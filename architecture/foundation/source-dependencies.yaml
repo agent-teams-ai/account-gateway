@@ -1,7 +1,7 @@
 schemaVersion: 2
 workspace: {kind: pnpm, manifest: pnpm-workspace.yaml}
-packageRoots: [packages]
-governedRoots: [packages/account-gateway/src]
+packageRoots: [packages, services]
+governedRoots: [packages/account-gateway/src, services/account-gateway/src, services/account-gateway/test]
 boundaries:
   - id: facade-contracts
     dependencyMode: runtime
@@ -31,3 +31,23 @@ boundaries:
     entrypoints: [packages/account-gateway/src/get-modular/index.ts]
     packageExports: [./get-modular]
     allow: {boundaries: [http], packages: ['@get-modular/core', '@get-modular/assembly'], builtins: [], runtimeReferences: []}
+  - id: kernel-domain
+    dependencyMode: runtime
+    roots: [services/account-gateway/src/domain.ts]
+    entrypoints: [services/account-gateway/src/domain.ts]
+    allow: {boundaries: [], packages: [], builtins: [], runtimeReferences: []}
+  - id: kernel-postgres
+    dependencyMode: runtime
+    roots: [services/account-gateway/src/postgres.ts]
+    entrypoints: [services/account-gateway/src/postgres.ts]
+    allow: {boundaries: [kernel-domain], packages: [pg], builtins: ['node:crypto'], runtimeReferences: []}
+  - id: kernel-composition
+    dependencyMode: runtime
+    roots: [services/account-gateway/src/composition.ts]
+    entrypoints: [services/account-gateway/src/composition.ts]
+    allow: {boundaries: [kernel-domain, kernel-postgres], packages: [pg], builtins: [], runtimeReferences: []}
+  - id: kernel-tests
+    dependencyMode: runtime
+    roots: [services/account-gateway/test]
+    entrypoints: [services/account-gateway/test/domain.test.ts, services/account-gateway/test/postgres.test.ts]
+    allow: {boundaries: [kernel-domain, kernel-postgres], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:timers/promises'], runtimeReferences: []}
