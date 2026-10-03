@@ -356,6 +356,43 @@ export class PostgresKernel implements DurableKernel {
     return this.transaction(context, async tx => requestStatus(await this.one(tx,
       'SELECT * FROM requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3', [tx.consumer, ref, id])));
   }
+  async savedExecution(context: TrustedContext, ref: string): Promise<import('./domain.ts').SavedExecution> {
+    uuid(ref);
+    return this.transaction(context, async tx => {
+      const e = await this.one(tx, `SELECT e.*, (e.state='open' AND e.issuer=$3
+        AND e.deadline>clock_timestamp() AND a.state='active' AND a.epoch=e.account_epoch
+        AND a.active_generation=e.generation AND a.profile=e.profile AND c.state='ready' AND c.profile=e.profile
+        AND (f.revision<e.policy_revision OR (f.revision=e.policy_revision AND f.fence=e.policy_fence))) AS allowed
+        FROM executions e JOIN accounts a ON a.consumer=e.consumer AND a.ref=e.account_ref
+        JOIN candidates c ON c.consumer=e.consumer AND c.generation=e.generation
+        JOIN policy_fences f ON f.consumer=e.consumer AND f.subject=e.policy_subject
+        WHERE e.consumer=$1 AND e.ref=$2`, [tx.consumer, ref, tx.issuer]);
+      return { generation: e.generation, state: e.state, dispatchAllowed: e.allowed === true, admission: {
+        executionRef: e.ref, issuerEpoch: e.issuer, invocationRef: e.invocation, attemptRef: e.attempt_ref,
+        accountRef: e.account_ref, authorizationEpoch: e.account_epoch, subjectRef: e.policy_subject,
+        policyRevision: Number(e.policy_revision), bindingRevision: Number(e.binding_revision), profileId: e.profile,
+        limits: executionLimits(e), expiresAt: e.deadline.toISOString(),
+      } };
+    });
+  }
+  async currentWorkerLease(context: TrustedContext, worker: string): Promise<string> {
+    uuid(worker);
+    return this.transaction(context, async tx => {
+      const r = await this.one(tx, `SELECT lease_until FROM workers WHERE consumer=$1 AND worker=$2
+        AND lease_until>clock_timestamp()`, [tx.consumer, worker]);
+      return r.lease_until.toISOString();
+    });
+  }
+  async requestProof(context: TrustedContext, ref: string, id: string): Promise<NativeDispatchProof | undefined> {
+    uuid(ref); identifier(id);
+    return this.transaction(context, async tx => {
+      const r = await this.one(tx, `SELECT execution_ref,id,worker,closure_token,native_origin_ref,
+        engine_incarnation,request_nonce,descriptor_generation FROM requests
+        WHERE consumer=$1 AND execution_ref=$2 AND id=$3`, [tx.consumer, ref, id]);
+      return r.closure_token && r.native_origin_ref && r.engine_incarnation && r.request_nonce && r.descriptor_generation
+        ? dispatchProof(r) : undefined;
+    });
+  }
   async claim(context: TrustedContext, ref: string, id: string, worker: string, admission: PrivateAdmission, reservation: NativeReservation): Promise<ClaimResult> {
     // Capture whitelisted primitives before validation or any await.
     reservation = captureReservation(reservation);

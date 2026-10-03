@@ -57,6 +57,19 @@ export interface PrivateAdmission {
   subjectRef: string; policyRevision: number; bindingRevision: number; profileId: string;
   limits: ApprovedLimits; expiresAt: string;
 }
+// Private persisted read authority for the HTTP/native boundary. This does not
+// grant dispatch: claim remains the sole atomic permission decision.
+export interface SavedExecution {
+  readonly admission: PrivateAdmission;
+  readonly generation: string;
+  readonly state: ExecutionStatus['state'];
+  readonly dispatchAllowed: boolean;
+}
+export interface ExecutionRead {
+  savedExecution(context: TrustedContext, executionRef: string): Promise<SavedExecution>;
+  currentWorkerLease(context: TrustedContext, worker: string): Promise<string>;
+  requestProof(context: TrustedContext, executionRef: string, requestId: string): Promise<NativeDispatchProof | undefined>;
+}
 export interface RequestStatus { requestRef: string; effect: Effect; code?: string }
 // Trusted authenticated native callback input. Never obtain this authority from
 // an execution client's payload or caller-selected URL. Actual process enrollment

@@ -28,6 +28,8 @@ jobs:
       AG_KERNEL_TEST_DSN: postgresql://postgres@127.0.0.1:5432/ag_kernel_test_ci
       AG_MANAGEMENT_DISPOSABLE_DB: ag_kernel_test_management_ci
       AG_MANAGEMENT_TEST_DSN: postgresql://postgres@127.0.0.1:5432/ag_kernel_test_management_ci
+      AG_FACADE_DISPOSABLE_DB: ag_kernel_test_facade_ci
+      AG_FACADE_TEST_DSN: postgresql://postgres@127.0.0.1:5432/ag_kernel_test_facade_ci
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,12 +39,14 @@ jobs:
           node-version: 24.21.0
       - run: npm install --prefix "$RUNNER_TEMP/gateway-pnpm" --ignore-scripts pnpm@11.28.2
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" install --frozen-lockfile
+      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run build
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run typecheck
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run test:domain
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run test:management
       - name: Prepare separate management database and pinned dump client
         run: |
           docker exec "${{ job.services.postgres.id }}" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ag_kernel_test_management_ci'
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ag_kernel_test_facade_ci'
           mkdir -p "$RUNNER_TEMP/gateway-pg-bin"
           printf '#!/bin/sh\nexec docker exec %s pg_dump "$@"\n' "${{ job.services.postgres.id }}" > "$RUNNER_TEMP/gateway-pg-bin/pg_dump"
           chmod 755 "$RUNNER_TEMP/gateway-pg-bin/pg_dump"

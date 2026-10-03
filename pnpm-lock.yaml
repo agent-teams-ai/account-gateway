@@ -41,6 +41,9 @@ importers:
 
   services/account-gateway:
     dependencies:
+      '@agent-teams/account-gateway':
+        specifier: workspace:*
+        version: link:../../packages/account-gateway
       pg:
         specifier: 8.23.1
         version: 8.23.1

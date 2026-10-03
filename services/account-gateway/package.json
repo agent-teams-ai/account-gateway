@@ -3,14 +3,21 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": "24.21.x" },
+  "engines": {
+    "node": "24.21.x"
+  },
   "scripts": {
     "typecheck": "tsc --project tsconfig.json",
-    "test:domain": "node --test test/domain.test.ts",
+    "test:domain": "node --test test/domain.test.ts test/facade-ingress.test.ts",
     "test:management": "node --test test/management.test.ts",
-    "test:pg": "node --test --test-concurrency=1 test/postgres.test.ts test/management-postgres.test.ts",
+    "test:pg": "node --test --test-concurrency=1 test/postgres.test.ts test/management-postgres.test.ts test/facade-postgres.test.ts",
     "test": "npm run test:domain && npm run test:management && npm run test:pg"
   },
-  "dependencies": { "pg": "8.23.1" },
-  "devDependencies": { "@types/pg": "8.23.1" }
+  "dependencies": {
+    "pg": "8.23.1",
+    "@agent-teams/account-gateway": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/pg": "8.23.1"
+  }
 }

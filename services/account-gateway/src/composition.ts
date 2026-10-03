@@ -1,12 +1,12 @@
 import pg from 'pg';
 import { KernelError } from './domain.ts';
 import { PostgresKernel } from './postgres.ts';
-import type { Bounds, DurableKernel } from './domain.ts';
+import type { Bounds, DurableKernel, ExecutionRead } from './domain.ts';
 
 // Outermost composition only. Configuration is server-owned; no environment
 // discovery, framework, scheduler, credential logging or automatic migration.
 export function openKernel(connectionString: string, bounds?: Bounds): {
-  kernel: DurableKernel; shutdown: () => Promise<void>;
+  kernel: DurableKernel & ExecutionRead; shutdown: () => Promise<void>;
 } {
   let url: URL;
   try { url = new URL(connectionString); } catch { throw new KernelError('invalid'); }
