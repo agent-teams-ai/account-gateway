@@ -1,5 +1,130 @@
 # Private kernel wire-policy bridge
 
+## B2 durable account occupancy and exact local closure — 2026-10-03
+
+This checkpoint owns only `services/account-gateway/`: domain, PostgreSQL adapter,
+new `002_transport_occupancy.sql`, actual PostgreSQL tests and this handoff.
+`001_kernel.sql` remains byte identical (SHA-256
+`160df664385b2a4ad8bfca2e98a5619f04322b1e2453c3f5e10a3f7d941ead15`).
+SDK/kernel repairs and other native/RR/review lanes are preserved. No dependency,
+framework, scheduler, ORM, public wire/HTTP/auth/proxy/UI or native bootstrap
+change is included. Requested implementation profile is explicit
+`gpt-6.1-sol/high/default`, NO FAST; integration review is `xhigh/default`.
+
+Requested base is exact merged `1ea091f8`, whose tree the controller identifies
+as identical to independently APPROVED `9f0f65bb`, with PR3 merged and both exact
+CI passing. These are supplied identities, not observed forge evidence here.
+The linked `.git` resolves outside the sandbox to inaccessible worktree metadata;
+`git rev-parse HEAD` and status fail, and its index-lock directory is not writable.
+No add, commit or push occurred. External patch receipts hash every observed
+service preimage, result, patch and the unchanged migration. The guard requires
+HEAD equal to resolved `1ea091f8`, its tree equal to resolved `9f0f65bb`, exact
+preimage bytes and absence of the new migration before integration. Any mismatch
+must stop; this worker cannot attest the checkout's Git tree itself. Main owns
+application and commit with author and committer iliya <iliyazelenkog@gmail.com>.
+
+### Private API and durable schema
+
+`requests.transport_occupied` is independent of `effect`; `closure_token` is
+permanent, and `requests.worker` is its original owner. 002 additionally rejects
+UPDATEs that change consumer/execution/request identity, original worker or closure
+token (including legacy NULL tokens), so future adapters cannot rebind or rotate
+an issued proof. Acknowledged closed occupancy also cannot be reopened by UPDATE.
+New dispatch results require a token in the private domain type;
+only legacy cleanup descriptors allow it to be absent. The
+first actual claim records occupancy and a random UUID proof in the same consumer
+row-serialized transaction as permanent request spending. Only its dispatch result
+returns `closure: {executionRef, requestRef, worker, token}`. Duplicate/readback
+claims never reissue a permit or proof. Safe request/operation/account DTOs remain
+positive allowlists and never contain closure proof or native descriptors.
+
+For this single-profile slice, `Bounds.maxConcurrent` also bounds occupied local
+transports across ALL executions for the same consumer/account, including old
+physical generations and closed/fenced executions. Each execution retains its
+narrower persisted approved concurrency and exact envelope matching. Admission
+counts occupancy by joining persisted execution account identity under the same
+consumer serialization, after reconciling expired ownership across that account.
+Reconciliation prioritizes occupied rows, at most the hard ceiling of 128; legacy
+overfull accounts stay denied while bounded classification progresses. Another
+account or consumer is unaffected. All writers must use the same configured bound.
+Request count and stored token allowance are never refunded or widened by closure;
+actual transport/provider byte/token enforcement remains B3/D work.
+
+`acknowledgeTransportClosed(context, worker, proof, cleanup?)` accepts only the
+exact persisted consumer/execution/request/original-worker/token. Original owner
+acknowledgements remain valid after lease expiry. An exact late ack classifies
+still-in-flight expired ownership as durable unknown/fenced before committing,
+and preserves already unknown or completed effects. Closure changes occupancy
+alone after that necessary loss classification; it never unfences, refunds or
+permits old-attempt replay. Exact repeated owner acks are idempotent, and an old
+proof cannot close a different newer request. A trusted adapter must call this
+only after independent local context/body/transport closure evidence, including
+completed deliveries; failed callbacks, timeout, upstream cancellation assumptions
+and credential generation erasure provide no such evidence.
+
+Cleanup's execution scope now returns a bounded `transports` page of exact durable
+closure descriptors. `cleanupTransports(context, cleanupRef, worker, token)`
+reads another page of still-occupied requests, only for the exact currently leased
+execution cleanup owner. Pages cap at `min(maintenanceBatch, 128)`; acknowledging
+one page advances the next read without a new dispatch permit. Proven new rows
+precede unproven legacy rows, so missing legacy authority cannot hide newer proofs. Delegated closure
+acks pass `{cleanupRef, token}` and additionally qualify the UPDATE by that exact
+execution scope, cleanup worker/token and DB-clock lease. Reclaimed cleanup rotates
+its CAS token, never the request proof. Done-job duplicate closure acks are allowed
+only for already closed matching requests and the exact final cleanup owner/token.
+Generation cleanup cannot release transport occupancy. Execution cleanup success
+is rejected until every matching occupied transport is independently acknowledged;
+failed settlement and stale leases cannot release it. Restart can reconstruct the
+proofs without the original dispatch permit RAM. Callback effects remain monotonic.
+All new command objects capture whitelisted primitives before validation/await.
+
+### Safe numbered upgrade and qualification limits
+
+Apply unchanged 001 then 002 to a NEW fixture; for an existing private 001 schema,
+stop all old writers and supervise/quiesce local transports before applying 002
+once. Mixed old/new writers are unsafe: old writers cannot record the new contract.
+Do not rewrite/reset 001 or automatically clear occupancy during deployment.
+002 conservatively retains every legacy dispatched row, including completed and
+unknown effects, as occupied with NO manufactured proof. Legacy descriptors have
+no token; closure through this port is refused and execution cleanup stays pending.
+Separately authorized exact offline reset after independently proved real closure
+would be required for such rows; no reset authority/tool or migration platform is
+implemented. This first slice has never run production. Quiescence, lease timeout
+or deletion of credentials alone cannot be substituted for transport closure.
+
+The real-PG fixture now applies sorted numbered migrations and seeds synthetic
+001-shaped legacy rows between 001 and 002 in its NEW empty disposable database.
+All 19 existing PostgreSQL cases remain, with explicit closure setup where capacity
+must be reused; the restart case isolates a second account. Eight new actual-PG
+cases cover distinct-execution contention/isolation, narrower execution bounds,
+loss and exact late ack, completion/failed callbacks, bounded restart cleanup CAS,
+old generation/credential cleanup/restore, mutable closure/cleanup commands and
+legacy upgrade. The DB contract case attempts actual rewrites of all five proof
+binding fields, attempts to reopen a confirmed closure, and requires constraint
+rejection plus unchanged durable identity;
+the completion case reuses the same execution for a newer delivery and verifies
+a duplicate expired-owner proof cannot free that new slot. Each new case starts with an old-production observable-behavior
+assertion before relying on new closure API/schema fields. No mocks, source-string
+assertions, compiler-failure regression oracle or test-only production hooks exist.
+
+Worker checks: Node 24.21.0 syntax checks and domain 2/2 PASS. Typecheck, all 27
+actual PostgreSQL cases, old-production negative qualification, frozen pnpm install,
+build/root/Foundation/topology, Docs Protocol and exact CI/review are NOT_RUN here.
+There is no node_modules, pnpm's corepack launcher is unavailable, no main-owned
+PG17.10 fixture was supplied here, and no PostgreSQL client is installed. No install, DB launch/provision,
+credential/provider access or real user project was used. Main must run pinned
+pnpm11.28.2 and PostgreSQL17.10 outside this provider sandbox in a NEW fixture,
+then run the eight B2 cases against actual old 1ea production in a separate NEW
+fixture (retain new tests and numbered migrations). A failing negative test must
+show its initial behavioral assertion, not an absent method/column or compiler
+failure. Use the commands and strict disposable-DB guards below; full exact-byte
+qualification remains outstanding. B2 establishes a private durable contract only;
+no live provider, actual transport or supervisor acceptance is claimed.
+
+Historical qualification sections below apply to earlier patches only. Their
+per-execution-only accounting and fresh-schema-only limitations are superseded
+by B2 above, and no historical PASS qualifies this candidate.
+
 ## Primary F3 qualification - 2026-10-03
 
 Main verified guarded patch325a0807 against exact aea6ed03 in a NEW sandbox.
