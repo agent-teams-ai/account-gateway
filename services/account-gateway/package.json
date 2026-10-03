@@ -7,8 +7,9 @@
   "scripts": {
     "typecheck": "tsc --project tsconfig.json",
     "test:domain": "node --test test/domain.test.ts",
-    "test:pg": "node --test --test-concurrency=1 test/postgres.test.ts",
-    "test": "npm run test:domain && npm run test:pg"
+    "test:management": "node --test test/management.test.ts",
+    "test:pg": "node --test --test-concurrency=1 test/postgres.test.ts test/management-postgres.test.ts",
+    "test": "npm run test:domain && npm run test:management && npm run test:pg"
   },
   "dependencies": { "pg": "8.23.1" },
   "devDependencies": { "@types/pg": "8.23.1" }

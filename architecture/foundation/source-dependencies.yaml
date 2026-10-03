@@ -48,6 +48,27 @@ boundaries:
     allow: {boundaries: [kernel-domain, kernel-postgres], packages: [pg], builtins: [], runtimeReferences: []}
   - id: kernel-tests
     dependencyMode: runtime
-    roots: [services/account-gateway/test]
+    roots: [services/account-gateway/test/domain.test.ts, services/account-gateway/test/postgres.test.ts]
     entrypoints: [services/account-gateway/test/domain.test.ts, services/account-gateway/test/postgres.test.ts]
     allow: {boundaries: [kernel-domain, kernel-postgres], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:timers/promises'], runtimeReferences: []}
+
+  - id: native-management
+    dependencyMode: runtime
+    roots: [services/account-gateway/src/management.ts]
+    entrypoints: [services/account-gateway/src/management.ts]
+    allow: {boundaries: [kernel-domain], packages: [], builtins: [], runtimeReferences: []}
+  - id: native-management-postgres
+    dependencyMode: runtime
+    roots: [services/account-gateway/src/management-store.ts]
+    entrypoints: [services/account-gateway/src/management-store.ts]
+    allow: {boundaries: [kernel-domain, native-management], packages: [pg], builtins: ['node:crypto'], runtimeReferences: []}
+  - id: native-management-http
+    dependencyMode: runtime
+    roots: [services/account-gateway/src/native-client.ts]
+    entrypoints: [services/account-gateway/src/native-client.ts]
+    allow: {boundaries: [kernel-domain, native-management], packages: [], builtins: ['node:http', 'node:https'], runtimeReferences: []}
+  - id: native-management-tests
+    dependencyMode: runtime
+    roots: [services/account-gateway/test/management.test.ts, services/account-gateway/test/management-postgres.test.ts]
+    entrypoints: [services/account-gateway/test/management.test.ts, services/account-gateway/test/management-postgres.test.ts]
+    allow: {boundaries: [kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:timers/promises', 'node:http', 'node:child_process'], runtimeReferences: []}
