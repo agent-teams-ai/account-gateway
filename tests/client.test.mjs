@@ -307,3 +307,117 @@ test('request and operation readback reject contradictory nested diagnostics wit
   'GET /v1/executions/execution-a/requests/stable-request','POST /v1/executions/execution-a/requests',
  ]);
 });
+
+// Regression: a multi-account preparation cannot hydrate admission or recover its pinned
+// epoch if the SDK drops/rejects the selected identity or consults later account metadata.
+test('applied preparation and lost-ack operation GET retain the selected account and epoch', async t => {
+  const observed = [];
+  const applied = new Map();
+  const selected = { kind: 'execution', executionRef: 'execution-selected', accountRef: 'account-b', authorizationEpoch: 17, deadline: admission.expiresAt, state: 'active' };
+  const intent = { operationId: 'prepare-applied', invocationRef: 'run-a', attemptRef: 'attempt-a', accountRefs: ['account-a', 'account-b'], subjectRef: 'policy-a', policyRevision: 1, bindingRevision: 7, profileId: 'mimo', limits: bounds, deadline: admission.expiresAt };
+  const { management: m, execution: e, origin } = await fixture(t, async (req, res) => {
+    observed.push(`${req.method} ${req.url}`);
+    if (req.method === 'POST' && req.url === '/v1/executions') {
+      const body = JSON.parse(await read(req));
+      assert.deepEqual(body, { ...intent, operationId: body.operationId });
+      assert.deepEqual(body.accountRefs, ['account-a', 'account-b']);
+      const result = { operationRef: body.operationId, state: 'applied', result: selected };
+      applied.set(body.operationId, result);
+      if (body.operationId === 'prepare-lost') res.destroy();
+      else json(res, result);
+      return;
+    }
+    if (req.method === 'GET' && req.url.startsWith('/v1/operations/')) {
+      json(res, applied.get(req.url.slice('/v1/operations/'.length))); return;
+    }
+    assert.equal(req.url, '/v1/executions/execution-selected/requests');
+    assert.equal(req.method, 'POST');
+    assert.deepEqual(JSON.parse(req.headers['x-gateway-admission']), {
+      ...admission, accountRef: 'account-b', authorizationEpoch: 17, bindingRevision: 7,
+    });
+    assert.equal((await read(req)).toString(), '{}');
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'x-gateway-request-ref': 'request-selected' });
+    res.end('data: final\n\n');
+  });
+  const acknowledged = await m.prepare(intent);
+  assert.deepEqual(acknowledged, { operationRef: 'prepare-applied', state: 'applied', result: selected });
+  assert.deepEqual(await m.operation(intent.operationId), acknowledged);
+  await assert.rejects(m.prepare({ ...intent, operationId: 'prepare-lost' }), error =>
+    error instanceof sdk.GatewayError && error.code === 'transport' && error.effect === 'effect_unknown' && error.operationRef === 'prepare-lost');
+  // A fresh client has no preparation cache or first acknowledgement to reconstruct from.
+  const fresh = sdk.createManagementClient({ origin, role: 'management', token: 'fixture-control', timeoutMs: 1000 });
+  const recovered = await fresh.operation('prepare-lost');
+  assert.deepEqual(recovered, { operationRef: 'prepare-lost', state: 'applied', result: selected });
+  // Consumer policy composes admission from saved intent and the safe pinned tuple.
+  assert.ok(intent.accountRefs.includes(recovered.result.accountRef));
+  const pinnedAdmission = {
+    invocationRef: intent.invocationRef, attemptRef: intent.attemptRef,
+    accountRef: recovered.result.accountRef, authorizationEpoch: recovered.result.authorizationEpoch,
+    subjectRef: intent.subjectRef, policyRevision: intent.policyRevision, bindingRevision: intent.bindingRevision,
+    profileId: intent.profileId, limits: intent.limits, expiresAt: recovered.result.deadline,
+  };
+  const response = await e.request(recovered.result.executionRef, { requestId: 'request-selected', admission: pinnedAdmission, body: Buffer.from('{}') });
+  assert.equal(await new Response(response.body).text(), 'data: final\n\n');
+  assert.deepEqual(observed, [
+    'POST /v1/executions', 'GET /v1/operations/prepare-applied',
+    'POST /v1/executions', 'GET /v1/operations/prepare-lost',
+    'POST /v1/executions/execution-selected/requests',
+  ]);
+});
+
+// Regression: incomplete/unsafe applied results invite identity inference or replay,
+// or export private response data in validation diagnostics after possible effects.
+test('malformed selected preparation results fail closed on POST and operation GET without retry', async t => {
+  const observed = [];
+  let response;
+  let status = 200;
+  const { management: m } = await fixture(t, async (req, res) => {
+    observed.push(`${req.method} ${req.url}`); await read(req); json(res, response, status);
+  });
+  const selected = { kind: 'execution', executionRef: 'execution-selected', accountRef: 'account-b', authorizationEpoch: 17, deadline: admission.expiresAt, state: 'active' };
+  const intent = { operationId: 'stable-prepare', invocationRef: 'run-a', attemptRef: 'attempt-a', accountRefs: ['account-a', 'account-b'], subjectRef: 'policy-a', policyRevision: 1, bindingRevision: 7, profileId: 'mimo', limits: bounds, deadline: admission.expiresAt };
+  const invalid = [];
+  for (const field of ['accountRef', 'authorizationEpoch']) {
+    const omitted = { ...selected }; delete omitted[field]; invalid.push(omitted);
+  }
+  for (const accountRef of ['', '../private-sentinel', 'a'.repeat(129), 1, null]) invalid.push({ ...selected, accountRef });
+  for (const authorizationEpoch of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, '17', null]) invalid.push({ ...selected, authorizationEpoch });
+  for (const field of ['credential', 'admission', 'nativeDescriptor', 'nativeId', 'prompt', 'output']) invalid.push({ ...selected, [field]: { value: 'private-sentinel' } });
+  const rejectMalformed = promise => assert.rejects(promise, error => {
+    assert.ok(error instanceof sdk.GatewayError);
+    assert.equal(error.code, 'invalid_response');
+    assert.equal(error.effect, 'effect_unknown');
+    assert.equal(error.operationRef, intent.operationId);
+    assert.equal(error.diagnostic, undefined);
+    assert.equal(JSON.stringify({ message: error.message, ...error }).includes('private-sentinel'), false);
+    return true;
+  });
+  for (const result of invalid) {
+    response = { operationRef: intent.operationId, state: 'applied', result };
+    await rejectMalformed(m.prepare(intent));
+    await rejectMalformed(m.operation(intent.operationId));
+  }
+  // Existing discrimination and caller-identity rules also apply to the extended tuple.
+  for (const malformed of [
+    { operationRef: 'another-operation', state: 'applied', result: selected },
+    { operationRef: intent.operationId, state: 'applied', result: { ...selected, kind: 'account' } },
+  ]) {
+    response = malformed;
+    await rejectMalformed(m.prepare(intent));
+    await rejectMalformed(m.operation(intent.operationId));
+  }
+  // A valid account result remains readable, but cannot acknowledge preparation.
+  response = { operationRef: intent.operationId, state: 'applied', result: { kind: 'account', accountRef: 'account-b', metadataRevision: 2, authorizationEpoch: 17 } };
+  await rejectMalformed(m.prepare(intent));
+  assert.deepEqual(await m.operation(intent.operationId), response);
+  response = { operationRef: intent.operationId, state: 'applied' };
+  await rejectMalformed(m.prepare(intent));
+  response.result = selected; status = 202;
+  await rejectMalformed(m.prepare(intent));
+  await rejectMalformed(m.operation(intent.operationId));
+  assert.deepEqual(observed, [
+    ...Array.from({ length: invalid.length + 2 }, () => ['POST /v1/executions', 'GET /v1/operations/stable-prepare']).flat(),
+    'POST /v1/executions', 'GET /v1/operations/stable-prepare',
+    'POST /v1/executions', 'POST /v1/executions', 'GET /v1/operations/stable-prepare',
+  ]);
+});
