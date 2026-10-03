@@ -17,7 +17,7 @@ export const account = z.strictObject({ accountRef: reference, ownerRef: referen
 export const listQuery = z.strictObject({ ownerRef: reference.optional(), cursor: reference.optional(), limit: z.number().int().min(1).max(100).optional() });
 export const accounts = z.strictObject({ accounts: z.array(account).max(100), nextCursor: reference.optional() });
 export const accountResult = z.strictObject({ kind: z.literal('account'), accountRef: reference, metadataRevision: revision, authorizationEpoch: revision });
-export const executionResult = z.strictObject({ kind: z.literal('execution'), executionRef: reference, deadline, state: executionState });
+export const executionResult = z.strictObject({ kind: z.literal('execution'), executionRef: reference, accountRef: reference, authorizationEpoch: revision, deadline, state: executionState });
 export const operation = z.discriminatedUnion('state', [
   z.strictObject({ operationRef: reference, state: z.literal('pending') }),
   z.strictObject({ operationRef: reference, state: z.literal('applied'), result: z.discriminatedUnion('kind', [accountResult, executionResult]).optional() }),
