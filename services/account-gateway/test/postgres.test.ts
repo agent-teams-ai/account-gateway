@@ -116,9 +116,106 @@ async function race<L, R>(ctx: TrustedContext, left: () => Promise<L>, right: ()
     return results;
   } finally { await gate.query('ROLLBACK'); gate.release(); }
 }
+async function mutateAtConsumerLock<T>(ctx: TrustedContext, action: () => Promise<T>, mutate: () => void): Promise<T> {
+  await a.issuer(ctx);
+  const gate = await admin.connect();
+  try {
+    await gate.query('BEGIN');
+    await gate.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE', [ctx.consumerId]);
+    const pending = Promise.allSettled([action()]);
+    const blocked = await waitForLocks(gate, [pids[0]]);
+    if (blocked) mutate();
+    await gate.query('COMMIT');
+    const [outcome] = await pending;
+    assert.equal(blocked, true, 'command session must reach the actual consumer-row barrier');
+    if (outcome.status === 'rejected') throw outcome.reason;
+    return outcome.value;
+  } finally { await gate.query('ROLLBACK'); gate.release(); }
+}
 async function count(sql: string, values: unknown[]) {
   return (await admin.query(sql, values)).rows[0].n as number;
 }
+
+// Spare concurrency must not admit a fresh ID before maintenance observes owner loss.
+test('F1 claim fences expired in-flight ownership before spare-concurrency admission', async () => {
+  const bounds = { ...defaults, maxConcurrent: 2, maintenanceBatch: 1 };
+  const kernel = new PostgresKernel(poolA, bounds);
+  const ctx = context(), account = await connected(ctx);
+  const limits = { requests: 4, concurrency: 2, requestBytes: 4096, outputBytes: 8192, tokens: 5000 };
+  const e = await prepared(ctx, account.accountRef!, { limits }, kernel);
+  const unrelated = await prepared(ctx, account.accountRef!, { limits }, kernel);
+  const w1 = await worker(ctx), w2 = await worker(ctx);
+  assert.ok((await kernel.claim(ctx, e.result.executionRef!, 'completed', w1, e.admission)).dispatch);
+  await kernel.effect(ctx, e.result.executionRef!, 'completed', w1, 'response_started');
+  await kernel.effect(ctx, e.result.executionRef!, 'completed', w1, 'completed');
+  assert.ok((await kernel.claim(ctx, e.result.executionRef!, 'R1', w1, e.admission)).dispatch);
+  assert.ok((await kernel.claim(ctx, unrelated.result.executionRef!, 'live', w2, unrelated.admission)).dispatch);
+  await admin.query("UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND worker=$2",
+    [ctx.consumerId, w1]);
+  // No effect/reconcile/restore between exact W1 expiry and the fresh W2 claim.
+  const denied = await kernel.claim(ctx, e.result.executionRef!, 'R2', w2, e.admission);
+  assert.deepEqual(denied, { status: { requestRef: 'R2', effect: 'not_dispatched', code: 'fenced' } });
+  assert.deepEqual(await b.request(ctx, e.result.executionRef!, 'R2'), denied.status);
+  assert.deepEqual(await b.request(ctx, e.result.executionRef!, 'R1'),
+    { requestRef: 'R1', effect: 'effect_unknown', code: 'owner_lost' });
+  assert.equal((await b.execution(ctx, e.result.executionRef!)).state, 'fenced');
+  assert.equal((await b.request(ctx, e.result.executionRef!, 'completed')).effect, 'completed');
+  assert.equal(await count('SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
+    [ctx.consumerId, e.result.executionRef]), 2);
+  assert.deepEqual(await kernel.claim(ctx, e.result.executionRef!, 'R2', w2, e.admission), denied);
+  assert.equal((await kernel.claim(ctx, e.result.executionRef!, 'R1', w2, e.admission)).dispatch, undefined);
+  const replay = await kernel.prepare(ctx, { ...e.input, operationId: op() });
+  assert.equal(replay.executionRef, e.result.executionRef);
+  const fresh = await kernel.claim(ctx, replay.executionRef!, 'R3', w2, e.admission);
+  assert.equal(fresh.dispatch, undefined); assert.equal(fresh.status.code, 'fenced');
+  assert.equal(await count('SELECT count(*)::integer n FROM ag_kernel.cleanup WHERE consumer=$1 AND execution_ref=$2',
+    [ctx.consumerId, e.result.executionRef]), 1);
+  assert.equal((await b.execution(ctx, unrelated.result.executionRef!)).state, 'open');
+  assert.equal((await b.request(ctx, unrelated.result.executionRef!, 'live')).effect, 'dispatch_started');
+  assert.ok((await kernel.claim(ctx, unrelated.result.executionRef!, 'live-next', w2, unrelated.admission)).dispatch);
+  assert.equal(await count('SELECT count(*)::integer n FROM ag_kernel.cleanup WHERE consumer=$1 AND execution_ref=$2',
+    [ctx.consumerId, unrelated.result.executionRef]), 0);
+});
+
+test('F2 beginAccount snapshots caller primitives before the consumer-row await', async () => {
+  const ctx = context();
+  const input: AccountIntent = { operationId: op(), kind: 'create', intentDigest: digest(),
+    ownerRef: 'owner', profile: 'mimo-test', displayName: 'A' };
+  const original = { ...input };
+  const result = await mutateAtConsumerLock(ctx, () => a.beginAccount(ctx, input), () => { input.displayName = 'B'; });
+  assert.equal(result.operationRef, original.operationId);
+  assert.equal((await b.account(ctx, result.accountRef!)).displayName, 'A');
+  assert.deepEqual(await b.operation(ctx, original.operationId), result);
+  assert.deepEqual(await b.beginAccount(ctx, original), result);
+  await assert.rejects(b.beginAccount(ctx, input), isCode('conflict'));
+  const recorded = (await admin.query('SELECT intent FROM ag_kernel.operations WHERE consumer=$1 AND id=$2',
+    [ctx.consumerId, original.operationId])).rows[0].intent;
+  assert.deepEqual(recorded, { kind: 'create', digest: original.intentDigest, target: null,
+    expectedRevision: null, owner: original.ownerRef, profile: original.profile, name: 'A' });
+  assert.equal(await count('SELECT count(*)::integer n FROM ag_kernel.accounts WHERE consumer=$1', [ctx.consumerId]), 1);
+  assert.equal(await count('SELECT count(*)::integer n FROM ag_kernel.candidates WHERE consumer=$1', [ctx.consumerId]), 1);
+});
+
+test('transaction snapshots trusted consumer before awaits despite structurally mutable context', async () => {
+  const original = context(), foreign = context();
+  await connected(foreign);
+  const before = await b.accounts(foreign);
+  const caller = { consumerId: original.consumerId };
+  const input: AccountIntent = { operationId: op(), kind: 'create', intentDigest: digest(),
+    ownerRef: 'owner', profile: 'mimo-test', displayName: 'Consumer A' };
+  const result = await mutateAtConsumerLock(original, () => a.beginAccount(caller, input),
+    () => { caller.consumerId = foreign.consumerId; });
+  assert.equal((await b.account(original, result.accountRef!)).displayName, 'Consumer A');
+  assert.deepEqual(await b.operation(original, input.operationId), result);
+  assert.deepEqual(await b.beginAccount(original, input), result);
+  await assert.rejects(b.operation(foreign, input.operationId), isCode('unknown'));
+  await assert.rejects(b.account(foreign, result.accountRef!), isCode('unknown'));
+  assert.deepEqual(await b.accounts(foreign), before);
+  for (const table of ['accounts', 'operations', 'candidates', 'issuer_epochs']) {
+    assert.equal(await count(`SELECT count(*)::integer n FROM ag_kernel.${table} WHERE consumer=$1`, [original.consumerId]), 1, table);
+    assert.equal(await count(`SELECT count(*)::integer n FROM ag_kernel.${table} WHERE consumer=$1`, [foreign.consumerId]), 1, table);
+  }
+});
 
 // Red if concurrent id reuse creates two account rows/candidates, changes the
 // lost-ack reference, or a second native-create permit can escape.

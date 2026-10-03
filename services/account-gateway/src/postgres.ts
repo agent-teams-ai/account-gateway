@@ -45,16 +45,17 @@ export class PostgresKernel implements DurableKernel {
     this.bounds = boundedConfig(bounds);
   }
   private async transaction<T>(context: TrustedContext, body: (tx: Tx) => Promise<T>): Promise<T> {
-    identifier(context.consumerId);
+    const consumer = context.consumerId;
+    identifier(consumer);
     let db: PoolClient | undefined;
     try {
       db = await this.pool.connect();
       await db.query('BEGIN');
       await db.query('SET LOCAL search_path = ag_kernel, pg_catalog');
-      await db.query('INSERT INTO consumers(consumer) VALUES ($1) ON CONFLICT DO NOTHING', [context.consumerId]);
-      const r = await db.query('SELECT issuer FROM consumers WHERE consumer=$1 FOR UPDATE', [context.consumerId]);
-      await db.query('INSERT INTO issuer_epochs(consumer,issuer) VALUES ($1,$2) ON CONFLICT DO NOTHING', [context.consumerId, r.rows[0].issuer]);
-      const result = await body({ db, consumer: context.consumerId, issuer: r.rows[0].issuer });
+      await db.query('INSERT INTO consumers(consumer) VALUES ($1) ON CONFLICT DO NOTHING', [consumer]);
+      const r = await db.query('SELECT issuer FROM consumers WHERE consumer=$1 FOR UPDATE', [consumer]);
+      await db.query('INSERT INTO issuer_epochs(consumer,issuer) VALUES ($1,$2) ON CONFLICT DO NOTHING', [consumer, r.rows[0].issuer]);
+      const result = await body({ db, consumer, issuer: r.rows[0].issuer });
       await db.query('COMMIT');
       return result;
     } catch (error) {
@@ -127,6 +128,9 @@ export class PostgresKernel implements DurableKernel {
     return this.transaction(context, tx => this.op(tx, id));
   }
   async beginAccount(context: TrustedContext, input: AccountIntent): Promise<OperationStatus> {
+    input = { operationId: input.operationId, kind: input.kind, intentDigest: input.intentDigest,
+      accountRef: input.accountRef, expectedRevision: input.expectedRevision,
+      ownerRef: input.ownerRef, profile: input.profile, displayName: input.displayName };
     identifier(input.operationId); identifier(input.intentDigest);
     if (!['create','reconnect','rename','disable'].includes(input.kind)) throw new KernelError('invalid');
     if (input.kind === 'create') {
@@ -335,12 +339,13 @@ export class PostgresKernel implements DurableKernel {
         [tx.consumer, ref, id]);
       if (previous.rows[0]) return { status: requestStatus(previous.rows[0]) };
       const e = await this.one(tx, 'SELECT * FROM executions WHERE consumer=$1 AND ref=$2', [tx.consumer, ref]);
+      const ownerLost = await this.reconcileRequests(tx, ref, e.max_concurrent);
       const a = await this.one(tx, 'SELECT * FROM accounts WHERE consumer=$1 AND ref=$2', [tx.consumer, e.account_ref]);
       const c = await this.one(tx, 'SELECT * FROM candidates WHERE consumer=$1 AND generation=$2', [tx.consumer, e.generation]);
       const f = await this.one(tx, 'SELECT revision,fence FROM policy_fences WHERE consumer=$1 AND subject=$2', [tx.consumer, e.policy_subject]);
       const now = (await tx.db.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
       let code: string | undefined;
-      if (admission.executionRef !== ref || admission.accountRef !== e.account_ref ||
+      if (ownerLost || admission.executionRef !== ref || admission.accountRef !== e.account_ref ||
           admission.subjectRef !== e.policy_subject || e.state !== 'open' || e.issuer !== tx.issuer || admission.issuerEpoch !== e.issuer ||
           a.state !== 'active' || a.epoch !== e.account_epoch || admission.authorizationEpoch !== e.account_epoch ||
           a.active_generation !== e.generation || c.state !== 'ready' ||
@@ -448,17 +453,22 @@ export class PostgresKernel implements DurableKernel {
       if (!r.rowCount) throw new KernelError('denied');
     });
   }
+  private async reconcileRequests(tx: Tx, ref?: string, limit = this.bounds.maintenanceBatch): Promise<boolean> {
+    const lost = await tx.db.query(`SELECT r.* FROM requests r LEFT JOIN workers w
+      ON w.consumer=r.consumer AND w.worker=r.worker WHERE r.consumer=$1
+      AND ($3::uuid IS NULL OR r.execution_ref=$3)
+      AND r.effect IN ('dispatch_started','response_started') AND (w.worker IS NULL OR w.lease_until<=clock_timestamp())
+      ORDER BY r.execution_ref,r.id LIMIT $2`, [tx.consumer, limit, ref ?? null]);
+    for (const r of lost.rows) {
+      await tx.db.query("UPDATE requests SET effect='effect_unknown',code='owner_lost' WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
+        [tx.consumer, r.execution_ref, r.id]);
+      await this.fenceExecution(tx, r.execution_ref);
+    }
+    return lost.rows.length > 0;
+  }
   async reconcile(context: TrustedContext): Promise<void> {
     return this.transaction(context, async tx => {
-      const lost = await tx.db.query(`SELECT r.* FROM requests r LEFT JOIN workers w
-        ON w.consumer=r.consumer AND w.worker=r.worker WHERE r.consumer=$1
-        AND r.effect IN ('dispatch_started','response_started') AND (w.worker IS NULL OR w.lease_until<=clock_timestamp())
-        ORDER BY r.execution_ref,r.id LIMIT $2`, [tx.consumer, this.bounds.maintenanceBatch]);
-      for (const r of lost.rows) {
-        await tx.db.query("UPDATE requests SET effect='effect_unknown',code='owner_lost' WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
-          [tx.consumer, r.execution_ref, r.id]);
-        await this.fenceExecution(tx, r.execution_ref);
-      }
+      await this.reconcileRequests(tx);
       const cs = await tx.db.query(`SELECT c.* FROM candidates c LEFT JOIN workers w
         ON w.consumer=c.consumer AND w.worker=c.worker WHERE c.consumer=$1 AND c.state='creating'
         AND (w.worker IS NULL OR w.lease_until<=clock_timestamp()) LIMIT $2`, [tx.consumer, this.bounds.maintenanceBatch]);

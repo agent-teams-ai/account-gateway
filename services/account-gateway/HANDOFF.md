@@ -2,14 +2,17 @@
 
 The original kernel producer owned only `services/account-gateway/`. The
 assembled PR3 also includes root workspace/lockfile, Foundation policy and CI
-integration supplied by other writers. This remediation owns only
-`services/account-gateway/`, `tests/source-policy.test.mjs` and
-`.github/workflows/checkpoint-b-kernel.yaml`; other writers' files are untouched.
+integration supplied by other writers. This F1/F2 remediation owns only
+`services/account-gateway/src/postgres.ts`, `services/account-gateway/test/postgres.test.ts`
+and this `HANDOFF.md`; native and RR C1 writers own their other workspaces.
 No commit, push, provisioning, provider inference or credential access occurred.
 
 ## Source and qualification identity
 
-The requested base is `8cc30167ce3f2a1e4b2c19b4caf7dc8558519be0`.
+The requested reviewed head is `5f07a18be3e5650495bd0b942b09f9438df50309`.
+Main reports that all 69 independent-review public-source fingerprints matched
+its authoritative 5f Git tree. The local `.spike-inputs/REVIEW.md` is integrity-bound
+review data; its F1/P1 and F2/P2 REQUEST_CHANGES define this bounded patch.
 Linked Git metadata is unavailable, so that supplied identity is not represented
 as an observed HEAD. The guarded external patch records exact observed preimage
 and result SHA-256 values. Candidate-only `EVIDENCE.json` was removed because its
@@ -22,13 +25,49 @@ TypeScript and domain PASS; `postgres.log` records 13/13 actual PG PASS.
 These supplied receipts match `.spike-inputs/INPUT-HASHES.json`.
 They do **not** qualify the new remediation.
 
-Current worker checks: Node 24.21.0 domain 2/2 PASS and Node syntax checks for
-three source files, two TS test files and the source-policy test PASS.
+Current worker checks: Node 24.21.0 domain 2/2 PASS and syntax checks for the
+changed PostgreSQL adapter and test file PASS (see external exact-byte evidence).
 Typecheck, actual Foundation/source-policy behavior, Docs Protocol validation,
-frozen installation and all 15 PostgreSQL cases are NOT_RUN here: dependencies
+frozen installation and all 18 PostgreSQL cases are NOT_RUN here: dependencies
 are absent, and main owns fresh database and CI qualification. No install or
 DB gate wait was performed. Main must run the new exact patch through these
 gates and independent `gpt-6.1-sol/xhigh/default` review.
+
+## Current F1/F2 and trusted-context patch
+
+F1: fresh claim reuses bounded request-loss reconciliation scoped to its execution
+inside the existing serialized consumer transaction. It classifies expired
+`dispatch_started`/`response_started` ownership as `effect_unknown`/`owner_lost`,
+fences and idempotently queues execution cleanup before admission evaluation.
+The new request commits `not_dispatched`/`fenced`; no classification exception
+rolls it back. The scoped bound uses persisted execution concurrency rather than the
+maintenance batch. Completed effects and unrelated live executions survive.
+
+F2: `beginAccount` snapshots every known primitive at entry, before validation
+and the first await. Validation, intent, operation identity, lookup, CAS and
+mutation use that same snapshot. Transaction bookkeeping also captures the
+trusted consumer once before its first await. Structural caller mutation cannot
+switch issuer bookkeeping or business effects to another existing consumer;
+authentication remains the outer trusted boundary.
+
+Three additional actual-PG regressions are named `F1 claim fences expired
+in-flight ownership before spare-concurrency admission`, `F2 beginAccount
+snapshots caller primitives before the consumer-row await`, and `transaction
+snapshots trusted consumer before awaits despite structurally mutable context`.
+F1 uses concurrency 2, exact W1 expiry and fresh W2 claim without callback or
+maintenance, then checks durable denial/ambiguity/fence, one cleanup, replay
+and new-ID denial, completed monotonicity and unrelated live execution safety.
+The mutation regressions observe the real DB session blocked on the consumer
+row using existing snapshot-refresh and pool-idle fixes, then inspect persisted
+account/intent/replay and foreign-consumer isolation. The response-started loss
+uses the shared SQL predicate; no duplicate response-only test was added.
+
+Implementation request: `gpt-6.1-sol/high/default`, NO FAST. This patch remains
+pending main's NEW synthetic PG qualification, before-regression run against
+actual old 5f production plus the new tests, typecheck, existing policy/CI gates,
+and independent exact-fingerprint `gpt-6.1-sol/xhigh/default` review. Historical
+15-PG/code/CI receipts below do not qualify this patch. No empirical gates were
+added to self-approval; no DB gate was invoked or awaited here.
 
 ## Bounded PR3 remediation
 
@@ -150,7 +189,7 @@ Current concurrency/request accounting is per execution. Account-global provider
 admission, native transport byte/token enforcement and the HTTP service remain
 dependent B work; this unused private kernel does not establish those gates.
 
-## Current main qualification - 2026-10-03
+## Historical main qualification - 2026-10-03
 
 Main assembled the reviewed-source-base remediation with merged SDK PR2
 `83f0c7ca` and corrected two observed test-harness failures: PostgreSQL activity
@@ -165,12 +204,28 @@ Foundation/source-policy and dev-only checks, and PostgreSQL 15/15 in a NEW
 empty PG17.10 fixture. Receipts are retained under
 `qualification-kernel-integrated-b24715c8-v1` in main-owned durable evidence.
 Earlier 4706 and 7193 fixtures retain the real harness failures; they are not
-claimed PASS. This qualifies the current code changes, not facade/native/product
-acceptance. Independent exact-commit xhigh review and final CI remain pending.
+claimed PASS. These receipts qualify the prior assembled code only; they do not qualify this
+F1/F2/context patch or its three new PG regressions. Independent exact-commit
+xhigh review and final CI remain pending.
 The additional text in this handoff records completed main evidence; it is not
 an observed Git identity or a claim that the worker ran those gates.
 
 ## Main qualification and integration
+
+Main qualified guarded F1/F2/context patch
+`eb8cda287cfb560c7c6681fe1299a078a1a4920cbd6dcd027bb82272b9f746cb`
+on the exact `5f07a18` base in a NEW isolated fixture. Frozen installation,
+TypeScript, domain 2/2, build, root 26/26, Foundation/source policy and topology
+passed. Actual PostgreSQL 17.10 passed all 18 cases with zero skips. A separate
+NEW database using actual old `5f07a18` production and the three new behavioral
+tests failed all three: a forbidden R2 dispatch permit, changed A-to-B intent,
+and broken consumer bookkeeping. Evidence is retained externally under
+`qualification-kernel-eb8cda28-v1` and `qualification-kernel-eb8-before-v1`.
+An initial fixture command used the wrong internal PostgreSQL port and did not
+create a database; the corrected command ran only the unproved DB phase.
+These results establish the bounded kernel repairs, not account-wide capacity,
+transport, UI or real-provider E2E. Independent review and final exact-head CI
+remain required before merge.
 
 Main owns workspace inclusion and its single native lockfile. Use the qualified
 Node 24.21.x / TypeScript 7.0.2 toolchain, retain installed version receipts and
