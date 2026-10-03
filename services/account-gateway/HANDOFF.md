@@ -90,7 +90,25 @@ approved exact offline reset after independently proved transport closure would
 be needed; this patch adds no reset tool or migration platform. This first slice
 has never run production.
 
-## Qualification and remaining gates
+## Main qualification and remaining gates
+
+Main subsequently qualified owner checkpoint `8b62ea62b1e829e21d651e412ed77f9af5aea205`:
+pinned frozen install, TypeScript, domain 2/2, fresh PostgreSQL 17.10 27/27 with zero
+skips, build, root 26/26, Foundation, topology and Docs Protocol passed. Evidence:
+`qualification-kernel-b2-final-873be837-v1/result.json` in the durable workstream.
+Exact-head kernel and package CI also passed. Independent xhigh review is pending.
+
+The later review fix keeps the SQL002 occupancy default conservative for accepted
+inserts that omit new fields, with an actual SQL/account-capacity regression. Its
+before control failed behaviorally on old8b62 (0 occupied slots instead of 1);
+the corrected fresh PostgreSQL 17.10 suite passed all 28 cases with zero skips,
+and typecheck passed. Evidence: `qualification-b2-conservative-default-v1/result.json`.
+The original account-wide race also failed on actual merged1ea production
+(2 dispatches instead of 1), with successful setup and no missing API or compiler
+failure: `qualification-b2-original-capacity-negative-v1/result.json`. SQL001
+is unchanged. No native transport, supervisor or product gate is accepted here.
+
+### Historical continuation worker checks
 
 Current execution receipts are external to the source tree. All qualification
 claims must bind their result hashes. Node 24.21.0 syntax checks and both domain tests passed locally; exact final
@@ -98,14 +116,14 @@ file hashes and per-command exit codes are recorded in external evidence. These
 checks do not establish PostgreSQL correctness. The pnpm launcher is present but
 its referenced corepack binary is missing, so pnpm qualification cannot run.
 
-**NOT_RUN for this candidate:** TypeScript, frozen dependency install, formatter,
+**NOT_RUN by the continuation worker:** TypeScript, frozen dependency install, formatter,
 all 27 actual PostgreSQL cases, before-source negative controls, build/root tests,
 Foundation/topology, Docs Protocol, exact CI, independent xhigh source review and
 product/actual transport/supervisor acceptance. No node_modules, tsc or psql were
 present at preflight. No dependencies or DB were installed or provisioned here.
 Main supplies pinned pnpm 11.28.2, Node 24.21.x and a NEW PostgreSQL 17.10 fixture.
 
-Main must run service typecheck, domain tests and all PG cases with zero skips.
+The main qualification recipe runs typecheck, domain tests and all PG cases with zero skips.
 The test guard requires `AG_KERNEL_TEST_ALLOW=disposable_pg17_10`, a newly created
 localhost DB named `ag_kernel_test_[a-z0-9_]+`, `AG_KERNEL_DISPOSABLE_DB` equal to
 that name and a matching locally supplied `AG_KERNEL_TEST_DSN`. Never export the

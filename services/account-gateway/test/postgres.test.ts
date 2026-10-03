@@ -1131,6 +1131,22 @@ test('B2 closure and cleanup authority capture whitelisted primitives before con
   await x.settleCleanup(ctx, original.cleanupRef, delegate, original.token, true);
 });
 
+test('B2 accepted insert omitting occupancy conservatively holds the account slot', async () => {
+  const ctx = context(), account = await connected(ctx), w = await worker(ctx);
+  const first = await prepared(ctx, account.accountRef!), second = await prepared(ctx, account.accountRef!);
+  await admin.query(`INSERT INTO ag_kernel.requests(consumer,execution_ref,id,effect,worker)
+    VALUES ($1,$2,'accepted-without-new-fields','dispatch_started',$3)`,
+  [ctx.consumerId, first.result.executionRef, w]);
+  assert.equal(await occupancy(ctx, account.accountRef!), 1);
+  const denied = await b.claim(ctx, second.result.executionRef!, 'must-stay-held', w, second.admission);
+  assert.equal(denied.dispatch, undefined);
+  assert.deepEqual(denied.status, { requestRef: 'must-stay-held', effect: 'not_dispatched', code: 'limit' });
+  const row = (await admin.query(`SELECT closure_token FROM ag_kernel.requests
+    WHERE consumer=$1 AND execution_ref=$2 AND id='accepted-without-new-fields'`,
+  [ctx.consumerId, first.result.executionRef])).rows[0];
+  assert.equal(row.closure_token, null, 'conservative default does not fabricate closure authority');
+});
+
 test('B2 numbered upgrade retains legacy active, completed and unknown occupancy without fabricating closure authority', async () => {
   const active = (await admin.query(`SELECT id,effect FROM ag_kernel.requests
     WHERE consumer=$1 AND execution_ref=$2 AND id IN ('legacy-dispatch','legacy-response') ORDER BY id`,

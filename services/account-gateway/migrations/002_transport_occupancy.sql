@@ -5,7 +5,9 @@ SET LOCAL search_path = ag_kernel, pg_catalog;
 ALTER TABLE requests ADD COLUMN transport_occupied boolean NOT NULL DEFAULT true;
 ALTER TABLE requests ADD COLUMN closure_token uuid;
 UPDATE requests SET transport_occupied=false WHERE effect='not_dispatched';
-ALTER TABLE requests ALTER COLUMN transport_occupied SET DEFAULT false;
+-- An accepted insert omitting the new field must retain conservative occupancy.
+-- Denied requests explicitly insert false; omission must never free capacity.
+ALTER TABLE requests ALTER COLUMN transport_occupied SET DEFAULT true;
 ALTER TABLE requests ADD CONSTRAINT requests_transport_proof CHECK (
   (effect <> 'not_dispatched' OR (NOT transport_occupied AND closure_token IS NULL))
   AND (closure_token IS NULL OR worker IS NOT NULL)
