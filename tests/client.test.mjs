@@ -421,3 +421,39 @@ test('malformed selected preparation results fail closed on POST and operation G
     'POST /v1/executions', 'POST /v1/executions', 'GET /v1/operations/stable-prepare',
   ]);
 });
+
+// Regression: a proved non-entry must be observable through the public HTTP client,
+// without allowing mislabeled success, retry inference or private native proofs.
+test('B2a public HTTP readback accepts only consistent positive rejection and never retries', async t => {
+  let calls = 0;
+  const rejection = { code: 'upstream_failure', traceRef: 'trace-a', effect: 'rejected_before_dispatch', retry: { kind: 'never' } };
+  const valid = { requestRef: 'request-a', effect: 'rejected_before_dispatch', status: 'failed', error: { ...rejection, requestRef: 'request-a' } };
+  let response = valid;
+  const { execution: e, management: m } = await fixture(t, async (req, res) => {
+    calls++;
+    if (req.method === 'POST') { await read(req); json(res, { ...rejection, requestRef: 'request-a' }, 422); return; }
+    json(res, response);
+  });
+  assert.deepEqual(await e.status('execution-a', 'request-a'), valid);
+  response = { operationRef: 'operation-a', state: 'rejected', error: { ...rejection, operationRef: 'operation-a' } };
+  assert.deepEqual(await m.operation('operation-a'), response);
+  const invalid = [
+    ...['completed', 'unknown', 'pending', 'cancelled'].map(status => ({ ...valid, status })),
+    { requestRef: 'request-a', effect: 'rejected_before_dispatch', status: 'failed' },
+    { ...valid, error: { ...rejection, effect: 'effect_unknown' } },
+    { ...valid, error: { ...rejection, retry: { kind: 'readback' } } },
+    { ...valid, error: { ...rejection, retry: { kind: 'after', milliseconds: 1 } } },
+    { ...valid, effect: 'completed' },
+    { ...valid, effect: 'effect_unknown' },
+    { ...valid, native: { originRef: 'private-sentinel' } },
+    { ...valid, error: { ...rejection, token: 'private-sentinel' } },
+  ];
+  for (const payload of invalid) {
+    response = payload;
+    await rejects(e.status('execution-a', 'request-a'), 'invalid_response', 'effect_unknown');
+  }
+  response = { operationRef: 'operation-a', state: 'unknown', error: { ...rejection, operationRef: 'operation-a' } };
+  await rejects(m.operation('operation-a'), 'invalid_response', 'effect_unknown');
+  await rejects(e.request('execution-a', { requestId: 'request-a', admission, body: Buffer.from('{}') }), 'safe_error', 'rejected_before_dispatch');
+  assert.equal(calls, 2 + invalid.length + 2, 'every public invocation sends exactly one HTTP request');
+});

@@ -6,7 +6,7 @@ import {
 import type {
   TrustedContext, DurableKernel, Bounds, AccountIntent, AccountStatus, OperationStatus,
   ApprovedPreparation, ExecutionStatus, NativeDescriptor, NativeCreatePermit,
-  PrivateAdmission, ApprovedLimits, AccountPageQuery, AccountPage, ClaimResult, RequestStatus, Effect, CleanupClaim, TransportClosure, CleanupAuthority,
+  PrivateAdmission, ApprovedLimits, AccountPageQuery, AccountPage, ClaimResult, RequestStatus, Effect, CleanupClaim, TransportClosure, CleanupAuthority, NativeReservation, NativeDispatchProof, NativeBinding,
 } from './domain.ts';
 
 type Row = Record<string, any>;
@@ -34,12 +34,36 @@ const executionLimits = (r: Row): ApprovedLimits => ({
   outputBytes: r.max_output_bytes, tokens: r.max_tokens,
 });
 
+const nativeBinding = (r: Row): NativeBinding => ({
+  originRef: r.native_origin_ref, engineIncarnation: r.engine_incarnation,
+  requestNonce: r.request_nonce, generation: r.descriptor_generation,
+});
 const transportClosure = (r: Row): TransportClosure => ({
   executionRef: r.execution_ref, requestRef: r.id, worker: r.worker,
   ...(r.closure_token ? { token: r.closure_token } : {}),
+  ...(r.native_origin_ref !== null && r.native_origin_ref !== undefined ? { native: nativeBinding(r) } : {}),
 });
-const captureClosure = (proof: TransportClosure): TransportClosure => ({
-  executionRef: proof.executionRef, requestRef: proof.requestRef, worker: proof.worker, token: proof.token,
+const captureReservation = (input: NativeReservation): NativeReservation => {
+  if (!input || typeof input !== 'object') throw new KernelError('invalid');
+  const copy = { originRef: input.originRef, engineIncarnation: input.engineIncarnation, requestNonce: input.requestNonce };
+  identifier(copy.originRef); uuid(copy.engineIncarnation); uuid(copy.requestNonce);
+  return copy;
+};
+const captureClosure = (proof: TransportClosure): TransportClosure => {
+  if (!proof || typeof proof !== 'object') throw new KernelError('invalid');
+  const native = proof.native;
+  return { executionRef: proof.executionRef, requestRef: proof.requestRef, worker: proof.worker, token: proof.token,
+    ...(native === undefined ? {} : { native: { ...captureReservation(native), generation: native.generation } }) };
+};
+const validateNativeClosure = (proof: TransportClosure): void => {
+  uuid(proof.executionRef); identifier(proof.requestRef); uuid(proof.worker); uuid(proof.token);
+  uuid(proof.native?.generation);
+  // Native fields were independently validated by captureReservation. A legacy
+  // NULL binding has no authority, even when an older closure token exists.
+};
+const dispatchProof = (r: Row): NativeDispatchProof => ({
+  executionRef: r.execution_ref, requestRef: r.id, worker: r.worker, token: r.closure_token,
+  native: nativeBinding(r),
 });
 
 // One consumer row is the explicit serialization lock for policy fences,
@@ -332,8 +356,9 @@ export class PostgresKernel implements DurableKernel {
     return this.transaction(context, async tx => requestStatus(await this.one(tx,
       'SELECT * FROM requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3', [tx.consumer, ref, id])));
   }
-  async claim(context: TrustedContext, ref: string, id: string, worker: string, admission: PrivateAdmission): Promise<ClaimResult> {
+  async claim(context: TrustedContext, ref: string, id: string, worker: string, admission: PrivateAdmission, reservation: NativeReservation): Promise<ClaimResult> {
     // Capture whitelisted primitives before validation or any await.
+    reservation = captureReservation(reservation);
     admission = { executionRef: admission.executionRef, issuerEpoch: admission.issuerEpoch,
       invocationRef: admission.invocationRef, attemptRef: admission.attemptRef, accountRef: admission.accountRef,
       authorizationEpoch: admission.authorizationEpoch, subjectRef: admission.subjectRef,
@@ -389,18 +414,29 @@ export class PostgresKernel implements DurableKernel {
         if (e.request_count >= e.max_requests || occupied.execution_n >= e.max_concurrent ||
             occupied.account_n >= this.bounds.maxConcurrent) code = 'limit';
       }
-      if (!code) await this.worker(tx, worker);
-      const r = (await tx.db.query(`INSERT INTO requests(consumer,execution_ref,id,effect,code,worker,transport_occupied,closure_token)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`, [tx.consumer, ref, id,
-        code ? 'not_dispatched' : 'dispatch_started', code ?? null, code ? null : worker, !code, code ? null : randomUUID()])).rows[0];
+      if (!code) {
+        await this.worker(tx, worker);
+        // One native reservation nonce cannot be moved onto a fresh request ID.
+        // The consumer lock serializes this check; SQL003 independently guards it.
+        const reused = await tx.db.query(`SELECT 1 FROM requests WHERE consumer=$1
+          AND native_origin_ref=$2 AND engine_incarnation=$3 AND request_nonce=$4 LIMIT 1`,
+        [tx.consumer, reservation.originRef, reservation.engineIncarnation, reservation.requestNonce]);
+        if (reused.rowCount) throw new KernelError('denied');
+      }
+      const r = (await tx.db.query(`INSERT INTO requests(consumer,execution_ref,id,effect,code,worker,transport_occupied,closure_token,
+        native_origin_ref,engine_incarnation,request_nonce,descriptor_generation)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`, [tx.consumer, ref, id,
+        code ? 'not_dispatched' : 'dispatch_started', code ?? null, code ? null : worker, !code, code ? null : randomUUID(),
+        code ? null : reservation.originRef, code ? null : reservation.engineIncarnation,
+        code ? null : reservation.requestNonce, code ? null : e.generation])).rows[0];
       if (code) return { status: requestStatus(r) };
       await tx.db.query('UPDATE executions SET request_count=request_count+1 WHERE consumer=$1 AND ref=$2', [tx.consumer, ref]);
       return { status: requestStatus(r), dispatch: { descriptor: descriptor(c), executionRef: ref, requestRef: id,
-        limits: executionLimits(e), deadline: e.deadline.toISOString(), closure: { ...transportClosure(r), token: r.closure_token } } };
+        limits: executionLimits(e), deadline: e.deadline.toISOString(), closure: dispatchProof(r) } };
     });
   }
   async effect(context: TrustedContext, ref: string, id: string, worker: string,
-    next: Exclude<Effect, 'not_dispatched' | 'dispatch_started'>): Promise<RequestStatus> {
+    next: Exclude<Effect, 'not_dispatched' | 'dispatch_started' | 'rejected_before_dispatch'>): Promise<RequestStatus> {
     uuid(ref); identifier(id); uuid(worker);
     if (!['response_started','completed','effect_unknown'].includes(next)) throw new KernelError('invalid');
     return this.transaction(context, async tx => {
@@ -434,11 +470,44 @@ export class PostgresKernel implements DurableKernel {
       return requestStatus(lost);
     });
   }
+  async rejectBeforeDispatch(context: TrustedContext, worker: string, input: NativeDispatchProof,
+    entered: false): Promise<RequestStatus> {
+    const proof = captureClosure(input);
+    uuid(worker); validateNativeClosure(proof);
+    if (entered !== false) throw new KernelError('invalid');
+    if (worker !== proof.worker) throw new KernelError('denied');
+    return this.transaction(context, async tx => {
+      const r = await this.one(tx, 'SELECT * FROM requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3',
+        [tx.consumer, proof.executionRef, proof.requestRef]);
+      if (r.worker !== proof.worker || r.closure_token !== proof.token ||
+          r.native_origin_ref !== proof.native!.originRef || r.engine_incarnation !== proof.native!.engineIncarnation ||
+          r.request_nonce !== proof.native!.requestNonce || r.descriptor_generation !== proof.native!.generation) {
+        throw new KernelError('denied');
+      }
+      // Exact terminal readback is harmless after lease loss; it neither grants
+      // permission nor rewrites the persisted non-entry fact.
+      if (r.effect === 'rejected_before_dispatch') return requestStatus(r);
+      if (r.effect !== 'dispatch_started') throw new KernelError('conflict');
+      const rejected = (await tx.db.query(`UPDATE requests r SET effect='rejected_before_dispatch',code='native_rejected'
+        WHERE r.consumer=$1 AND r.execution_ref=$2 AND r.id=$3 AND r.effect='dispatch_started'
+        AND EXISTS (SELECT 1 FROM workers w WHERE w.consumer=r.consumer AND w.worker=r.worker
+          AND w.lease_until>clock_timestamp()) RETURNING r.*`,
+      [tx.consumer, proof.executionRef, proof.requestRef])).rows[0];
+      if (rejected) return requestStatus(rejected);
+      // Commit required unknown/fence classification if the original lease was
+      // lost, including expiry between the read and the attempted settlement.
+      const lost = (await tx.db.query(`UPDATE requests SET effect='effect_unknown',code='owner_lost'
+        WHERE consumer=$1 AND execution_ref=$2 AND id=$3 RETURNING *`,
+      [tx.consumer, proof.executionRef, proof.requestRef])).rows[0];
+      await this.fenceExecution(tx, proof.executionRef);
+      return requestStatus(lost);
+    });
+  }
   async acknowledgeTransportClosed(context: TrustedContext, worker: string, proof: TransportClosure,
     cleanup?: CleanupAuthority): Promise<void> {
     proof = captureClosure(proof);
     cleanup = cleanup === undefined ? undefined : { cleanupRef: cleanup.cleanupRef, token: cleanup.token };
-    uuid(worker); uuid(proof.executionRef); identifier(proof.requestRef); uuid(proof.worker); uuid(proof.token);
+    uuid(worker); validateNativeClosure(proof);
     if (cleanup) { uuid(cleanup.cleanupRef); uuid(cleanup.token); }
     else if (worker !== proof.worker) throw new KernelError('denied');
     return this.transaction(context, async tx => {
@@ -447,12 +516,14 @@ export class PostgresKernel implements DurableKernel {
       // cannot release occupancy. Repeated exact owner acks remain harmless.
       const closed = await tx.db.query(`UPDATE requests r SET transport_occupied=false
         WHERE r.consumer=$1 AND r.execution_ref=$2 AND r.id=$3 AND r.worker=$4 AND r.closure_token=$5
+        AND r.native_origin_ref=$9 AND r.engine_incarnation=$10 AND r.request_nonce=$11 AND r.descriptor_generation=$12
         AND ($6::uuid IS NULL OR EXISTS (SELECT 1 FROM cleanup j WHERE j.consumer=r.consumer
           AND j.ref=$6 AND j.execution_ref=r.execution_ref AND j.worker=$7 AND j.token=$8
           AND ((j.state='claimed' AND j.lease_until>clock_timestamp())
             OR (j.state='done' AND NOT r.transport_occupied)))) RETURNING r.id`,
       [tx.consumer, proof.executionRef, proof.requestRef, proof.worker, proof.token,
-        cleanup?.cleanupRef ?? null, worker, cleanup?.token ?? null]);
+        cleanup?.cleanupRef ?? null, worker, cleanup?.token ?? null, proof.native!.originRef,
+        proof.native!.engineIncarnation, proof.native!.requestNonce, proof.native!.generation]);
       if (!closed.rowCount) throw new KernelError('denied');
       // Closure is independent of accepted effect. If owner loss has not yet been
       // observed, classify this exact request before committing the release.
@@ -579,8 +650,8 @@ export class PostgresKernel implements DurableKernel {
     });
   }
   private async transports(tx: Tx, ref: string): Promise<readonly TransportClosure[]> {
-    const r = await tx.db.query(`SELECT execution_ref,id,worker,closure_token FROM requests
-      WHERE consumer=$1 AND execution_ref=$2 AND transport_occupied ORDER BY (closure_token IS NULL),id LIMIT $3`,
+    const r = await tx.db.query(`SELECT execution_ref,id,worker,closure_token,native_origin_ref,engine_incarnation,request_nonce,descriptor_generation FROM requests
+      WHERE consumer=$1 AND execution_ref=$2 AND transport_occupied ORDER BY (native_origin_ref IS NULL),(closure_token IS NULL),id LIMIT $3`,
     [tx.consumer, ref, Math.min(this.bounds.maintenanceBatch, 128)]);
     return r.rows.map(transportClosure);
   }

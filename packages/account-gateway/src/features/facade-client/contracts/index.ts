@@ -6,11 +6,12 @@ export const deadline = z.iso.datetime({ offset: true }).max(64);
 export const protocol = z.enum(['openai-chat', 'openai-responses', 'anthropic-messages']);
 export const accountState = z.enum(['staging', 'active', 'quarantined', 'rejected', 'disabled', 'tombstoned']);
 export const executionState = z.enum(['active', 'fenced', 'terminal']);
-export const effectState = z.enum(['not_dispatched', 'dispatch_started', 'response_started', 'completed', 'effect_unknown']);
+export const effectState = z.enum(['not_dispatched', 'dispatch_started', 'response_started', 'completed', 'effect_unknown', 'rejected_before_dispatch']);
 export const errorCode = z.enum(['invalid_request', 'unauthenticated', 'forbidden', 'not_found', 'conflict', 'admission_limited', 'upstream_failure', 'internal_error']);
 export const safeError = z.strictObject({ code: errorCode, traceRef: reference, operationRef: reference.optional(), requestRef: reference.optional(), effect: effectState,
   retry: z.discriminatedUnion('kind', [z.strictObject({ kind: z.literal('never') }), z.strictObject({ kind: z.literal('readback') }), z.strictObject({ kind: z.literal('after'), milliseconds: z.number().int().min(0).max(3600000) })]),
-}).refine(v => v.retry.kind !== 'after' || v.effect === 'not_dispatched');
+}).refine(v => (v.retry.kind !== 'after' || v.effect === 'not_dispatched') &&
+  (v.effect !== 'rejected_before_dispatch' || v.retry.kind === 'never'));
 export const profile = z.strictObject({ profileId: reference, protocol, modelIds: z.array(z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/)).min(1).max(128), authKinds: z.array(z.enum(['api_key', 'oauth'])).min(1).max(2) });
 export const profiles = z.strictObject({ profiles: z.array(profile).max(128) });
 export const account = z.strictObject({ accountRef: reference, ownerRef: reference, profileId: reference, displayName: z.string().min(1).max(128), state: accountState, metadataRevision: revision, authorizationEpoch: revision });
@@ -25,14 +26,17 @@ export const operation = z.discriminatedUnion('state', [
   z.strictObject({ operationRef: reference, state: z.literal('unknown'), error: safeError.optional() }),
 ]).refine(v => !('error' in v) || !v.error || (
   (v.error.operationRef === undefined || v.error.operationRef === v.operationRef) &&
-  (v.state !== 'unknown' || (v.error.effect !== 'not_dispatched' && v.error.retry.kind !== 'after'))
+  (v.state !== 'unknown' || (v.error.effect !== 'not_dispatched' && v.error.effect !== 'rejected_before_dispatch' && v.error.retry.kind !== 'after')) &&
+  (v.error.effect !== 'rejected_before_dispatch' || v.state === 'rejected')
 ));
 export const accountOperation = operation.refine(v => v.state !== 'applied' || v.result?.kind === 'account');
 export const preparationOperation = operation.refine(v => v.state !== 'applied' || v.result?.kind === 'execution');
 export const acknowledgementOperation = operation.refine(v => v.state !== 'applied' || !v.result);
 export const execution = z.strictObject({ executionRef: reference, accountRef: reference, authorizationEpoch: revision, profileId: reference, deadline, state: executionState });
 export const requestStatus = z.strictObject({ requestRef: reference, effect: effectState, status: z.enum(['pending', 'completed', 'cancelled', 'failed', 'unknown']), error: safeError.optional() })
-  .refine(v => (v.status !== 'unknown' || v.effect === 'effect_unknown') &&
+  .refine(v => (v.effect !== 'rejected_before_dispatch' ||
+    (v.status === 'failed' && v.error !== undefined && v.error.retry.kind === 'never')) &&
+    (v.status !== 'unknown' || v.effect === 'effect_unknown') &&
     (v.status !== 'completed' || v.effect === 'completed') && (!v.error || (
     (v.error.requestRef === undefined || v.error.requestRef === v.requestRef) &&
     v.error.effect === v.effect &&
