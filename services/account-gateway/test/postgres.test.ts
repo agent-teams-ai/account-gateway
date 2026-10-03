@@ -196,6 +196,29 @@ test('F2 beginAccount snapshots caller primitives before the consumer-row await'
   assert.equal(await count('SELECT count(*)::integer n FROM ag_kernel.candidates WHERE consumer=$1', [ctx.consumerId]), 1);
 });
 
+test('F3 acknowledgeCandidate snapshots native proof before the consumer-row await', async () => {
+  const ctx = context(), account = await staged(ctx), w = await worker(ctx);
+  const candidate = await a.startCandidate(ctx, account.operationRef, w); assert.ok(candidate);
+  const initial = (await admin.query('SELECT native_identity FROM ag_kernel.candidates WHERE consumer=$1 AND generation=$2',
+    [ctx.consumerId, candidate.candidate])).rows[0];
+  assert.equal(initial.native_identity, null, 'fresh candidate has no acknowledged physical identity');
+  const proof = { generation: candidate.candidate, nativePhysicalIdentity: randomUUID(), profile: candidate.profile };
+  const original = { ...proof }, differentIdentity = randomUUID();
+  const result = await mutateAtConsumerLock(ctx,
+    () => a.acknowledgeCandidate(ctx, account.operationRef, w, proof),
+    () => { proof.nativePhysicalIdentity = differentIdentity; });
+  assert.equal(result.state, 'applied');
+  const recorded = (await admin.query('SELECT generation,native_identity AS "nativePhysicalIdentity",profile FROM ag_kernel.candidates WHERE consumer=$1 AND generation=$2',
+    [ctx.consumerId, candidate.candidate])).rows[0];
+  assert.deepEqual(recorded, original);
+  const e = await prepared(ctx, account.accountRef!);
+  const claim = await b.claim(ctx, e.result.executionRef!, 'proof-snapshot', w, e.admission);
+  assert.ok(claim.dispatch);
+  assert.deepEqual(claim.dispatch.descriptor, original);
+  assert.deepEqual(await b.acknowledgeCandidate(ctx, account.operationRef, w, original), result);
+  await assert.rejects(b.acknowledgeCandidate(ctx, account.operationRef, w, proof), isCode('conflict'));
+});
+
 test('transaction snapshots trusted consumer before awaits despite structurally mutable context', async () => {
   const original = context(), foreign = context();
   await connected(foreign);

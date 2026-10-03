@@ -1,5 +1,53 @@
 # Private kernel wire-policy bridge
 
+## Primary F3 qualification - 2026-10-03
+
+Main verified guarded patch325a0807 against exact aea6ed03 in a NEW sandbox.
+Frozen pnpm11.28.2 install, typecheck, domain2, build, root26, Foundation and
+static topology passed. Actual PostgreSQL17.10 passed all19 cases, zero skips.
+In a separate NEW database the one F3 behavior test failed on unchanged aea
+production: the durable identity became B instead of originally supplied A.
+Tests are actual consumer-row-lock waits and durable claim descriptors.
+No native/provider effects or product/facade acceptance claimed. Historical
+worker NOT_RUN below records what the worker itself did, not this primary run.
+Final exact-head CI and independent xhigh/default review remain required.
+
+## Current F3 native proof capture repair - 2026-10-03
+
+This bounded repair changes only `src/postgres.ts`, `test/postgres.test.ts`
+and this handoff under `services/account-gateway/`. F1/F2, the consumer-context
+capture and all existing tests remain intact. Earlier qualification and scope
+statements below describe previous patches, not qualification of this F3 repair.
+
+Requested base: exact `aea6ed03` kernel. The linked `.git` points to missing
+external worktree metadata; HEAD, index-lock writability and Git identity cannot
+be verified here. No commit/push was attempted. The external guarded patch
+requires the owner to verify HEAD resolves to `aea6ed03` and all three observed
+preimage SHA-256 values before applying. A mismatch must stop integration;
+this worker cannot independently attest that the observed files equal that Git tree.
+Main owns integration with author and committer iliya <iliyazelenkog@gmail.com>.
+Requested execution profile: `gpt-6.1-sol/high/default`, NO FAST.
+
+`acknowledgeCandidate` copies only generation, nativePhysicalIdentity and profile
+before validation or any await. All existing validation, conflict checks and
+persistence use that same captured primitive object.
+
+Exactly one new actual-PG regression uses existing `mutateAtConsumerLock` on a
+fresh creating candidate whose native identity is NULL. It submits valid proof A,
+mutates the caller to valid unused identity B while the real consumer row is
+locked, then requires durable identity and a later claim descriptor to remain A,
+exact A replay to succeed, and B to conflict. Old production rereads B after the
+lock and should fail the persisted-A assertion; that negative run is NOT_RUN here.
+
+Local Node syntax verification is recorded in external evidence. TypeScript,
+Docs Protocol and PostgreSQL qualification are NOT_RUN here: dependencies are
+absent and main owns pinned fixture qualification outside the provider sandbox.
+Main must run all 19 PG cases on NEW disposable PostgreSQL 17.10 and demonstrate
+this single F3 test fails against actual `aea6ed03` production in a separate NEW
+fixture before qualifying the exact repaired bytes. Existing toolchain and DB
+guards below apply. No install, test DB launch, provisioning, provider call,
+credential access, schema/framework or public API change occurred.
+
 The original kernel producer owned only `services/account-gateway/`. The
 assembled PR3 also includes root workspace/lockfile, Foundation policy and CI
 integration supplied by other writers. This F1/F2 remediation owns only

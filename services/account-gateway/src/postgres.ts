@@ -206,6 +206,9 @@ export class PostgresKernel implements DurableKernel {
     });
   }
   async acknowledgeCandidate(context: TrustedContext, id: string, worker: string, proof: NativeDescriptor): Promise<OperationStatus> {
+    // Capture the physical proof before validation and the first await.
+    proof = { generation: proof.generation, nativePhysicalIdentity: proof.nativePhysicalIdentity,
+      profile: proof.profile };
     identifier(id); uuid(proof.generation); uuid(proof.nativePhysicalIdentity); identifier(proof.profile, 64);
     return this.transaction(context, async tx => {
       await this.worker(tx, worker);
