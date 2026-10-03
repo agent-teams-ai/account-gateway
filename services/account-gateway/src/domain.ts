@@ -58,17 +58,24 @@ export interface PrivateAdmission {
   limits: ApprovedLimits; expiresAt: string;
 }
 export interface RequestStatus { requestRef: string; effect: Effect; code?: string }
+// Protected-private permanent one-request proof. A missing token denotes legacy
+// occupancy without closure authority; this port cannot acknowledge it.
+export interface TransportClosure {
+  executionRef: string; requestRef: string; worker: string; token?: string;
+}
+export interface CleanupAuthority { cleanupRef: string; token: string }
 export type ClaimResult =
   | { status: RequestStatus; dispatch?: never }
   | { status: RequestStatus; dispatch: { descriptor: NativeDescriptor; executionRef: string; requestRef: string;
-      limits: ApprovedLimits; deadline: string } };
+      limits: ApprovedLimits; deadline: string; closure: TransportClosure & { token: string } } };
 // Without a descriptor, only exact-generation readback/quarantine is allowed;
 // never delete a guessed native identity. Settlement is a trusted adapter ack.
 export interface CleanupClaim {
   cleanupRef: string; token: string;
-  scope: { kind: 'generation'; generation: string; profile: string; descriptor?: NativeDescriptor } | { kind: 'execution'; executionRef: string };
+  scope: { kind: 'generation'; generation: string; profile: string; descriptor?: NativeDescriptor } | { kind: 'execution'; executionRef: string; transports: readonly TransportClosure[] };
 }
 export interface Bounds {
+  // maxConcurrent also caps occupied local transports per consumer/account.
   maxRequests: number; maxConcurrent: number; maxRequestBytes: number; maxOutputBytes: number; maxTokens: number; maxRunMs: number;
   workerLeaseMs: number; cleanupLeaseMs: number; maintenanceBatch: number;
 }
@@ -124,11 +131,15 @@ export interface DurableKernel {
   claim(context: TrustedContext, executionRef: string, requestId: string, worker: string, admission: PrivateAdmission): Promise<ClaimResult>;
   request(context: TrustedContext, executionRef: string, requestId: string): Promise<RequestStatus>;
   effect(context: TrustedContext, executionRef: string, requestId: string, worker: string, next: Exclude<Effect, 'not_dispatched' | 'dispatch_started'>): Promise<RequestStatus>;
+  // Trusted transport/supervisor closure evidence, never timeout or key erasure.
+  // Original owner can ack after expiry; delegation requires exact cleanup CAS.
+  acknowledgeTransportClosed(context: TrustedContext, worker: string, proof: TransportClosure, cleanup?: CleanupAuthority): Promise<void>;
   fence(context: TrustedContext, operationId: string, subject: string, revision: number): Promise<OperationStatus>;
   close(context: TrustedContext, operationId: string, executionRef: string): Promise<OperationStatus>;
   heartbeat(context: TrustedContext, worker: string): Promise<void>;
   reconcile(context: TrustedContext): Promise<void>;
   restore(context: TrustedContext, expectedIssuer: string, freshIssuer: string): Promise<void>;
   claimCleanup(context: TrustedContext, worker: string): Promise<CleanupClaim | undefined>;
+  cleanupTransports(context: TrustedContext, cleanupRef: string, worker: string, token: string): Promise<readonly TransportClosure[]>;
   settleCleanup(context: TrustedContext, cleanupRef: string, worker: string, token: string, succeeded: boolean): Promise<void>;
 }

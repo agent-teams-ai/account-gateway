@@ -6,7 +6,7 @@ import {
 import type {
   TrustedContext, DurableKernel, Bounds, AccountIntent, AccountStatus, OperationStatus,
   ApprovedPreparation, ExecutionStatus, NativeDescriptor, NativeCreatePermit,
-  PrivateAdmission, ApprovedLimits, AccountPageQuery, AccountPage, ClaimResult, RequestStatus, Effect, CleanupClaim,
+  PrivateAdmission, ApprovedLimits, AccountPageQuery, AccountPage, ClaimResult, RequestStatus, Effect, CleanupClaim, TransportClosure, CleanupAuthority,
 } from './domain.ts';
 
 type Row = Record<string, any>;
@@ -32,6 +32,14 @@ const accountStatus = (r: Row): AccountStatus => ({
 const executionLimits = (r: Row): ApprovedLimits => ({
   requests: r.max_requests, concurrency: r.max_concurrent, requestBytes: r.max_request_bytes,
   outputBytes: r.max_output_bytes, tokens: r.max_tokens,
+});
+
+const transportClosure = (r: Row): TransportClosure => ({
+  executionRef: r.execution_ref, requestRef: r.id, worker: r.worker,
+  ...(r.closure_token ? { token: r.closure_token } : {}),
+});
+const captureClosure = (proof: TransportClosure): TransportClosure => ({
+  executionRef: proof.executionRef, requestRef: proof.requestRef, worker: proof.worker, token: proof.token,
 });
 
 // One consumer row is the explicit serialization lock for policy fences,
@@ -325,6 +333,13 @@ export class PostgresKernel implements DurableKernel {
       'SELECT * FROM requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3', [tx.consumer, ref, id])));
   }
   async claim(context: TrustedContext, ref: string, id: string, worker: string, admission: PrivateAdmission): Promise<ClaimResult> {
+    // Capture whitelisted primitives before validation or any await.
+    admission = { executionRef: admission.executionRef, issuerEpoch: admission.issuerEpoch,
+      invocationRef: admission.invocationRef, attemptRef: admission.attemptRef, accountRef: admission.accountRef,
+      authorizationEpoch: admission.authorizationEpoch, subjectRef: admission.subjectRef,
+      policyRevision: admission.policyRevision, bindingRevision: admission.bindingRevision, profileId: admission.profileId,
+      expiresAt: admission.expiresAt, limits: { requests: admission.limits.requests, concurrency: admission.limits.concurrency,
+        requestBytes: admission.limits.requestBytes, outputBytes: admission.limits.outputBytes, tokens: admission.limits.tokens } };
     uuid(ref); identifier(id); uuid(worker); uuid(admission.issuerEpoch);
     uuid(admission.executionRef); uuid(admission.accountRef); identifier(admission.subjectRef);
     identifier(admission.invocationRef); identifier(admission.attemptRef); identifier(admission.profileId, 64);
@@ -342,7 +357,9 @@ export class PostgresKernel implements DurableKernel {
         [tx.consumer, ref, id]);
       if (previous.rows[0]) return { status: requestStatus(previous.rows[0]) };
       const e = await this.one(tx, 'SELECT * FROM executions WHERE consumer=$1 AND ref=$2', [tx.consumer, ref]);
-      const ownerLost = await this.reconcileRequests(tx, ref, e.max_concurrent);
+      // All generations/states of this consumer/account share occupancy. The
+      // hard ceiling is 128; overfull legacy accounts remain conservatively denied.
+      const ownerLost = await this.reconcileRequests(tx, ref, 128, e.account_ref);
       const a = await this.one(tx, 'SELECT * FROM accounts WHERE consumer=$1 AND ref=$2', [tx.consumer, e.account_ref]);
       const c = await this.one(tx, 'SELECT * FROM candidates WHERE consumer=$1 AND generation=$2', [tx.consumer, e.generation]);
       const f = await this.one(tx, 'SELECT revision,fence FROM policy_fences WHERE consumer=$1 AND subject=$2', [tx.consumer, e.policy_subject]);
@@ -365,18 +382,21 @@ export class PostgresKernel implements DurableKernel {
         await tx.db.query("UPDATE executions SET state='closed' WHERE consumer=$1 AND ref=$2", [tx.consumer, ref]);
         await this.cleanup(tx, undefined, ref);
       } else {
-        const inflight = (await tx.db.query(`SELECT count(*)::integer AS n FROM requests WHERE consumer=$1 AND execution_ref=$2
-          AND effect IN ('dispatch_started','response_started')`, [tx.consumer, ref])).rows[0].n;
-        if (e.request_count >= e.max_requests || inflight >= e.max_concurrent) code = 'limit';
+        const occupied = (await tx.db.query(`SELECT count(*)::integer AS account_n,
+          count(*) FILTER (WHERE r.execution_ref=$2)::integer AS execution_n
+          FROM requests r JOIN executions x ON x.consumer=r.consumer AND x.ref=r.execution_ref
+          WHERE r.consumer=$1 AND x.account_ref=$3 AND r.transport_occupied`, [tx.consumer, ref, e.account_ref])).rows[0];
+        if (e.request_count >= e.max_requests || occupied.execution_n >= e.max_concurrent ||
+            occupied.account_n >= this.bounds.maxConcurrent) code = 'limit';
       }
       if (!code) await this.worker(tx, worker);
-      const r = (await tx.db.query(`INSERT INTO requests(consumer,execution_ref,id,effect,code,worker)
-        VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`, [tx.consumer, ref, id,
-        code ? 'not_dispatched' : 'dispatch_started', code ?? null, code ? null : worker])).rows[0];
+      const r = (await tx.db.query(`INSERT INTO requests(consumer,execution_ref,id,effect,code,worker,transport_occupied,closure_token)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`, [tx.consumer, ref, id,
+        code ? 'not_dispatched' : 'dispatch_started', code ?? null, code ? null : worker, !code, code ? null : randomUUID()])).rows[0];
       if (code) return { status: requestStatus(r) };
       await tx.db.query('UPDATE executions SET request_count=request_count+1 WHERE consumer=$1 AND ref=$2', [tx.consumer, ref]);
       return { status: requestStatus(r), dispatch: { descriptor: descriptor(c), executionRef: ref, requestRef: id,
-        limits: executionLimits(e), deadline: e.deadline.toISOString() } };
+        limits: executionLimits(e), deadline: e.deadline.toISOString(), closure: { ...transportClosure(r), token: r.closure_token } } };
     });
   }
   async effect(context: TrustedContext, ref: string, id: string, worker: string,
@@ -412,6 +432,37 @@ export class PostgresKernel implements DurableKernel {
         WHERE consumer=$1 AND execution_ref=$2 AND id=$3 RETURNING *`, [tx.consumer, ref, id])).rows[0];
       await this.fenceExecution(tx, ref);
       return requestStatus(lost);
+    });
+  }
+  async acknowledgeTransportClosed(context: TrustedContext, worker: string, proof: TransportClosure,
+    cleanup?: CleanupAuthority): Promise<void> {
+    proof = captureClosure(proof);
+    cleanup = cleanup === undefined ? undefined : { cleanupRef: cleanup.cleanupRef, token: cleanup.token };
+    uuid(worker); uuid(proof.executionRef); identifier(proof.requestRef); uuid(proof.worker); uuid(proof.token);
+    if (cleanup) { uuid(cleanup.cleanupRef); uuid(cleanup.token); }
+    else if (worker !== proof.worker) throw new KernelError('denied');
+    return this.transaction(context, async tx => {
+      // Exact immutable request/owner/token match. A cleanup delegate additionally
+      // needs its exact leased execution scope at the write; generation erasure
+      // cannot release occupancy. Repeated exact owner acks remain harmless.
+      const closed = await tx.db.query(`UPDATE requests r SET transport_occupied=false
+        WHERE r.consumer=$1 AND r.execution_ref=$2 AND r.id=$3 AND r.worker=$4 AND r.closure_token=$5
+        AND ($6::uuid IS NULL OR EXISTS (SELECT 1 FROM cleanup j WHERE j.consumer=r.consumer
+          AND j.ref=$6 AND j.execution_ref=r.execution_ref AND j.worker=$7 AND j.token=$8
+          AND ((j.state='claimed' AND j.lease_until>clock_timestamp())
+            OR (j.state='done' AND NOT r.transport_occupied)))) RETURNING r.id`,
+      [tx.consumer, proof.executionRef, proof.requestRef, proof.worker, proof.token,
+        cleanup?.cleanupRef ?? null, worker, cleanup?.token ?? null]);
+      if (!closed.rowCount) throw new KernelError('denied');
+      // Closure is independent of accepted effect. If owner loss has not yet been
+      // observed, classify this exact request before committing the release.
+      const lost = await tx.db.query(`UPDATE requests r SET effect='effect_unknown',code='owner_lost'
+        WHERE r.consumer=$1 AND r.execution_ref=$2 AND r.id=$3
+        AND r.effect IN ('dispatch_started','response_started') AND NOT EXISTS
+          (SELECT 1 FROM workers w WHERE w.consumer=r.consumer AND w.worker=r.worker
+            AND w.lease_until>clock_timestamp()) RETURNING r.id`,
+      [tx.consumer, proof.executionRef, proof.requestRef]);
+      if (lost.rowCount) await this.fenceExecution(tx, proof.executionRef);
     });
   }
   async fence(context: TrustedContext, id: string, subject: string, revision: number): Promise<OperationStatus> {
@@ -456,18 +507,20 @@ export class PostgresKernel implements DurableKernel {
       if (!r.rowCount) throw new KernelError('denied');
     });
   }
-  private async reconcileRequests(tx: Tx, ref?: string, limit = this.bounds.maintenanceBatch): Promise<boolean> {
+  private async reconcileRequests(tx: Tx, ref?: string, limit = this.bounds.maintenanceBatch, account?: string): Promise<boolean> {
     const lost = await tx.db.query(`SELECT r.* FROM requests r LEFT JOIN workers w
       ON w.consumer=r.consumer AND w.worker=r.worker WHERE r.consumer=$1
-      AND ($3::uuid IS NULL OR r.execution_ref=$3)
+      AND (($4::uuid IS NULL AND ($3::uuid IS NULL OR r.execution_ref=$3)) OR EXISTS
+        (SELECT 1 FROM executions e WHERE e.consumer=r.consumer AND e.ref=r.execution_ref AND e.account_ref=$4))
       AND r.effect IN ('dispatch_started','response_started') AND (w.worker IS NULL OR w.lease_until<=clock_timestamp())
-      ORDER BY r.execution_ref,r.id LIMIT $2`, [tx.consumer, limit, ref ?? null]);
+      ORDER BY r.transport_occupied DESC,(r.execution_ref=$3) DESC,r.execution_ref,r.id LIMIT $2`,
+    [tx.consumer, limit, ref ?? null, account ?? null]);
     for (const r of lost.rows) {
       await tx.db.query("UPDATE requests SET effect='effect_unknown',code='owner_lost' WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
         [tx.consumer, r.execution_ref, r.id]);
       await this.fenceExecution(tx, r.execution_ref);
     }
-    return lost.rows.length > 0;
+    return ref ? lost.rows.some(r => r.execution_ref === ref) : lost.rows.length > 0;
   }
   async reconcile(context: TrustedContext): Promise<void> {
     return this.transaction(context, async tx => {
@@ -521,8 +574,26 @@ export class PostgresKernel implements DurableKernel {
       const scope: CleanupClaim['scope'] = j.generation
         ? { kind: 'generation', generation: j.generation, profile: j.profile,
             ...(j.native_identity ? { descriptor: descriptor(j) } : {}) }
-        : { kind: 'execution', executionRef: j.execution_ref };
+        : { kind: 'execution', executionRef: j.execution_ref, transports: await this.transports(tx, j.execution_ref) };
       return { cleanupRef: j.ref, token, scope };
+    });
+  }
+  private async transports(tx: Tx, ref: string): Promise<readonly TransportClosure[]> {
+    const r = await tx.db.query(`SELECT execution_ref,id,worker,closure_token FROM requests
+      WHERE consumer=$1 AND execution_ref=$2 AND transport_occupied ORDER BY (closure_token IS NULL),id LIMIT $3`,
+    [tx.consumer, ref, Math.min(this.bounds.maintenanceBatch, 128)]);
+    return r.rows.map(transportClosure);
+  }
+  async cleanupTransports(context: TrustedContext, ref: string, worker: string, token: string): Promise<readonly TransportClosure[]> {
+    uuid(ref); uuid(worker); uuid(token);
+    return this.transaction(context, async tx => {
+      const j = (await tx.db.query(`SELECT execution_ref FROM cleanup WHERE consumer=$1 AND ref=$2
+        AND worker=$3 AND token=$4 AND state='claimed' AND lease_until>clock_timestamp()
+        AND execution_ref IS NOT NULL`, [tx.consumer, ref, worker, token])).rows[0];
+      if (!j) throw new KernelError('denied');
+      // Read another bounded page after acknowledging the previous page. No
+      // token rotation, guessed request range or volatile dispatch permit needed.
+      return this.transports(tx, j.execution_ref);
     });
   }
   async settleCleanup(context: TrustedContext, ref: string, worker: string, token: string, succeeded: boolean): Promise<void> {
@@ -531,6 +602,11 @@ export class PostgresKernel implements DurableKernel {
     return this.transaction(context, async tx => {
       const j = await this.one(tx, 'SELECT * FROM cleanup WHERE consumer=$1 AND ref=$2', [tx.consumer, ref]);
       if (j.worker !== worker || j.token !== token) throw new KernelError('denied');
+      if (succeeded && j.execution_ref) {
+        const occupied = await tx.db.query(`SELECT 1 FROM requests WHERE consumer=$1
+          AND execution_ref=$2 AND transport_occupied LIMIT 1`, [tx.consumer, j.execution_ref]);
+        if (occupied.rowCount) throw new KernelError('conflict');
+      }
       if (j.state === 'done' && succeeded) return;
       const updated = await tx.db.query(`UPDATE cleanup SET state=$5 WHERE consumer=$1 AND ref=$2
         AND worker=$3 AND token=$4 AND state='claimed' AND lease_until>clock_timestamp() RETURNING generation`,

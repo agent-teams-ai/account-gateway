@@ -1,300 +1,165 @@
-# Private kernel wire-policy bridge
+# B2 account occupancy and exact local closure handoff
 
-## Primary F3 qualification - 2026-10-03
+## Unqualified mechanical continuation — 2026-10-03
 
-Main verified guarded patch325a0807 against exact aea6ed03 in a NEW sandbox.
-Frozen pnpm11.28.2 install, typecheck, domain2, build, root26, Foundation and
-static topology passed. Actual PostgreSQL17.10 passed all19 cases, zero skips.
-In a separate NEW database the one F3 behavior test failed on unchanged aea
-production: the durable identity became B instead of originally supplied A.
-Tests are actual consumer-row-lock waits and durable claim descriptors.
-No native/provider effects or product/facade acceptance claimed. Historical
-worker NOT_RUN below records what the worker itself did, not this primary run.
-Final exact-head CI and independent xhigh/default review remain required.
+Continue only from supplied checkpoint
+`be978224d36636540f86d86c06ac1b0b76178e0b`. The prior worker ended in terminal
+`task_timeout`; the owner mechanically preserved patch `f83208b6`. Neither that
+checkpoint nor this continuation has accepted product, PostgreSQL, type or
+independent source-review qualification. Historical main/PG PASS receipts have
+been removed from this handoff: they do not qualify these bytes.
 
-## Current F3 native proof capture repair - 2026-10-03
+This worker owns only `services/account-gateway/`. The checkpoint already contains
+the B2 domain, PostgreSQL adapter, numbered migration and 27 actual-PG cases;
+this continuation preserves that implementation and strengthens the legacy fixture.
+SDK/kernel settlement, HTTP, native/C1, UI, RR, root workflows, dependencies and
+locks remain separate scopes. No commit, push, deploy, provisioning or inference
+is authorized here. Main owns integration and verifies author and committer
+`iliya <iliyazelenkog@gmail.com>`.
 
-This bounded repair changes only `src/postgres.ts`, `test/postgres.test.ts`
-and this handoff under `services/account-gateway/`. F1/F2, the consumer-context
-capture and all existing tests remain intact. Earlier qualification and scope
-statements below describe previous patches, not qualification of this F3 repair.
+The single Git preflight failed because the linked metadata path
+`source-b2-partial-f83208b6/.git/worktrees/kernel-account-occupancy-b2-finish` is
+unavailable. No Git retry, index write, commit or push was attempted. HEAD, lock
+writability, exact checkpoint identity and the comparison to merged
+`1ea091f8` are **UNVERIFIED** here. No accessible merged-1ea source export was
+found in the bounded input inspection. Source inspection of the preserved service
+files is worker implementation work, not an accepted independent review.
+Integration must verify checkpoint HEAD and every exact preimage before applying
+the continuation patch; stop on any mismatch. Do not apply this delta to 1ea or
+recreate B2 from 1ea. Main separately compares the cumulative B2 diff to merged1ea.
 
-Requested base: exact `aea6ed03` kernel. The linked `.git` points to missing
-external worktree metadata; HEAD, index-lock writability and Git identity cannot
-be verified here. No commit/push was attempted. The external guarded patch
-requires the owner to verify HEAD resolves to `aea6ed03` and all three observed
-preimage SHA-256 values before applying. A mismatch must stop integration;
-this worker cannot independently attest that the observed files equal that Git tree.
-Main owns integration with author and committer iliya <iliyazelenkog@gmail.com>.
-Requested execution profile: `gpt-6.1-sol/high/default`, NO FAST.
+## Durable private contract
 
-`acknowledgeCandidate` copies only generation, nativePhysicalIdentity and profile
-before validation or any await. All existing validation, conflict checks and
-persistence use that same captured primitive object.
+`Bounds.maxConcurrent` limits occupied local transports across every execution
+in the same consumer/account, including older generations and closed/fenced
+executions. Persisted execution concurrency remains a narrower bound. Claim
+matches the persisted private admission envelope and counts account/execution
+occupancy under the existing consumer-row transaction lock, after reconciling
+expired ownership across that account. Other accounts and consumers are isolated.
+All writers must use the same configured bound. Reconciliation is bounded at 128
+rows for admission; overfull legacy accounts remain denied while classification
+progresses. Request count and stored token allowance are permanent; closure never
+refunds, widens, unfences or grants replay.
 
-Exactly one new actual-PG regression uses existing `mutateAtConsumerLock` on a
-fresh creating candidate whose native identity is NULL. It submits valid proof A,
-mutates the caller to valid unused identity B while the real consumer row is
-locked, then requires durable identity and a later claim descriptor to remain A,
-exact A replay to succeed, and B to conflict. Old production rereads B after the
-lock and should fail the persisted-A assertion; that negative run is NOT_RUN here.
+`requests.transport_occupied` is independent of effect. A dispatched request
+permanently binds execution, request, original worker and a UUID `closure_token`.
+002 prevents updates rebinding those fields or reopening acknowledged occupancy.
+Only the initial dispatch claim returns the private one-request closure descriptor;
+duplicate claims return safe status without a permit. Safe RequestStatus,
+OperationStatus and account DTOs remain allowlists without closure/native material.
 
-Local Node syntax verification is recorded in external evidence. TypeScript,
-Docs Protocol and PostgreSQL qualification are NOT_RUN here: dependencies are
-absent and main owns pinned fixture qualification outside the provider sandbox.
-Main must run all 19 PG cases on NEW disposable PostgreSQL 17.10 and demonstrate
-this single F3 test fails against actual `aea6ed03` production in a separate NEW
-fixture before qualifying the exact repaired bytes. Existing toolchain and DB
-guards below apply. No install, test DB launch, provisioning, provider call,
-credential access, schema/framework or public API change occurred.
+`acknowledgeTransportClosed(context, worker, proof, cleanup?)` releases only the
+exact persisted consumer/execution/request/original-worker/token. Original-owner
+acknowledgement works after its worker lease expires and is idempotent. A late ack
+classifies still-active expired ownership as unknown/fenced in the same transaction;
+already completed/unknown effects remain unchanged. Wrong, stale or different
+request proofs cannot release a slot. Completion, failed callbacks, owner loss,
+revoke/close/restore, credential erasure and assumed upstream cancellation never
+independently clear occupancy. A trusted caller must first independently confirm
+local body/context/transport closure, including for completed delivery.
 
-The original kernel producer owned only `services/account-gateway/`. The
-assembled PR3 also includes root workspace/lockfile, Foundation policy and CI
-integration supplied by other writers. This F1/F2 remediation owns only
-`services/account-gateway/src/postgres.ts`, `services/account-gateway/test/postgres.test.ts`
-and this `HANDOFF.md`; native and RR C1 writers own their other workspaces.
-No commit, push, provisioning, provider inference or credential access occurred.
+Execution cleanup claims expose bounded durable `transports` descriptors;
+`cleanupTransports` pages remaining occupancy for the exact leased execution
+cleanup owner. Pages cap at min(maintenanceBatch, 128); proven requests precede
+legacy unproven requests. Delegated closure acknowledgement requires the exact
+execution scope, cleanup worker, CAS token and unexpired DB-clock cleanup lease.
+Reclaim rotates cleanup CAS, never the request proof. Done-job duplicate acks are
+accepted only for already closed matching requests and the final exact owner/token.
+Execution cleanup success is refused while any matching transport remains occupied.
+Generation cleanup does not release execution transports. New closure/cleanup
+command objects capture whitelisted primitives before validation or any await.
 
-## Source and qualification identity
+## Numbered migration and fixture
 
-The requested reviewed head is `5f07a18be3e5650495bd0b942b09f9438df50309`.
-Main reports that all 69 independent-review public-source fingerprints matched
-its authoritative 5f Git tree. The local `.spike-inputs/REVIEW.md` is integrity-bound
-review data; its F1/P1 and F2/P2 REQUEST_CHANGES define this bounded patch.
-Linked Git metadata is unavailable, so that supplied identity is not represented
-as an observed HEAD. The guarded external patch records exact observed preimage
-and result SHA-256 values. Candidate-only `EVIDENCE.json` was removed because its
-old e9 fingerprints and superseding claims contradicted later main evidence.
+`001_kernel.sql` is unchanged, SHA-256
+`160df664385b2a4ad8bfca2e98a5619f04322b1e2453c3f5e10a3f7d941ead15`.
+Apply 001 then real `002_transport_occupancy.sql` on a NEW empty disposable fixture.
+The actual-PG fixture seeds genuine 001-shaped rows between those migrations:
+active dispatch/response, completed, unknown and denied requests. The four accepted
+rows remain occupied with no manufactured closure token; only never-dispatched
+rows start unoccupied. The legacy test checks active effects survive migration,
+expired active effects subsequently become unknown without releasing capacity,
+terminal effects remain monotonic, request_count remains four, and cleanup refuses
+unproven closure. Admission cannot silently free an upgrading account's slots.
 
-Historical main qualification applies to guarded patch
-`10354c7d1847ed300b6dcf20c0665b620b6195e3cfcd150149abc1cc149f8d9f`:
-`.spike-inputs/qualification/results.json` reports frozen installation,
-TypeScript and domain PASS; `postgres.log` records 13/13 actual PG PASS.
-These supplied receipts match `.spike-inputs/INPUT-HASHES.json`.
-They do **not** qualify the new remediation.
+For an existing private 001 schema, stop old writers before applying 002 once.
+Mixed writers cannot implement this contract. Do not reset 001 or infer closure
+from deployment quiescence, a timeout or credential deletion. Legacy accepted
+requests deliberately lack closure authority and keep cleanup pending. A separately
+approved exact offline reset after independently proved transport closure would
+be needed; this patch adds no reset tool or migration platform. This first slice
+has never run production.
 
-Current worker checks: Node 24.21.0 domain 2/2 PASS and syntax checks for the
-changed PostgreSQL adapter and test file PASS (see external exact-byte evidence).
-Typecheck, actual Foundation/source-policy behavior, Docs Protocol validation,
-frozen installation and all 18 PostgreSQL cases are NOT_RUN here: dependencies
-are absent, and main owns fresh database and CI qualification. No install or
-DB gate wait was performed. Main must run the new exact patch through these
-gates and independent `gpt-6.1-sol/xhigh/default` review.
+## Main qualification and remaining gates
 
-## Current F1/F2 and trusted-context patch
+Main subsequently qualified owner checkpoint `8b62ea62b1e829e21d651e412ed77f9af5aea205`:
+pinned frozen install, TypeScript, domain 2/2, fresh PostgreSQL 17.10 27/27 with zero
+skips, build, root 26/26, Foundation, topology and Docs Protocol passed. Evidence:
+`qualification-kernel-b2-final-873be837-v1/result.json` in the durable workstream.
+Exact-head kernel and package CI also passed. Independent xhigh review is pending.
 
-F1: fresh claim reuses bounded request-loss reconciliation scoped to its execution
-inside the existing serialized consumer transaction. It classifies expired
-`dispatch_started`/`response_started` ownership as `effect_unknown`/`owner_lost`,
-fences and idempotently queues execution cleanup before admission evaluation.
-The new request commits `not_dispatched`/`fenced`; no classification exception
-rolls it back. The scoped bound uses persisted execution concurrency rather than the
-maintenance batch. Completed effects and unrelated live executions survive.
+The later review fix keeps the SQL002 occupancy default conservative for accepted
+inserts that omit new fields, with an actual SQL/account-capacity regression. Its
+before control failed behaviorally on old8b62 (0 occupied slots instead of 1);
+the corrected fresh PostgreSQL 17.10 suite passed all 28 cases with zero skips,
+and typecheck passed. Evidence: `qualification-b2-conservative-default-v1/result.json`.
+The original account-wide race also failed on actual merged1ea production
+(2 dispatches instead of 1), with successful setup and no missing API or compiler
+failure: `qualification-b2-original-capacity-negative-v1/result.json`. SQL001
+is unchanged. No native transport, supervisor or product gate is accepted here.
 
-F2: `beginAccount` snapshots every known primitive at entry, before validation
-and the first await. Validation, intent, operation identity, lookup, CAS and
-mutation use that same snapshot. Transaction bookkeeping also captures the
-trusted consumer once before its first await. Structural caller mutation cannot
-switch issuer bookkeeping or business effects to another existing consumer;
-authentication remains the outer trusted boundary.
+### Historical continuation worker checks
 
-Three additional actual-PG regressions are named `F1 claim fences expired
-in-flight ownership before spare-concurrency admission`, `F2 beginAccount
-snapshots caller primitives before the consumer-row await`, and `transaction
-snapshots trusted consumer before awaits despite structurally mutable context`.
-F1 uses concurrency 2, exact W1 expiry and fresh W2 claim without callback or
-maintenance, then checks durable denial/ambiguity/fence, one cleanup, replay
-and new-ID denial, completed monotonicity and unrelated live execution safety.
-The mutation regressions observe the real DB session blocked on the consumer
-row using existing snapshot-refresh and pool-idle fixes, then inspect persisted
-account/intent/replay and foreign-consumer isolation. The response-started loss
-uses the shared SQL predicate; no duplicate response-only test was added.
+Current execution receipts are external to the source tree. All qualification
+claims must bind their result hashes. Node 24.21.0 syntax checks and both domain tests passed locally; exact final
+file hashes and per-command exit codes are recorded in external evidence. These
+checks do not establish PostgreSQL correctness. The pnpm launcher is present but
+its referenced corepack binary is missing, so pnpm qualification cannot run.
 
-Implementation request: `gpt-6.1-sol/high/default`, NO FAST. This patch remains
-pending main's NEW synthetic PG qualification, before-regression run against
-actual old 5f production plus the new tests, typecheck, existing policy/CI gates,
-and independent exact-fingerprint `gpt-6.1-sol/xhigh/default` review. Historical
-15-PG/code/CI receipts below do not qualify this patch. No empirical gates were
-added to self-approval; no DB gate was invoked or awaited here.
+**NOT_RUN by the continuation worker:** TypeScript, frozen dependency install, formatter,
+all 27 actual PostgreSQL cases, before-source negative controls, build/root tests,
+Foundation/topology, Docs Protocol, exact CI, independent xhigh source review and
+product/actual transport/supervisor acceptance. No node_modules, tsc or psql were
+present at preflight. No dependencies or DB were installed or provisioned here.
+Main supplies pinned pnpm 11.28.2, Node 24.21.x and a NEW PostgreSQL 17.10 fixture.
 
-## Bounded PR3 remediation
+The main qualification recipe runs typecheck, domain tests and all PG cases with zero skips.
+The test guard requires `AG_KERNEL_TEST_ALLOW=disposable_pg17_10`, a newly created
+localhost DB named `ag_kernel_test_[a-z0-9_]+`, `AG_KERNEL_DISPOSABLE_DB` equal to
+that name and a matching locally supplied `AG_KERNEL_TEST_DSN`. Never export the
+DSN or vendor bodies. The fixture refuses an existing ag_kernel schema and leaves
+its new schema for inspection; it never drops/reset an old DB.
 
-1. Effect progression now checks the exact worker's DB-clock lease and qualifies
-   the UPDATE with that lease. Expired in-flight callbacks commit `effect_unknown`
-   with `owner_lost`, execution fencing and durable cleanup. Returning the status
-   commits classification; throwing inside the transaction would roll it back.
-   Same-state callbacks also check the lease. Terminal accepted completion remains
-   monotonic, and readback never yields a dispatch permit. A new real PG case
-   expires exact leases before maintenance, observes durable unknown/fencing and
-   tests duplicate/fresh-id replay denial plus completed-effect preservation.
-2. Restore enqueues generation cleanup for every quarantined candidate in the
-   same transaction: ready, creating, staged and previously quarantined, including
-   absent native identity. Existing generation uniqueness keeps repeated restore idempotent.
-   A new PG case claims and settles active and pending-generation cleanup,
-   preserves absent physical identity, checks exact scopes and foreign isolation,
-   and verifies repeated restore before and after settlement.
-3. Stale candidate-only evidence is removed; historical main 13/13 proof above
-   remains explicitly tied to prior 103 rather than the new changes.
-4. Source-policy tests clone actual governed sources, manifests and policy into
-   disposable fixtures and invoke the installed Foundation CLI. Type-only `pg`
-   imports mutate only the fixture. Valid-policy checks precede negative checks;
-   actual domain bytes are verified pristine. SIGKILL can leave only temp files.
-   Actual CLI behavior still requires main's installed dependencies.
-5. SQL adds `(consumer, account_ref)` indexes for candidates and open executions
-   used by account disable. No ORM, framework or scheduler was added.
-6. Original producer ownership and assembled PR ownership are distinguished above.
-7. TS configuration sets `lib: [ES2024]` and `erasableSyntaxOnly: true` for Node
-   stripping. Full TypeScript qualification remains with main.
-8. Kernel workflow concurrency is keyed by workflow/ref and cancels superseded runs.
-9. Domain tests independently reject concurrency 129 with requests 300, accept
-   the 128 ceiling and retain requests 32/concurrency 33 cross-field rejection.
-10. Actual DB lock observation has a bounded 15-second monotonic timeout without
-    replay/retry. The deadline case records a claim transaction starting before
-    expiry, waits to its persisted deadline using DB time, and releases the lock
-    after observed expiry. Its fixture allows 10 seconds for setup; production
-    deadlines and admission behavior are unchanged.
+Retain the eight named B2 actual-PG cases. In a separate NEW disposable DB, main
+runs them against actual merged1ea production while retaining these tests and
+numbered migrations. The regressions first assert observed old-boundary behavior
+(account admission or premature cleanup), before using the new closure APIs;
+failure must identify that behavioral assertion, not missing columns/methods or
+compiler failure. Legacy upgrade additionally reads only preexisting effect
+fields before its admission oracle. No mock-only or source-string tests qualify.
 
-## Policy and private persistence
+Separate **future integration gates**: SDK/kernel settlement and concrete transport
+adapters must carry private closure evidence and acknowledge completed delivery;
+cleanup/supervisor must independently confirm closure in B3/D. Existing outer
+settlement alone cannot satisfy the new contract. `rejected_before_dispatch` is a
+later additive boundary checkpoint; no public SDK change is included here. Main
+also runs the cumulative <=2000-LOC check, exact-head CI and independent xhigh
+review. B2 is a private durable contract, not live-provider acceptance.
 
-Preparation uses `invocationRef` plus opaque string `attemptRef`, without numeric
-conversion. PostgreSQL uniquely binds consumer/invocation/attempt. Same intent
-under another operation ID reads back the same sticky execution; conflicting
-intent cannot replace it. Unknown outcomes keep that identity fenced.
-
-Preparation persists independent policy and binding revisions, profile, deadline
-and all approved limits: requests, concurrency, request bytes, output bytes and
-tokens. Policy/binding revisions support zero through `Number.MAX_SAFE_INTEGER`
-using PostgreSQL bigint and explicit numeric decoding. Metadata CAS accepts zero
-as a revision and can conflict with the stored positive account revision.
-
-`PrivateAdmission` represents the actual SDK admission fields plus private
-execution/issuer identity. Before a new permit, claim matches invocation,
-attempt, account, authorization epoch, subject, policy revision, binding
-revision, profile, every limit and expiry against the persisted preparation.
-Expiry compares instants, so equivalent offsets and trailing fractional zeros
-work. Nonzero fractions finer than the persisted millisecond deny the permit;
-JavaScript Date truncation cannot make an extended expiry match. Live authority,
-issuer, generation, acknowledged fence and DB-clock deadline checks still apply.
-Approval and nested limits are copied before the first await.
-
-The first committed claim alone returns a protected-private descriptor and
-persisted limits/deadline for the future transport adapter. Request totals and
-concurrency are enforced here. Body/output/token transport enforcement, provider
-token enforcement and capacity qualification are pending; storing a numeric
-limit does not prove them. No native request body, output, credential or plain
-credential hash is stored. `intentDigest` remains an opaque token supplied by a
-future trusted HMAC ingress; this kernel does not implement that ingress.
-
-Pure policy imports no SDK, Zod, framework or vendor DTO. Domain bounds select
-server policy, rather than validating public wire syntax. Defaults are bounded
-engineering values, not measured capacity: 32 requests, concurrency 1, 1 MiB
-request, 4 MiB output, 100,000 tokens and a one-hour run. The outer facade must
-use the existing SDK versioned schema authority and map internal account/profile,
-epoch/state and preparation names at that boundary. No additional wire schema,
-HTTP server, authentication service or renewal mechanism was added.
-
-The `accounts` private port returns only safe summaries. Its PostgreSQL adapter
-filters by authenticated consumer and optional owner, uses UUID keyset order,
-and caps pages at 100. A cursor is an ordering bound, not an existence lookup.
-Product owner/role authorization and HTTP authentication belong outside this
-private port. No native identity or descriptor appears in account/readback DTOs.
-
-## Tests and lifecycle preservation
-
-All original nine PostgreSQL cases remain: durable operation/candidate uniqueness;
-conflicting operation race; staging/rename/reconnect CAS; acknowledged fence vs
-claim with accepted effects; sticky preparation/duplicate/unknown fencing; atomic
-limits and blocked deadline; restart vs restore; cleanup lease reclamation; and
-consumer isolation/immutable owner/safe readback. The sticky race now also
-contends with distinct operation IDs on the same opaque attempt.
-
-Four additional real-DB cases cover the complete stale envelope and equivalent
-expiry instants; every limit/binding in operation and sticky intent plus bigint
-revisions; conflicting approval contention and distinct opaque attempts with
-consumer-bound readback; and >100-row account listing/filter/keyset isolation.
-Races use distinct backend PIDs and observe actual PostgreSQL lock contention.
-There are no mock-only or source-string assertions and no duplicated HTTP tests.
-The two pure domain cases retain independent bounds and immutable configuration
-checks, extended for the new numeric configuration.
-
-Main qualification on 2026-10-03 of guarded patch `10354c7d` passed frozen
-installation, TypeScript, both domain cases and all 13 actual PostgreSQL 17.10
-cases on a new empty disposable database. The two stale-envelope fixtures now
-use explicitly bounded test instances to compare valid but different concurrency
-values; production defaults and validation were preserved. Root integration also
-passed build, 24 tests and actual Foundation/dev-only checks; the new Foundation
-boundaries govern private source and tests and reject database types in policy.
-Supplied receipts are under `.spike-inputs/qualification/` and match the input
-hash manifest. This is historical main evidence for prior 103; current worker
-NOT_RUN gates above describe this new remediation.
-
-Promise-returning port validation remains async. Cleanup tokens/ownership,
-issuer restore, physical-generation proof checks and monotonic accepted effects
-are preserved. Synthetic descriptor UUIDs establish only kernel DB contracts;
-actual native physical identity and provider pinning require the separate engine
-writer's qualification. Readback/restore/reconcile never replay inference.
-Current concurrency/request accounting is per execution. Account-global provider
-admission, native transport byte/token enforcement and the HTTP service remain
-dependent B work; this unused private kernel does not establish those gates.
-
-## Historical main qualification - 2026-10-03
-
-Main assembled the reviewed-source-base remediation with merged SDK PR2
-`83f0c7ca` and corrected two observed test-harness failures: PostgreSQL activity
-snapshots retained an earlier idle transaction; the ten-second deadline barrier
-also let the pool close an observed backend. The harness now explicitly refreshes
-PG activity snapshots and keeps its two test-only backend identities alive.
-No production lease, deadline or admission policy was relaxed.
-
-Assembled source patch `b24715c89865aa3a1b1b43a9954cd24ce5fad521d128864fc76867e0aafedfef`
-passed frozen install, TypeScript, domain 2/2, build, all 26 root tests, actual
-Foundation/source-policy and dev-only checks, and PostgreSQL 15/15 in a NEW
-empty PG17.10 fixture. Receipts are retained under
-`qualification-kernel-integrated-b24715c8-v1` in main-owned durable evidence.
-Earlier 4706 and 7193 fixtures retain the real harness failures; they are not
-claimed PASS. These receipts qualify the prior assembled code only; they do not qualify this
-F1/F2/context patch or its three new PG regressions. Independent exact-commit
-xhigh review and final CI remain pending.
-The additional text in this handoff records completed main evidence; it is not
-an observed Git identity or a claim that the worker ran those gates.
-
-## Main qualification and integration
-
-Main qualified guarded F1/F2/context patch
-`eb8cda287cfb560c7c6681fe1299a078a1a4920cbd6dcd027bb82272b9f746cb`
-on the exact `5f07a18` base in a NEW isolated fixture. Frozen installation,
-TypeScript, domain 2/2, build, root 26/26, Foundation/source policy and topology
-passed. Actual PostgreSQL 17.10 passed all 18 cases with zero skips. A separate
-NEW database using actual old `5f07a18` production and the three new behavioral
-tests failed all three: a forbidden R2 dispatch permit, changed A-to-B intent,
-and broken consumer bookkeeping. Evidence is retained externally under
-`qualification-kernel-eb8cda28-v1` and `qualification-kernel-eb8-before-v1`.
-An initial fixture command used the wrong internal PostgreSQL port and did not
-create a database; the corrected command ran only the unproved DB phase.
-These results establish the bounded kernel repairs, not account-wide capacity,
-transport, UI or real-provider E2E. Independent review and final exact-head CI
-remain required before merge.
-
-Main owns workspace inclusion and its single native lockfile. Use the qualified
-Node 24.21.x / TypeScript 7.0.2 toolchain, retain installed version receipts and
-run these against this fingerprinted candidate in a NEW dedicated sandbox:
+Main commands after providing the guarded NEW disposable fixture locally:
 
 ```sh
-pnpm install --frozen-lockfile
-pnpm --dir services/account-gateway run typecheck
-pnpm --dir services/account-gateway run test:domain
-AG_KERNEL_TEST_ALLOW=disposable_pg17_10 pnpm --dir services/account-gateway run test:pg
+pnpm --filter @agent-teams/account-gateway-kernel typecheck
+pnpm --filter @agent-teams/account-gateway-kernel test:domain
+pnpm --filter @agent-teams/account-gateway-kernel test:pg
+# Separate NEW negative-control fixture with old merged1ea production only:
+node --test --test-concurrency=1 --test-name-pattern='^B2 ' services/account-gateway/test/postgres.test.ts
 ```
 
-Main privately supplies `AG_KERNEL_TEST_DSN` and `AG_KERNEL_DISPOSABLE_DB` for a
-NEW localhost PostgreSQL 17.10 DB named `ag_kernel_test_[a-z0-9_]+`; never print
-the DSN. The harness refuses an existing kernel schema, remote/unmatched DSNs,
-URL options and other server versions. It retains the disposable schema rather
-than dropping it. Use a new DB for every complete rerun.
-
-This is a fresh private schema, not an upgrade/migration of a deployed service.
-Main must review the exact candidate with `gpt-6.1-sol/xhigh`, serviceTier default,
-and integrate/commit with author and committer iliya <iliyazelenkog@gmail.com>.
-Guarded patch and evidence live outside the source tree in the worker artifact
-directory. This handoff does not assert new PG/typecheck/source-policy PASS, public HTTP acceptance, native identity
-qualification, production capacity, production cutover or public release.
+Continuation artifacts (outside the source worktree) are in
+`/srv/worker-state/jobs/account-gateway/first-slice-v1/jobs/account-gateway-20261003-kernel-account-occupancy-b2-finish/tmp/agent/b2-finish-artifacts/`:
+`preimages.json`, `continuation.patch`, `guard.json`, `apply-guarded.py` and
+`verification.json`. The patch is a delta from the observed mechanical checkpoint,
+not a replacement/cumulative patch from merged1ea. The guard verifies exact HEAD,
+all five preimages, patch hash and unchanged 001 before applying; it performs no
+commit/push. `verification.json` carries truthful NOT_RUN gates.
