@@ -26,7 +26,7 @@ let a: PostgresKernel, b: PostgresKernel, pids: number[];
 let migrated = false;
 const legacy = { ctx: { consumerId: 'legacy-' + randomUUID() }, account: randomUUID(),
   execution: randomUUID(), generation: randomUUID(), worker: randomUUID() };
-// Actual 001-shaped fixture: terminal effects never proved local body closure.
+// Actual pre-002 rows: active, unknown and terminal effects never proved closure.
 async function seedLegacyRequests(): Promise<void> {
   const consumer = legacy.ctx.consumerId;
   await admin.query('INSERT INTO ag_kernel.consumers(consumer) VALUES ($1)', [consumer]);
@@ -46,12 +46,13 @@ async function seedLegacyRequests(): Promise<void> {
     profile,generation,policy_subject,policy_revision,binding_revision,issuer,policy_fence,deadline,
     max_requests,max_concurrent,max_request_bytes,max_output_bytes,max_tokens,request_count,state)
     SELECT $1,$2,'legacy-invocation','attempt-a','{}',$3,1,'mimo-test',$4,'binding-fixture',1,0,c.issuer,f.fence,
-      clock_timestamp()+interval '1 day',4,1,4096,8192,5000,2,'closed'
+      clock_timestamp()+interval '1 day',6,1,4096,8192,5000,4,'closed'
     FROM ag_kernel.consumers c JOIN ag_kernel.policy_fences f ON f.consumer=c.consumer WHERE c.consumer=$1`,
   [consumer, legacy.execution, legacy.account, legacy.generation]);
   await admin.query(`INSERT INTO ag_kernel.requests(consumer,execution_ref,id,effect,worker)
     VALUES ($1,$2,'legacy-completed','completed',$3),($1,$2,'legacy-unknown','effect_unknown',$3),
-      ($1,$2,'legacy-denied','not_dispatched',NULL)`, [consumer, legacy.execution, legacy.worker]);
+      ($1,$2,'legacy-denied','not_dispatched',NULL),($1,$2,'legacy-dispatch','dispatch_started',$3),
+      ($1,$2,'legacy-response','response_started',$3)`, [consumer, legacy.execution, legacy.worker]);
 }
 before(async () => {
   const connectionString = safeTestDsn();
@@ -1130,25 +1131,34 @@ test('B2 closure and cleanup authority capture whitelisted primitives before con
   await x.settleCleanup(ctx, original.cleanupRef, delegate, original.token, true);
 });
 
-test('B2 numbered upgrade retains legacy completed and unknown occupancy without fabricating closure authority', async () => {
+test('B2 numbered upgrade retains legacy active, completed and unknown occupancy without fabricating closure authority', async () => {
+  const active = (await admin.query(`SELECT id,effect FROM ag_kernel.requests
+    WHERE consumer=$1 AND execution_ref=$2 AND id IN ('legacy-dispatch','legacy-response') ORDER BY id`,
+  [legacy.ctx.consumerId, legacy.execution])).rows;
+  assert.deepEqual(active, [
+    { id: 'legacy-dispatch', effect: 'dispatch_started' },
+    { id: 'legacy-response', effect: 'response_started' },
+  ], 'numbered upgrade preserves preexisting active effects before loss classification');
   const w = await worker(legacy.ctx), fresh = await prepared(legacy.ctx, legacy.account);
   assert.equal((await b.claim(legacy.ctx, fresh.result.executionRef!, 'legacy-held', w, fresh.admission)).dispatch, undefined);
-  assert.equal(await occupancy(legacy.ctx, legacy.account), 2);
+  assert.equal(await occupancy(legacy.ctx, legacy.account), 4);
   const rows = (await admin.query(`SELECT id,effect,transport_occupied,closure_token FROM ag_kernel.requests
     WHERE consumer=$1 AND execution_ref=$2 ORDER BY id`, [legacy.ctx.consumerId, legacy.execution])).rows;
   assert.deepEqual(rows, [
     { id: 'legacy-completed', effect: 'completed', transport_occupied: true, closure_token: null },
     { id: 'legacy-denied', effect: 'not_dispatched', transport_occupied: false, closure_token: null },
+    { id: 'legacy-dispatch', effect: 'effect_unknown', transport_occupied: true, closure_token: null },
+    { id: 'legacy-response', effect: 'effect_unknown', transport_occupied: true, closure_token: null },
     { id: 'legacy-unknown', effect: 'effect_unknown', transport_occupied: true, closure_token: null },
   ]);
   await a.close(legacy.ctx, op(), legacy.execution);
   const job = await b.claimCleanup(legacy.ctx, w); assert.ok(job && job.scope.kind === 'execution');
-  assert.equal(job.scope.transports.length, 2);
+  assert.equal(job.scope.transports.length, 4);
   for (const proof of job.scope.transports) {
     assert.equal(proof.token, undefined);
     await assert.rejects(a.acknowledgeTransportClosed(legacy.ctx, w, proof, { cleanupRef: job.cleanupRef, token: job.token }), isCode('invalid'));
   }
   await assert.rejects(a.settleCleanup(legacy.ctx, job.cleanupRef, w, job.token, true), isCode('conflict'));
   assert.equal(await count('SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
-    [legacy.ctx.consumerId, legacy.execution]), 2);
+    [legacy.ctx.consumerId, legacy.execution]), 4);
 });
