@@ -18,3 +18,5 @@
   installing; pin qualified versions and retain one native lockfile.
 - Stage release changes as bounded dependency-safe PRs. Product production
   cutover and public package release require their applicable owner approval.
+
+Use [docs/.agents/skills/docs-authoring/SKILL.md](docs/.agents/skills/docs-authoring/SKILL.md) for documentation.

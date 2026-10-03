@@ -1,0 +1,33 @@
+schemaVersion: 2
+workspace: {kind: pnpm, manifest: pnpm-workspace.yaml}
+packageRoots: [packages]
+governedRoots: [packages/account-gateway/src]
+boundaries:
+  - id: facade-contracts
+    dependencyMode: runtime
+    roots: [packages/account-gateway/src/features/facade-client/contracts]
+    entrypoints: [packages/account-gateway/src/features/facade-client/contracts/index.ts]
+    allow: {boundaries: [], packages: [zod], builtins: [], runtimeReferences: []}
+  - id: facade-http
+    dependencyMode: runtime
+    roots: [packages/account-gateway/src/features/facade-client/http]
+    entrypoints: [packages/account-gateway/src/features/facade-client/http/index.ts]
+    allow: {boundaries: [facade-contracts], packages: [zod], builtins: [], runtimeReferences: []}
+  - id: contracts
+    dependencyMode: runtime
+    roots: [packages/account-gateway/src/contracts]
+    entrypoints: [packages/account-gateway/src/contracts/index.ts]
+    packageExports: [./contracts]
+    allow: {boundaries: [facade-contracts], packages: [], builtins: [], runtimeReferences: []}
+  - id: http
+    dependencyMode: runtime
+    roots: [packages/account-gateway/src/http]
+    entrypoints: [packages/account-gateway/src/http/index.ts]
+    packageExports: [./http]
+    allow: {boundaries: [facade-http], packages: [], builtins: [], runtimeReferences: []}
+  - id: get-modular
+    dependencyMode: runtime
+    roots: [packages/account-gateway/src/get-modular]
+    entrypoints: [packages/account-gateway/src/get-modular/index.ts]
+    packageExports: [./get-modular]
+    allow: {boundaries: [http], packages: ['@get-modular/core', '@get-modular/assembly'], builtins: [], runtimeReferences: []}

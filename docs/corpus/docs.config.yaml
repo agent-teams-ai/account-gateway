@@ -1,0 +1,15 @@
+schemaVersion: 4
+protocol: {id: agent-teams.docs-protocol, version: 1}
+foundationProfile:
+  path: .docs-protocol/document-authoring.yaml
+  schemaVersion: 3
+  metadataSidecarPolicy: foundation-profile-v3-strict-merge
+agentWorkflow:
+  skillPath: .agents/skills/docs-authoring/SKILL.md
+  adoption: portable-v1
+relations:
+  blockers:
+    types: [adr, explanation, how-to, reference, tutorial]
+    statuses: [proposed]
+    subjectIncompatibleStatuses: [accepted, active, deprecated, superseded]
+semanticValidatorIds: []

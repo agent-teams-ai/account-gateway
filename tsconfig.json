@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "declaration": true,
+    "outDir": "packages/account-gateway/dist",
+    "rootDir": "packages/account-gateway/src",
+    "lib": [
+      "ES2023",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "skipLibCheck": false,
+    "verbatimModuleSyntax": true,
+    "types": [
+      "node"
+    ]
+  },
+  "include": [
+    "packages/account-gateway/src/**/*.ts"
+  ]
+}

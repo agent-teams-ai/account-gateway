@@ -1,0 +1,55 @@
+schemaVersion: 3
+projectId: "account-gateway-docs"
+catalog:
+  metadataSchemaPath: .docs-protocol/metadata.schema.json
+  ownerCatalog: {path: .docs-protocol/owners.yaml, contract: foundation.owner-map/v1}
+  collections:
+    - {kind: markdown-tree, root: docs}
+  excludedPrefixes: [.docs-protocol]
+authoring:
+  mode: create-only
+  ownerSets:
+    schemaVersion: 1
+    sets:
+      documentation: ["gateway-maintainers"]
+  artifactTypes:
+    - type: adr
+      initialStatus: proposed
+      identity: {kind: explicit, format: adr-four-digits}
+      placement: {kind: collection, directory: docs/decisions, filename: numeric-id-slug}
+      template: {kind: fenced-markdown-body, path: .docs-protocol/templates/adr.md}
+      heading: {kind: id-colon-title}
+      reachability: {kind: manual-fixed-index, indexPath: docs/decisions/README.md}
+      ownerSetId: documentation
+    - type: tutorial
+      initialStatus: proposed
+      identity: {kind: explicit, format: qualified, grammar: {prefixSegments: [docs, tutorial], minSuffixSegments: 1, maxSuffixSegments: 16}}
+      placement: {kind: collection, directory: docs/tutorials, filename: slug}
+      template: {kind: fenced-markdown-body, path: .docs-protocol/templates/tutorial.md}
+      heading: {kind: title}
+      reachability: {kind: not-required, reason: Deterministic catalog and context projection provide reachability without duplicating manual indexes.}
+      ownerSetId: documentation
+    - type: how-to
+      initialStatus: proposed
+      identity: {kind: explicit, format: qualified, grammar: {prefixSegments: [docs, how-to], minSuffixSegments: 1, maxSuffixSegments: 16}}
+      placement: {kind: collection, directory: docs/how-to, filename: slug}
+      template: {kind: fenced-markdown-body, path: .docs-protocol/templates/how-to.md}
+      heading: {kind: title}
+      reachability: {kind: not-required, reason: Deterministic catalog and context projection provide reachability without duplicating manual indexes.}
+      ownerSetId: documentation
+    - type: reference
+      initialStatus: proposed
+      identity: {kind: explicit, format: qualified, grammar: {prefixSegments: [docs, reference], minSuffixSegments: 1, maxSuffixSegments: 16}}
+      placement: {kind: collection, directory: docs/reference, filename: slug}
+      template: {kind: fenced-markdown-body, path: .docs-protocol/templates/reference.md}
+      heading: {kind: title}
+      reachability: {kind: not-required, reason: Deterministic catalog and context projection provide reachability without duplicating manual indexes.}
+      ownerSetId: documentation
+    - type: explanation
+      initialStatus: proposed
+      identity: {kind: explicit, format: qualified, grammar: {prefixSegments: [docs, explanation], minSuffixSegments: 1, maxSuffixSegments: 16}}
+      placement: {kind: collection, directory: docs/explanation, filename: slug}
+      template: {kind: fenced-markdown-body, path: .docs-protocol/templates/explanation.md}
+      heading: {kind: title}
+      reachability: {kind: not-required, reason: Deterministic catalog and context projection provide reachability without duplicating manual indexes.}
+      ownerSetId: documentation

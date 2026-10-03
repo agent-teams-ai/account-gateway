@@ -1,0 +1,26 @@
+{
+  "contract": "foundation.document-metadata-sidecar/v1",
+  "documents": {
+    "docs/first-slice.md": {
+      "id": "docs.reference.first-slice",
+      "type": "reference",
+      "status": "active",
+      "owner": "gateway-maintainers",
+      "summary": "Accepted first-slice scope and qualification boundaries."
+    },
+    "docs/COMPOSITION.md": {
+      "id": "docs.reference.composition",
+      "type": "reference",
+      "status": "active",
+      "owner": "gateway-maintainers",
+      "summary": "Scoped feature ownership and static composition."
+    },
+    "packages/account-gateway/README.md": {
+      "id": "docs.reference.sdk",
+      "type": "reference",
+      "status": "active",
+      "owner": "gateway-maintainers",
+      "summary": "Server SDK usage and safe wire boundary."
+    }
+  }
+}

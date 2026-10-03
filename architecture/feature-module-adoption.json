@@ -1,0 +1,56 @@
+{
+  "standard": {
+    "id": "agent-teams.feature-module-standard",
+    "version": "v1",
+    "path": "docs/architecture/feature-module-standard/v1.md",
+    "commit": "eef92e7fd40f538b4e9ba03e01bbd4e2d23f12f2",
+    "sha256": "851653f96643cf0466b67ab22963661976b00de44840fa3144a48a8c054f95fa",
+    "repository": "agent-teams-ai/.github"
+  },
+  "owner": "gateway-maintainers",
+  "modules": [
+    {
+      "root": "packages/account-gateway",
+      "role": "sdk",
+      "sourceRoot": "packages/account-gateway/src",
+      "features": [
+        "features/facade-client"
+      ],
+      "featureLayers": [
+        "contracts",
+        "http"
+      ],
+      "composition": "get-modular",
+      "publicIndexes": [
+        "contracts/index.ts",
+        "http/index.ts"
+      ],
+      "tests": [
+        "tests/client.test.mjs",
+        "tests/source-policy.test.mjs"
+      ]
+    }
+  ],
+  "excluded": [
+    "engine",
+    "apps/gateway",
+    ".spike-inputs",
+    "node_modules",
+    "docs/corpus"
+  ],
+  "deviations": [
+    {
+      "scope": "tests",
+      "reason": "Root black-box tests exercise packaged facade clients and module composition together; no detached white-box unit tree.",
+      "owner": "gateway-maintainers",
+      "reviewTrigger": "Add a second feature or service."
+    }
+  ],
+  "enforcement": [
+    "node scripts/check-topology.mjs",
+    "pnpm foundation",
+    "pnpm test",
+    "pnpm docs:check"
+  ],
+  "decision": "docs/COMPOSITION.md"
+}
