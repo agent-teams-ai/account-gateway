@@ -24,7 +24,7 @@ async function fixture(t, handler) {
 }
 const json = (res, body, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
 const read = async req => { const chunks = []; for await (const chunk of req) chunks.push(chunk); return Buffer.concat(chunks); };
-const rejects = (promise, code, effect) => assert.rejects(promise, error => error instanceof sdk.GatewayError && error.code === code && error.effect === effect && !JSON.stringify(error).includes('private-sentinel'));
+const rejects = (promise, code, effect) => assert.rejects(promise, error => error instanceof sdk.GatewayError && error.code === code && error.effect === effect && !JSON.stringify({ message: error.message, ...error }).includes('private-sentinel'));
 
 // Regression: an added route, changed CAS, or reserialized native payload breaks the actual HTTP boundary.
 test('all thirteen facade routes, exact native bytes and stable readback identities', async t => {
@@ -74,7 +74,7 @@ test('strict ingress and separate execution surface reject before network', asyn
   assert.equal('connect' in e, false); assert.equal('prepare' in e, false); assert.equal('fence' in e, false);
   assert.throws(() => sdk.createManagementClient({ origin, role: 'execution', token: 'private-sentinel' }), error => error.code === 'invalid_input');
   for (const extra of [{ consumerId: 'other' }, { nativeId: 9 }, { origin: 'https://other.invalid' }]) {
-    assert.throws(() => m.connect({ operationId: 'op-a', ownerRef: 'owner-a', profileId: 'mimo', displayName: 'Test', credential: { kind: 'api_key', value: 'private-sentinel' }, ...extra }), error => !JSON.stringify(error).includes('private-sentinel'));
+    assert.throws(() => m.connect({ operationId: 'op-a', ownerRef: 'owner-a', profileId: 'mimo', displayName: 'Test', credential: { kind: 'api_key', value: 'private-sentinel' }, ...extra }), error => !JSON.stringify({ message: error.message, ...error }).includes('private-sentinel'));
   }
   assert.throws(() => m.get('../admin'), error => error.effect === 'not_dispatched');
   const signal = AbortSignal.abort();
@@ -247,4 +247,60 @@ test('cancelling partial mutation readback preserves identity and unknown effect
  await new Promise(resolve=>setImmediate(resolve));
  controller.abort();await rejected;
  assert.equal(mutations,1);
+});
+
+// Regression: optional list fields become literal "undefined" on the wire.
+test('list omits explicit undefined values from its HTTP query', async t => {
+ const observed=[];
+ const {management:m}=await fixture(t,(req,res)=>{observed.push(req.url);json(res,{accounts:[]});});
+ await m.list();
+ await m.list({ownerRef:undefined,cursor:undefined,limit:undefined});
+ assert.deepEqual(observed,['/v1/accounts','/v1/accounts']);
+});
+
+// Regression: nested error identities/effects invite a replay after ambiguous dispatch.
+test('request and operation readback reject contradictory nested diagnostics without replay', async t => {
+ const observed=[];
+ let response;
+ const {management:m,execution:e}=await fixture(t,async(req,res)=>{
+  observed.push(`${req.method} ${req.url}`);await read(req);
+  json(res,response,req.method==='POST'?202:200);
+ });
+ const ambiguous={requestRef:'stable-request',effect:'effect_unknown',status:'unknown'};
+ const requestError={...safe('upstream_failure','effect_unknown'),requestRef:'stable-request'};
+ const rejectRequest=promise=>assert.rejects(promise,error=>error.code==='invalid_response' && error.effect==='effect_unknown' && error.requestRef==='stable-request');
+ // Isolate identity, effect and timed retry contradictions, rather than relying on one bad field.
+ for(const status of [
+  {...ambiguous,error:{...requestError,requestRef:'another-request'}},
+  {...ambiguous,error:{...requestError,effect:'not_dispatched'}},
+  {...ambiguous,error:{...requestError,effect:'not_dispatched',retry:{kind:'after',milliseconds:1}}},
+  // Matching effects alone cannot make a timed retry safe for unknown status.
+  {...ambiguous,effect:'not_dispatched',error:{...requestError,effect:'not_dispatched',retry:{kind:'after',milliseconds:1}}},
+ ]) {
+  response=status;
+  await rejectRequest(e.status('execution-a','stable-request'));
+  await rejectRequest(e.request('execution-a',{requestId:'stable-request',admission,body:Buffer.from('{}')}));
+ }
+ for(const error of [
+  {...safe('upstream_failure','effect_unknown'),operationRef:'another-op'},
+  {...safe('upstream_failure'),operationRef:'stable-op'},
+  {...safe('upstream_failure'),operationRef:'stable-op',retry:{kind:'after',milliseconds:1}},
+ ]) {
+  response={operationRef:'stable-op',state:'unknown',error};
+  await assert.rejects(m.operation('stable-op'),error=>error.code==='invalid_response' && error.effect==='effect_unknown' && error.operationRef==='stable-op');
+ }
+ response={...ambiguous,error:requestError};
+ assert.deepEqual(await e.status('execution-a','stable-request'),response);
+ response={operationRef:'stable-op',state:'unknown',error:{...safe('upstream_failure','effect_unknown'),operationRef:'stable-op'}};
+ assert.deepEqual(await m.operation('stable-op'),response);
+ // Revoke/expiry/cleanup classification must retain an already accepted effect.
+ response={requestRef:'stable-request',effect:'dispatch_started',status:'cancelled',error:{...safe('forbidden','dispatch_started'),requestRef:'stable-request'}};
+ assert.deepEqual(await e.status('execution-a','stable-request'),response);
+ assert.deepEqual(await e.request('execution-a',{requestId:'stable-request',admission,body:Buffer.from('{}')}),{kind:'status',status:response});
+ assert.deepEqual(observed,[
+  ...Array.from({length:4},()=>['GET /v1/executions/execution-a/requests/stable-request','POST /v1/executions/execution-a/requests']).flat(),
+  ...Array(3).fill('GET /v1/operations/stable-op'),
+  'GET /v1/executions/execution-a/requests/stable-request','GET /v1/operations/stable-op',
+  'GET /v1/executions/execution-a/requests/stable-request','POST /v1/executions/execution-a/requests',
+ ]);
 });

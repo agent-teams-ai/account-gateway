@@ -24,16 +24,26 @@ test('installed portable init refuses a changed preimage with zero file mutation
  await assert.rejects(docsInitApply({...input,expectedPlanDigest:plan.planDigest}));
  assert.deepEqual(await snapshot(root),before);
 });
-// Regression: portable v4 relation policy accepts an absent blocker or an incompatible terminal state.
-test('tiny portable v4/authoring v3 corpus validates and rejects broken relations', async () => {
+// Regression: missing relation targets and incompatible active subjects are independently rejected.
+test('portable v4 relations distinguish missing target from incompatible subject status', async () => {
  const root=await fresh(); await cp('docs/corpus',root,{recursive:true});
  const base={consumerRoot:root,profilePath:'docs.config.yaml'};
  assert.equal((await docsCheckV2(base)).exitCode,0);
  const file=root+'/docs/reference/sdk-boundary.md';
  const original=await readFile(file,'utf8');
- await writeFile(file,original.replace('status: proposed','status: active\nrelated: [docs.reference.absent]\nblocked_by: [docs.reference.absent]'));
- const invalid=await docsCheckV2(base); assert.notEqual(invalid.exitCode,0);
- assert.ok(invalid.envelope.diagnostics.some(d=>d.severity==='error'));
+ const withBlocker=(status,target)=>original.replace('status: proposed',`status: ${status}\nrelated: [${target}]\nblocked_by: [${target}]`);
+ await writeFile(file,withBlocker('proposed','docs.reference.absent'));
+ const missing=await docsCheckV2(base); assert.notEqual(missing.exitCode,0);
+ assert.ok(missing.envelope.diagnostics.some(d=>d.severity==='error' &&
+  JSON.stringify(d).includes('docs.reference.absent') && /relation|target|reference|resolve|missing|unknown/i.test(JSON.stringify(d))),JSON.stringify(missing.envelope));
+ // A distinct proposed reference is an eligible target: no self-cycle or unsupported type.
+ await writeFile(root+'/docs/reference/blocker.md',original.replace('docs.reference.sdk-boundary','docs.reference.blocker').replace('# SDK boundary','# Blocker'));
+ await writeFile(file,withBlocker('proposed','docs.reference.blocker'));
+ assert.equal((await docsCheckV2(base)).exitCode,0);
+ await writeFile(file,withBlocker('active','docs.reference.blocker'));
+ const incompatible=await docsCheckV2(base); assert.notEqual(incompatible.exitCode,0);
+ assert.ok(incompatible.envelope.diagnostics.some(d=>d.severity==='error' &&
+  /block/i.test(JSON.stringify(d)) && /active|incompat|status/i.test(JSON.stringify(d))),JSON.stringify(incompatible.envelope));
 });
 // Regression: applying a new document against changed authoring authority bypasses reviewed Plan bytes.
 test('new document preview rejects changed authoring authority without publication', async () => {

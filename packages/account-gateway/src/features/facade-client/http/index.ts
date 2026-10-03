@@ -148,8 +148,8 @@ export function createManagementClient(settings: ManagementConfig) {
   return Object.freeze({
     profiles: (options?: CallOptions) => json('/v1/profiles', c.profiles, 'GET', undefined, options),
     list: (input: c.ListQuery = {}, options?: CallOptions) => {
-      const query = new URLSearchParams(Object.entries(valid(c.listQuery, input)).map(([key, value]) => [key, String(value)]));
-      return json(`/v1/accounts?${query}`, c.accounts, 'GET', undefined, options);
+      const query = new URLSearchParams(Object.entries(valid(c.listQuery, input)).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
+      return json(query.size ? `/v1/accounts?${query}` : '/v1/accounts', c.accounts, 'GET', undefined, options);
     },
     get: (accountRef: string, options?: CallOptions) => json(`/v1/accounts/${id(accountRef)}`, c.account, 'GET', undefined, options),
     connect: (input: Connect, options?: CallOptions) => mutate('/v1/accounts', 'POST', valid(connect, input), options),

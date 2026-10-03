@@ -13,6 +13,11 @@ test('scoped topology rejects unowned behavior, modules and empty feature layers
   assert.equal(check().status,0);
   const file=root+'/packages/account-gateway/src/rogue.ts';
   await writeFile(file,'export const unowned = 1;\n');assert.equal(check().status,1);await rm(file);
+  const invalidFile=root+'/packages/account-gateway/src/features/facade-client/domain.ts';
+  await writeFile(invalidFile,'export const misplaced = 1;\n');
+  const invalid=check(); assert.equal(invalid.status,1);
+  assert.match(invalid.stderr,/Undeclared feature layer: features\/facade-client\/domain\.ts/);
+  await rm(invalidFile); assert.equal(check().status,0);
   const layer=root+'/packages/account-gateway/src/features/facade-client/domain';
   await mkdir(layer);assert.equal(check().status,1);await rm(layer,{recursive:true});
   await mkdir(root+'/packages/undeclared');assert.equal(check().status,1);

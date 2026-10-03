@@ -14,7 +14,7 @@ The SDK implements the private v1 facade contract; native service and product au
 
 ## Contract
 
-Management submission is write-only. Readback has strict safe result unions and stable caller identities. Transport ambiguity fences reconciliation; clients never replay automatically.
+Management submission is write-only. Readback has strict safe result unions and stable caller identities. Transport ambiguity requires readback reconciliation of the SAME known operation or request identity; clients never replay mutations or inference, including under a new identity.
 
 ## Examples
 

@@ -3,9 +3,13 @@
 The implementation target is the accepted Review Router Account Gateway
 first-slice contract (architecture document 52, revised 2026-10-03).
 
-The dedicated repository owns one versioned wire-schema authority, server-only
-HTTP clients, static Get Modular composition and a private Sub2API facade.
-Consumer products keep their own users, membership and repository policies.
+This bootstrap implements only the SDK: one versioned wire-schema authority,
+server-only HTTP clients and static Get Modular composition. The intended
+repository ownership includes a private Sub2API facade, but its implementation,
+native integration and service kernel remain pending, as do Review Router
+service/domain/UI integration and product CI qualification. This ownership is
+normative scope, not evidence of completed delivery. Consumer products keep
+their own users, membership and repository policies.
 
 Operation references equal stable caller operation IDs in the authenticated
 consumer namespace. Request references equal caller request IDs per execution.

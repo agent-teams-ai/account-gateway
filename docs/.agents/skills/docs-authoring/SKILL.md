@@ -8,7 +8,13 @@ description: Create and maintain repository documentation using the portable Doc
 Protocol declaration: agent-teams.docs-protocol/v1.
 
 Read `docs.config.yaml` and the local authority files before changing documentation.
-Choose the Diataxis category matching the reader's need, or use an ADR for a durable decision.
+Use only artifact types declared in the local authoring profile. This repository
+currently creates reference documents; do not prescribe tutorial, how-to,
+explanation or ADR creation until the profile supports them. Portable adopters
+select from their own declared types and use their matching templates.
+Run the installed CLI through the adopter's package command environment (here,
+`pnpm exec docs-protocol`). Docs Protocol 0.6.2 provides both `docs-protocol`
+and `agent-teams-docs`; a separate alias installation is unnecessary.
 
 1. Discover existing material with `docs-protocol find --consumer . --profile docs.config.yaml --text QUERY`.
 2. Preview creation with `docs-protocol new --consumer . --profile docs.config.yaml --type TYPE --id ID --title "TITLE" --owner OWNER_ID --summary "SUMMARY" --dry-run`.

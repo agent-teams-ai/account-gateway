@@ -3,7 +3,7 @@ set -euo pipefail
 # Controller supplies an absolute archive and a NEW writable disposable directory.
 archive=$(realpath "$1")
 qualification_root=$(realpath -m "$2")
-source_root=$(pwd)
+source_root=$(pwd -P)
 case "$qualification_root/" in "$source_root/"*) echo 'Use a directory outside the source workspace' >&2; exit 2;; esac
 if [ -e "$qualification_root" ]; then echo 'Qualification directory must be absent' >&2; exit 2; fi
 mkdir -p "$qualification_root/a" "$qualification_root/b"

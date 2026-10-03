@@ -8,7 +8,7 @@ const [a,b] = await Promise.all(process.argv.slice(2).map(moduleFor));
 const server = createServer((req,res) => {
   res.setHeader('content-type','application/json');
   if(req.headers.authorization === 'Bearer consumer-a' && req.url === '/v1/accounts/account-a') res.end(JSON.stringify({accountRef:'account-a',ownerRef:'owner-a',profileId:'mimo',displayName:'Sandbox',state:'active',metadataRevision:1,authorizationEpoch:1}));
-  else { res.statusCode=404; res.end(JSON.stringify({code:'not_found',traceRef:'trace-a',effect:'not_dispatched',retry:{kind:'never'}})); }
+  else { assert.equal(req.headers.authorization, 'Bearer consumer-b'); res.statusCode=404; res.end(JSON.stringify({code:'not_found',traceRef:'trace-a',effect:'not_dispatched',retry:{kind:'never'}})); }
 });
 server.listen(0,'127.0.0.1'); await once(server,'listening');
 try {

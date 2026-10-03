@@ -20,14 +20,15 @@ for (const module of profile.modules) {
       if (entry.isSymbolicLink()) { failures.push('Source link: ' + path); continue; }
       const feature = module.features.find(f => path === f || path.startsWith(f + '/'));
       const composition = path === module.composition || path.startsWith(module.composition + '/');
+      if (feature && path !== feature) {
+        const layer = path.slice(feature.length + 1).split('/')[0];
+        if (!module.featureLayers.includes(layer) || (!entry.isDirectory() && !path.slice(feature.length + 1).includes('/')))
+          failures.push('Undeclared feature layer: ' + path);
+      }
       if (entry.isDirectory()) {
         const ancestor = module.features.some(f => f.startsWith(path + '/')) ||
           module.publicIndexes.some(f => f.startsWith(path + '/'));
         if (!feature && !composition && !ancestor) failures.push('Unowned production directory: ' + path);
-        if (feature && path !== feature) {
-          const layer = path.slice(feature.length + 1).split('/')[0];
-          if (!module.featureLayers.includes(layer)) failures.push('Undeclared feature layer: ' + path);
-        }
         await walk(path);
       } else if (!feature && !composition && !allowedFiles.has(path)) failures.push('Unowned production file: ' + path);
     }
