@@ -2,7 +2,7 @@
 // at its boundary; these are neither wire validators nor public SDK exports.
 export interface TrustedContext { readonly consumerId: string }
 export type OperationState = 'pending' | 'applied' | 'rejected' | 'unknown';
-export type Effect = 'not_dispatched' | 'dispatch_started' | 'response_started' | 'completed' | 'effect_unknown';
+export type Effect = 'not_dispatched' | 'dispatch_started' | 'response_started' | 'completed' | 'effect_unknown' | 'rejected_before_dispatch';
 export type AccountState = 'staging' | 'active' | 'disabled' | 'quarantined';
 export class KernelError extends Error {
   readonly code: 'invalid' | 'unknown' | 'conflict' | 'denied' | 'unavailable';
@@ -58,16 +58,28 @@ export interface PrivateAdmission {
   limits: ApprovedLimits; expiresAt: string;
 }
 export interface RequestStatus { requestRef: string; effect: Effect; code?: string }
-// Protected-private permanent one-request proof. A missing token denotes legacy
-// occupancy without closure authority; this port cannot acknowledge it.
+// Trusted authenticated native callback input. Never obtain this authority from
+// an execution client's payload or caller-selected URL. Actual process enrollment
+// and incarnation authentication remain B3 composition gates.
+export interface NativeReservation {
+  originRef: string; engineIncarnation: string; requestNonce: string;
+}
+export interface NativeBinding extends NativeReservation { generation: string }
+// Protected-private permanent one-request proof. A missing token or native
+// binding denotes legacy occupancy without closure authority.
 export interface TransportClosure {
-  executionRef: string; requestRef: string; worker: string; token?: string;
+  executionRef: string; requestRef: string; worker: string; token?: string; native?: NativeBinding;
+}
+// The sole first claim returns this bound dispatch/closure identity. Cleanup
+// may read it under its existing lease/CAS but never receives dispatch permission.
+export interface NativeDispatchProof extends TransportClosure {
+  token: string; native: NativeBinding;
 }
 export interface CleanupAuthority { cleanupRef: string; token: string }
 export type ClaimResult =
   | { status: RequestStatus; dispatch?: never }
   | { status: RequestStatus; dispatch: { descriptor: NativeDescriptor; executionRef: string; requestRef: string;
-      limits: ApprovedLimits; deadline: string; closure: TransportClosure & { token: string } } };
+      limits: ApprovedLimits; deadline: string; closure: NativeDispatchProof } };
 // Without a descriptor, only exact-generation readback/quarantine is allowed;
 // never delete a guessed native identity. Settlement is a trusted adapter ack.
 export interface CleanupClaim {
@@ -128,9 +140,13 @@ export interface DurableKernel {
   unknownCandidate(context: TrustedContext, operationId: string, worker: string): Promise<OperationStatus>;
   prepare(context: TrustedContext, approval: ApprovedPreparation): Promise<OperationStatus>;
   execution(context: TrustedContext, executionRef: string): Promise<ExecutionStatus>;
-  claim(context: TrustedContext, executionRef: string, requestId: string, worker: string, admission: PrivateAdmission): Promise<ClaimResult>;
+  claim(context: TrustedContext, executionRef: string, requestId: string, worker: string, admission: PrivateAdmission, reservation: NativeReservation): Promise<ClaimResult>;
   request(context: TrustedContext, executionRef: string, requestId: string): Promise<RequestStatus>;
-  effect(context: TrustedContext, executionRef: string, requestId: string, worker: string, next: Exclude<Effect, 'not_dispatched' | 'dispatch_started'>): Promise<RequestStatus>;
+  effect(context: TrustedContext, executionRef: string, requestId: string, worker: string, next: Exclude<Effect, 'not_dispatched' | 'dispatch_started' | 'rejected_before_dispatch'>): Promise<RequestStatus>;
+  // Only authenticated native non-entry evidence can settle a started claim.
+  // Rejection spends its allowance and retains occupancy until separate closure.
+  // Expired ownership commits unknown/fenced status instead of rolling it back.
+  rejectBeforeDispatch(context: TrustedContext, worker: string, proof: NativeDispatchProof, entered: false): Promise<RequestStatus>;
   // Trusted transport/supervisor closure evidence, never timeout or key erasure.
   // Original owner can ack after expiry; delegation requires exact cleanup CAS.
   acknowledgeTransportClosed(context: TrustedContext, worker: string, proof: TransportClosure, cleanup?: CleanupAuthority): Promise<void>;

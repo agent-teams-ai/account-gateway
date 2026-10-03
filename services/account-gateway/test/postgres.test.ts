@@ -6,7 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
 import { PostgresKernel } from '../src/postgres.ts';
 import { KernelError, defaults } from '../src/domain.ts';
-import type { TrustedContext, AccountIntent, ApprovedPreparation, OperationStatus, PrivateAdmission, CleanupClaim, TransportClosure } from '../src/domain.ts';
+import type { TrustedContext, AccountIntent, ApprovedPreparation, OperationStatus, PrivateAdmission, CleanupClaim, TransportClosure, NativeReservation, NativeDispatchProof } from '../src/domain.ts';
 
 // Only a new, explicitly designated disposable localhost PostgreSQL 17.10 DB.
 // Never print the DSN or a vendor error; no fallback DB or production fixtures.
@@ -71,6 +71,23 @@ before(async () => {
     for (const name of migrations) {
       await admin.query(await readFile(new URL(name, directory), 'utf8'));
       if (name.startsWith('001_')) await seedLegacyRequests();
+      // A real accepted SQL002 row may have a closure token but no native
+      // authority. Seed before003, without inventing its future native tuple.
+      if (name.startsWith('002_')) {
+        a = new PostgresKernel(poolA); b = new PostgresKernel(poolB);
+        const account = await connected(nativeLegacy.ctx);
+        nativeLegacy.account = account.accountRef!;
+        nativeLegacy.worker = await worker(nativeLegacy.ctx);
+        const e = await prepared(nativeLegacy.ctx, nativeLegacy.account);
+        nativeLegacy.execution = e.result.executionRef!;
+        nativeLegacy.generation = (await admin.query('SELECT generation FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
+          [nativeLegacy.ctx.consumerId, nativeLegacy.execution])).rows[0].generation;
+        await admin.query(`INSERT INTO ag_kernel.requests(consumer,execution_ref,id,effect,worker,closure_token)
+          VALUES ($1,$2,'pre003','completed',$3,$4)`,
+        [nativeLegacy.ctx.consumerId, nativeLegacy.execution, nativeLegacy.worker, nativeLegacy.token]);
+        await admin.query('UPDATE ag_kernel.executions SET request_count=1 WHERE consumer=$1 AND ref=$2',
+          [nativeLegacy.ctx.consumerId, nativeLegacy.execution]);
+      }
     }
     migrated = true;
     a = new PostgresKernel(poolA);
@@ -87,6 +104,12 @@ after(async () => {
   await Promise.all([admin, poolA, poolB].filter(Boolean).map(pool => pool.end()));
 });
 
+// Controlled trusted callback fixtures; no native process/provider is launched.
+const reservation = (): NativeReservation => ({
+  originRef: 'sandbox-native-origin', engineIncarnation: randomUUID(), requestNonce: randomUUID(),
+});
+const nativeLegacy = { ctx: { consumerId: 'native-legacy-' + randomUUID() },
+  account: '', execution: '', worker: '', generation: '', token: randomUUID() };
 const context = (): TrustedContext => ({ consumerId: 'test-' + randomUUID() });
 const op = (): string => randomUUID();
 const digest = (): string => 'safe-ingress-' + randomUUID();
@@ -180,16 +203,16 @@ test('F1 claim fences expired in-flight ownership before spare-concurrency admis
   const e = await prepared(ctx, account.accountRef!, { limits }, kernel);
   const unrelated = await prepared(ctx, account.accountRef!, { limits }, kernel);
   const w1 = await worker(ctx), w2 = await worker(ctx);
-  const completed = await kernel.claim(ctx, e.result.executionRef!, 'completed', w1, e.admission); assert.ok(completed.dispatch);
+  const completed = await kernel.claim(ctx, e.result.executionRef!, 'completed', w1, e.admission, reservation()); assert.ok(completed.dispatch);
   await kernel.effect(ctx, e.result.executionRef!, 'completed', w1, 'response_started');
   await kernel.effect(ctx, e.result.executionRef!, 'completed', w1, 'completed');
   await kernel.acknowledgeTransportClosed(ctx, w1, completed.dispatch.closure);
-  const R1 = await kernel.claim(ctx, e.result.executionRef!, 'R1', w1, e.admission); assert.ok(R1.dispatch);
-  assert.ok((await kernel.claim(ctx, unrelated.result.executionRef!, 'live', w2, unrelated.admission)).dispatch);
+  const R1 = await kernel.claim(ctx, e.result.executionRef!, 'R1', w1, e.admission, reservation()); assert.ok(R1.dispatch);
+  assert.ok((await kernel.claim(ctx, unrelated.result.executionRef!, 'live', w2, unrelated.admission, reservation())).dispatch);
   await admin.query("UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND worker=$2",
     [ctx.consumerId, w1]);
   // No effect/reconcile/restore between exact W1 expiry and the fresh W2 claim.
-  const denied = await kernel.claim(ctx, e.result.executionRef!, 'R2', w2, e.admission);
+  const denied = await kernel.claim(ctx, e.result.executionRef!, 'R2', w2, e.admission, reservation());
   assert.deepEqual(denied, { status: { requestRef: 'R2', effect: 'not_dispatched', code: 'fenced' } });
   assert.deepEqual(await b.request(ctx, e.result.executionRef!, 'R2'), denied.status);
   assert.deepEqual(await b.request(ctx, e.result.executionRef!, 'R1'),
@@ -198,11 +221,11 @@ test('F1 claim fences expired in-flight ownership before spare-concurrency admis
   assert.equal((await b.request(ctx, e.result.executionRef!, 'completed')).effect, 'completed');
   assert.equal(await count('SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
     [ctx.consumerId, e.result.executionRef]), 2);
-  assert.deepEqual(await kernel.claim(ctx, e.result.executionRef!, 'R2', w2, e.admission), denied);
-  assert.equal((await kernel.claim(ctx, e.result.executionRef!, 'R1', w2, e.admission)).dispatch, undefined);
+  assert.deepEqual(await kernel.claim(ctx, e.result.executionRef!, 'R2', w2, e.admission, reservation()), denied);
+  assert.equal((await kernel.claim(ctx, e.result.executionRef!, 'R1', w2, e.admission, reservation())).dispatch, undefined);
   const replay = await kernel.prepare(ctx, { ...e.input, operationId: op() });
   assert.equal(replay.executionRef, e.result.executionRef);
-  const fresh = await kernel.claim(ctx, replay.executionRef!, 'R3', w2, e.admission);
+  const fresh = await kernel.claim(ctx, replay.executionRef!, 'R3', w2, e.admission, reservation());
   assert.equal(fresh.dispatch, undefined); assert.equal(fresh.status.code, 'fenced');
   assert.equal(await count('SELECT count(*)::integer n FROM ag_kernel.cleanup WHERE consumer=$1 AND execution_ref=$2',
     [ctx.consumerId, e.result.executionRef]), 1);
@@ -210,7 +233,7 @@ test('F1 claim fences expired in-flight ownership before spare-concurrency admis
   assert.equal((await b.request(ctx, unrelated.result.executionRef!, 'live')).effect, 'dispatch_started');
   await kernel.acknowledgeTransportClosed(ctx, w1, R1.dispatch.closure);
   assert.equal((await b.request(ctx, e.result.executionRef!, 'R1')).effect, 'effect_unknown');
-  assert.ok((await kernel.claim(ctx, unrelated.result.executionRef!, 'live-next', w2, unrelated.admission)).dispatch);
+  assert.ok((await kernel.claim(ctx, unrelated.result.executionRef!, 'live-next', w2, unrelated.admission, reservation())).dispatch);
   assert.equal(await count('SELECT count(*)::integer n FROM ag_kernel.cleanup WHERE consumer=$1 AND execution_ref=$2',
     [ctx.consumerId, unrelated.result.executionRef]), 0);
 });
@@ -250,7 +273,7 @@ test('F3 acknowledgeCandidate snapshots native proof before the consumer-row awa
     [ctx.consumerId, candidate.candidate])).rows[0];
   assert.deepEqual(recorded, original);
   const e = await prepared(ctx, account.accountRef!);
-  const claim = await b.claim(ctx, e.result.executionRef!, 'proof-snapshot', w, e.admission);
+  const claim = await b.claim(ctx, e.result.executionRef!, 'proof-snapshot', w, e.admission, reservation());
   assert.ok(claim.dispatch);
   assert.deepEqual(claim.dispatch.descriptor, original);
   assert.deepEqual(await b.acknowledgeCandidate(ctx, account.operationRef, w, original), result);
@@ -341,13 +364,13 @@ test('staging, rename and reconnect use separate revision and epoch CAS', async 
   const reconnect = await a.beginAccount(ctx, { operationId: op(), kind: 'reconnect', intentDigest: digest(),
     accountRef: active.accountRef, expectedRevision: rename.revision });
   const pending = await a.startCandidate(ctx, reconnect.operationRef, w); assert.ok(pending);
-  const oldClaim = await b.claim(ctx, e.result.executionRef!, 'old-before-promotion', w, e.admission);
+  const oldClaim = await b.claim(ctx, e.result.executionRef!, 'old-before-promotion', w, e.admission, reservation());
   assert.ok(oldClaim.dispatch);
   assert.equal(oldClaim.dispatch.descriptor.generation, c.candidate);
   const promoted = await a.acknowledgeCandidate(ctx, reconnect.operationRef, w,
     { generation: pending.candidate, nativePhysicalIdentity: randomUUID(), profile: pending.profile });
   assert.equal(promoted.epoch, active.epoch! + 1);
-  const denied = await b.claim(ctx, e.result.executionRef!, 'old-after-promotion', w, e.admission);
+  const denied = await b.claim(ctx, e.result.executionRef!, 'old-after-promotion', w, e.admission, reservation());
   assert.equal(denied.dispatch, undefined); assert.equal(denied.status.effect, 'not_dispatched');
   const e2 = await prepared(ctx, active.accountRef!, { invocationRef: op() });
   const stale = await a.beginAccount(ctx, { operationId: op(), kind: 'reconnect', intentDigest: digest(),
@@ -362,7 +385,7 @@ test('staging, rename and reconnect use separate revision and epoch CAS', async 
   await a.effect(ctx, e.result.executionRef!, 'old-before-promotion', w, 'response_started');
   await a.effect(ctx, e.result.executionRef!, 'old-before-promotion', w, 'completed');
   await a.acknowledgeTransportClosed(ctx, w, oldClaim.dispatch.closure);
-  const still = await a.claim(ctx, e2.result.executionRef!, 'still-sticky', w, e2.admission);
+  const still = await a.claim(ctx, e2.result.executionRef!, 'still-sticky', w, e2.admission, reservation());
   assert.ok(still.dispatch); assert.equal(still.dispatch.descriptor.generation, pending.candidate);
 });
 
@@ -371,9 +394,9 @@ test('staging, rename and reconnect use separate revision and epoch CAS', async 
 test('fence linearizes against claim and preserves already accepted effects', async () => {
   const ctx = context(), account = await connected(ctx), e = await prepared(ctx, account.accountRef!);
   const w = await worker(ctx);
-  const first = await a.claim(ctx, e.result.executionRef!, 'accepted', w, e.admission); assert.ok(first.dispatch);
+  const first = await a.claim(ctx, e.result.executionRef!, 'accepted', w, e.admission, reservation()); assert.ok(first.dispatch);
   const f = await b.fence(ctx, 'fence-stable', e.input.policySubject, 2); assert.equal(f.state, 'applied');
-  const stale = await a.claim(ctx, e.result.executionRef!, 'paused-envelope', w, e.admission);
+  const stale = await a.claim(ctx, e.result.executionRef!, 'paused-envelope', w, e.admission, reservation());
   assert.equal(stale.status.effect, 'not_dispatched'); assert.equal(stale.dispatch, undefined);
   assert.equal((await b.request(ctx, e.result.executionRef!, 'accepted')).effect, 'dispatch_started');
   await a.effect(ctx, e.result.executionRef!, 'accepted', w, 'response_started');
@@ -384,15 +407,15 @@ test('fence linearizes against claim and preserves already accepted effects', as
   const ctx2 = context(), ac2 = await connected(ctx2), e2 = await prepared(ctx2, ac2.accountRef!), w2 = await worker(ctx2);
   const pair = await race(ctx2,
     () => a.fence(ctx2, op(), e2.input.policySubject, 2),
-    () => b.claim(ctx2, e2.result.executionRef!, 'racing', w2, e2.admission));
+    () => b.claim(ctx2, e2.result.executionRef!, 'racing', w2, e2.admission, reservation()));
   assert.equal(pair.every(r => r.status === 'fulfilled'), true);
-  const after = await a.claim(ctx2, e2.result.executionRef!, 'after-ack', w2, e2.admission);
+  const after = await a.claim(ctx2, e2.result.executionRef!, 'after-ack', w2, e2.admission, reservation());
   assert.equal(after.dispatch, undefined); assert.equal(after.status.effect, 'not_dispatched');
   // A distinct same-revision fence still closes previously issued admissions;
   // revision equality must never produce a false acknowledged fence.
   const ctx3 = context(), ac3 = await connected(ctx3), e3 = await prepared(ctx3, ac3.accountRef!), w3 = await worker(ctx3);
   assert.equal((await b.fence(ctx3, 'same-revision', e3.input.policySubject, 1)).state, 'applied');
-  assert.equal((await a.claim(ctx3, e3.result.executionRef!, 'previously-issued', w3, e3.admission)).dispatch, undefined);
+  assert.equal((await a.claim(ctx3, e3.result.executionRef!, 'previously-issued', w3, e3.admission, reservation())).dispatch, undefined);
 });
 
 // Red if duplicate POST creates another dispatch permit, alternate preparation
@@ -408,16 +431,16 @@ test('sticky preparation, duplicate requests and unknown invocation fencing', as
   await assert.rejects(b.prepare(ctx, { ...input, operationId: op(), permittedAccounts: [two.accountRef!] }), isCode('conflict'));
   const w1 = await worker(ctx, a), w2 = await worker(ctx, b);
   const admission = admissionFor(input, e, one.accountRef!);
-  const claims = await race(ctx, () => a.claim(ctx, e.executionRef!, 'same-request', w1, admission),
-    () => b.claim(ctx, e.executionRef!, 'same-request', w2, admission));
+  const claims = await race(ctx, () => a.claim(ctx, e.executionRef!, 'same-request', w1, admission, reservation()),
+    () => b.claim(ctx, e.executionRef!, 'same-request', w2, admission, reservation()));
   assert.equal(claims.every(r => r.status === 'fulfilled'), true);
   assert.equal(claims.filter(r => r.status === 'fulfilled' && r.value.dispatch).length, 1);
   const winner = claims[0].status === 'fulfilled' && claims[0].value.dispatch ? w1 : w2;
-  const duplicate = await b.claim(ctx, e.executionRef!, 'same-request', w2, admission);
+  const duplicate = await b.claim(ctx, e.executionRef!, 'same-request', w2, admission, reservation());
   assert.equal(duplicate.dispatch, undefined); assert.equal(duplicate.status.requestRef, 'same-request');
   await a.effect(ctx, e.executionRef!, 'same-request', winner, 'response_started');
   await b.effect(ctx, e.executionRef!, 'same-request', winner, 'effect_unknown');
-  const fresh = await a.claim(ctx, e.executionRef!, op(), w1, admission);
+  const fresh = await a.claim(ctx, e.executionRef!, op(), w1, admission, reservation());
   assert.equal(fresh.dispatch, undefined); assert.equal(fresh.status.effect, 'not_dispatched');
   assert.equal((await b.prepare(ctx, { ...input, operationId: op() })).executionRef, e.executionRef);
   await assert.rejects(a.prepare(ctx, { ...input, operationId: op(), intentDigest: digest() }), isCode('conflict'));
@@ -432,10 +455,10 @@ test('atomic request limits and runtime deadline/config enforcement', async () =
   const e = await prepared(ctx, account.accountRef!, { limits: { requests: 2, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 5000 } });
   const w = await worker(ctx);
   const other = await prepared(ctx, account.accountRef!);
-  const misbound = await b.claim(ctx, other.result.executionRef!, 'wrong-envelope', w, e.admission);
+  const misbound = await b.claim(ctx, other.result.executionRef!, 'wrong-envelope', w, e.admission, reservation());
   assert.equal(misbound.dispatch, undefined); assert.equal(misbound.status.code, 'fenced');
-  const pair = await race(ctx, () => a.claim(ctx, e.result.executionRef!, 'one', w, e.admission),
-    () => b.claim(ctx, e.result.executionRef!, 'two', w, e.admission));
+  const pair = await race(ctx, () => a.claim(ctx, e.result.executionRef!, 'one', w, e.admission, reservation()),
+    () => b.claim(ctx, e.result.executionRef!, 'two', w, e.admission, reservation()));
   assert.equal(pair.every(r => r.status === 'fulfilled'), true);
   assert.equal(pair.filter(r => r.status === 'fulfilled' && r.value.dispatch).length, 1);
   const first = pair[0].status === 'fulfilled' && pair[0].value.dispatch ? 'one' : 'two';
@@ -446,12 +469,12 @@ test('atomic request limits and runtime deadline/config enforcement', async () =
   const permit = pair.find(r => r.status === 'fulfilled' && r.value.dispatch);
   assert.ok(permit && permit.status === 'fulfilled' && permit.value.dispatch);
   await a.acknowledgeTransportClosed(ctx, w, permit.value.dispatch.closure);
-  assert.equal((await b.claim(ctx, e.result.executionRef!, denied, w, e.admission)).dispatch, undefined);
-  const third = await a.claim(ctx, e.result.executionRef!, 'third', w, e.admission); assert.ok(third.dispatch);
+  assert.equal((await b.claim(ctx, e.result.executionRef!, denied, w, e.admission, reservation())).dispatch, undefined);
+  const third = await a.claim(ctx, e.result.executionRef!, 'third', w, e.admission, reservation()); assert.ok(third.dispatch);
   await a.effect(ctx, e.result.executionRef!, 'third', w, 'response_started');
   await a.effect(ctx, e.result.executionRef!, 'third', w, 'completed');
   await a.acknowledgeTransportClosed(ctx, w, third.dispatch.closure);
-  const total = await b.claim(ctx, e.result.executionRef!, 'fourth', w, e.admission);
+  const total = await b.claim(ctx, e.result.executionRef!, 'fourth', w, e.admission, reservation());
   assert.equal(total.status.code, 'limit'); assert.equal(total.status.effect, 'not_dispatched');
   await assert.rejects(a.prepare(ctx, await approval(ctx, account.accountRef!, { limits: { ...e.input.limits, requests: 0 } })), isCode('invalid'));
   // Red if pretransaction validation throws outside the Promise port or admits zero limits.
@@ -468,7 +491,7 @@ test('atomic request limits and runtime deadline/config enforcement', async () =
   try {
     await gate.query('BEGIN');
     await gate.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE', [ctx.consumerId]);
-    const waiting = a.claim(ctx, short.result.executionRef!, 'late', w, short.admission);
+    const waiting = a.claim(ctx, short.result.executionRef!, 'late', w, short.admission, reservation());
     // Prevent an unhandled rejection while the actual transaction is blocked.
     const outcome = waiting.then(value => ({ value }), () => ({ value: undefined }));
     assert.equal(await waitForLocks(gate, [pids[0]]), true);
@@ -497,7 +520,7 @@ test('expired effect owner cannot complete or retain in-flight authority before 
     ['response_started', 'response_started'],
   ] as const) {
     const e = await prepared(ctx, account.accountRef!), lost = await worker(ctx);
-    const permit = await a.claim(ctx, e.result.executionRef!, 'accepted', lost, e.admission); assert.ok(permit.dispatch);
+    const permit = await a.claim(ctx, e.result.executionRef!, 'accepted', lost, e.admission, reservation()); assert.ok(permit.dispatch);
     if (state === 'response_started') await a.effect(ctx, e.result.executionRef!, 'accepted', lost, state);
     const expired = await admin.query("UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND worker=$2", [ctx.consumerId, lost]);
     assert.equal(expired.rowCount, 1);
@@ -509,23 +532,23 @@ test('expired effect owner cannot complete or retain in-flight authority before 
     assert.equal(await count('SELECT count(*)::integer n FROM ag_kernel.cleanup WHERE consumer=$1 AND execution_ref=$2', [ctx.consumerId, e.result.executionRef]), 1);
     assert.deepEqual(await b.effect(ctx, e.result.executionRef!, 'accepted', lost, 'effect_unknown'), result);
     await assert.rejects(b.effect(ctx, e.result.executionRef!, 'accepted', lost, 'completed'), isCode('conflict'));
-    const duplicate = await b.claim(ctx, e.result.executionRef!, 'accepted', live, e.admission);
+    const duplicate = await b.claim(ctx, e.result.executionRef!, 'accepted', live, e.admission, reservation());
     assert.equal(duplicate.dispatch, undefined); assert.deepEqual(duplicate.status, result);
-    const fresh = await b.claim(ctx, e.result.executionRef!, 'fresh', live, e.admission);
+    const fresh = await b.claim(ctx, e.result.executionRef!, 'fresh', live, e.admission, reservation());
     assert.equal(fresh.dispatch, undefined); assert.equal(fresh.status.code, 'fenced');
     await b.reconcile(ctx);
     assert.deepEqual(await a.request(ctx, e.result.executionRef!, 'accepted'), result);
     await a.acknowledgeTransportClosed(ctx, lost, permit.dispatch.closure);
   }
   const completed = await prepared(ctx, account.accountRef!), owner = await worker(ctx);
-  assert.ok((await a.claim(ctx, completed.result.executionRef!, 'done', owner, completed.admission)).dispatch);
+  assert.ok((await a.claim(ctx, completed.result.executionRef!, 'done', owner, completed.admission, reservation())).dispatch);
   await a.effect(ctx, completed.result.executionRef!, 'done', owner, 'response_started');
   await a.effect(ctx, completed.result.executionRef!, 'done', owner, 'completed');
   await admin.query("UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND worker=$2", [ctx.consumerId, owner]);
   assert.equal((await b.effect(ctx, completed.result.executionRef!, 'done', owner, 'completed')).effect, 'completed');
   await b.reconcile(ctx);
   assert.equal((await b.request(ctx, completed.result.executionRef!, 'done')).effect, 'completed');
-  assert.equal((await b.claim(ctx, completed.result.executionRef!, 'done', live, completed.admission)).dispatch, undefined);
+  assert.equal((await b.claim(ctx, completed.result.executionRef!, 'done', live, completed.admission, reservation())).dispatch, undefined);
 });
 
 // Restore must persist cleanup for active, creating, staged and already
@@ -534,7 +557,7 @@ test('restore durably cleans every exact generation and repeated restores do not
   const ctx = context(), account = await connected(ctx), w = await worker(ctx);
   const foreign = context(), foreignAccount = await connected(foreign);
   const e = await prepared(ctx, account.accountRef!);
-  assert.ok((await a.claim(ctx, e.result.executionRef!, 'done', w, e.admission)).dispatch);
+  assert.ok((await a.claim(ctx, e.result.executionRef!, 'done', w, e.admission, reservation())).dispatch);
   await a.effect(ctx, e.result.executionRef!, 'done', w, 'response_started');
   await a.effect(ctx, e.result.executionRef!, 'done', w, 'completed');
   const reconnect = await a.beginAccount(ctx, { operationId: op(), kind: 'reconnect', intentDigest: digest(),
@@ -589,8 +612,8 @@ test('restart reconciles only lost claims; explicit restore rotates and quaranti
   const separate = await connected(ctx);
   const healthy = await prepared(ctx, account.accountRef!), dead = await prepared(ctx, separate.accountRef!);
   const liveWorker = await worker(ctx), deadWorker = await worker(ctx);
-  assert.ok((await a.claim(ctx, healthy.result.executionRef!, 'live', liveWorker, healthy.admission)).dispatch);
-  assert.ok((await b.claim(ctx, dead.result.executionRef!, 'orphan', deadWorker, dead.admission)).dispatch);
+  assert.ok((await a.claim(ctx, healthy.result.executionRef!, 'live', liveWorker, healthy.admission, reservation())).dispatch);
+  assert.ok((await b.claim(ctx, dead.result.executionRef!, 'orphan', deadWorker, dead.admission, reservation())).dispatch);
   const pending = await staged(ctx), c = await a.startCandidate(ctx, pending.operationRef, deadWorker); assert.ok(c);
   await admin.query("UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND worker=$2",
     [ctx.consumerId, deadWorker]);
@@ -606,7 +629,7 @@ test('restart reconciles only lost claims; explicit restore rotates and quaranti
   assert.equal((await a.account(ctx, account.accountRef!)).state, 'active');
   assert.equal((await a.operation(ctx, pending.operationRef)).state, 'unknown');
   assert.equal(await a.startCandidate(ctx, pending.operationRef, liveWorker), undefined);
-  assert.equal((await a.claim(ctx, dead.result.executionRef!, 'fresh-orphan-id', liveWorker, dead.admission)).dispatch, undefined);
+  assert.equal((await a.claim(ctx, dead.result.executionRef!, 'fresh-orphan-id', liveWorker, dead.admission, reservation())).dispatch, undefined);
   await assert.rejects(a.heartbeat(ctx, deadWorker), isCode('denied'));
   assert.equal(await a.issuer(ctx), originalIssuer);
   const freshIssuer = randomUUID();
@@ -618,7 +641,7 @@ test('restart reconciles only lost claims; explicit restore rotates and quaranti
   const proof = (await admin.query('SELECT generation,native_identity,profile FROM ag_kernel.candidates WHERE consumer=$1 AND operation_id=$2', [ctx.consumerId, account.operationRef])).rows[0];
   assert.equal((await a.acknowledgeCandidate(ctx, account.operationRef, liveWorker, { generation: proof.generation, nativePhysicalIdentity: proof.native_identity, profile: proof.profile })).state, 'applied');
   assert.equal((await a.account(ctx, account.accountRef!)).state, 'quarantined');
-  assert.equal((await a.claim(ctx, healthy.result.executionRef!, 'old-grant', liveWorker, healthy.admission)).dispatch, undefined);
+  assert.equal((await a.claim(ctx, healthy.result.executionRef!, 'old-grant', liveWorker, healthy.admission, reservation())).dispatch, undefined);
   await assert.rejects(a.restore(ctx, freshIssuer, originalIssuer), isCode('conflict'));
   await assert.rejects(a.prepare(ctx, await approval(ctx, account.accountRef!)), isCode('unknown'));
 });
@@ -628,11 +651,11 @@ test('restart reconciles only lost claims; explicit restore rotates and quaranti
 test('disable and idempotent close persist bounded scoped cleanup across worker loss', async () => {
   const ctx = context(), account = await connected(ctx), e = await prepared(ctx, account.accountRef!);
   const w1 = await worker(ctx), w2 = await worker(ctx);
-  assert.ok((await a.claim(ctx, e.result.executionRef!, 'accepted', w1, e.admission)).dispatch);
+  assert.ok((await a.claim(ctx, e.result.executionRef!, 'accepted', w1, e.admission, reservation())).dispatch);
   const disabled = await a.beginAccount(ctx, { operationId: 'disable', kind: 'disable', intentDigest: digest(),
     accountRef: account.accountRef, expectedRevision: account.revision });
   assert.equal(disabled.state, 'applied');
-  assert.equal((await b.claim(ctx, e.result.executionRef!, 'denied', w2, e.admission)).dispatch, undefined);
+  assert.equal((await b.claim(ctx, e.result.executionRef!, 'denied', w2, e.admission, reservation())).dispatch, undefined);
   const closed = await a.close(ctx, 'close', e.result.executionRef!);
   assert.deepEqual(await b.close(ctx, 'close', e.result.executionRef!), closed);
   assert.equal((await a.request(ctx, e.result.executionRef!, 'accepted')).effect, 'dispatch_started');
@@ -664,13 +687,13 @@ test('disable and idempotent close persist bounded scoped cleanup across worker 
 test('consumer isolation, immutable owner and positive safe readback shapes', async () => {
   const ctx = context(), foreign = context(), account = await connected(ctx), e = await prepared(ctx, account.accountRef!);
   const w = await worker(ctx);
-  await a.claim(ctx, e.result.executionRef!, 'request', w, e.admission);
+  await a.claim(ctx, e.result.executionRef!, 'request', w, e.admission, reservation());
   await assert.rejects(b.account(foreign, account.accountRef!), isCode('unknown'));
   await assert.rejects(b.account(foreign, randomUUID()), isCode('unknown'));
   await assert.rejects(b.operation(foreign, account.operationRef), isCode('unknown'));
   await assert.rejects(b.execution(foreign, e.result.executionRef!), isCode('unknown'));
   await assert.rejects(b.request(foreign, e.result.executionRef!, 'request'), isCode('unknown'));
-  await assert.rejects(b.claim(foreign, e.result.executionRef!, 'new', w, e.admission), isCode('unknown'));
+  await assert.rejects(b.claim(foreign, e.result.executionRef!, 'new', w, e.admission, reservation()), isCode('unknown'));
   await assert.rejects(b.beginAccount(foreign, { operationId: op(), kind: 'reconnect', intentDigest: digest(),
     accountRef: account.accountRef, expectedRevision: account.revision }), isCode('unknown'));
   // A DB contract catches future alternate adapters accidentally transferring ownership.
@@ -718,7 +741,7 @@ test('complete private admission matches persisted preparation, with zero revisi
     ['tokens', { limits: { ...e.input.limits, tokens: 5001 } }],
   ];
   for (const [name, mutation] of mutations) {
-    const denied = await b.claim(ctx, e.result.executionRef!, 'stale-' + name, w, { ...e.admission, ...mutation });
+    const denied = await b.claim(ctx, e.result.executionRef!, 'stale-' + name, w, { ...e.admission, ...mutation }, reservation());
     assert.equal(denied.dispatch, undefined, name);
     assert.equal(denied.status.effect, 'not_dispatched', name);
     assert.equal(denied.status.code, 'fenced', name);
@@ -729,18 +752,18 @@ test('complete private admission matches persisted preparation, with zero revisi
   // Same instant with a different RFC3339 spelling must work; string equality
   // would deny it. The permit carries persisted transport limits, never a body.
   const offset = new Date(e.input.deadline.getTime() + 3_600_000).toISOString().replace('Z', '000+01:00');
-  const accepted = await a.claim(ctx, e.result.executionRef!, 'offset-expiry', w, { ...e.admission, expiresAt: offset });
+  const accepted = await a.claim(ctx, e.result.executionRef!, 'offset-expiry', w, { ...e.admission, expiresAt: offset }, reservation());
   assert.ok(accepted.dispatch);
   assert.deepEqual(accepted.dispatch.limits, { requests: 4, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 5000 });
   assert.equal(accepted.dispatch.deadline, e.input.deadline.toISOString());
   // A denied identity cannot later become a dispatch when its envelope is fixed.
-  assert.equal((await a.claim(ctx, e.result.executionRef!, 'stale-binding', w, e.admission)).dispatch, undefined);
+  assert.equal((await a.claim(ctx, e.result.executionRef!, 'stale-binding', w, e.admission, reservation())).dispatch, undefined);
   await b.fence(ctx, 'zero-revision-fence', e.input.policySubject, 0);
   await a.effect(ctx, e.result.executionRef!, 'offset-expiry', w, 'response_started');
   await a.effect(ctx, e.result.executionRef!, 'offset-expiry', w, 'completed');
-  const repeat = await b.claim(ctx, e.result.executionRef!, 'offset-expiry', w, { ...e.admission, bindingRevision: 1 });
+  const repeat = await b.claim(ctx, e.result.executionRef!, 'offset-expiry', w, { ...e.admission, bindingRevision: 1 }, reservation());
   assert.equal(repeat.dispatch, undefined); assert.equal(repeat.status.effect, 'completed');
-  assert.equal((await a.claim(ctx, e.result.executionRef!, 'after-zero-fence', w, e.admission)).dispatch, undefined);
+  assert.equal((await a.claim(ctx, e.result.executionRef!, 'after-zero-fence', w, e.admission, reservation())).dispatch, undefined);
 });
 
 // Protect operation intent and sticky invocation identity independently. Each
@@ -767,14 +790,14 @@ test('preparation intent protects every approved limit and independent binding r
   await assert.rejects(a.prepare(ctx, { ...e.input, attemptRef: 'attempt-b' }), isCode('conflict'));
   await assert.rejects(a.prepare(ctx, { ...e.input, invocationRef: 'other-invocation' }), isCode('conflict'));
   const w = await worker(ctx);
-  const accepted = await b.claim(ctx, e.result.executionRef!, 'full-range-binding', w, e.admission);
+  const accepted = await b.claim(ctx, e.result.executionRef!, 'full-range-binding', w, e.admission, reservation());
   assert.ok(accepted.dispatch, 'safe-integer revision must survive PostgreSQL bigint decoding');
   assert.equal(await count('SELECT count(*)::integer n FROM ag_kernel.executions WHERE consumer=$1', [ctx.consumerId]), 1);
   // New fields retain the asynchronous invalid-input contract.
   await assert.rejects(a.prepare(ctx, { ...e.input, operationId: op(),
     limits: { ...e.input.limits, concurrency: 3 } }), isCode('invalid'));
   await assert.rejects(b.claim(ctx, e.result.executionRef!, 'invalid-concurrency', w,
-    { ...e.admission, limits: { ...e.input.limits, concurrency: 3 } }), isCode('invalid'));
+    { ...e.admission, limits: { ...e.input.limits, concurrency: 3 } }, reservation()), isCode('invalid'));
   assert.equal(await count('SELECT count(*)::integer n FROM ag_kernel.requests WHERE consumer=$1 AND id=$2',
     [ctx.consumerId, 'invalid-concurrency']), 0);
   for (const field of ['requestBytes', 'outputBytes', 'tokens'] as const) {
@@ -783,7 +806,7 @@ test('preparation intent protects every approved limit and independent binding r
   await assert.rejects(b.prepare(ctx, { ...e.input, attemptRef: 1 } as unknown as ApprovedPreparation), isCode('invalid'));
   await assert.rejects(a.prepare(ctx, { ...e.input, bindingRevision: -1 }), isCode('invalid'));
   await assert.rejects(b.claim(ctx, e.result.executionRef!, 'invalid-limits', w,
-    { ...e.admission, limits: { ...e.input.limits, tokens: Infinity } }), isCode('invalid'));
+    { ...e.admission, limits: { ...e.input.limits, tokens: Infinity } }, reservation()), isCode('invalid'));
 });
 
 // Distinct opaque strings cannot alias through integer coercion. Conflicting
@@ -801,10 +824,10 @@ test('opaque attempt identity, conflicting approval race and per-consumer readba
   assert.equal((await b.execution(ctx, won.executionRef)).accountRef, account.accountRef);
   assert.equal(await count('SELECT count(*)::integer n FROM ag_kernel.executions WHERE consumer=$1', [ctx.consumerId]), 1);
   const w = await worker(ctx), envelope = admissionFor(approved, won, account.accountRef!);
-  const claim = await b.claim(ctx, won.executionRef, 'opaque-winner', w, envelope); assert.ok(claim.dispatch);
+  const claim = await b.claim(ctx, won.executionRef, 'opaque-winner', w, envelope, reservation()); assert.ok(claim.dispatch);
   assert.equal(claim.dispatch.limits.outputBytes, approved.limits.outputBytes);
   await a.effect(ctx, won.executionRef, 'opaque-winner', w, 'effect_unknown');
-  assert.equal((await b.claim(ctx, won.executionRef, 'new-id', w, envelope)).dispatch, undefined);
+  assert.equal((await b.claim(ctx, won.executionRef, 'new-id', w, envelope, reservation())).dispatch, undefined);
   assert.equal((await a.prepare(ctx, { ...approved, operationId: op() })).executionRef, won.executionRef);
   const distinct = await Promise.all(['attempt-01','attempt-1'].map(attemptRef =>
     a.prepare(ctx, { ...input, operationId: op(), attemptRef })));
@@ -883,18 +906,18 @@ test('B2 distinct executions contend for one account slot, unrelated accounts an
   const ctx = context(), account = await connected(ctx), unrelated = await connected(ctx);
   const first = await prepared(ctx, account.accountRef!), second = await prepared(ctx, account.accountRef!);
   const w1 = await worker(ctx), w2 = await worker(ctx);
-  const pair = await race(ctx, () => a.claim(ctx, first.result.executionRef!, 'first', w1, first.admission),
-    () => b.claim(ctx, second.result.executionRef!, 'second', w2, second.admission));
+  const pair = await race(ctx, () => a.claim(ctx, first.result.executionRef!, 'first', w1, first.admission, reservation()),
+    () => b.claim(ctx, second.result.executionRef!, 'second', w2, second.admission, reservation()));
   assert.equal(pair.every(r => r.status === 'fulfilled'), true);
   // This fails behaviorally on old production before any new column/API is read.
   assert.equal(pair.filter(r => r.status === 'fulfilled' && r.value.dispatch).length, 1);
   assert.equal(pair.filter(r => r.status === 'fulfilled' && r.value.status.code === 'limit').length, 1);
   assert.equal(await occupancy(ctx, account.accountRef!), 1);
   const other = await prepared(ctx, unrelated.accountRef!);
-  assert.ok((await b.claim(ctx, other.result.executionRef!, 'other-account', w2, other.admission)).dispatch);
+  assert.ok((await b.claim(ctx, other.result.executionRef!, 'other-account', w2, other.admission, reservation())).dispatch);
   const foreign = context(), foreignAccount = await connected(foreign), foreignWorker = await worker(foreign);
   const foreignExecution = await prepared(foreign, foreignAccount.accountRef!);
-  assert.ok((await b.claim(foreign, foreignExecution.result.executionRef!, 'other-consumer', foreignWorker, foreignExecution.admission)).dispatch);
+  assert.ok((await b.claim(foreign, foreignExecution.result.executionRef!, 'other-consumer', foreignWorker, foreignExecution.admission, reservation())).dispatch);
 });
 
 test('B2 execution keeps its narrower approval while sharing the configured account ceiling', async () => {
@@ -902,20 +925,20 @@ test('B2 execution keeps its narrower approval while sharing the configured acco
   const x = new PostgresKernel(poolA, bounds), y = new PostgresKernel(poolB, bounds);
   const ctx = context(), account = await connected(ctx), w = await worker(ctx);
   const first = await prepared(ctx, account.accountRef!, {}, x), second = await prepared(ctx, account.accountRef!, {}, x);
-  assert.ok((await x.claim(ctx, first.result.executionRef!, 'one', w, first.admission)).dispatch);
-  assert.equal((await y.claim(ctx, first.result.executionRef!, 'too-wide', w, first.admission)).status.code, 'limit');
-  assert.ok((await y.claim(ctx, second.result.executionRef!, 'two', w, second.admission)).dispatch);
+  assert.ok((await x.claim(ctx, first.result.executionRef!, 'one', w, first.admission, reservation())).dispatch);
+  assert.equal((await y.claim(ctx, first.result.executionRef!, 'too-wide', w, first.admission, reservation())).status.code, 'limit');
+  assert.ok((await y.claim(ctx, second.result.executionRef!, 'two', w, second.admission, reservation())).dispatch);
   const third = await prepared(ctx, account.accountRef!, {}, x);
-  assert.equal((await x.claim(ctx, third.result.executionRef!, 'account-full', w, third.admission)).dispatch, undefined);
+  assert.equal((await x.claim(ctx, third.result.executionRef!, 'account-full', w, third.admission, reservation())).dispatch, undefined);
   assert.equal(await occupancy(ctx, account.accountRef!), 2);
 });
 
 test('B2 lost owner retains occupancy; exact late closure frees one without refund, unfence or replay', async () => {
   const ctx = context(), account = await connected(ctx), owner = await worker(ctx), live = await worker(ctx);
   const first = await prepared(ctx, account.accountRef!), second = await prepared(ctx, account.accountRef!);
-  const permit = await a.claim(ctx, first.result.executionRef!, 'old', owner, first.admission); assert.ok(permit.dispatch);
+  const permit = await a.claim(ctx, first.result.executionRef!, 'old', owner, first.admission, reservation()); assert.ok(permit.dispatch);
   await expire(ctx, owner);
-  const denied = await b.claim(ctx, second.result.executionRef!, 'held', live, second.admission);
+  const denied = await b.claim(ctx, second.result.executionRef!, 'held', live, second.admission, reservation());
   assert.equal(denied.dispatch, undefined, 'lost ownership is not local transport closure');
   assert.equal(denied.status.code, 'limit');
   const unknown = { requestRef: 'old', effect: 'effect_unknown', code: 'owner_lost' };
@@ -937,7 +960,9 @@ test('B2 lost owner retains occupancy; exact late closure frees one without refu
     }
     assert.equal(code, '23514', column);
   }
-  const binding = (await admin.query(`SELECT execution_ref AS "executionRef",id AS "requestRef",worker,closure_token AS token
+  const binding = (await admin.query(`SELECT execution_ref AS "executionRef",id AS "requestRef",worker,closure_token AS token,
+    json_build_object('originRef',native_origin_ref,'engineIncarnation',engine_incarnation,
+      'requestNonce',request_nonce,'generation',descriptor_generation) AS native
     FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3`,
   [ctx.consumerId, first.result.executionRef, 'old'])).rows[0];
   assert.deepEqual(binding, proof);
@@ -968,13 +993,13 @@ test('B2 lost owner retains occupancy; exact late closure frees one without refu
     [ctx.consumerId, first.result.executionRef])).rows[0];
   assert.deepEqual(allowance, { max_requests: 4, max_tokens: 5000 });
   assert.equal((await a.prepare(ctx, { ...first.input, operationId: op() })).executionRef, first.result.executionRef);
-  assert.equal((await b.claim(ctx, first.result.executionRef!, 'old', live, first.admission)).dispatch, undefined);
-  assert.equal((await b.claim(ctx, first.result.executionRef!, 'fresh-old-attempt', live, first.admission)).status.code, 'fenced');
-  assert.equal((await a.claim(ctx, second.result.executionRef!, 'held', live, second.admission)).dispatch, undefined);
-  const newer = await b.claim(ctx, second.result.executionRef!, 'new', live, second.admission); assert.ok(newer.dispatch);
+  assert.equal((await b.claim(ctx, first.result.executionRef!, 'old', live, first.admission, reservation())).dispatch, undefined);
+  assert.equal((await b.claim(ctx, first.result.executionRef!, 'fresh-old-attempt', live, first.admission, reservation())).status.code, 'fenced');
+  assert.equal((await a.claim(ctx, second.result.executionRef!, 'held', live, second.admission, reservation())).dispatch, undefined);
+  const newer = await b.claim(ctx, second.result.executionRef!, 'new', live, second.admission, reservation()); assert.ok(newer.dispatch);
   await a.acknowledgeTransportClosed(ctx, owner, proof);
   assert.equal(await occupancy(ctx, account.accountRef!), 1, 'old exact ack cannot release a newer request');
-  assert.equal((await a.claim(ctx, second.result.executionRef!, 'over', live, second.admission)).dispatch, undefined);
+  assert.equal((await a.claim(ctx, second.result.executionRef!, 'over', live, second.admission, reservation())).dispatch, undefined);
   assert.deepEqual(Object.keys(await b.request(ctx, first.result.executionRef!, 'old')).sort(), ['code','effect','requestRef']);
   // Exact late ack itself must classify ownership if neither maintenance nor a
   // callback has observed expiry; otherwise a fresh ID could escape the fence.
@@ -985,37 +1010,37 @@ test('B2 lost owner retains occupancy; exact late closure frees one without refu
   assert.equal((await a.execution(ctx, second.result.executionRef!)).state, 'fenced');
   assert.equal(await occupancy(ctx, account.accountRef!), 0);
   const nextOwner = await worker(ctx);
-  assert.equal((await a.claim(ctx, second.result.executionRef!, 'no-late-replay', nextOwner, second.admission)).dispatch, undefined);
+  assert.equal((await a.claim(ctx, second.result.executionRef!, 'no-late-replay', nextOwner, second.admission, reservation())).dispatch, undefined);
 });
 
 test('B2 completed effect and failed callback retain transport until explicit owner closure', async () => {
   const ctx = context(), account = await connected(ctx), w = await worker(ctx);
   const first = await prepared(ctx, account.accountRef!), second = await prepared(ctx, account.accountRef!);
-  const completed = await a.claim(ctx, first.result.executionRef!, 'done', w, first.admission); assert.ok(completed.dispatch);
+  const completed = await a.claim(ctx, first.result.executionRef!, 'done', w, first.admission, reservation()); assert.ok(completed.dispatch);
   await a.effect(ctx, first.result.executionRef!, 'done', w, 'response_started');
   await a.effect(ctx, first.result.executionRef!, 'done', w, 'completed');
-  assert.equal((await b.claim(ctx, second.result.executionRef!, 'completed-held', w, second.admission)).dispatch, undefined);
+  assert.equal((await b.claim(ctx, second.result.executionRef!, 'completed-held', w, second.admission, reservation())).dispatch, undefined);
   await expire(ctx, w);
   await a.acknowledgeTransportClosed(ctx, w, completed.dispatch.closure);
   assert.equal((await b.request(ctx, first.result.executionRef!, 'done')).effect, 'completed');
   const fresh = await worker(ctx);
-  const later = await b.claim(ctx, first.result.executionRef!, 'later-delivery', fresh, first.admission); assert.ok(later.dispatch);
+  const later = await b.claim(ctx, first.result.executionRef!, 'later-delivery', fresh, first.admission, reservation()); assert.ok(later.dispatch);
   await a.acknowledgeTransportClosed(ctx, w, completed.dispatch.closure);
   assert.equal((await b.execution(ctx, first.result.executionRef!)).state, 'open');
-  assert.equal((await a.claim(ctx, second.result.executionRef!, 'old-proof-held', fresh, second.admission)).dispatch, undefined,
+  assert.equal((await a.claim(ctx, second.result.executionRef!, 'old-proof-held', fresh, second.admission, reservation())).dispatch, undefined,
     'an expired completed-request proof cannot close a newer delivery in the same execution');
   assert.equal(await occupancy(ctx, account.accountRef!), 1);
   await b.effect(ctx, first.result.executionRef!, 'later-delivery', fresh, 'response_started');
   await b.effect(ctx, first.result.executionRef!, 'later-delivery', fresh, 'completed');
   await b.acknowledgeTransportClosed(ctx, fresh, later.dispatch.closure);
-  const failed = await b.claim(ctx, second.result.executionRef!, 'failed', fresh, second.admission);
+  const failed = await b.claim(ctx, second.result.executionRef!, 'failed', fresh, second.admission, reservation());
   assert.ok(failed.dispatch);
   await b.effect(ctx, second.result.executionRef!, 'failed', fresh, 'effect_unknown');
   const third = await prepared(ctx, account.accountRef!);
-  assert.equal((await a.claim(ctx, third.result.executionRef!, 'failed-held', fresh, third.admission)).dispatch, undefined);
+  assert.equal((await a.claim(ctx, third.result.executionRef!, 'failed-held', fresh, third.admission, reservation())).dispatch, undefined);
   await a.acknowledgeTransportClosed(ctx, fresh, failed.dispatch.closure);
   assert.equal((await b.request(ctx, second.result.executionRef!, 'failed')).effect, 'effect_unknown');
-  assert.ok((await b.claim(ctx, third.result.executionRef!, 'after-closure', fresh, third.admission)).dispatch);
+  assert.ok((await b.claim(ctx, third.result.executionRef!, 'after-closure', fresh, third.admission, reservation())).dispatch);
 });
 
 test('B2 cleanup recovers bounded durable exact proofs; premature and stale cleanup cannot release', async () => {
@@ -1024,7 +1049,7 @@ test('B2 cleanup recovers bounded durable exact proofs; premature and stale clea
   const ctx = context(), account = await connected(ctx), owner = await worker(ctx), delegate = await worker(ctx);
   const first = await prepared(ctx, account.accountRef!, { limits: { requests: 4, concurrency: 2,
     requestBytes: 4096, outputBytes: 8192, tokens: 5000 } }, x);
-  for (const id of ['body-a','body-b']) assert.ok((await x.claim(ctx, first.result.executionRef!, id, owner, first.admission)).dispatch);
+  for (const id of ['body-a','body-b']) assert.ok((await x.claim(ctx, first.result.executionRef!, id, owner, first.admission, reservation())).dispatch);
   await x.close(ctx, op(), first.result.executionRef!);
   await expire(ctx, owner);
   const restarted = new PostgresKernel(poolB, bounds);
@@ -1042,7 +1067,7 @@ test('B2 cleanup recovers bounded durable exact proofs; premature and stale clea
   await assert.rejects(x.cleanupTransports(ctx, job.cleanupRef, owner, job.token), isCode('denied'));
   await assert.rejects(x.acknowledgeTransportClosed(ctx, delegate, { ...proof, token: randomUUID() }, authority), isCode('denied'));
   const unrelated = await connected(ctx), other = await prepared(ctx, unrelated.accountRef!, {}, x);
-  const otherPermit = await x.claim(ctx, other.result.executionRef!, 'foreign-scope', delegate, other.admission); assert.ok(otherPermit.dispatch);
+  const otherPermit = await x.claim(ctx, other.result.executionRef!, 'foreign-scope', delegate, other.admission, reservation()); assert.ok(otherPermit.dispatch);
   await assert.rejects(x.acknowledgeTransportClosed(ctx, delegate, otherPermit.dispatch.closure, authority), isCode('denied'));
   await admin.query("UPDATE ag_kernel.cleanup SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND ref=$2",
     [ctx.consumerId, job.cleanupRef]);
@@ -1056,7 +1081,7 @@ test('B2 cleanup recovers bounded durable exact proofs; premature and stale clea
   await restarted.acknowledgeTransportClosed(ctx, delegate, proof, freshAuthority);
   assert.equal(await occupancy(ctx, account.accountRef!), 1);
   const second = await prepared(ctx, account.accountRef!, {}, x);
-  assert.ok((await x.claim(ctx, second.result.executionRef!, 'newer', delegate, second.admission)).dispatch);
+  assert.ok((await x.claim(ctx, second.result.executionRef!, 'newer', delegate, second.admission, reservation())).dispatch);
   await restarted.acknowledgeTransportClosed(ctx, delegate, proof, freshAuthority);
   assert.equal(await occupancy(ctx, account.accountRef!), 2);
   await assert.rejects(x.settleCleanup(ctx, reclaimed.cleanupRef, delegate, reclaimed.token, true), isCode('conflict'));
@@ -1076,19 +1101,19 @@ test('B2 cleanup recovers bounded durable exact proofs; premature and stale clea
 test('B2 old generation, credential cleanup and restore keep occupied account capacity', async () => {
   const ctx = context(), account = await connected(ctx), w = await worker(ctx);
   const old = await prepared(ctx, account.accountRef!);
-  const permit = await a.claim(ctx, old.result.executionRef!, 'old-generation', w, old.admission); assert.ok(permit.dispatch);
+  const permit = await a.claim(ctx, old.result.executionRef!, 'old-generation', w, old.admission, reservation()); assert.ok(permit.dispatch);
   const reconnect = await a.beginAccount(ctx, { operationId: op(), kind: 'reconnect', intentDigest: digest(),
     accountRef: account.accountRef, expectedRevision: account.revision });
   const candidate = await a.startCandidate(ctx, reconnect.operationRef, w); assert.ok(candidate);
   await a.acknowledgeCandidate(ctx, reconnect.operationRef, w,
     { generation: candidate.candidate, nativePhysicalIdentity: randomUUID(), profile: candidate.profile });
   const newer = await prepared(ctx, account.accountRef!);
-  assert.equal((await b.claim(ctx, newer.result.executionRef!, 'new-generation-held', w, newer.admission)).dispatch, undefined);
+  assert.equal((await b.claim(ctx, newer.result.executionRef!, 'new-generation-held', w, newer.admission, reservation())).dispatch, undefined);
   // Claim both preexisting cleanup jobs without releasing the execution transport.
   const jobs = [await a.claimCleanup(ctx, w), await b.claimCleanup(ctx, w)];
   const generation = jobs.find(j => j?.scope.kind === 'generation'); assert.ok(generation);
   await b.settleCleanup(ctx, generation.cleanupRef, w, generation.token, true);
-  assert.equal((await a.claim(ctx, newer.result.executionRef!, 'erasure-held', w, newer.admission)).dispatch, undefined);
+  assert.equal((await a.claim(ctx, newer.result.executionRef!, 'erasure-held', w, newer.admission, reservation())).dispatch, undefined);
   await a.restore(ctx, await a.issuer(ctx), randomUUID());
   assert.equal(await occupancy(ctx, account.accountRef!), 1);
   assert.deepEqual(await b.request(ctx, old.result.executionRef!, 'old-generation'),
@@ -1100,11 +1125,11 @@ test('B2 old generation, credential cleanup and restore keep occupied account ca
   await a.acknowledgeCandidate(ctx, recovered.operationRef, w,
     { generation: recovery.candidate, nativePhysicalIdentity: randomUUID(), profile: recovery.profile });
   const current = await prepared(ctx, account.accountRef!);
-  assert.equal((await b.claim(ctx, current.result.executionRef!, 'restore-held', w, current.admission)).dispatch, undefined);
+  assert.equal((await b.claim(ctx, current.result.executionRef!, 'restore-held', w, current.admission, reservation())).dispatch, undefined);
   await a.acknowledgeTransportClosed(ctx, w, permit.dispatch.closure);
   assert.deepEqual(await b.request(ctx, old.result.executionRef!, 'old-generation'),
     { requestRef: 'old-generation', effect: 'effect_unknown', code: 'restore' });
-  assert.ok((await b.claim(ctx, current.result.executionRef!, 'restored-after-closure', w, current.admission)).dispatch);
+  assert.ok((await b.claim(ctx, current.result.executionRef!, 'restored-after-closure', w, current.admission, reservation())).dispatch);
 });
 
 test('B2 closure and cleanup authority capture whitelisted primitives before consumer lock await', async () => {
@@ -1112,10 +1137,10 @@ test('B2 closure and cleanup authority capture whitelisted primitives before con
   const x = new PostgresKernel(poolA, bounds);
   const ctx = context(), account = await connected(ctx), owner = await worker(ctx), delegate = await worker(ctx);
   const first = await prepared(ctx, account.accountRef!, {}, x), second = await prepared(ctx, account.accountRef!, {}, x);
-  const one = await x.claim(ctx, first.result.executionRef!, 'A', owner, first.admission); assert.ok(one.dispatch);
-  const two = await x.claim(ctx, second.result.executionRef!, 'B', owner, second.admission); assert.ok(two.dispatch);
+  const one = await x.claim(ctx, first.result.executionRef!, 'A', owner, first.admission, reservation()); assert.ok(one.dispatch);
+  const two = await x.claim(ctx, second.result.executionRef!, 'B', owner, second.admission, reservation()); assert.ok(two.dispatch);
   const third = await prepared(ctx, account.accountRef!, {}, x);
-  assert.equal((await x.claim(ctx, third.result.executionRef!, 'capacity-held', delegate, third.admission)).dispatch, undefined,
+  assert.equal((await x.claim(ctx, third.result.executionRef!, 'capacity-held', delegate, third.admission, reservation())).dispatch, undefined,
     'behavior regression must fail on old production before any new closure API');
   const mutable: TransportClosure = { ...one.dispatch.closure };
   await mutateAtConsumerLock(ctx, () => x.acknowledgeTransportClosed(ctx, owner, mutable),
@@ -1138,7 +1163,7 @@ test('B2 accepted insert omitting occupancy conservatively holds the account slo
     VALUES ($1,$2,'accepted-without-new-fields','dispatch_started',$3)`,
   [ctx.consumerId, first.result.executionRef, w]);
   assert.equal(await occupancy(ctx, account.accountRef!), 1);
-  const denied = await b.claim(ctx, second.result.executionRef!, 'must-stay-held', w, second.admission);
+  const denied = await b.claim(ctx, second.result.executionRef!, 'must-stay-held', w, second.admission, reservation());
   assert.equal(denied.dispatch, undefined);
   assert.deepEqual(denied.status, { requestRef: 'must-stay-held', effect: 'not_dispatched', code: 'limit' });
   const row = (await admin.query(`SELECT closure_token FROM ag_kernel.requests
@@ -1156,7 +1181,7 @@ test('B2 numbered upgrade retains legacy active, completed and unknown occupancy
     { id: 'legacy-response', effect: 'response_started' },
   ], 'numbered upgrade preserves preexisting active effects before loss classification');
   const w = await worker(legacy.ctx), fresh = await prepared(legacy.ctx, legacy.account);
-  assert.equal((await b.claim(legacy.ctx, fresh.result.executionRef!, 'legacy-held', w, fresh.admission)).dispatch, undefined);
+  assert.equal((await b.claim(legacy.ctx, fresh.result.executionRef!, 'legacy-held', w, fresh.admission, reservation())).dispatch, undefined);
   assert.equal(await occupancy(legacy.ctx, legacy.account), 4);
   const rows = (await admin.query(`SELECT id,effect,transport_occupied,closure_token FROM ag_kernel.requests
     WHERE consumer=$1 AND execution_ref=$2 ORDER BY id`, [legacy.ctx.consumerId, legacy.execution])).rows;
@@ -1177,4 +1202,325 @@ test('B2 numbered upgrade retains legacy active, completed and unknown occupancy
   await assert.rejects(a.settleCleanup(legacy.ctx, job.cleanupRef, w, job.token, true), isCode('conflict'));
   assert.equal(await count('SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
     [legacy.ctx.consumerId, legacy.execution]), 4);
+});
+
+
+// Regression: non-entry must spend a permanent request/cap while holding the
+// account slot; only exact separate closure permits the next bounded request.
+test('B2a exact positive rejection retains occupancy and spent budget until closure', async () => {
+  const ctx = context(), account = await connected(ctx), w = await worker(ctx);
+  const limits = { requests: 2, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 5000 };
+  const e = await prepared(ctx, account.accountRef!, { limits });
+  const native = reservation();
+  const first = await a.claim(ctx, e.result.executionRef!, 'first', w, e.admission, native);
+  assert.ok(first.dispatch);
+  assert.deepEqual(first.dispatch.closure.native, { ...native, generation: first.dispatch.descriptor.generation });
+  const rejected = await a.rejectBeforeDispatch(ctx, w, first.dispatch.closure, false);
+  assert.deepEqual(rejected, { requestRef: 'first', effect: 'rejected_before_dispatch', code: 'native_rejected' });
+  assert.deepEqual(await b.request(ctx, e.result.executionRef!, 'first'), rejected);
+  assert.equal((await b.execution(ctx, e.result.executionRef!)).state, 'open');
+  assert.equal(await occupancy(ctx, account.accountRef!), 1);
+  const blocked = await b.claim(ctx, e.result.executionRef!, 'held', w, e.admission, reservation());
+  assert.deepEqual(blocked, { status: { requestRef: 'held', effect: 'not_dispatched', code: 'limit' } });
+  const budget = async () => (await admin.query(
+    'SELECT request_count,max_requests,max_tokens,deadline,state FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
+    [ctx.consumerId, e.result.executionRef])).rows[0];
+  assert.equal((await budget()).request_count, 1);
+  await a.acknowledgeTransportClosed(ctx, w, first.dispatch.closure);
+  assert.deepEqual(await b.rejectBeforeDispatch(ctx, w, first.dispatch.closure, false), rejected);
+  const second = await b.claim(ctx, e.result.executionRef!, 'second', w, e.admission, reservation());
+  assert.ok(second.dispatch);
+  assert.deepEqual(second.dispatch.limits, limits);
+  assert.equal(second.dispatch.deadline, e.admission.expiresAt);
+  await b.rejectBeforeDispatch(ctx, w, second.dispatch.closure, false);
+  await a.acknowledgeTransportClosed(ctx, w, second.dispatch.closure);
+  assert.deepEqual(await budget(), { request_count: 2, max_requests: 2, max_tokens: 5000,
+    deadline: new Date(e.admission.expiresAt), state: 'open' });
+  assert.deepEqual(await a.claim(ctx, e.result.executionRef!, 'spent', w, e.admission, reservation()),
+    { status: { requestRef: 'spent', effect: 'not_dispatched', code: 'limit' } });
+  assert.equal((await budget()).request_count, 2);
+});
+
+// Regression: a wrong native tuple, worker or closure token must neither reject
+// nor release a request; generic effect and entered:true cannot bypass evidence.
+test('B2a rejection and closure require exact native dispatch identity', async () => {
+  const ctx = context(), account = await connected(ctx), w = await worker(ctx);
+  const e = await prepared(ctx, account.accountRef!);
+  const claim = await a.claim(ctx, e.result.executionRef!, 'exact', w, e.admission, reservation());
+  assert.ok(claim.dispatch);
+  const proof = claim.dispatch.closure;
+  const wrong: NativeDispatchProof[] = [
+    { ...proof, native: { ...proof.native, originRef: 'other-origin' } },
+    { ...proof, native: { ...proof.native, engineIncarnation: randomUUID() } },
+    { ...proof, native: { ...proof.native, requestNonce: randomUUID() } },
+    { ...proof, native: { ...proof.native, generation: randomUUID() } },
+    { ...proof, token: randomUUID() }, { ...proof, worker: randomUUID() },
+  ];
+  for (const invalid of wrong) {
+    await assert.rejects(b.rejectBeforeDispatch(ctx, w, invalid, false), isCode('denied'));
+    await assert.rejects(b.acknowledgeTransportClosed(ctx, w, invalid), isCode('denied'));
+  }
+  await assert.rejects(b.rejectBeforeDispatch(ctx, randomUUID(), proof, false), isCode('denied'));
+  await assert.rejects(b.rejectBeforeDispatch({ consumerId: 'other-consumer' }, w, proof, false), isCode('unknown'));
+  await assert.rejects(b.rejectBeforeDispatch(ctx, w, { ...proof, requestRef: 'other-request' }, false), isCode('unknown'));
+  await assert.rejects(b.rejectBeforeDispatch(ctx, w, { ...proof, executionRef: randomUUID() }, false), isCode('unknown'));
+  await assert.rejects(b.rejectBeforeDispatch(ctx, w, proof, true as false), isCode('invalid'));
+  await assert.rejects(b.effect(ctx, e.result.executionRef!, 'exact', w, 'rejected_before_dispatch' as never), isCode('invalid'));
+  await assert.rejects(b.claim(ctx, e.result.executionRef!, 'missing-authority', w, e.admission,
+    undefined as unknown as NativeReservation), isCode('invalid'));
+  assert.deepEqual(await b.request(ctx, e.result.executionRef!, 'exact'), { requestRef: 'exact', effect: 'dispatch_started' });
+  assert.equal(await occupancy(ctx, account.accountRef!), 1);
+  assert.equal(await count('SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
+    [ctx.consumerId, e.result.executionRef]), 1);
+  assert.equal((await a.rejectBeforeDispatch(ctx, w, proof, false)).effect, 'rejected_before_dispatch');
+});
+
+// Regression: duplicate callbacks with either original or substituted
+// reservations must never obtain another dispatch permit or rearm rejection.
+test('B2a duplicate claim races and terminal readback never grant another permit', async () => {
+  const ctx = context(), account = await connected(ctx), w = await worker(ctx);
+  const e = await prepared(ctx, account.accountRef!), native = reservation();
+  const pair = await race(ctx,
+    () => a.claim(ctx, e.result.executionRef!, 'duplicate', w, e.admission, native),
+    () => b.claim(ctx, e.result.executionRef!, 'duplicate', w, e.admission, reservation()));
+  const claims = pair.map(value => { assert.equal(value.status, 'fulfilled'); return (value as PromiseFulfilledResult<Awaited<ReturnType<PostgresKernel['claim']>>>).value; });
+  assert.equal(claims.filter(value => value.dispatch).length, 1);
+  const accepted = claims.find(value => value.dispatch)!;
+  assert.ok(accepted.dispatch);
+  const first = await a.rejectBeforeDispatch(ctx, w, accepted.dispatch.closure, false);
+  const restarted = new PostgresKernel(poolB);
+  assert.deepEqual(await restarted.rejectBeforeDispatch(ctx, w, accepted.dispatch.closure, false), first);
+  for (const input of [native, reservation()]) {
+    assert.deepEqual(await restarted.claim(ctx, e.result.executionRef!, 'duplicate', w, e.admission, input), { status: first });
+  }
+  await a.acknowledgeTransportClosed(ctx, w, accepted.dispatch.closure);
+  assert.deepEqual(await restarted.claim(ctx, e.result.executionRef!, 'duplicate', w, e.admission, reservation()), { status: first });
+  await admin.query("UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND worker=$2", [ctx.consumerId, w]);
+  assert.deepEqual(await restarted.rejectBeforeDispatch(ctx, w, accepted.dispatch.closure, false), first);
+  assert.equal(await count('SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
+    [ctx.consumerId, e.result.executionRef]), 1);
+});
+
+// Regression: a late positive non-entry report must never turn response,
+// completion or unknown into rejection, even when it has the original proof.
+test('B2a post-response completed and unknown settlements are denied', async () => {
+  for (const terminal of ['response_started', 'completed', 'effect_unknown'] as const) {
+    const ctx = context(), account = await connected(ctx), w = await worker(ctx);
+    const e = await prepared(ctx, account.accountRef!);
+    const claim = await a.claim(ctx, e.result.executionRef!, 'already-entered', w, e.admission, reservation());
+    assert.ok(claim.dispatch);
+    if (terminal === 'completed') await a.effect(ctx, e.result.executionRef!, 'already-entered', w, 'response_started');
+    await a.effect(ctx, e.result.executionRef!, 'already-entered', w, terminal);
+    await assert.rejects(b.rejectBeforeDispatch(ctx, w, claim.dispatch.closure, false), isCode('conflict'));
+    assert.equal((await b.request(ctx, e.result.executionRef!, 'already-entered')).effect, terminal);
+    assert.equal(await occupancy(ctx, account.accountRef!), 1);
+    await a.acknowledgeTransportClosed(ctx, w, claim.dispatch.closure);
+    assert.equal((await b.request(ctx, e.result.executionRef!, 'already-entered')).effect, terminal);
+  }
+});
+
+// Regression: throwing on lost lease would roll back unknown/fence and let a
+// late entered:false rehabilitate an ambiguous dispatch after closure.
+test('B2a expired original lease commits unknown and keeps the execution fenced', async () => {
+  const ctx = context(), account = await connected(ctx), w = await worker(ctx);
+  const e = await prepared(ctx, account.accountRef!);
+  const claim = await a.claim(ctx, e.result.executionRef!, 'lease-lost', w, e.admission, reservation());
+  assert.ok(claim.dispatch);
+  await admin.query("UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND worker=$2",
+    [ctx.consumerId, w]);
+  const unknown = await b.rejectBeforeDispatch(ctx, w, claim.dispatch.closure, false);
+  assert.deepEqual(unknown, { requestRef: 'lease-lost', effect: 'effect_unknown', code: 'owner_lost' });
+  assert.deepEqual(await a.request(ctx, e.result.executionRef!, 'lease-lost'), unknown);
+  assert.equal((await a.execution(ctx, e.result.executionRef!)).state, 'fenced');
+  await assert.rejects(a.rejectBeforeDispatch(ctx, w, claim.dispatch.closure, false), isCode('conflict'));
+  assert.equal(await occupancy(ctx, account.accountRef!), 1);
+  const fresh = await worker(ctx);
+  assert.equal((await a.claim(ctx, e.result.executionRef!, 'still-held', fresh, e.admission, reservation())).dispatch, undefined);
+  await b.acknowledgeTransportClosed(ctx, w, claim.dispatch.closure);
+  assert.equal(await occupancy(ctx, account.accountRef!), 0);
+  assert.deepEqual(await a.claim(ctx, e.result.executionRef!, 'after-closure', fresh, e.admission, reservation()),
+    { status: { requestRef: 'after-closure', effect: 'not_dispatched', code: 'fenced' } });
+  assert.deepEqual(await b.request(ctx, e.result.executionRef!, 'lease-lost'), unknown);
+  assert.equal(await count('SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
+    [ctx.consumerId, e.result.executionRef]), 1);
+});
+
+// Regression: missing native settlement is ambiguity, not proof of non-entry;
+// reconciliation must preserve unknown despite a late positive callback.
+test('B2a lost rejection settlement remains unknown after reconciliation and closure', async () => {
+  const ctx = context(), account = await connected(ctx), w = await worker(ctx);
+  const e = await prepared(ctx, account.accountRef!);
+  const claim = await a.claim(ctx, e.result.executionRef!, 'settlement-lost', w, e.admission, reservation());
+  assert.ok(claim.dispatch);
+  await admin.query("UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND worker=$2",
+    [ctx.consumerId, w]);
+  await b.reconcile(ctx);
+  await assert.rejects(b.rejectBeforeDispatch(ctx, w, claim.dispatch.closure, false), isCode('conflict'));
+  assert.equal((await a.request(ctx, e.result.executionRef!, 'settlement-lost')).effect, 'effect_unknown');
+  assert.equal((await a.execution(ctx, e.result.executionRef!)).state, 'fenced');
+  assert.equal(await occupancy(ctx, account.accountRef!), 1);
+  await b.acknowledgeTransportClosed(ctx, w, claim.dispatch.closure);
+  assert.equal((await a.request(ctx, e.result.executionRef!, 'settlement-lost')).effect, 'effect_unknown');
+  assert.equal((await a.execution(ctx, e.result.executionRef!)).state, 'fenced');
+});
+
+// Regression: mutable callback/proof objects must not change authority across
+// an actual DB consumer-row lock wait; only captured primitive fields are bound.
+test('B2a reservation and non-entry proof capture before actual transaction await', async () => {
+  const ctx = context(), account = await connected(ctx), w = await worker(ctx);
+  const e = await prepared(ctx, account.accountRef!);
+  const mutable = { ...reservation(), ignored: { diagnostic: 'discarded-fixture' } }, original = { ...mutable };
+  const generation = (await admin.query('SELECT generation FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
+    [ctx.consumerId, e.result.executionRef])).rows[0].generation as string;
+  const claim = await mutateAtConsumerLock(ctx,
+    () => a.claim(ctx, e.result.executionRef!, 'mutation', w, e.admission, mutable),
+    () => Object.assign(mutable, reservation()));
+  assert.ok(claim.dispatch);
+  const expected = { originRef: original.originRef, engineIncarnation: original.engineIncarnation,
+    requestNonce: original.requestNonce, generation };
+  assert.deepEqual(claim.dispatch.closure.native, expected);
+  const stored = (await admin.query('SELECT native_origin_ref,engine_incarnation,request_nonce,descriptor_generation FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3',
+    [ctx.consumerId, e.result.executionRef, 'mutation'])).rows[0];
+  assert.deepEqual(stored, { native_origin_ref: expected.originRef, engine_incarnation: expected.engineIncarnation,
+    request_nonce: expected.requestNonce, descriptor_generation: generation });
+  const proof: NativeDispatchProof = { ...claim.dispatch.closure, native: { ...claim.dispatch.closure.native } };
+  const result = await mutateAtConsumerLock(ctx, () => a.rejectBeforeDispatch(ctx, w, proof, false),
+    () => { proof.token = randomUUID(); Object.assign(proof.native, reservation(), { generation: randomUUID() }); });
+  assert.equal(result.effect, 'rejected_before_dispatch');
+  assert.deepEqual(await b.request(ctx, e.result.executionRef!, 'mutation'), result);
+  assert.equal(await occupancy(ctx, account.accountRef!), 1);
+});
+
+// Regression: storage must prevent rebinding/NULL upgrade authority, and
+// trusted cleanup must recover exact original native identity without a permit.
+test('B2a immutable stored binding survives cleanup restart and restore', async () => {
+  const ctx = context(), account = await connected(ctx), owner = await worker(ctx), delegate = await worker(ctx);
+  const e = await prepared(ctx, account.accountRef!);
+  const claim = await a.claim(ctx, e.result.executionRef!, 'cleanup-native', owner, e.admission, reservation());
+  assert.ok(claim.dispatch);
+  for (const [column, value] of [
+    ['native_origin_ref', 'replacement-origin'], ['engine_incarnation', randomUUID()],
+    ['request_nonce', randomUUID()], ['descriptor_generation', randomUUID()],
+  ]) {
+    let code: string | undefined;
+    try { await admin.query(`UPDATE ag_kernel.requests SET ${column}=$4 WHERE consumer=$1 AND execution_ref=$2 AND id=$3`,
+      [ctx.consumerId, e.result.executionRef, 'cleanup-native', value]); }
+    catch (error) { code = (error as { code?: string }).code; }
+    assert.equal(code, '23514', 'database must refuse immutable native rebinding');
+  }
+  const rejected = await a.rejectBeforeDispatch(ctx, owner, claim.dispatch.closure, false);
+  await a.close(ctx, op(), e.result.executionRef!);
+  const restarted = new PostgresKernel(poolB);
+  const job = await restarted.claimCleanup(ctx, delegate); assert.ok(job && job.scope.kind === 'execution');
+  assert.deepEqual(job.scope.transports, [claim.dispatch.closure]);
+  assert.deepEqual(await restarted.cleanupTransports(ctx, job.cleanupRef, delegate, job.token), [claim.dispatch.closure]);
+  const authority = { cleanupRef: job.cleanupRef, token: job.token };
+  const wrong = { ...claim.dispatch.closure, native: { ...claim.dispatch.closure.native, requestNonce: randomUUID() } };
+  await assert.rejects(a.acknowledgeTransportClosed(ctx, delegate, wrong, authority), isCode('denied'));
+  await assert.rejects(restarted.settleCleanup(ctx, job.cleanupRef, delegate, job.token, true), isCode('conflict'));
+  await a.acknowledgeTransportClosed(ctx, delegate, job.scope.transports[0], authority);
+  await restarted.settleCleanup(ctx, job.cleanupRef, delegate, job.token, true);
+  await a.restore(ctx, await a.issuer(ctx), randomUUID());
+  assert.deepEqual(await restarted.request(ctx, e.result.executionRef!, 'cleanup-native'), rejected);
+  const row = (await admin.query('SELECT native_origin_ref,engine_incarnation,request_nonce,descriptor_generation,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3',
+    [ctx.consumerId, e.result.executionRef, 'cleanup-native'])).rows[0];
+  assert.deepEqual(row, { native_origin_ref: claim.dispatch.closure.native.originRef,
+    engine_incarnation: claim.dispatch.closure.native.engineIncarnation, request_nonce: claim.dispatch.closure.native.requestNonce,
+    descriptor_generation: claim.dispatch.closure.native.generation, transport_occupied: false });
+  let code: string | undefined;
+  try { await admin.query("UPDATE ag_kernel.requests SET effect='dispatch_started' WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
+    [ctx.consumerId, e.result.executionRef, 'cleanup-native']); }
+  catch (error) { code = (error as { code?: string }).code; }
+  assert.equal(code, '23514', 'a positive rejection is a permanent terminal fact');
+});
+
+// Regression: an accepted SQL002 row with a token but NULL native binding must
+// not acquire proof authority or free capacity during003, cleanup or restore.
+test('B2a SQL003 legacy NULL native binding conservatively retains occupancy', async () => {
+  const ctx = nativeLegacy.ctx, fresh = await worker(ctx);
+  const fields = async () => (await admin.query('SELECT effect,closure_token,native_origin_ref,engine_incarnation,request_nonce,descriptor_generation,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3',
+    [ctx.consumerId, nativeLegacy.execution, 'pre003'])).rows[0];
+  const expected = { effect: 'completed', closure_token: nativeLegacy.token, native_origin_ref: null,
+    engine_incarnation: null, request_nonce: null, descriptor_generation: null, transport_occupied: true };
+  assert.deepEqual(await fields(), expected);
+  const e = await prepared(ctx, nativeLegacy.account);
+  assert.equal((await b.claim(ctx, e.result.executionRef!, 'legacy-held', fresh, e.admission, reservation())).dispatch, undefined);
+  const fabricated: NativeDispatchProof = { executionRef: nativeLegacy.execution, requestRef: 'pre003',
+    worker: nativeLegacy.worker, token: nativeLegacy.token,
+    native: { ...reservation(), generation: nativeLegacy.generation } };
+  await assert.rejects(a.rejectBeforeDispatch(ctx, nativeLegacy.worker, fabricated, false), isCode('denied'));
+  await assert.rejects(a.acknowledgeTransportClosed(ctx, nativeLegacy.worker, fabricated), isCode('denied'));
+  let code: string | undefined;
+  try { await admin.query(`UPDATE ag_kernel.requests SET native_origin_ref='invented',engine_incarnation=$3,
+      request_nonce=$4,descriptor_generation=$5 WHERE consumer=$1 AND execution_ref=$2 AND id='pre003'`,
+    [ctx.consumerId, nativeLegacy.execution, randomUUID(), randomUUID(), nativeLegacy.generation]); }
+  catch (error) { code = (error as { code?: string }).code; }
+  assert.equal(code, '23514');
+  await a.close(ctx, op(), nativeLegacy.execution);
+  const job = await b.claimCleanup(ctx, fresh); assert.ok(job && job.scope.kind === 'execution');
+  assert.deepEqual(job.scope.transports, [{ executionRef: nativeLegacy.execution, requestRef: 'pre003',
+    worker: nativeLegacy.worker, token: nativeLegacy.token }]);
+  await assert.rejects(a.acknowledgeTransportClosed(ctx, fresh, job.scope.transports[0],
+    { cleanupRef: job.cleanupRef, token: job.token }), isCode('invalid'));
+  await assert.rejects(b.settleCleanup(ctx, job.cleanupRef, fresh, job.token, true), isCode('conflict'));
+  await a.restore(ctx, await a.issuer(ctx), randomUUID());
+  assert.deepEqual(await fields(), expected);
+  assert.equal(await occupancy(ctx, nativeLegacy.account), 1);
+  assert.equal(await count('SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
+    [ctx.consumerId, nativeLegacy.execution]), 1);
+});
+
+// Regression: replaying one spent native nonce on a different request/execution
+// ID after closure must not convert its original reservation into another permit.
+test('B2a a spent native reservation cannot move onto fresh request identities', async () => {
+  const ctx = context(), account = await connected(ctx), w = await worker(ctx);
+  const e = await prepared(ctx, account.accountRef!), native = reservation();
+  const first = await a.claim(ctx, e.result.executionRef!, 'nonce-first', w, e.admission, native);
+  assert.ok(first.dispatch);
+  await a.effect(ctx, e.result.executionRef!, 'nonce-first', w, 'response_started');
+  await a.effect(ctx, e.result.executionRef!, 'nonce-first', w, 'completed');
+  await a.acknowledgeTransportClosed(ctx, w, first.dispatch.closure);
+  await assert.rejects(b.claim(ctx, e.result.executionRef!, 'nonce-replayed', w, e.admission, native), isCode('denied'));
+  const another = await prepared(ctx, account.accountRef!);
+  await assert.rejects(b.claim(ctx, another.result.executionRef!, 'cross-execution', w, another.admission, native), isCode('denied'));
+  assert.equal(await count('SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
+    [ctx.consumerId, e.result.executionRef]), 1);
+  assert.equal(await count('SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
+    [ctx.consumerId, another.result.executionRef]), 0);
+  const legitimate = await b.claim(ctx, e.result.executionRef!, 'nonce-new', w, e.admission,
+    { ...native, requestNonce: randomUUID() });
+  assert.ok(legitimate.dispatch);
+  assert.equal(await count('SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
+    [ctx.consumerId, e.result.executionRef]), 2);
+});
+
+
+// Regression: a legacy SQL002 token without native authority must not occupy
+// every bounded cleanup page ahead of newer requests with provable closure.
+test('B2a bounded cleanup prioritizes complete native proofs over legacy tokens', async () => {
+  const bounds = { ...defaults, maxConcurrent: 2, maintenanceBatch: 1 };
+  const x = new PostgresKernel(poolA, bounds);
+  const ctx = context(), account = await connected(ctx), owner = await worker(ctx, x), delegate = await worker(ctx, x);
+  const e = await prepared(ctx, account.accountRef!, {
+    limits: { requests: 4, concurrency: 2, requestBytes: 4096, outputBytes: 8192, tokens: 5000 },
+  }, x);
+  const claim = await x.claim(ctx, e.result.executionRef!, 'Z-bound', owner, e.admission, reservation());
+  assert.ok(claim.dispatch);
+  await x.rejectBeforeDispatch(ctx, owner, claim.dispatch.closure, false);
+  const legacyToken = randomUUID();
+  await admin.query(`INSERT INTO ag_kernel.requests(consumer,execution_ref,id,effect,worker,closure_token)
+    VALUES ($1,$2,'A-legacy-token','completed',$3,$4)`, [ctx.consumerId, e.result.executionRef, owner, legacyToken]);
+  await admin.query('UPDATE ag_kernel.executions SET request_count=2 WHERE consumer=$1 AND ref=$2',
+    [ctx.consumerId, e.result.executionRef]);
+  await x.close(ctx, op(), e.result.executionRef!);
+  const job = await x.claimCleanup(ctx, delegate); assert.ok(job && job.scope.kind === 'execution');
+  assert.deepEqual(job.scope.transports, [claim.dispatch.closure]);
+  const authority = { cleanupRef: job.cleanupRef, token: job.token };
+  await x.acknowledgeTransportClosed(ctx, delegate, job.scope.transports[0], authority);
+  const remaining = await x.cleanupTransports(ctx, job.cleanupRef, delegate, job.token);
+  assert.deepEqual(remaining, [{ executionRef: e.result.executionRef, requestRef: 'A-legacy-token',
+    worker: owner, token: legacyToken }]);
+  await assert.rejects(x.acknowledgeTransportClosed(ctx, delegate, remaining[0], authority), isCode('invalid'));
+  await assert.rejects(x.settleCleanup(ctx, job.cleanupRef, delegate, job.token, true), isCode('conflict'));
+  assert.equal(await occupancy(ctx, account.accountRef!), 1);
 });

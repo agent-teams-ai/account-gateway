@@ -1,165 +1,187 @@
-# B2 account occupancy and exact local closure handoff
+# B2a trusted native proof and positive pre-entry rejection
 
-## Unqualified mechanical continuation — 2026-10-03
+This is an unqualified guarded implementation packet. Primary owns frozen pinned
+qualification, independent exact-source xhigh review, integration and commits.
+The controller verifies author and committer are iliya <iliyazelenkog@gmail.com>.
 
-Continue only from supplied checkpoint
-`be978224d36636540f86d86c06ac1b0b76178e0b`. The prior worker ended in terminal
-`task_timeout`; the owner mechanically preserved patch `f83208b6`. Neither that
-checkpoint nor this continuation has accepted product, PostgreSQL, type or
-independent source-review qualification. Historical main/PG PASS receipts have
-been removed from this handoff: they do not qualify these bytes.
+## Source and inputs
 
-This worker owns only `services/account-gateway/`. The checkpoint already contains
-the B2 domain, PostgreSQL adapter, numbered migration and 27 actual-PG cases;
-this continuation preserves that implementation and strengthens the legacy fixture.
-SDK/kernel settlement, HTTP, native/C1, UI, RR, root workflows, dependencies and
-locks remain separate scopes. No commit, push, deploy, provisioning or inference
-is authorized here. Main owns integration and verifies author and committer
-`iliya <iliyazelenkog@gmail.com>`.
+Requested accepted main: `ded1530216501416605293398a970bbf3e19d092`.
+Observed HEAD: **UNVERIFIED**. The linked Git administrative directory is absent;
+the one index.lock preflight returned ENOENT. No Git/index mutation was retried.
+Source files remain byte-identical to the captured preimages. Apply only after
+the controller checks the requested HEAD, every entry in preimages.json and
+the patch SHA256 from guard.json. Preserve concurrent management/SQL004 and Go
+custody changes. There are no unowned changes in this patch.
 
-The single Git preflight failed because the linked metadata path
-`source-b2-partial-f83208b6/.git/worktrees/kernel-account-occupancy-b2-finish` is
-unavailable. No Git retry, index write, commit or push was attempted. HEAD, lock
-writability, exact checkpoint identity and the comparison to merged
-`1ea091f8` are **UNVERIFIED** here. No accessible merged-1ea source export was
-found in the bounded input inspection. Source inspection of the preserved service
-files is worker implementation work, not an accepted independent review.
-Integration must verify checkpoint HEAD and every exact preimage before applying
-the continuation patch; stop on any mismatch. Do not apply this delta to 1ea or
-recreate B2 from 1ea. Main separately compares the cumulative B2 diff to merged1ea.
+Contract53: `66a2393e7a55f76df1a78281af44379d0b455a0770d82f34e587dcca284157b0`.
+Q: `fdf2099991d7d7e36f9e636c3029e136104c2c22e5005bb9cbde38c1cd555fa0`.
+Exact supplied bytes are retained in the packet's inputs/ directory.
+Q protects consumer-owned primitive domain contracts from PG and SDK DTOs.
+The SDK feature contracts file remains the single public effect/schema authority.
 
-## Durable private contract
-
-`Bounds.maxConcurrent` limits occupied local transports across every execution
-in the same consumer/account, including older generations and closed/fenced
-executions. Persisted execution concurrency remains a narrower bound. Claim
-matches the persisted private admission envelope and counts account/execution
-occupancy under the existing consumer-row transaction lock, after reconciling
-expired ownership across that account. Other accounts and consumers are isolated.
-All writers must use the same configured bound. Reconciliation is bounded at 128
-rows for admission; overfull legacy accounts remain denied while classification
-progresses. Request count and stored token allowance are permanent; closure never
-refunds, widens, unfences or grants replay.
-
-`requests.transport_occupied` is independent of effect. A dispatched request
-permanently binds execution, request, original worker and a UUID `closure_token`.
-002 prevents updates rebinding those fields or reopening acknowledged occupancy.
-Only the initial dispatch claim returns the private one-request closure descriptor;
-duplicate claims return safe status without a permit. Safe RequestStatus,
-OperationStatus and account DTOs remain allowlists without closure/native material.
-
-`acknowledgeTransportClosed(context, worker, proof, cleanup?)` releases only the
-exact persisted consumer/execution/request/original-worker/token. Original-owner
-acknowledgement works after its worker lease expires and is idempotent. A late ack
-classifies still-active expired ownership as unknown/fenced in the same transaction;
-already completed/unknown effects remain unchanged. Wrong, stale or different
-request proofs cannot release a slot. Completion, failed callbacks, owner loss,
-revoke/close/restore, credential erasure and assumed upstream cancellation never
-independently clear occupancy. A trusted caller must first independently confirm
-local body/context/transport closure, including for completed delivery.
-
-Execution cleanup claims expose bounded durable `transports` descriptors;
-`cleanupTransports` pages remaining occupancy for the exact leased execution
-cleanup owner. Pages cap at min(maintenanceBatch, 128); proven requests precede
-legacy unproven requests. Delegated closure acknowledgement requires the exact
-execution scope, cleanup worker, CAS token and unexpired DB-clock cleanup lease.
-Reclaim rotates cleanup CAS, never the request proof. Done-job duplicate acks are
-accepted only for already closed matching requests and the final exact owner/token.
-Execution cleanup success is refused while any matching transport remains occupied.
-Generation cleanup does not release execution transports. New closure/cleanup
-command objects capture whitelisted primitives before validation or any await.
-
-## Numbered migration and fixture
-
-`001_kernel.sql` is unchanged, SHA-256
+Unchanged SQL001 SHA256:
 `160df664385b2a4ad8bfca2e98a5619f04322b1e2453c3f5e10a3f7d941ead15`.
-Apply 001 then real `002_transport_occupancy.sql` on a NEW empty disposable fixture.
-The actual-PG fixture seeds genuine 001-shaped rows between those migrations:
-active dispatch/response, completed, unknown and denied requests. The four accepted
-rows remain occupied with no manufactured closure token; only never-dispatched
-rows start unoccupied. The legacy test checks active effects survive migration,
-expired active effects subsequently become unknown without releasing capacity,
-terminal effects remain monotonic, request_count remains four, and cleanup refuses
-unproven closure. Admission cannot silently free an upgrading account's slots.
+Unchanged SQL002 SHA256:
+`65695ee98f728082e7131df8293ae8d1fd0c353321a2de9d769fad5dbd7fe546`.
+No dependencies, lockfiles, root configuration/workflows, facade, management,
+native, launcher or UI are modified. No installs, provider calls, credentials,
+runtime/provisioning checks, commits, pushes, deployment or package release.
 
-For an existing private 001 schema, stop old writers before applying 002 once.
-Mixed writers cannot implement this contract. Do not reset 001 or infer closure
-from deployment quiescence, a timeout or credential deletion. Legacy accepted
-requests deliberately lack closure authority and keep cleanup pending. A separately
-approved exact offline reset after independently proved transport closure would
-be needed; this patch adds no reset tool or migration platform. This first slice
-has never run production.
+## Trusted boundary and durable behavior
 
-## Main qualification and remaining gates
+claim(context, executionRef, requestId, worker, admission, reservation) requires
+a NativeReservation with opaque originRef, engineIncarnation UUID and requestNonce
+UUID. Trusted server composition must obtain it from an authenticated native
+callback, never from caller URLs, client admission fields or CI bodies. B2a does
+not authenticate/enroll a live native process; that is an explicit B3 gate.
 
-Main subsequently qualified owner checkpoint `8b62ea62b1e829e21d651e412ed77f9af5aea205`:
-pinned frozen install, TypeScript, domain 2/2, fresh PostgreSQL 17.10 27/27 with zero
-skips, build, root 26/26, Foundation, topology and Docs Protocol passed. Evidence:
-`qualification-kernel-b2-final-873be837-v1/result.json` in the durable workstream.
-Exact-head kernel and package CI also passed. Independent xhigh review is pending.
+Claim snapshots the whitelisted reservation and existing complete admission
+primitives before the pool/transaction await. The sole accepted insert permanently
+stores the original consumer/execution/request/worker and closure token alongside
+origin/incarnation/nonce and descriptor generation. The first claim alone returns
+dispatch.closure, now a NativeDispatchProof containing the exact private native
+binding. Duplicate claims return only safe status, including mismatched valid
+reservations. A spent origin/incarnation/nonce cannot be repurposed onto another
+request/execution in the same consumer; consumer serialization and SQL003's
+partial unique index enforce that tombstone after closure/restore.
 
-The later review fix keeps the SQL002 occupancy default conservative for accepted
-inserts that omit new fields, with an actual SQL/account-capacity regression. Its
-before control failed behaviorally on old8b62 (0 occupied slots instead of 1);
-the corrected fresh PostgreSQL 17.10 suite passed all 28 cases with zero skips,
-and typecheck passed. Evidence: `qualification-b2-conservative-default-v1/result.json`.
-The original account-wide race also failed on actual merged1ea production
-(2 dispatches instead of 1), with successful setup and no missing API or compiler
-failure: `qualification-b2-original-capacity-negative-v1/result.json`. SQL001
-is unchanged. No native transport, supervisor or product gate is accepted here.
+rejectBeforeDispatch(context, worker, proof, false) is a dedicated trusted
+settlement, requiring the exact immutable dispatch/closure tuple, original current
+worker lease and dispatch_started effect. Literal entered:false is mandatory.
+Wrong origin/incarnation/nonce/generation/worker/token and other scope are denied;
+response_started, completed and effect_unknown cannot be relabeled. An exact
+duplicate may read prior rejection after lease expiry and never rearm it.
+Generic effect(next) excludes rejected_before_dispatch both in types and at runtime.
 
-### Historical continuation worker checks
+Positive rejection commits rejected_before_dispatch/native_rejected, keeps the
+execution open and retains transport occupancy. Each accepted claim permanently
+spends its request slot and original per-request token cap. limits.tokens remains
+output+reasoning per request; requests*tokens is the conservative allowance ceiling.
+There is no refund/billing ledger, retry, failover, replay, renewal or scheduler.
 
-Current execution receipts are external to the source tree. All qualification
-claims must bind their result hashes. Node 24.21.0 syntax checks and both domain tests passed locally; exact final
-file hashes and per-command exit codes are recorded in external evidence. These
-checks do not establish PostgreSQL correctness. The pnpm launcher is present but
-its referenced corepack binary is missing, so pnpm qualification cannot run.
+Only separate exact acknowledgeTransportClosed releases occupancy. It requires
+the native binding as well as original worker/token/scope; cleanup delegation
+retains existing execution lease/CAS checks. Cleanup reads the durable original
+native binding and never returns a dispatch permit. Bounded pages prioritize
+complete native proofs ahead of legacy tokens without native authority, so legacy
+occupancy does not prevent provable closures from progressing. Deadline, revoke, owner loss,
+restore, erasure and effect completion do not themselves release occupancy.
+Loss of the original lease during a valid rejection settlement returns committed
+effect_unknown/owner_lost and a durable fence, rather than throwing and rolling
+back that fact. Late non-entry reports cannot rehabilitate unknown. Accepted
+rejection survives later owner loss/restore/cleanup classification.
 
-**NOT_RUN by the continuation worker:** TypeScript, frozen dependency install, formatter,
-all 27 actual PostgreSQL cases, before-source negative controls, build/root tests,
-Foundation/topology, Docs Protocol, exact CI, independent xhigh source review and
-product/actual transport/supervisor acceptance. No node_modules, tsc or psql were
-present at preflight. No dependencies or DB were installed or provisioned here.
-Main supplies pinned pnpm 11.28.2, Node 24.21.x and a NEW PostgreSQL 17.10 fixture.
+Apply numbered003 once after unchanged001/002 with old writers stopped. SQL003
+retains existing rows' exact occupancy/token, adds NULL native bindings without
+backfill authority, enforces all-or-none new binding and immutable generation/
+origin/incarnation/nonce, and preserves rejection as terminal. Legacy accepted
+rows cannot gain native authority or release occupancy via guessed proofs, even
+when an old SQL002 closure token exists. Their cleanup remains pending; no reset
+or grant reopening is added.
 
-The main qualification recipe runs typecheck, domain tests and all PG cases with zero skips.
-The test guard requires `AG_KERNEL_TEST_ALLOW=disposable_pg17_10`, a newly created
-localhost DB named `ag_kernel_test_[a-z0-9_]+`, `AG_KERNEL_DISPOSABLE_DB` equal to
-that name and a matching locally supplied `AG_KERNEL_TEST_DSN`. Never export the
-DSN or vendor bodies. The fixture refuses an existing ag_kernel schema and leaves
-its new schema for inspection; it never drops/reset an old DB.
+SDK effectState adds rejected_before_dispatch. Safe positive errors require
+retry.kind=never; request status requires failed plus a consistent safe error,
+and operation readback permits that effect only in rejected state. Unknown,
+completed, missing-error and retry-inferred variants are rejected. Strict public
+schemas and internal safe status projections exclude the private tuple/proof.
 
-Retain the eight named B2 actual-PG cases. In a separate NEW disposable DB, main
-runs them against actual merged1ea production while retaining these tests and
-numbered migrations. The regressions first assert observed old-boundary behavior
-(account admission or premature cleanup), before using the new closure APIs;
-failure must identify that behavioral assertion, not missing columns/methods or
-compiler failure. Legacy upgrade additionally reads only preexisting effect
-fields before its admission oracle. No mock-only or source-string tests qualify.
+## Tests and actual worker checks
 
-Separate **future integration gates**: SDK/kernel settlement and concrete transport
-adapters must carry private closure evidence and acknowledge completed delivery;
-cleanup/supervisor must independently confirm closure in B3/D. Existing outer
-settlement alone cannot satisfy the new contract. `rejected_before_dispatch` is a
-later additive boundary checkpoint; no public SDK change is included here. Main
-also runs the cumulative <=2000-LOC check, exact-head CI and independent xhigh
-review. B2 is a private durable contract, not live-provider acceptance.
+Twelve new behavior tests state their regression before each test. Eleven use the
+real guarded migrated PostgreSQL fixture; one tests public wire validators with
+independent literal payloads in the existing owned PostgreSQL TS test module.
+Existing claim/race/cleanup tests are preserved and supply explicit test-only
+native reservations. No mocks, source-string tests or production test hooks.
 
-Main commands after providing the guarded NEW disposable fixture locally:
+Coverage: rejection then occupied capacity denial; exact closure then fresh
+request with permanently spent budget; every binding mismatch and generic bypass;
+duplicate callback race/readback; post-response/completed/unknown denial; durable
+lost-lease unknown/fencing and lost settlement; mutation across an observed actual
+DB transaction lock wait; immutable SQL binding, cleanup restart/CAS and restore;
+real pre003 accepted NULL-native row with an old token; native nonce reuse across
+request/execution identities; bounded cleanup progress before legacy token rows;
+positive/negative literal SDK wire payloads.
+
+The supplied tree has **no tests/validation.test.mjs**. Creating a new handwritten
+MJS test is prohibited, so wire assertions are in the existing owned
+services/account-gateway/test/postgres.test.ts, within the service's meaningful
+TypeScript project. They run with its real PG qualification; no absent test file
+or unrelated tests were invented/edited. Primary should confirm this supplied-tree
+discrepancy when integrating.
+
+Worker PASS: Node 24.21.0 executes the two unchanged domain tests against the
+candidate domain, 2/2, zero skips. Final TypeScript stripping/module syntax for
+all four edited TS files: PASS 4/4. These are syntax checks only.
+Direct node --check on TS initially failed because that CLI path does not strip
+TypeScript; raw receipts are retained. The final syntax check uses Node's built-in
+stripTypeScriptTypes and SourceTextModule without resolving/evaluating imports.
+
+**NOT_RUN:** TypeScript typecheck, frozen pinned dependencies, every real PG/SDK
+behavior case, SDK build/root suites, Foundation/topology/Docs Protocol, exact-head
+CI and independent xhigh review. No node_modules, tsc, psql or disposable fixture
+are available. pnpm's launcher references a missing corepack binary. No replacement
+tools/dependencies/DB were installed. This packet claims no PG/product acceptance.
+
+Primary's installed pinned environment uses Node24.21.x, pnpm11.28.2,
+TypeScript7.0.2, pg/@types-pg8.23.1 and a NEW disposable PostgreSQL17.10 database.
+Use the existing AG_KERNEL_TEST_ALLOW=disposable_pg17_10 designation, a localhost
+ag_kernel_test_[a-z0-9_]+ database with matching AG_KERNEL_DISPOSABLE_DB, and supply
+AG_KERNEL_TEST_DSN locally without logging/exporting it. The fixture refuses an
+existing schema and retains the new schema for inspection. Never use real projects.
+
+Commands after guarded integration and primary-provided frozen dependencies:
 
 ```sh
 pnpm --filter @agent-teams/account-gateway-kernel typecheck
 pnpm --filter @agent-teams/account-gateway-kernel test:domain
 pnpm --filter @agent-teams/account-gateway-kernel test:pg
-# Separate NEW negative-control fixture with old merged1ea production only:
-node --test --test-concurrency=1 --test-name-pattern='^B2 ' services/account-gateway/test/postgres.test.ts
+pnpm build
+pnpm test
+pnpm foundation
+pnpm check:topology
+pnpm docs:check
 ```
 
-Continuation artifacts (outside the source worktree) are in
-`/srv/worker-state/jobs/account-gateway/first-slice-v1/jobs/account-gateway-20261003-kernel-account-occupancy-b2-finish/tmp/agent/b2-finish-artifacts/`:
-`preimages.json`, `continuation.patch`, `guard.json`, `apply-guarded.py` and
-`verification.json`. The patch is a delta from the observed mechanical checkpoint,
-not a replacement/cumulative patch from merged1ea. The guard verifies exact HEAD,
-all five preimages, patch hash and unchanged 001 before applying; it performs no
-commit/push. `verification.json` carries truthful NOT_RUN gates.
+Primary must run the complete existing PG suite plus all B2a tests with zero skips,
+then exact-source gpt-6.1-sol/xhigh/default review. Model/effort/serviceTier cannot
+be set or attested by this worker's callable tools; requested writer configuration
+is gpt-6.1-sol/high/default, NO FAST. Runtime declares network enabled, but full
+Internet capability is unverified and cannot be expanded through these tools.
+Filesystem/credential isolation was preserved; no secret paths were read.
+
+Remaining B3 gates: real authenticated native process/incarnation enrollment,
+private callback/settlement composition, physical transport/body/context closure,
+protected launcher/inherited-lock and exact old-process retirement qualification.
+This additive kernel/SDK packet does not establish those product/runtime gates.
+
+## Packet file hashes
+
+Exact candidate and preimage hashes, input digests, patch digest, actual checks
+and patch reconstruction/source-preservation receipts live in guard.json and
+verification.json next to changes.patch. Those external manifests include this
+handoff's digest without a circular self-reference.
+
+## Primary qualification - 2026-10-03
+
+The owner verified the exact ded15302 base, every preimage and guarded worker
+patch75c7629f before materializing a separate qualification clone. SQL001/002
+remain unchanged. The actual initial PG37/40 failed one stale independent test
+SELECT and two direct SQL calls because SQL003's trigger referenced executions
+through caller search_path. The table is now schema-qualified; the test reads
+the full immutable proof. A completed-effect nonce control uses APIs present
+in both versions, with actual old production admitting a spent nonce (valid
+behavioral failure, not a missing API).
+
+Public wire coverage belongs to the existing SDK HTTP client suite, not a
+cross-package private import in the neutral kernel PG fixture. It checks exact
+positive non-entry status, contradictory statuses/errors, private proof rejection
+and one request per public invocation. No architecture exception or dependency
+was added. Source/installed boundary schemas remain SDK-owned.
+
+Pinned frozen pnpm11.28.2, TypeScript7 typecheck, SDK build/domain2, root27 HTTP/
+architecture/docs behavior cases, Foundation, Docs Protocol and topology pass.
+The final separate39-case PG17.10 receipt is retained in the primary qualification
+directory. Independent exact-source xhigh review and current CI remain required.
+This unused checkpoint does not qualify native registration, process closure,
+launcher, facade authentication, providers, product UI, deploy or assembled E2E.
