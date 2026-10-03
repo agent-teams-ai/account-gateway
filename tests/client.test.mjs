@@ -49,6 +49,7 @@ test('all thirteen facade routes, exact native bytes and stable readback identit
     }
     const body = JSON.parse(await read(req));
     assert.equal(body.operationId, 'op-a');
+    if (req.url === '/v1/executions') assert.equal(body.bindingRevision, 7);
     assert.ok(req.url.endsWith('/close') ? req.headers.authorization === 'Bearer fixture-run' : req.headers.authorization === 'Bearer fixture-control');
     if (req.method === 'PATCH' || req.url.endsWith('/reconnect') || req.url.endsWith('/disable')) assert.equal(body.expectedMetadataRevision, 2);
     json(res, { operationRef: body.operationId, state: 'pending' }, 202);
@@ -58,7 +59,7 @@ test('all thirteen facade routes, exact native bytes and stable readback identit
   await m.rename('account-a', { operationId: 'op-a', expectedMetadataRevision: 2, displayName: 'New' });
   await m.reconnect('account-a', { operationId: 'op-a', expectedMetadataRevision: 2, credential: { kind: 'api_key', value: 'fixture-write-only' } });
   await m.disable('account-a', { operationId: 'op-a', expectedMetadataRevision: 2 }); await m.operation('op-a');
-  await m.prepare({ operationId: 'op-a', invocationRef: 'run-a', attemptRef: 'attempt-a', accountRefs: ['account-a'], subjectRef: 'policy-a', policyRevision: 1, profileId: 'mimo', limits: bounds, deadline: admission.expiresAt });
+  await m.prepare({ operationId: 'op-a', invocationRef: 'run-a', attemptRef: 'attempt-a', accountRefs: ['account-a'], subjectRef: 'policy-a', policyRevision: 1, bindingRevision: 7, profileId: 'mimo', limits: bounds, deadline: admission.expiresAt });
   const stream = await e.request('execution-a', { requestId: 'request-a', admission, body: native });
   assert.equal(await new Response(stream.body).text(), 'data: final\n\n');
   assert.equal((await e.status('execution-a', 'request-a')).effect, 'completed');
@@ -271,6 +272,8 @@ test('request and operation readback reject contradictory nested diagnostics wit
  const rejectRequest=promise=>assert.rejects(promise,error=>error.code==='invalid_response' && error.effect==='effect_unknown' && error.requestRef==='stable-request');
  // Isolate identity, effect and timed retry contradictions, rather than relying on one bad field.
  for(const status of [
+  {...ambiguous,effect:'not_dispatched'},
+  {...ambiguous,status:'completed'},
   {...ambiguous,error:{...requestError,requestRef:'another-request'}},
   {...ambiguous,error:{...requestError,effect:'not_dispatched'}},
   {...ambiguous,error:{...requestError,effect:'not_dispatched',retry:{kind:'after',milliseconds:1}}},
@@ -298,7 +301,7 @@ test('request and operation readback reject contradictory nested diagnostics wit
  assert.deepEqual(await e.status('execution-a','stable-request'),response);
  assert.deepEqual(await e.request('execution-a',{requestId:'stable-request',admission,body:Buffer.from('{}')}),{kind:'status',status:response});
  assert.deepEqual(observed,[
-  ...Array.from({length:4},()=>['GET /v1/executions/execution-a/requests/stable-request','POST /v1/executions/execution-a/requests']).flat(),
+  ...Array.from({length:6},()=>['GET /v1/executions/execution-a/requests/stable-request','POST /v1/executions/execution-a/requests']).flat(),
   ...Array(3).fill('GET /v1/operations/stable-op'),
   'GET /v1/executions/execution-a/requests/stable-request','GET /v1/operations/stable-op',
   'GET /v1/executions/execution-a/requests/stable-request','POST /v1/executions/execution-a/requests',

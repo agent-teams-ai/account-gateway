@@ -13,6 +13,10 @@ their own users, membership and repository policies.
 
 Operation references equal stable caller operation IDs in the authenticated
 consumer namespace. Request references equal caller request IDs per execution.
+Preparation retains opaque string invocation/attempt references and independent
+policy and repository-binding revisions. An unknown request status cannot assert
+absence of dispatch; completed status requires a completed effect. Cancellation
+can retain an accepted effect. The service must persist and enforce this envelope.
 Lost acknowledgements use safe readback, never automatic mutation/inference
 retry. Readback excludes credentials and provider payloads; uncertain effects
 fence the invocation even when a caller supplies another request identity.

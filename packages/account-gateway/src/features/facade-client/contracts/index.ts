@@ -32,13 +32,14 @@ export const preparationOperation = operation.refine(v => v.state !== 'applied' 
 export const acknowledgementOperation = operation.refine(v => v.state !== 'applied' || !v.result);
 export const execution = z.strictObject({ executionRef: reference, accountRef: reference, authorizationEpoch: revision, profileId: reference, deadline, state: executionState });
 export const requestStatus = z.strictObject({ requestRef: reference, effect: effectState, status: z.enum(['pending', 'completed', 'cancelled', 'failed', 'unknown']), error: safeError.optional() })
-  .refine(v => !v.error || (
+  .refine(v => (v.status !== 'unknown' || v.effect === 'effect_unknown') &&
+    (v.status !== 'completed' || v.effect === 'completed') && (!v.error || (
     (v.error.requestRef === undefined || v.error.requestRef === v.requestRef) &&
     v.error.effect === v.effect &&
     (v.status !== 'unknown' || v.error.retry.kind !== 'after')
-  ));
+  )));
 export const limits = z.strictObject({ requests: z.number().int().min(1).max(10000), requestBytes: z.number().int().min(1).max(16777216), outputBytes: z.number().int().min(1).max(67108864), tokens: z.number().int().min(1).max(10000000), concurrency: z.number().int().min(1).max(128) });
-export const prepare = z.strictObject({ operationId: reference, invocationRef: reference, attemptRef: reference, accountRefs: z.array(reference).min(1).max(100), subjectRef: reference, policyRevision: revision, profileId: reference, limits, deadline });
+export const prepare = z.strictObject({ operationId: reference, invocationRef: reference, attemptRef: reference, accountRefs: z.array(reference).min(1).max(100), subjectRef: reference, policyRevision: revision, bindingRevision: revision, profileId: reference, limits, deadline });
 export const rename = z.strictObject({ operationId: reference, expectedMetadataRevision: revision, displayName: z.string().min(1).max(128) });
 export const disable = z.strictObject({ operationId: reference, expectedMetadataRevision: revision });
 export const close = z.strictObject({ operationId: reference, reason: z.enum(['completed', 'cancelled', 'failed', 'deadline', 'revoked']) });
