@@ -376,16 +376,34 @@ export class PostgresKernel implements DurableKernel {
     uuid(ref); identifier(id); uuid(worker);
     if (!['response_started','completed','effect_unknown'].includes(next)) throw new KernelError('invalid');
     return this.transaction(context, async tx => {
-      const r = await this.one(tx, 'SELECT * FROM requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3', [tx.consumer, ref, id]);
+      const r = await this.one(tx, `SELECT r.*,w.lease_until>clock_timestamp() AS live FROM requests r
+        LEFT JOIN workers w ON w.consumer=r.consumer AND w.worker=r.worker
+        WHERE r.consumer=$1 AND r.execution_ref=$2 AND r.id=$3`, [tx.consumer, ref, id]);
       if (r.worker !== worker) throw new KernelError('denied');
-      if (r.effect === next) return requestStatus(r);
-      if (!['dispatch_started','response_started'].includes(r.effect) ||
-          (next === 'response_started' && r.effect !== 'dispatch_started') ||
-          (next === 'completed' && r.effect !== 'response_started')) throw new KernelError('conflict');
-      const changed = (await tx.db.query('UPDATE requests SET effect=$4 WHERE consumer=$1 AND execution_ref=$2 AND id=$3 RETURNING *',
-        [tx.consumer, ref, id, next])).rows[0];
-      if (next === 'effect_unknown') await this.fenceExecution(tx, ref);
-      return requestStatus(changed);
+      // Terminal readback never grants dispatch and accepted completion survives owner loss.
+      if (!['dispatch_started','response_started'].includes(r.effect)) {
+        if (r.effect === next) return requestStatus(r);
+        throw new KernelError('conflict');
+      }
+      if (r.live) {
+        if (next === 'completed' && r.effect !== 'response_started') throw new KernelError('conflict');
+        // Recheck at the write, including same-state readback: a lease can expire
+        // after the read. Consumer serialization also prevents lease resurrection.
+        const changed = (await tx.db.query(`UPDATE requests r SET effect=$4
+          WHERE r.consumer=$1 AND r.execution_ref=$2 AND r.id=$3 AND EXISTS
+          (SELECT 1 FROM workers w WHERE w.consumer=r.consumer AND w.worker=r.worker
+            AND w.lease_until>clock_timestamp()) RETURNING r.*`, [tx.consumer, ref, id, next])).rows[0];
+        if (changed) {
+          if (next === 'effect_unknown') await this.fenceExecution(tx, ref);
+          return requestStatus(changed);
+        }
+      }
+      // Return after committing classification; throwing inside this transaction
+      // would roll back both the unknown effect and its durable execution fence.
+      const lost = (await tx.db.query(`UPDATE requests SET effect='effect_unknown',code='owner_lost'
+        WHERE consumer=$1 AND execution_ref=$2 AND id=$3 RETURNING *`, [tx.consumer, ref, id])).rows[0];
+      await this.fenceExecution(tx, ref);
+      return requestStatus(lost);
     });
   }
   async fence(context: TrustedContext, id: string, subject: string, revision: number): Promise<OperationStatus> {
@@ -466,7 +484,8 @@ export class PostgresKernel implements DurableKernel {
       const es = await tx.db.query("UPDATE executions SET state='fenced' WHERE consumer=$1 RETURNING ref", [tx.consumer]);
       for (const e of es.rows) await this.cleanup(tx, undefined, e.ref);
       await tx.db.query("UPDATE accounts SET state='quarantined',epoch=epoch+1 WHERE consumer=$1 AND state IN ('active','staging')", [tx.consumer]);
-      await tx.db.query("UPDATE candidates SET state='quarantined' WHERE consumer=$1 AND state IN ('ready','creating','staged')", [tx.consumer]);
+      const cs = await tx.db.query("UPDATE candidates SET state='quarantined' WHERE consumer=$1 AND state IN ('ready','creating','staged','quarantined') RETURNING generation", [tx.consumer]);
+      for (const c of cs.rows) await this.cleanup(tx, c.generation);
       await tx.db.query("UPDATE operations SET state='unknown',code='restore' WHERE consumer=$1 AND state='pending'", [tx.consumer]);
     });
   }

@@ -1,27 +1,71 @@
 # Private kernel wire-policy bridge
 
-This candidate adds only `services/account-gateway/`. It copies the immutable
-original kernel and completes its private persistence policy before the future
-HTTP facade. SDK, engine/native identity, root workspace, native lock and CI
-remain under their respective writers. No commit, push, provisioning, provider
-inference, credential access or global runtime/product change was performed.
+The original kernel producer owned only `services/account-gateway/`. The
+assembled PR3 also includes root workspace/lockfile, Foundation policy and CI
+integration supplied by other writers. This remediation owns only
+`services/account-gateway/`, `tests/source-policy.test.mjs` and
+`.github/workflows/checkpoint-b-kernel.yaml`; other writers' files are untouched.
+No commit, push, provisioning, provider inference or credential access occurred.
 
 ## Source and qualification identity
 
-The controller supplied canonical main source `07234f60` and stated its source
-tree equals reviewed `226a090`. These are supplied identities. Git observation
-failed because the linked worktree metadata is inaccessible; no Git SHA was
-inferred. `EVIDENCE.json` records fingerprints of the actual available source,
-SDK authority and candidate files. All 21 immutable input hashes were verified.
+The requested base is `8cc30167ce3f2a1e4b2c19b4caf7dc8558519be0`.
+Linked Git metadata is unavailable, so that supplied identity is not represented
+as an observed HEAD. The guarded external patch records exact observed preimage
+and result SHA-256 values. Candidate-only `EVIDENCE.json` was removed because its
+old e9 fingerprints and superseding claims contradicted later main evidence.
 
-The retained receipt at
-`.spike-inputs/evidence/qualification-kernel-24a13795-v1/results.json` qualifies
-**prior candidate 24a13795**: native frozen-lock integration/install, TypeScript,
-domain 2/2 and actual PostgreSQL 9/9 PASS, including the late-deadline race.
-Those results do not qualify this changed candidate. New candidate: local Node
-24.21.0 domain 2/2 and syntax checks PASS; TypeScript, frozen install and all 13
-PostgreSQL cases NOT_RUN. Dependencies are absent and no worker DB is designated.
-Only main may run heavy qualification in a NEW dedicated sandbox.
+Historical main qualification applies to guarded patch
+`10354c7d1847ed300b6dcf20c0665b620b6195e3cfcd150149abc1cc149f8d9f`:
+`.spike-inputs/qualification/results.json` reports frozen installation,
+TypeScript and domain PASS; `postgres.log` records 13/13 actual PG PASS.
+These supplied receipts match `.spike-inputs/INPUT-HASHES.json`.
+They do **not** qualify the new remediation.
+
+Current worker checks: Node 24.21.0 domain 2/2 PASS and Node syntax checks for
+three source files, two TS test files and the source-policy test PASS.
+Typecheck, actual Foundation/source-policy behavior, Docs Protocol validation,
+frozen installation and all 15 PostgreSQL cases are NOT_RUN here: dependencies
+are absent, and main owns fresh database and CI qualification. No install or
+DB gate wait was performed. Main must run the new exact patch through these
+gates and independent `gpt-6.1-sol/xhigh/default` review.
+
+## Bounded PR3 remediation
+
+1. Effect progression now checks the exact worker's DB-clock lease and qualifies
+   the UPDATE with that lease. Expired in-flight callbacks commit `effect_unknown`
+   with `owner_lost`, execution fencing and durable cleanup. Returning the status
+   commits classification; throwing inside the transaction would roll it back.
+   Same-state callbacks also check the lease. Terminal accepted completion remains
+   monotonic, and readback never yields a dispatch permit. A new real PG case
+   expires exact leases before maintenance, observes durable unknown/fencing and
+   tests duplicate/fresh-id replay denial plus completed-effect preservation.
+2. Restore enqueues generation cleanup for every quarantined candidate in the
+   same transaction: ready, creating, staged and previously quarantined, including
+   absent native identity. Existing generation uniqueness keeps repeated restore idempotent.
+   A new PG case claims and settles active and pending-generation cleanup,
+   preserves absent physical identity, checks exact scopes and foreign isolation,
+   and verifies repeated restore before and after settlement.
+3. Stale candidate-only evidence is removed; historical main 13/13 proof above
+   remains explicitly tied to prior 103 rather than the new changes.
+4. Source-policy tests clone actual governed sources, manifests and policy into
+   disposable fixtures and invoke the installed Foundation CLI. Type-only `pg`
+   imports mutate only the fixture. Valid-policy checks precede negative checks;
+   actual domain bytes are verified pristine. SIGKILL can leave only temp files.
+   Actual CLI behavior still requires main's installed dependencies.
+5. SQL adds `(consumer, account_ref)` indexes for candidates and open executions
+   used by account disable. No ORM, framework or scheduler was added.
+6. Original producer ownership and assembled PR ownership are distinguished above.
+7. TS configuration sets `lib: [ES2024]` and `erasableSyntaxOnly: true` for Node
+   stripping. Full TypeScript qualification remains with main.
+8. Kernel workflow concurrency is keyed by workflow/ref and cancels superseded runs.
+9. Domain tests independently reject concurrency 129 with requests 300, accept
+   the 128 ceiling and retain requests 32/concurrency 33 cross-field rejection.
+10. Actual DB lock observation has a bounded 15-second monotonic timeout without
+    replay/retry. The deadline case records a claim transaction starting before
+    expiry, waits to its persisted deadline using DB time, and releases the lock
+    after observed expiry. Its fixture allows 10 seconds for setup; production
+    deadlines and admission behavior are unchanged.
 
 ## Policy and private persistence
 
@@ -93,8 +137,9 @@ use explicitly bounded test instances to compare valid but different concurrency
 values; production defaults and validation were preserved. Root integration also
 passed build, 24 tests and actual Foundation/dev-only checks; the new Foundation
 boundaries govern private source and tests and reject database types in policy.
-Receipts: `qualification-kernel-10354c7d-v1`. Earlier worker NOT_RUN statements
-describe worker-local availability; this paragraph records later controller work.
+Supplied receipts are under `.spike-inputs/qualification/` and match the input
+hash manifest. This is historical main evidence for prior 103; current worker
+NOT_RUN gates above describe this new remediation.
 
 Promise-returning port validation remains async. Cleanup tokens/ownership,
 issuer restore, physical-generation proof checks and monotonic accepted effects
@@ -104,6 +149,26 @@ writer's qualification. Readback/restore/reconcile never replay inference.
 Current concurrency/request accounting is per execution. Account-global provider
 admission, native transport byte/token enforcement and the HTTP service remain
 dependent B work; this unused private kernel does not establish those gates.
+
+## Current main qualification - 2026-10-03
+
+Main assembled the reviewed-source-base remediation with merged SDK PR2
+`83f0c7ca` and corrected two observed test-harness failures: PostgreSQL activity
+snapshots retained an earlier idle transaction; the ten-second deadline barrier
+also let the pool close an observed backend. The harness now explicitly refreshes
+PG activity snapshots and keeps its two test-only backend identities alive.
+No production lease, deadline or admission policy was relaxed.
+
+Assembled source patch `b24715c89865aa3a1b1b43a9954cd24ce5fad521d128864fc76867e0aafedfef`
+passed frozen install, TypeScript, domain 2/2, build, all 26 root tests, actual
+Foundation/source-policy and dev-only checks, and PostgreSQL 15/15 in a NEW
+empty PG17.10 fixture. Receipts are retained under
+`qualification-kernel-integrated-b24715c8-v1` in main-owned durable evidence.
+Earlier 4706 and 7193 fixtures retain the real harness failures; they are not
+claimed PASS. This qualifies the current code changes, not facade/native/product
+acceptance. Independent exact-commit xhigh review and final CI remain pending.
+The additional text in this handoff records completed main evidence; it is not
+an observed Git identity or a claim that the worker ran those gates.
 
 ## Main qualification and integration
 
@@ -127,6 +192,6 @@ than dropping it. Use a new DB for every complete rerun.
 This is a fresh private schema, not an upgrade/migration of a deployed service.
 Main must review the exact candidate with `gpt-6.1-sol/xhigh`, serviceTier default,
 and integrate/commit with author and committer iliya <iliyazelenkog@gmail.com>.
-There is no generated checkpoint patch inside the source tree. This handoff does
-not assert new PG/typecheck PASS, public HTTP acceptance, native identity
+Guarded patch and evidence live outside the source tree in the worker artifact
+directory. This handoff does not assert new PG/typecheck/source-policy PASS, public HTTP acceptance, native identity
 qualification, production capacity, production cutover or public release.

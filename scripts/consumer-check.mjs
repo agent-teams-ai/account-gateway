@@ -12,6 +12,17 @@ const gm = await import('@agent-teams/account-gateway/get-modular');
 assert.equal(networkRequests,0,'importing declarations and entrypoints must be inert');
 channel('undici:request:create').unsubscribe(observe);
 assert.equal(wire.account.safeParse({}).success, false);
+// Both independently installed archives must expose the selected preparation contract.
+const selected = {kind:'execution',executionRef:'execution-selected',accountRef:'account-b',authorizationEpoch:17,deadline:'2026-10-03T23:00:00Z',state:'active'};
+const prepared = {operationRef:'prepare-selected',state:'applied',result:selected};
+assert.deepEqual(wire.preparationOperation.parse(prepared), prepared);
+assert.deepEqual(wire.operation.parse(prepared), prepared);
+for (const field of ['accountRef','authorizationEpoch']) {
+ const incomplete={...selected};delete incomplete[field];
+ assert.equal(wire.preparationOperation.safeParse({...prepared,result:incomplete}).success,false);
+ assert.equal(wire.operation.safeParse({...prepared,result:incomplete}).success,false);
+}
+assert.equal(wire.operation.safeParse({...prepared,result:{...selected,nativeDescriptor:'private-sentinel'}}).success,false);
 assert.equal(typeof sdk.createManagementClient, 'function');
 assert.equal(typeof gm.constructExecutionClient, 'function');
 assert.equal('connect' in sdk.createExecutionClient({ origin:'http://127.0.0.1:1', role:'execution', token:'fixture-only' }), false);
@@ -45,6 +56,11 @@ if(false) {
  run.connect({});
  // @ts-expect-error management config cannot be an execution role
  createManagementClient({origin:'http://127.0.0.1:1',role:'execution',token:'fixture'});
+}
+// Declaration closure must expose required selected fields after result discrimination.
+export function selectedIdentity(operation: Operation): {accountRef: string; authorizationEpoch: number} | undefined {
+ if(operation.state!=='applied' || operation.result?.kind!=='execution') return undefined;
+ return {accountRef:operation.result.accountRef,authorizationEpoch:operation.result.authorizationEpoch};
 }
 export type Closure=[Account, Operation, Prepare, ListQuery, typeof constructManagementClient, typeof bindExecutionFactory];
 `);

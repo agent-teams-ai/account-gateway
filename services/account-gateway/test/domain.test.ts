@@ -9,7 +9,9 @@ test('bounds reject zero, fractions, nonfinite values and independent hard ceili
   }
   assert.throws(() => boundedConfig({ ...defaults, extra: 1 } as typeof defaults), KernelError);
   assert.throws(() => boundedConfig({ ...defaults, cleanupLeaseMs: 300_001 }), KernelError);
-  assert.throws(() => boundedConfig({ ...defaults, maxConcurrent: 33 }), KernelError);
+  assert.throws(() => boundedConfig({ ...defaults, maxRequests: 300, maxConcurrent: 129 }), KernelError);
+  assert.throws(() => boundedConfig({ ...defaults, maxRequests: 32, maxConcurrent: 33 }), KernelError);
+  assert.equal(boundedConfig({ ...defaults, maxRequests: 300, maxConcurrent: 128 }).maxConcurrent, 128);
   assert.throws(() => boundedConfig({ ...defaults, maintenanceBatch: 1_001 }), KernelError);
   assert.throws(() => boundedConfig({ ...defaults, maxRequestBytes: 16_777_217 }), KernelError);
   assert.throws(() => boundedConfig({ ...defaults, maxOutputBytes: NaN }), KernelError);

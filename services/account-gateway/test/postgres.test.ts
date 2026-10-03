@@ -27,8 +27,9 @@ let migrated = false;
 before(async () => {
   const connectionString = safeTestDsn();
   admin = new pg.Pool({ connectionString, max: 2 });
-  poolA = new pg.Pool({ connectionString, max: 1 });
-  poolB = new pg.Pool({ connectionString, max: 1 });
+  // Keep the two observed backend identities alive across the deadline barrier.
+  poolA = new pg.Pool({ connectionString, max: 1, idleTimeoutMillis: 0 });
+  poolB = new pg.Pool({ connectionString, max: 1, idleTimeoutMillis: 0 });
   try {
     const v = await admin.query("SELECT current_database() AS db,current_setting('server_version') AS version");
     assert.equal(v.rows[0].db, database);
@@ -87,6 +88,18 @@ async function prepared(ctx: TrustedContext, accountRef: string, override: Parti
   const result = await kernel.prepare(ctx, input); assert.ok(result.executionRef); assert.ok(result.epoch);
   return { input, result, admission: admissionFor(input, result, accountRef) };
 }
+// Bounded observation tolerates a busy runner without retrying any kernel action.
+async function waitForLocks(db: pg.PoolClient, expected: number[]): Promise<boolean> {
+  const until = process.hrtime.bigint() + 15_000_000_000n;
+  while (process.hrtime.bigint() < until) {
+    // The barrier transaction must not retain an earlier idle activity snapshot.
+    await db.query('SELECT pg_stat_clear_snapshot()');
+    const seen = await db.query("SELECT count(*)::integer AS n FROM pg_stat_activity WHERE pid=ANY($1::integer[]) AND wait_event_type='Lock'", [expected]);
+    if (seen.rows[0].n === expected.length) return true;
+    await delay(20);
+  }
+  return false;
+}
 // Hold the authoritative row; observe BOTH live sessions blocked before release.
 // This catches check-then-insert/check-then-dispatch regressions under contention.
 async function race<L, R>(ctx: TrustedContext, left: () => Promise<L>, right: () => Promise<R>) {
@@ -96,12 +109,7 @@ async function race<L, R>(ctx: TrustedContext, left: () => Promise<L>, right: ()
     await gate.query('BEGIN');
     await gate.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE', [ctx.consumerId]);
     const pair = Promise.allSettled([left(), right()]);
-    let blocked = false;
-    for (let n = 0; n < 200; n++) {
-      const seen = await gate.query("SELECT count(*)::integer AS n FROM pg_stat_activity WHERE pid=ANY($1::integer[]) AND wait_event_type='Lock'", [pids]);
-      if (seen.rows[0].n === 2) { blocked = true; break; }
-      await delay(10);
-    }
+    const blocked = await waitForLocks(gate, pids);
     await gate.query('COMMIT');
     const results = await pair;
     assert.equal(blocked, true, 'both distinct sessions must reach the DB barrier');
@@ -289,7 +297,7 @@ test('atomic request limits and runtime deadline/config enforcement', async () =
   await assert.rejects(a.prepare(ctx, await approval(ctx, account.accountRef!, { deadline: new Date(now.getTime() - 1) })), isCode('denied'));
   await assert.rejects(a.prepare(ctx, await approval(ctx, account.accountRef!, { deadline: new Date(now.getTime() + 3_700_000) })), isCode('denied'));
   const freshNow = (await admin.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
-  const short = await prepared(ctx, account.accountRef!, { deadline: new Date(freshNow.getTime() + 3_000) });
+  const short = await prepared(ctx, account.accountRef!, { deadline: new Date(freshNow.getTime() + 10_000) });
   const gate = await admin.connect();
   let expired;
   try {
@@ -298,16 +306,14 @@ test('atomic request limits and runtime deadline/config enforcement', async () =
     const waiting = a.claim(ctx, short.result.executionRef!, 'late', w, short.admission);
     // Prevent an unhandled rejection while the actual transaction is blocked.
     const outcome = waiting.then(value => ({ value }), () => ({ value: undefined }));
-    let blocked = false;
-    for (let n = 0; n < 200; n++) {
-      const seen = await gate.query("SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock'", [pids[0]]);
-      if (seen.rowCount) { blocked = true; break; }
-      await delay(10);
-    }
-    assert.equal(blocked, true);
-    // Clock advances AFTER claim transaction start, BEFORE its row lock release.
+    assert.equal(await waitForLocks(gate, [pids[0]]), true);
+    await gate.query('SELECT pg_stat_clear_snapshot()');
+    const started = (await gate.query('SELECT xact_start FROM pg_stat_activity WHERE pid=$1', [pids[0]])).rows[0].xact_start as Date;
+    assert.ok(started.getTime() < short.input.deadline.getTime(), 'claim transaction must start before expiry');
+    // Wait to the persisted DB deadline rather than a fixed wall-clock sleep.
     // CURRENT_TIMESTAMP would incorrectly accept this request after the wait.
-    await gate.query('SELECT pg_sleep(3.1)');
+    await gate.query('SELECT pg_sleep(GREATEST(0,EXTRACT(EPOCH FROM ($1::timestamptz-clock_timestamp())))+0.05)', [short.input.deadline]);
+    assert.equal((await gate.query('SELECT clock_timestamp()>=$1::timestamptz AS expired', [short.input.deadline])).rows[0].expired, true);
     await gate.query('COMMIT');
     expired = (await outcome).value;
     assert.ok(expired);
@@ -315,6 +321,98 @@ test('atomic request limits and runtime deadline/config enforcement', async () =
   assert.equal(expired.status.code, 'deadline'); assert.equal(expired.dispatch, undefined);
   assert.equal(await count('SELECT count(*)::integer n FROM ag_kernel.cleanup WHERE consumer=$1 AND execution_ref=$2',
     [ctx.consumerId, short.result.executionRef]), 1);
+});
+
+// Expire the exact owner before maintenance. Stale callbacks must commit
+// ambiguity/fencing, including same-state callbacks, and never allow replay.
+test('expired effect owner cannot complete or retain in-flight authority before maintenance', async () => {
+  const ctx = context(), account = await connected(ctx), live = await worker(ctx);
+  for (const [state, next] of [
+    ['dispatch_started', 'completed'], ['response_started', 'completed'],
+    ['response_started', 'response_started'],
+  ] as const) {
+    const e = await prepared(ctx, account.accountRef!), lost = await worker(ctx);
+    assert.ok((await a.claim(ctx, e.result.executionRef!, 'accepted', lost, e.admission)).dispatch);
+    if (state === 'response_started') await a.effect(ctx, e.result.executionRef!, 'accepted', lost, state);
+    const expired = await admin.query("UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND worker=$2", [ctx.consumerId, lost]);
+    assert.equal(expired.rowCount, 1);
+    // No reconcile/restore between lease expiry and this stale callback.
+    const result = await a.effect(ctx, e.result.executionRef!, 'accepted', lost, next);
+    assert.deepEqual(result, { requestRef: 'accepted', effect: 'effect_unknown', code: 'owner_lost' });
+    assert.deepEqual(await b.request(ctx, e.result.executionRef!, 'accepted'), result);
+    assert.equal((await b.execution(ctx, e.result.executionRef!)).state, 'fenced');
+    assert.equal(await count('SELECT count(*)::integer n FROM ag_kernel.cleanup WHERE consumer=$1 AND execution_ref=$2', [ctx.consumerId, e.result.executionRef]), 1);
+    assert.deepEqual(await b.effect(ctx, e.result.executionRef!, 'accepted', lost, 'effect_unknown'), result);
+    await assert.rejects(b.effect(ctx, e.result.executionRef!, 'accepted', lost, 'completed'), isCode('conflict'));
+    const duplicate = await b.claim(ctx, e.result.executionRef!, 'accepted', live, e.admission);
+    assert.equal(duplicate.dispatch, undefined); assert.deepEqual(duplicate.status, result);
+    const fresh = await b.claim(ctx, e.result.executionRef!, 'fresh', live, e.admission);
+    assert.equal(fresh.dispatch, undefined); assert.equal(fresh.status.code, 'fenced');
+    await b.reconcile(ctx);
+    assert.deepEqual(await a.request(ctx, e.result.executionRef!, 'accepted'), result);
+  }
+  const completed = await prepared(ctx, account.accountRef!), owner = await worker(ctx);
+  assert.ok((await a.claim(ctx, completed.result.executionRef!, 'done', owner, completed.admission)).dispatch);
+  await a.effect(ctx, completed.result.executionRef!, 'done', owner, 'response_started');
+  await a.effect(ctx, completed.result.executionRef!, 'done', owner, 'completed');
+  await admin.query("UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND worker=$2", [ctx.consumerId, owner]);
+  assert.equal((await b.effect(ctx, completed.result.executionRef!, 'done', owner, 'completed')).effect, 'completed');
+  await b.reconcile(ctx);
+  assert.equal((await b.request(ctx, completed.result.executionRef!, 'done')).effect, 'completed');
+  assert.equal((await b.claim(ctx, completed.result.executionRef!, 'done', live, completed.admission)).dispatch, undefined);
+});
+
+// Restore must persist cleanup for active, creating, staged and already
+// quarantined generations, without inventing physical identity for unknowns.
+test('restore durably cleans every exact generation and repeated restores do not duplicate work', async () => {
+  const ctx = context(), account = await connected(ctx), w = await worker(ctx);
+  const foreign = context(), foreignAccount = await connected(foreign);
+  const e = await prepared(ctx, account.accountRef!);
+  assert.ok((await a.claim(ctx, e.result.executionRef!, 'done', w, e.admission)).dispatch);
+  await a.effect(ctx, e.result.executionRef!, 'done', w, 'response_started');
+  await a.effect(ctx, e.result.executionRef!, 'done', w, 'completed');
+  const reconnect = await a.beginAccount(ctx, { operationId: op(), kind: 'reconnect', intentDigest: digest(),
+    accountRef: account.accountRef, expectedRevision: account.revision });
+  assert.ok(await a.startCandidate(ctx, reconnect.operationRef, w));
+  const inert = await staged(ctx), uncertain = await staged(ctx);
+  assert.ok(await a.startCandidate(ctx, uncertain.operationRef, w));
+  await a.unknownCandidate(ctx, uncertain.operationRef, w);
+  const rows = (await admin.query('SELECT generation,native_identity,profile,state FROM ag_kernel.candidates WHERE consumer=$1', [ctx.consumerId])).rows;
+  assert.deepEqual(rows.map(r => r.state).sort(), ['creating','quarantined','ready','staged']);
+  const expected = new Map(rows.map(r => [r.generation as string, r]));
+  const original = await a.issuer(ctx), first = randomUUID(), second = randomUUID();
+  await a.restore(ctx, original, first);
+  await b.restore(ctx, first, second);
+  assert.equal(await count('SELECT count(*)::integer n FROM ag_kernel.cleanup WHERE consumer=$1', [ctx.consumerId]), 5);
+  assert.equal((await b.operation(ctx, reconnect.operationRef)).state, 'unknown');
+  assert.equal((await b.operation(ctx, inert.operationRef)).state, 'unknown');
+  const seen = new Set<string>(); let executionSeen = false;
+  for (let n = 0; n < 5; n++) {
+    const job = await b.claimCleanup(ctx, w); assert.ok(job);
+    if (job.scope.kind === 'generation') {
+      const scope = job.scope, row = expected.get(scope.generation); assert.ok(row);
+      assert.equal(seen.has(scope.generation), false); seen.add(scope.generation);
+      assert.equal(scope.profile, row.profile);
+      if (row.native_identity) assert.deepEqual(scope.descriptor, {
+        generation: row.generation, nativePhysicalIdentity: row.native_identity, profile: row.profile,
+      });
+      else assert.equal(scope.descriptor, undefined, 'unknown physical identity must remain absent');
+    } else {
+      assert.equal(executionSeen, false); executionSeen = true;
+      assert.equal(job.scope.executionRef, e.result.executionRef);
+    }
+    await b.settleCleanup(ctx, job.cleanupRef, w, job.token, true);
+    await a.settleCleanup(ctx, job.cleanupRef, w, job.token, true);
+  }
+  assert.equal(seen.size, 4); assert.equal(executionSeen, true);
+  assert.equal(await a.claimCleanup(ctx, w), undefined);
+  assert.equal(await count("SELECT count(*)::integer n FROM ag_kernel.candidates WHERE consumer=$1 AND state='retired'", [ctx.consumerId]), 4);
+  assert.equal((await a.account(ctx, account.accountRef!)).state, 'quarantined');
+  assert.equal((await a.account(foreign, foreignAccount.accountRef!)).state, 'active');
+  assert.equal((await a.request(ctx, e.result.executionRef!, 'done')).effect, 'completed');
+  await a.restore(ctx, second, randomUUID());
+  assert.equal(await count("SELECT count(*)::integer n FROM ag_kernel.cleanup WHERE consumer=$1 AND state='done'", [ctx.consumerId]), 5);
+  assert.equal(await b.claimCleanup(ctx, w), undefined);
 });
 
 // Red if startup rotates all grants, expired ownership retries inference,

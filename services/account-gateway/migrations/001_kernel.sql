@@ -102,6 +102,8 @@ CREATE TABLE cleanup (
   CHECK ((generation IS NULL) <> (execution_ref IS NULL)),
   CHECK (state <> 'claimed' OR (worker IS NOT NULL AND token IS NOT NULL AND lease_until IS NOT NULL))
 );
+CREATE INDEX candidates_account ON candidates(consumer, account_ref);
+CREATE INDEX executions_open_account ON executions(consumer, account_ref) WHERE state = 'open';
 CREATE INDEX accounts_owner_page ON accounts(consumer, owner_ref, ref);
 CREATE INDEX requests_inflight ON requests(consumer, worker) WHERE effect IN ('dispatch_started','response_started');
 CREATE INDEX cleanup_pending ON cleanup(consumer, state, lease_until);
