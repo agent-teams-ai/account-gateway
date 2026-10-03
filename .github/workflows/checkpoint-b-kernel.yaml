@@ -1,0 +1,40 @@
+name: Checkpoint B private kernel qualification
+on:
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  kernel:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: ag_kernel_test_ci
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ag_kernel_test_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      AG_KERNEL_TEST_ALLOW: disposable_pg17_10
+      AG_KERNEL_DISPOSABLE_DB: ag_kernel_test_ci
+      AG_KERNEL_TEST_DSN: postgresql://postgres@127.0.0.1:5432/ag_kernel_test_ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+      - run: npm install --prefix "$RUNNER_TEMP/gateway-pnpm" --ignore-scripts pnpm@11.28.2
+      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" install --frozen-lockfile
+      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run typecheck
+      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run test:domain
+      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run test:pg
