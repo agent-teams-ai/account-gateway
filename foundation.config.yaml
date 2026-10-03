@@ -1,0 +1,6 @@
+schemaVersion: 2
+project:
+  id: account-gateway
+capabilities:
+  architecture.source-dependencies:
+    configPath: architecture/foundation/source-dependencies.yaml

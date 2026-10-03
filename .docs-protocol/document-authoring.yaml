@@ -1,0 +1,25 @@
+schemaVersion: 3
+projectId: "account-gateway"
+catalog:
+  metadataSchemaPath: .docs-protocol/metadata.schema.json
+  ownerCatalog: {path: .docs-protocol/owners.yaml, contract: foundation.owner-map/v1}
+  metadataSidecar: {kind: path-metadata-map, path: .docs-protocol/metadata.yaml}
+  collections:
+    - {kind: markdown-tree, root: docs}
+    - {kind: frontmatter-readme, roots: [packages]}
+  excludedPrefixes: [docs/corpus, docs/.agents, .docs-protocol]
+authoring:
+  mode: create-only
+  ownerSets:
+    schemaVersion: 1
+    sets:
+      documentation: ["gateway-maintainers"]
+  artifactTypes:
+    - type: reference
+      initialStatus: proposed
+      identity: {kind: explicit, format: qualified, grammar: {prefixSegments: [docs, reference], minSuffixSegments: 1, maxSuffixSegments: 16}}
+      placement: {kind: collection, directory: docs/reference, filename: slug}
+      template: {kind: fenced-markdown-body, path: .docs-protocol/templates/reference.md}
+      heading: {kind: title}
+      reachability: {kind: not-required, reason: Deterministic catalog and context projection provide reachability without duplicating manual indexes.}
+      ownerSetId: documentation

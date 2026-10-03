@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "type",
+    "status",
+    "owner",
+    "summary"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 214
+    },
+    "type": {
+      "enum": [
+        "adr",
+        "tutorial",
+        "how-to",
+        "reference",
+        "explanation",
+        "index"
+      ]
+    },
+    "status": {
+      "type": "string"
+    },
+    "owner": {
+      "const": "gateway-maintainers"
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "related": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string"
+      }
+    },
+    "blocked_by": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string"
+      }
+    },
+    "code_anchors": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "type",
+        "status"
+      ],
+      "properties": {
+        "type": {
+          "const": "adr"
+        },
+        "status": {
+          "enum": [
+            "proposed",
+            "active",
+            "deprecated",
+            "superseded",
+            "accepted"
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "type",
+        "status"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "tutorial",
+            "how-to",
+            "reference",
+            "explanation",
+            "index"
+          ]
+        },
+        "status": {
+          "enum": [
+            "proposed",
+            "active",
+            "deprecated",
+            "superseded"
+          ]
+        }
+      }
+    }
+  ]
+}

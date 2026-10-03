@@ -5,3 +5,13 @@ coverage/
 .env.*
 *.tgz
 .cache/
+
+.pnpm-store/
+.qualification/
+docs/corpus/.foundation/
+docs/corpus/.agent-teams-local/
+docs/corpus/**/.foundation-retired-evidence*/
+
+.foundation/
+.agent-teams-local/
+**/.foundation-retired-evidence*/

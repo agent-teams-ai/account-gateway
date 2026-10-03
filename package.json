@@ -1,0 +1,26 @@
+{
+  "name": "account-gateway-workspace",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.28.2",
+  "engines": {
+    "node": ">=24.21.0 <25"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "test:static": "node --test --test-name-pattern=\"public Core/Assembly\" tests/client.test.mjs && node --test tests/source-policy.test.mjs",
+    "foundation": "agent-teams-foundation check architecture.source-dependencies --consumer .",
+    "docs:check": "agent-teams-docs check --consumer . --profile docs.config.yaml",
+    "check:topology": "node scripts/check-topology.mjs",
+    "qualify:consumers": "bash scripts/qualify-consumers.sh"
+  },
+  "devDependencies": {
+    "@agent-teams/engineering-foundation": "1.7.1",
+    "@agent-teams/docs-protocol": "0.6.2",
+    "@types/node": "24.19.1",
+    "typescript": "7.0.2",
+    "@get-modular/core": "0.2.0",
+    "@get-modular/assembly": "0.2.0"
+  }
+}

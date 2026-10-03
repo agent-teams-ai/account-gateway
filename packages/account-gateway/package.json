@@ -1,0 +1,35 @@
+{
+  "name": "@agent-teams/account-gateway",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=24.21.0 <25"
+  },
+  "exports": {
+    "./contracts": {
+      "types": "./dist/contracts/index.d.ts",
+      "default": "./dist/contracts/index.js"
+    },
+    "./http": {
+      "types": "./dist/http/index.d.ts",
+      "browser": null,
+      "node": "./dist/http/index.js"
+    },
+    "./get-modular": {
+      "types": "./dist/get-modular/index.d.ts",
+      "browser": null,
+      "node": "./dist/get-modular/index.js"
+    }
+  },
+  "dependencies": {
+    "@get-modular/core": "0.2.0",
+    "@get-modular/assembly": "0.2.0",
+    "zod": "4.6.5"
+  },
+  "sideEffects": false
+}
