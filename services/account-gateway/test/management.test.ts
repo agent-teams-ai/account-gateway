@@ -142,6 +142,36 @@ test('private physical identity rejects imprecise numeric ID and preserves exact
   assert.throws(() => physicalCandidate({ ...d,baseURL: 'https://secret@fixture.invalid' }),KernelError);
 });
 
+// Regression: JSON.parse rounds fractional native identity tokens to an accepted integer.
+test('native HTTP readback validates original account_id tokens without rounding', async () => {
+  const j = journal();
+  const body = (token: string): string => `{"descriptor":{"account_id":${token},"generation":"${j.generation}",` +
+    '"created_at":"2026-10-03T04:05:06.123456789+00:00","profile":"synthetic-profile",' +
+    '"base_url":"https://fixture.invalid/v1","model":"fixture-model"},"name":"Disposable fixture",' +
+    '"state":"inactive","group_free":true,"schedulable":false,"probes_enabled":false}';
+  let response = '';
+  const server = await local((_req,res) => res.end(response));
+  try {
+    const native = client(server.origin);
+    for (const [token,expected] of [['734',734],['9007199254740991',9007199254740991]] as const) {
+      response = body(token);
+      const [row] = await native.read(j);
+      assert.equal(row.nativeId,expected);
+      assert.equal(row.createdAt,'2026-10-03T04:05:06.123456789+00:00');
+    }
+    for (const token of ['734.000000000000000001','733.999999999999999999',
+      '9007199254740992','734.0','7.34e2','0','-734','"734"']) {
+      response = body(token);
+      await assert.rejects(native.read(j),code('invalid_readback'),token);
+    }
+    // Canonical escaped member names still denote the same field and enforce its raw token.
+    response = body('734').replace('account_id','account_\\u0069d');
+    assert.equal((await native.read(j))[0].nativeId,734);
+    response = body('734.000000000000000001').replace('account_id','account_\\u0069d');
+    await assert.rejects(native.read(j),code('invalid_readback'));
+  } finally { await server.close(); }
+});
+
 // Regression: arrays, repeated/escaped identity members and non-inert flags could turn ambiguous native output into promotion proof.
 test('existing private Go wire rejects ambiguous shape, duplicate identity and unsafe candidate flags', async () => {
   const j = journal(),body = nativeBody(descriptor(j));

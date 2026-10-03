@@ -1,5 +1,9 @@
 # B3a private native management checkpoint
 
+PR6 repair status: bounded source changes and local HTTP/typechecks complete;
+current PostgreSQL, exact-head CI and independent review pending. Earlier sections
+retain the original checkpoint history; current evidence is recorded at the end.
+
 Owner: gateway-maintainers. Date: 2026-10-03. Status: implementation checkpoint;
 **focused checks qualified by primary; source review/CI and assembly pending**. Only the seven requested paths are added. No
 kernel, SDK, dependency, lock, facade, launcher, OAuth or production file is edited.
@@ -199,3 +203,69 @@ Frozen pnpm11.28.2/Node24.21.0, meaningful pinnedTypeScript7 typecheck, SDKbuild
 Application/Postgres/HTTP and actual transport/dump test boundaries explicitly classified in Foundation; pure kernel authority has no added network/database dependency. Composed SDK rebuilt after dependency fast-forward, fullroot27tests and Foundation PASS; prior Docs Protocol/topology PASS. An initial stale dist root27run failed only newB2a wire case; retained as invalid build artifact, not a source defect.
 Actual installed secret detector initially rejected only synthetic fixture literals; scanner-safe fixture data/auth expression keeps meaningful behavior. No detector/runtime override. TS scanner operator meaningful stricttypecheck PASS.
 Primary receipts live /srv/workers/jobs/account-gateway/first-slice-v1/tmp/qualification-management-v1/results. Native encrypted custody/scope, exact inactiveactivation/erase lostACK receipts, protected bootstrap/registry/callback and realprovider/CI E2E remain distinct gates. Exact-source xhigh/default review and CI pending, no assembledB/D acceptance/deploy.
+
+## PR6 bounded repairs on supplied 566331c
+
+Supplied base is `566331c22dc02603aae3b4a2516dcd9dd2599d91`; observed Git HEAD
+remains UNVERIFIED. The single nonmutating lock-creation probe found the linked
+administrative directory unavailable; no Git retry, index write, commit or push
+was made. All 42 available source/authority preimages listed in the frozen lean
+review match independently computed SHA-256 values. This verifies bytes, not Git
+tree membership or authorship. Contract53 retains SHA-256
+`66a2393e7a55f76df1a78281af44379d0b455a0770d82f34e587dcca284157b0`.
+SQL001–003, kernel policy, SDK wire authority, dependencies and native lockfile
+are unchanged. The supplied Q and docs-authoring skill/profile were read; this
+existing handoff remains outside the Docs Protocol catalog.
+
+- The existing duplicate-aware native decoder checks the original decoded
+  `account_id` member token before JSON.parse: canonical positive decimal integer,
+  exact BigInt value at most 9007199254740991. Canonical escaped member names still
+  work; duplicate decoded names still deny. CreatedAt text is retained exactly.
+  Real raw-byte HTTP tests cover 734, the safe maximum, overflow, both fractional
+  rounding forms, noncanonical numeric forms and string IDs. Before the repair,
+  the new regression failed with missing rejection for 734.000000000000000001;
+  it uses existing client APIs and compiles against the original implementation.
+- SQL004 adds one narrow INSERT trigger function for transient intents and
+  candidate journals. Existing operation/account/candidate rows must agree on
+  consumer, operation, immutable owner, account, create/reconnect purpose and
+  profile. Staging requires its staged candidate; journaling requires its consumed
+  creating candidate with exact generation/worker/profile. Existing immutable
+  journal/mapping, nonrenewal, erasure and uniqueness constraints remain. Direct
+  migrated-PG tests exercise mismatched independently valid FK parents, rename
+  misuse, unconsumed candidates, valid create/reconnect inserts and preserved
+  immutable mapping history after unknown/no-replay classification. A separate
+  raw fractional HTTP/PG case requires unknown/quarantine, no mapping/activation,
+  erased transient material and exactly one create POST.
+- Package `test:management` runs the actual HTTP suite; `test:pg` selects both the
+  existing kernel/migration suite and management PG suite. Package `test` includes
+  all three boundaries. Checkpoint B runs these commands with two separately
+  designated NEW empty databases in the existing digest-pinned PG17.10 service.
+  The pg_dump shim executes the client inside that same pinned service container;
+  no unqualified host client or new CI framework is introduced. Management tests
+  accept the paired `AG_MANAGEMENT_TEST_DSN` / `AG_MANAGEMENT_DISPOSABLE_DB` override
+  and retain the original guarded designation for standalone runs. Combined
+  `test:pg` requires separate core and management databases; schemas are never reset.
+
+Actual current worker checks: Node24.21.0, integrity-verified pinned pnpm11.28.2
+frozen install, TypeScript7.0.2 meaningful service source/test typecheck PASS;
+raw HTTP negative control RED (exit1, missing expected rejection), repaired
+HTTP/crypto 11/11 PASS zero skips, package HTTP invocation PASS, domain 2/2 PASS
+zero skips. No new handwritten Node helper was created. PG18 cases (16 retained
+plus two regressions), pg_dump and remote CI are **SKIP / NOT_RUN here**: no Docker
+socket or designated disposable database is available. Primary-supplied original
+16/16 PG/dump and earlier broad receipts above are historical and do not qualify
+these current SQL changes. Primary must run current `typecheck`, `test:management`
+and combined `test:pg` in the existing privileged disposable fixture, plus a
+fresh-database old-SQL negative control for the direct INSERT regressions.
+
+Current exact patch, pre/post hashes, unchanged-scope audit and command logs live
+under `/srv/worker-state/jobs/account-gateway/first-slice-v1/jobs/account-gateway-20261003-native-management-fixes-b3a/tmp/agent/pr6-repair-artifacts/`.
+Native custody/agreed create scope, lost-ACK activation/erase, expired unjournaled
+intent settlement, protected bootstrap/registry/callback/retirement, facade and
+controlled profile/provider qualification remain separate gates. Product routing
+is unchanged. This lane repairs necessary boundaries for runnable single-workspace
+MiMo D-min before full UI/S/E/F; it grants no assembled B/D E2E or release acceptance.
+
+## Primary fixed-code qualification 2026-10-03
+
+Isolated disposable PG17.10 with Node24.21.0/pinned TS7: HTTP11/11, management PostgreSQL18/18 including actual pg_dump, kernel39/39 passed with zero skips. Immutable SQL001-003 are byte-identical to566331c. Two new behavioral negative controls fail on unchanged566 production (raw734.000000000000000001 accepted; unrelated SQL parent account accepted); no compile/setup failure. Exact-source xhigh review and mandatory CI remain pending; this is not assembled native/facade or provider E2E.

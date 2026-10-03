@@ -45,7 +45,16 @@ function decode(bytes: Buffer): unknown {
         if (keys.has(key)) throw new NativeFailure('invalid_readback');
         keys.add(key); space();
         if (text[position++] !== ':') throw new NativeFailure('invalid_readback');
-        value(depth + 1); space();
+        const start = position;
+        value(depth + 1);
+        if (key === 'account_id') {
+          const token = text.slice(start,position).trim();
+          // Check the original Go integer token before JSON.parse can round it.
+          if (!/^[1-9][0-9]*$/.test(token) || BigInt(token) > BigInt(Number.MAX_SAFE_INTEGER)) {
+            throw new NativeFailure('invalid_readback');
+          }
+        }
+        space();
         const next = text[position++];
         if (next === '}') return;
         if (next !== ',') throw new NativeFailure('invalid_readback');

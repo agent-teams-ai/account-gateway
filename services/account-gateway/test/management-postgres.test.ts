@@ -17,7 +17,8 @@ import { NativeManagementClient } from '../src/native-client.ts';
 let pool: pg.Pool, lockPool: pg.Pool, kernel: PostgresKernel, custody: IntentSecrets, store: PostgresManagementStore;
 const profile = Object.freeze({ profile: 'synthetic-profile',baseURL: 'https://fixture.invalid/v1',model: 'fixture-model',qualificationRef: 'fixture-only' });
 function disposable(): { dsn: string; database: string } {
-  const dsn = process.env.AG_KERNEL_TEST_DSN, database = process.env.AG_KERNEL_DISPOSABLE_DB;
+  const dsn = process.env.AG_MANAGEMENT_TEST_DSN ?? process.env.AG_KERNEL_TEST_DSN,
+    database = process.env.AG_MANAGEMENT_DISPOSABLE_DB ?? process.env.AG_KERNEL_DISPOSABLE_DB;
   if (!dsn || !database || !/^ag_kernel_test_[a-z0-9_]+$/.test(database) ||
       process.env.AG_KERNEL_TEST_ALLOW !== 'disposable_pg17_10') throw new Error('NOT_RUN: explicit new disposable PG17.10 fixture required');
   let url: URL; try { url = new URL(dsn); } catch { throw new Error('NOT_RUN: invalid disposable designation'); }
@@ -58,7 +59,7 @@ function nativeBody(d: NativeReadback): object {
     group_free: true,schedulable: false,probes_enabled: false };
 }
 let nextNativeID = 734; // One synthetic engine identity space across disposable HTTP listeners.
-async function fixture(context: TrustedContext, mode: 'lost_ack' | 'wrong' | 'multiple' | 'zero' | 'error' | 'redirect' | 'activation_lost_ack' = 'lost_ack') {
+async function fixture(context: TrustedContext, mode: 'lost_ack' | 'wrong' | 'multiple' | 'zero' | 'error' | 'redirect' | 'activation_lost_ack' | 'fraction_above' | 'fraction_below' = 'lost_ack') {
   let creates = 0, erases = 0, providerCalls = 0;
   const bodies: Record<string,unknown>[] = [], reads: string[] = [], rows = new Map<string,NativeReadback>();
   const server = createServer((req,res) => {
@@ -68,8 +69,8 @@ async function fixture(context: TrustedContext, mode: 'lost_ack' | 'wrong' | 'mu
       req.on('data', chunk => chunks.push(chunk as Buffer)); req.on('end', () => {
         const body = JSON.parse(Buffer.concat(chunks).toString()) as Record<string,unknown>; bodies.push(body);
         const generation = String(body.generation);
-        rows.set(generation,{ generation,nativePhysicalIdentity: generation,nativeId: nextNativeID++,
-          createdAt: '2026-10-03T04:05:06.123456789+00:00',state: 'inactive',...profile });
+        rows.set(generation,{ generation,nativePhysicalIdentity: generation,nativeId: mode.startsWith('fraction_') ? 734 : nextNativeID++,
+          createdAt: mode.startsWith('fraction_') ? '2026-10-03T07:08:09.987654321+00:00' : '2026-10-03T04:05:06.123456789+00:00',state: 'inactive',...profile });
         req.socket.destroy(); // Native write completed; ACK was lost.
       }); return;
     }
@@ -83,7 +84,12 @@ async function fixture(context: TrustedContext, mode: 'lost_ack' | 'wrong' | 'mu
       const row = rows.get(generation);
       const candidates = !row || mode === 'zero' ? [] : mode === 'wrong' ? [{ ...row,generation: randomUUID(),nativePhysicalIdentity: randomUUID() }] :
         mode === 'multiple' ? [row,{ ...row,nativeId: 999 }] : [row];
-      res.end(JSON.stringify(candidates.length === 1 ? nativeBody(candidates[0]) : candidates.map(nativeBody))); return;
+      let body = JSON.stringify(candidates.length === 1 ? nativeBody(candidates[0]) : candidates.map(nativeBody));
+      if (mode === 'fraction_above' || mode === 'fraction_below') {
+        body = body.replace('"account_id":734','"account_id":' +
+          (mode === 'fraction_above' ? '734.000000000000000001' : '733.999999999999999999'));
+      }
+      res.end(body); return;
     }
     if (req.method === 'PUT' && req.url === '/private/native/v1/candidates/' + generation) {
       const chunks: Buffer[] = [];
@@ -235,6 +241,84 @@ test('B3a mapping uniqueness, immutable precision/profile and consumer isolation
   } finally { await f.close(); }
 });
 
+// Regression: independently valid FKs can attach custody/journal rows to unrelated parents.
+test('B3a direct SQL inserts bind create/reconnect operation, account, owner, permit worker and profile', async () => {
+  const constraint = (e: unknown): boolean => !!e && typeof e === 'object' && 'code' in e && e.code === '23514';
+  for (const purpose of ['create','reconnect'] as const) {
+    const context = ctx(),f = await fixture(context);
+    try {
+      const active = await f.manager.create(context,input());
+      const renamed = await kernel.beginAccount(context,{ operationId: randomUUID(),kind: 'rename',intentDigest: 'fixture-rename',
+        accountRef: active.accountRef!,expectedRevision: active.revision!,displayName: 'Renamed fixture' });
+      const other = await kernel.beginAccount(context,{ operationId: randomUUID(),kind: 'create',intentDigest: 'fixture-other',
+        ownerRef: 'other-fixture-owner',profile: 'second-fixture-profile',displayName: 'Other fixture' });
+      const otherPermit = await kernel.startCandidate(context,other.operationRef,f.worker); assert.ok(otherPermit);
+      const operationId = randomUUID();
+      const operation = await kernel.beginAccount(context,purpose === 'create'
+        ? { operationId,kind: purpose,intentDigest: 'fixture-create',ownerRef: 'workspace-fixture',profile: profile.profile,displayName: 'New fixture' }
+        : { operationId,kind: purpose,intentDigest: 'fixture-reconnect',accountRef: renamed.accountRef!,expectedRevision: renamed.revision! });
+      // Read actual kernel parents independently of the production management validation.
+      const account = (await pool.query<{ owner_ref: string }>(
+        'SELECT owner_ref FROM ag_kernel.accounts WHERE consumer=$1 AND ref=$2',[context.consumerId,operation.accountRef])).rows[0];
+      const candidate = (await pool.query<{ generation: string; profile: string }>(
+        'SELECT generation,profile FROM ag_kernel.candidates WHERE consumer=$1 AND operation_id=$2',[context.consumerId,operationId])).rows[0];
+      const scope: CandidateScope = { consumerId: context.consumerId,operationId,accountRef: operation.accountRef!,ownerRef: account.owner_ref,purpose };
+      const envelope = custody.seal(scope,'fixture-parent-scope');
+      const transient = async (row: CandidateScope): Promise<void> => {
+        await pool.query(`INSERT INTO ag_management.transient_intents
+          (consumer,operation_id,account_ref,owner_ref,purpose,nonce,ciphertext,tag,created_at,expires_at)
+          SELECT $1,$2,$3,$4,$5,$6,$7,$8,t,t+interval '1 minute' FROM (SELECT clock_timestamp() AS t) stamp`,
+          [row.consumerId,row.operationId,row.accountRef,row.ownerRef,row.purpose,envelope.nonce,envelope.ciphertext,envelope.tag]);
+      };
+      for (const [name,row] of [
+        ['account',{ ...scope,accountRef: other.accountRef! }],
+        ['operation',{ ...scope,operationId: other.operationRef }],
+        ['rename operation',{ ...scope,operationId: renamed.operationRef }],
+        ['owner',{ ...scope,ownerRef: 'wrong-fixture-owner' }],
+        ['purpose',{ ...scope,purpose: purpose === 'create' ? 'reconnect' : 'create' }],
+      ] satisfies [string,CandidateScope][]) await assert.rejects(transient(row),constraint,name);
+      await transient(scope);
+      assert.equal(await store.credential(scope),'fixture-parent-scope');
+      const worker = randomUUID(); await kernel.heartbeat(context,worker);
+      const journal: CandidateJournal = { ...scope,generation: candidate.generation,worker: f.worker,profile: { ...profile,profile: candidate.profile } };
+      const insertJournal = async (row: CandidateJournal): Promise<void> => {
+        await pool.query(`INSERT INTO ag_management.candidate_journal
+          (consumer,operation_id,account_ref,owner_ref,purpose,generation,worker,profile,base_url,model,qualification_ref)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+          [row.consumerId,row.operationId,row.accountRef,row.ownerRef,row.purpose,row.generation,row.worker,
+            row.profile.profile,row.profile.baseURL,row.profile.model,row.profile.qualificationRef]);
+      };
+      await assert.rejects(insertJournal(journal),constraint,'unconsumed candidate');
+      const permit = await kernel.startCandidate(context,operationId,f.worker); assert.ok(permit);
+      assert.equal(permit.candidate,candidate.generation);
+      for (const [name,row] of [
+        ['candidate/account',{ ...journal,generation: otherPermit.candidate,accountRef: other.accountRef! }],
+        ['operation',{ ...journal,operationId: other.operationRef }],
+        ['rename operation',{ ...journal,operationId: renamed.operationRef }],
+        ['owner',{ ...journal,ownerRef: 'wrong-fixture-owner' }],
+        ['purpose',{ ...journal,purpose: purpose === 'create' ? 'reconnect' : 'create' }],
+        ['worker',{ ...journal,worker }],
+        ['profile',{ ...journal,profile: { ...profile,profile: 'second-fixture-profile' } }],
+      ] satisfies [string,CandidateJournal][]) await assert.rejects(insertJournal(row),constraint,name);
+      assert.equal(await store.readJournal(context,operationId),undefined);
+      await insertJournal(journal);
+      assert.deepEqual(await store.readJournal(context,operationId),journal);
+      await pool.query(`INSERT INTO ag_management.physical_mappings
+        (consumer,generation,native_physical_identity,native_id,native_created_at) VALUES ($1,$2,$2,$3,$4)`,
+        [context.consumerId,journal.generation,purpose === 'create' ? 424242 : 424243,'2026-10-03T04:05:06.123456789+00:00']);
+      const mapping = await store.mapping(context,journal.generation); assert.ok(mapping);
+      assert.equal(mapping.ownerRef,account.owner_ref); assert.equal(mapping.accountRef,operation.accountRef);
+      assert.equal(mapping.descriptor.profile,candidate.profile);
+      await assert.rejects(pool.query('UPDATE ag_management.candidate_journal SET owner_ref=$3 WHERE consumer=$1 AND generation=$2',
+        [context.consumerId,journal.generation,'wrong-fixture-owner']),constraint);
+      assert.equal((await kernel.unknownCandidate(context,operationId,f.worker)).state,'unknown');
+      assert.equal(await kernel.startCandidate(context,operationId,f.worker),undefined);
+      assert.deepEqual(await store.mapping(context,journal.generation),mapping,'unknown retains immutable mapping history');
+      assert.equal(f.providerCalls(),0);
+    } finally { await f.close(); }
+  }
+});
+
 // Regression: zero/ambiguous/wrong/error/redirect readback must quarantine without a provider call, raw body or second create.
 test('B3a wrong native readback, status and redirect quarantine and do not invoke provider', async () => {
   for (const mode of ['wrong','multiple','zero','error','redirect'] as const) {
@@ -249,6 +333,25 @@ test('B3a wrong native readback, status and redirect quarantine and do not invok
       assert.deepEqual(await f.manager.create(context,command),status);
       assert.equal(f.creates(),1); assert.equal(f.providerCalls(),0);
       assert.equal(await f.manager.cleanup(context),'quarantined'); assert.equal(f.erases(),0);
+    } finally { await f.close(); }
+  }
+});
+
+// Regression: rounded fractional readback could activate and persist a different native identity.
+test('B3a raw fractional HTTP identities quarantine without mapping, activation or replay', async () => {
+  for (const mode of ['fraction_above','fraction_below'] as const) {
+    const context = ctx(),command = input(),f = await fixture(context,mode);
+    try {
+      const status = await f.manager.create(context,command);
+      assert.equal(status.state,'unknown');
+      const j = await store.readJournal(context,command.operationId); assert.ok(j);
+      assert.equal((await kernel.account(context,j.accountRef)).state,'quarantined');
+      assert.equal(await store.mapping(context,j.generation),undefined);
+      assert.equal(await store.credential(j),undefined);
+      assert.equal(f.rows.get(j.generation)?.state,'inactive');
+      assert.deepEqual(f.reads,[j.generation]);
+      assert.deepEqual(await f.manager.create(context,command),status);
+      assert.equal(f.creates(),1); assert.equal(f.providerCalls(),0);
     } finally { await f.close(); }
   }
 });

@@ -26,6 +26,8 @@ jobs:
       AG_KERNEL_TEST_ALLOW: disposable_pg17_10
       AG_KERNEL_DISPOSABLE_DB: ag_kernel_test_ci
       AG_KERNEL_TEST_DSN: postgresql://postgres@127.0.0.1:5432/ag_kernel_test_ci
+      AG_MANAGEMENT_DISPOSABLE_DB: ag_kernel_test_management_ci
+      AG_MANAGEMENT_TEST_DSN: postgresql://postgres@127.0.0.1:5432/ag_kernel_test_management_ci
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,4 +39,13 @@ jobs:
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" install --frozen-lockfile
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run typecheck
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run test:domain
+      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run test:management
+      - name: Prepare separate management database and pinned dump client
+        run: |
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ag_kernel_test_management_ci'
+          mkdir -p "$RUNNER_TEMP/gateway-pg-bin"
+          printf '#!/bin/sh\nexec docker exec %s pg_dump "$@"\n' "${{ job.services.postgres.id }}" > "$RUNNER_TEMP/gateway-pg-bin/pg_dump"
+          chmod 755 "$RUNNER_TEMP/gateway-pg-bin/pg_dump"
+          "$RUNNER_TEMP/gateway-pg-bin/pg_dump" --version
+          echo "$RUNNER_TEMP/gateway-pg-bin" >> "$GITHUB_PATH"
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run test:pg

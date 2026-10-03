@@ -39,6 +39,36 @@ CREATE TABLE physical_mappings (
   FOREIGN KEY (consumer,generation) REFERENCES candidate_journal(consumer,generation),
   CHECK (native_physical_identity=generation)
 );
+-- Independent FKs cannot bind an operation to its account, owner and consumed candidate.
+CREATE FUNCTION validate_private_parent_scope() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE parent ag_kernel.candidates%ROWTYPE;
+BEGIN
+  SELECT c.* INTO parent FROM ag_kernel.operations o
+    JOIN ag_kernel.accounts a ON a.consumer=o.consumer AND a.ref=o.account_ref
+    JOIN ag_kernel.candidates c ON c.consumer=o.consumer AND c.operation_id=o.id
+      AND c.account_ref=a.ref AND c.profile=a.profile
+    WHERE o.consumer=NEW.consumer AND o.id=NEW.operation_id AND o.state='pending'
+      AND a.ref=NEW.account_ref AND a.owner_ref=NEW.owner_ref AND o.intent->>'kind'=NEW.purpose
+      AND ((NEW.purpose='create' AND o.intent->>'owner'=a.owner_ref AND o.intent->>'profile'=c.profile)
+        OR (NEW.purpose='reconnect' AND o.intent->>'target'=a.ref::text));
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'invalid private parent scope' USING ERRCODE='23514';
+  END IF;
+  IF TG_TABLE_NAME='candidate_journal' THEN
+    IF parent.state<>'creating' OR parent.generation IS DISTINCT FROM NEW.generation
+      OR parent.worker IS DISTINCT FROM NEW.worker OR parent.profile IS DISTINCT FROM NEW.profile THEN
+      RAISE EXCEPTION 'invalid private candidate scope' USING ERRCODE='23514';
+    END IF;
+  ELSIF parent.state<>'staged' THEN
+    RAISE EXCEPTION 'invalid private intent scope' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER intent_parent_scope BEFORE INSERT ON transient_intents
+  FOR EACH ROW EXECUTE FUNCTION validate_private_parent_scope();
+CREATE TRIGGER journal_parent_scope BEFORE INSERT ON candidate_journal
+  FOR EACH ROW EXECUTE FUNCTION validate_private_parent_scope();
 CREATE FUNCTION immutable_private_binding() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF NEW IS DISTINCT FROM OLD THEN
