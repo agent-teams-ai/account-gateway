@@ -709,6 +709,17 @@ export class PostgresKernel implements DurableKernel {
       return this.transports(tx, j.execution_ref);
     });
   }
+  async currentCleanupLease(context: TrustedContext, ref: string, worker: string, token: string): Promise<string> {
+    uuid(ref); uuid(worker); uuid(token);
+    return this.transaction(context, async tx => {
+      const j = (await tx.db.query(`SELECT to_char(lease_until AT TIME ZONE 'UTC',
+        'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS expires FROM cleanup WHERE consumer=$1 AND ref=$2
+        AND worker=$3 AND token=$4 AND state='claimed' AND lease_until>clock_timestamp()
+        AND execution_ref IS NOT NULL`, [tx.consumer, ref, worker, token])).rows[0];
+      if (!j) throw new KernelError('denied');
+      return j.expires as string;
+    });
+  }
   async settleCleanup(context: TrustedContext, ref: string, worker: string, token: string, succeeded: boolean): Promise<void> {
     uuid(ref); uuid(worker); uuid(token);
     if (typeof succeeded !== 'boolean') throw new KernelError('invalid');

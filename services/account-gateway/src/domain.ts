@@ -72,6 +72,8 @@ export interface SavedExecution {
 export interface ExecutionRead {
   savedExecution(context: TrustedContext, executionRef: string): Promise<SavedExecution>;
   currentWorkerLease(context: TrustedContext, worker: string): Promise<string>;
+  // Read an already claimed execution cleanup lease, without renewal/creation.
+  currentCleanupLease(context: TrustedContext, cleanupRef: string, worker: string, token: string): Promise<string>;
   requestProof(context: TrustedContext, executionRef: string, requestId: string): Promise<NativeDispatchProof | undefined>;
 }
 export interface RequestStatus { requestRef: string; effect: Effect; code?: string }
