@@ -23,7 +23,11 @@ export interface AccountStatus {
   accountRef: string; ownerRef: string; profile: string; displayName: string;
   state: AccountState; revision: number; epoch: number;
 }
-export interface AccountPageQuery { ownerRef?: string; cursor?: string; limit?: number }
+export interface AccountPageQuery {
+  ownerRef?: string; cursor?: string; limit?: number;
+  // Internal authority filter: at most 100 owners; an empty set selects no rows.
+  allowedOwnerRefs?: readonly string[];
+}
 export interface AccountPage { accounts: readonly AccountStatus[]; nextCursor?: string }
 export interface OperationStatus {
   operationRef: string; state: OperationState; code?: string;
@@ -56,6 +60,19 @@ export interface PrivateAdmission {
   invocationRef: string; attemptRef: string; accountRef: string; authorizationEpoch: number;
   subjectRef: string; policyRevision: number; bindingRevision: number; profileId: string;
   limits: ApprovedLimits; expiresAt: string;
+}
+// Private persisted read authority for the HTTP/native boundary. This does not
+// grant dispatch: claim remains the sole atomic permission decision.
+export interface SavedExecution {
+  readonly admission: PrivateAdmission;
+  readonly generation: string;
+  readonly state: ExecutionStatus['state'];
+  readonly dispatchAllowed: boolean;
+}
+export interface ExecutionRead {
+  savedExecution(context: TrustedContext, executionRef: string): Promise<SavedExecution>;
+  currentWorkerLease(context: TrustedContext, worker: string): Promise<string>;
+  requestProof(context: TrustedContext, executionRef: string, requestId: string): Promise<NativeDispatchProof | undefined>;
 }
 export interface RequestStatus { requestRef: string; effect: Effect; code?: string }
 // Trusted authenticated native callback input. Never obtain this authority from

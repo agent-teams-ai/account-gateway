@@ -237,7 +237,8 @@ export class AccountManagement {
   }
   async accounts(context: TrustedContext, query: AccountPageQuery = {}): Promise<AccountPage> {
     const ctx = captureContext(context);
-    const captured = { ownerRef: query.ownerRef, cursor: query.cursor, limit: query.limit };
+    const captured = Object.freeze({ ownerRef: query.ownerRef, cursor: query.cursor, limit: query.limit,
+      allowedOwnerRefs: query.allowedOwnerRefs === undefined ? undefined : Object.freeze([...query.allowedOwnerRefs]) });
     return this.kernel.accounts(ctx, captured);
   }
   async operation(context: TrustedContext, id: string): Promise<OperationStatus> {
