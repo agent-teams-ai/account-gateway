@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
-import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { once } from 'node:events';
 import * as c from '@agent-teams/account-gateway/contracts';
 import { secretSubmission } from '@agent-teams/account-gateway/http';
@@ -35,8 +35,18 @@ export interface ExecutionBearer {
   // Supplied only by trusted backend composition from the persisted prepare.
   readonly saved: SavedExecution;
 }
-export type ConfiguredBearer = ManagementBearer | ExecutionBearer;
-type Grant = Omit<ManagementBearer, 'token'> | Omit<ExecutionBearer, 'token'>;
+// A distinct RR backend credential, never an execution or management upgrade.
+export interface RunControlBearer {
+  readonly token: string; readonly role: 'run-control'; readonly consumerId: string;
+  readonly ownerRefs: readonly string[]; readonly profileIds: readonly string[];
+  readonly limits: ApprovedLimits; readonly maxRunMs: number;
+}
+export interface RunAccess {
+  readonly operation: c.Operation; readonly bearer: string; readonly admission: c.Admission;
+}
+export type ConfiguredBearer = ManagementBearer | ExecutionBearer | RunControlBearer;
+type RunControlGrant = Omit<RunControlBearer, 'token'>;
+type Grant = Omit<ManagementBearer, 'token'> | Omit<ExecutionBearer, 'token'> | RunControlGrant;
 function savedCopy(s: SavedExecution): SavedExecution {
   const a = s.admission;
   const wire = parse(c.admission, { invocationRef: a.invocationRef, attemptRef: a.attemptRef, accountRef: a.accountRef,
@@ -48,10 +58,10 @@ function savedCopy(s: SavedExecution): SavedExecution {
     admission: Object.freeze({ ...wire, executionRef: a.executionRef, issuerEpoch: a.issuerEpoch }) });
 }
 const tokenHash = (token: string) => createHash('sha256').update(token).digest();
-// One bounded server mapping; replacement explicitly revokes all old captured
-// authorities, including a same-token rotation. No caller identity discovery.
+// One bounded server mapping. Explicit configuration replacement revokes old
+// captured authorities; run issuance only upserts its own execution entry.
 export class FacadeBearers {
-  #entries: readonly { hash: Buffer; grant: Grant }[] = [];
+  #entries: readonly { hash: Buffer; grant: Grant; issuedBy?: RunControlGrant; token?: string }[] = [];
   constructor(entries: readonly ConfiguredBearer[]) { this.replace(entries); }
   replace(entries: readonly ConfiguredBearer[]): void {
     if (entries.length > 128) throw new KernelError('invalid');
@@ -64,6 +74,15 @@ export class FacadeBearers {
       let grant: Grant;
       if (entry.role === 'execution') {
         grant = Object.freeze({ role: entry.role, consumerId: entry.consumerId, saved: savedCopy(entry.saved) });
+      } else if (entry.role === 'run-control') {
+        if (!entry.ownerRefs.length || entry.ownerRefs.length > 100 || !entry.profileIds.length || entry.profileIds.length > 128 ||
+            !Number.isSafeInteger(entry.maxRunMs) || entry.maxRunMs < 1 || entry.maxRunMs > 3_600_000 ||
+            entry.limits.concurrency > entry.limits.requests) throw new KernelError('invalid');
+        entry.ownerRefs.forEach(value => parse(c.reference, value));
+        entry.profileIds.forEach(value => { parse(c.reference, value); identifier(value, 64); });
+        grant = Object.freeze({ role: 'run-control', consumerId: entry.consumerId,
+          ownerRefs: Object.freeze([...entry.ownerRefs]), profileIds: Object.freeze([...entry.profileIds]),
+          limits: Object.freeze(parse(c.limits, entry.limits)), maxRunMs: entry.maxRunMs });
       } else {
         const p = entry.preparation;
         if (entry.role !== 'management' || !entry.ownerRefs.length || entry.ownerRefs.length > 100 ||
@@ -87,6 +106,24 @@ export class FacadeBearers {
     return found;
   }
   current(grant: Grant): boolean { return this.#entries.some(row => row.grant === grant); }
+  // Synchronous CAS after SQL read: identical issuance retains its token and
+  // original saved tuple. No neighboring grant is replaced or evicted.
+  upsertExecution(control: RunControlGrant, input: SavedExecution): string {
+    if (control.role !== 'run-control' || !this.current(control)) throw new KernelError('denied');
+    const saved = savedCopy(input);
+    if (!saved.dispatchAllowed || saved.state !== 'open' || Date.parse(saved.admission.expiresAt) <= Date.now()) throw new KernelError('denied');
+    const old = this.#entries.find(row => row.issuedBy === control && row.grant.role === 'execution' &&
+      row.grant.consumerId === control.consumerId && row.grant.saved.admission.executionRef === saved.admission.executionRef);
+    if (old) {
+      if (old.grant.role !== 'execution' || !sameSaved(old.grant.saved, saved) || !old.token) throw new KernelError('conflict');
+      return old.token;
+    }
+    if (this.#entries.length >= 128) throw new KernelError('unavailable');
+    const token = randomBytes(32).toString('base64url');
+    const grant = Object.freeze({ role: 'execution' as const, consumerId: control.consumerId, saved });
+    this.#entries = [...this.#entries, { hash: tokenHash(token), grant, issuedBy: control, token }];
+    return token;
+  }
 }
 export interface NativeEnrollment {
   readonly originRef: string; readonly engineIncarnation: string; readonly worker: string;
@@ -172,7 +209,7 @@ async function body(req: IncomingMessage, maximum: number): Promise<Uint8Array> 
   }
   return Buffer.concat(chunks, size);
 }
-function send<T>(res: ServerResponse, schema: Schema<T>, value: T, status = 200): void {
+function send<T>(res: ServerResponse, schema: Pick<Schema<T>, 'parse'>, value: T, status = 200): void {
   const bytes = JSON.stringify(schema.parse(value));
   if (Buffer.byteLength(bytes) > 65_536) throw new KernelError('unavailable');
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'content-length': Buffer.byteLength(bytes) });
@@ -323,7 +360,7 @@ export function createFacade(options: FacadeOptions): Server {
       const grant = bearers.resolve(authorization.slice(7));
       if (!grant) { send(res, c.safeError, safe('unauthenticated', 'not_dispatched'), 401); return; }
       requireCurrent(grant); const context = captureContext(grant);
-      if (!req.url || req.url.length > 2048 || !/^\/v1\//.test(req.url) || req.url.includes('#')) throw new KernelError('invalid');
+      if (!req.url || req.url.length > 2048 || !/^\/(?:v1|internal\/v1)\//.test(req.url) || req.url.includes('#')) throw new KernelError('invalid');
       const url = new URL(req.url, 'http://facade.invalid');
       if (url.origin !== 'http://facade.invalid') throw new KernelError('invalid');
       const path = url.pathname, method = req.method;
@@ -333,6 +370,57 @@ export function createFacade(options: FacadeOptions): Server {
       const match = /^\/v1\/executions\/([A-Za-z0-9_-]+)(?:\/(requests)(?:\/([A-Za-z0-9_-]+))?|\/(close))?$/.exec(path);
       const opMatch = /^\/v1\/operations\/([A-Za-z0-9_-]+)$/.exec(path);
       if (url.search && !(path === '/v1/accounts' && method === 'GET')) throw new KernelError('invalid');
+      if (path === '/internal/v1/run-access') {
+        if (grant.role !== 'run-control') throw new KernelError('denied');
+        if (method !== 'POST' || req.url !== '/internal/v1/run-access') throw new KernelError('invalid');
+        // Strict shared wire parsing captures independent immutable RR policy
+        // before any authority/SQL await. No caller-supplied consumer or role.
+        const parsed = parse(c.prepare, strictJSON(await body(req, Math.min(ingressBytes, 16_384)), true));
+        const input = Object.freeze({ ...parsed, accountRefs: Object.freeze([...parsed.accountRefs]),
+          limits: Object.freeze({ ...parsed.limits }) });
+        identity = { operationRef: input.operationId };
+        if (input.accountRefs.length > 16 || new Set(input.accountRefs).size !== input.accountRefs.length) throw new KernelError('invalid');
+        input.accountRefs.forEach(uuid); identifier(input.profileId, 64);
+        const profile = profiles.get(input.profileId);
+        if (!grant.profileIds.includes(input.profileId) || !profile || input.limits.tokens > profile.maxOutputTokens ||
+            input.limits.requestBytes > ingressBytes || input.limits.concurrency > input.limits.requests ||
+            (Object.keys(grant.limits) as (keyof ApprovedLimits)[]).some(key => input.limits[key] > grant.limits[key])) throw new KernelError('denied');
+        requireCurrent(grant);
+        let old: OperationStatus | undefined;
+        try { old = await kernel.operation(context, input.operationId); }
+        catch (error) { if (!(error instanceof KernelError) || error.code !== 'unknown') throw error; }
+        if (old && (!old.executionRef || !old.deadline)) throw new KernelError('conflict');
+        const original = old && savedCopy(await kernel.savedExecution(context, old.executionRef!));
+        // Ownership only: never derive original admission/epoch from Account GET.
+        for (const ref of input.accountRefs) {
+          const account = await management.account(context, ref);
+          if (!grant.ownerRefs.includes(account.ownerRef) || account.profile !== input.profileId) throw new KernelError('denied');
+        }
+        if ((!original && Date.parse(input.deadline) <= Date.now()) ||
+            Date.parse(input.deadline) - Date.now() > grant.maxRunMs) throw new KernelError('denied');
+        const issuer = original?.admission.issuerEpoch ?? await kernel.issuer(context);
+        requireCurrent(grant);
+        const tuple = ['account-gateway/facade-prepare/v1', context.consumerId, input.invocationRef, input.attemptRef,
+          [...input.accountRefs], input.profileId, input.subjectRef, input.policyRevision, input.bindingRevision, issuer, input.deadline,
+          input.limits.requests, input.limits.concurrency, input.limits.requestBytes, input.limits.outputBytes, input.limits.tokens];
+        uncertain = true;
+        const op = await kernel.prepare(context, { operationId: input.operationId,
+          intentDigest: createHmac('sha256', hmac).update(JSON.stringify(tuple)).digest('hex'),
+          invocationRef: input.invocationRef, attemptRef: input.attemptRef, permittedAccounts: input.accountRefs, profile: input.profileId,
+          policySubject: input.subjectRef, policyRevision: input.policyRevision, bindingRevision: input.bindingRevision,
+          issuerEpoch: issuer, deadline: new Date(input.deadline), limits: input.limits });
+        if (op.state !== 'applied' || !op.executionRef) throw new KernelError('unavailable');
+        const saved = savedCopy(await kernel.savedExecution(context, op.executionRef));
+        requireCurrent(grant);
+        const bearer = bearers.upsertExecution(grant, saved);
+        const { executionRef: _execution, issuerEpoch: _issuer, ...projection } = saved.admission;
+        const result: RunAccess = { operation: c.preparationOperation.parse({ operationRef: op.operationRef, state: 'applied',
+          result: { kind: 'execution', executionRef: saved.admission.executionRef, accountRef: saved.admission.accountRef,
+            authorizationEpoch: saved.admission.authorizationEpoch, deadline: saved.admission.expiresAt, state: executionState(saved.state) } }),
+          bearer, admission: c.admission.parse(projection) };
+        send(res, { parse: (value: RunAccess) => value }, result); return;
+      }
+      if (grant.role === 'run-control') throw new KernelError('denied');
       if (grant.role === 'execution') {
         if (!match && !(opMatch && method === 'GET')) throw new KernelError('denied');
         if (match && match[1] !== grant.saved.admission.executionRef) throw new KernelError('denied');

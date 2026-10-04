@@ -60,3 +60,11 @@ jobs:
         run: |
           docker exec "${{ job.services.postgres.id }}" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ag_kernel_test_native_bridge_ci'
           node --test services/account-gateway/test/native-transport-postgres.test.ts
+
+      - name: Bounded backend run access against its own empty disposable database
+        env:
+          AG_RUN_ACCESS_DISPOSABLE_DB: ag_kernel_test_run_access_ci
+          AG_RUN_ACCESS_TEST_DSN: postgresql://postgres@127.0.0.1:5432/ag_kernel_test_run_access_ci
+        run: |
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ag_kernel_test_run_access_ci'
+          node --test services/account-gateway/test/run-access-postgres.test.ts

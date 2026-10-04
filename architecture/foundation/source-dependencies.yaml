@@ -79,8 +79,8 @@ boundaries:
     allow: {boundaries: [kernel-domain, native-management, contracts, http], packages: ['@agent-teams/account-gateway'], builtins: ['node:http', 'node:crypto', 'node:events'], runtimeReferences: []}
   - id: private-facade-tests
     dependencyMode: runtime
-    roots: [services/account-gateway/test/facade-ingress.test.ts, services/account-gateway/test/facade-postgres.test.ts]
-    entrypoints: [services/account-gateway/test/facade-ingress.test.ts, services/account-gateway/test/facade-postgres.test.ts]
+    roots: [services/account-gateway/test/facade-ingress.test.ts, services/account-gateway/test/facade-postgres.test.ts, services/account-gateway/test/run-access-postgres.test.ts]
+    entrypoints: [services/account-gateway/test/facade-ingress.test.ts, services/account-gateway/test/facade-postgres.test.ts, services/account-gateway/test/run-access-postgres.test.ts]
     allow: {boundaries: [private-facade, contracts, http, kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:http', 'node:net', 'node:fs/promises', 'node:timers/promises'], runtimeReferences: []}
   - id: native-transport-http
     dependencyMode: runtime
