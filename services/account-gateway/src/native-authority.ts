@@ -50,7 +50,7 @@ export class NativeAuthority {
       return { association: previous, first: false };
     }
     if (this.#pending.size >= this.configuration.maxPending) {
-      // Eviction follows protected durable closure ACK only, never local expiry.
+      // Retained claims are evicted only after protected durable closure ACK.
       for (const [k, a] of this.#pending) if (a.acknowledged) { this.#pending.delete(k); break; }
     }
     if (this.#pending.size >= this.configuration.maxPending) return denied();
@@ -60,6 +60,23 @@ export class NativeAuthority {
     const a: Association = { context, saved: snapshot, requestId: input.requestId, digest, callback, signal: input.signal,
       ready: false, admitStarted: false, outboundStarted: false, acknowledged: false };
     this.#pending.set(index, a); return { association: a, first: true };
+  }
+  #forget(a: Association): void {
+    const index = key(a.context, a.saved.admission.executionRef, a.requestId);
+    if (this.#pending.get(index) === a) this.#pending.delete(index);
+  }
+  reclaimUnstarted(a: Association): void {
+    // Only the synchronous pre-POST path can establish this positive fact.
+    if (!a.outboundStarted && !a.admitStarted) this.#forget(a);
+  }
+  async reclaimDenied(a: Association): Promise<void> {
+    if (!a.admitStarted || a.proof) return denied();
+    const ref = a.saved.admission.executionRef;
+    const status = await this.kernel.request(a.context, ref, a.requestId);
+    if (status.effect !== 'not_dispatched' || status.requestRef !== a.requestId ||
+        await this.kernel.requestProof(a.context, ref, a.requestId)) return denied();
+    // SQL retains the denial/replay tombstone; this map only routes callbacks.
+    this.#forget(a);
   }
   async prepare(a: Association, bytes: Uint8Array): Promise<void> {
     const fresh = saved(await this.kernel.savedExecution(a.context, a.saved.admission.executionRef));
@@ -82,12 +99,13 @@ export class NativeAuthority {
   async persisted(ctx: TrustedContext, p: NativeDispatchProof): Promise<void> {
     this.consumer(ctx);
     const e = this.configuration.enrollment;
-    if (p.worker !== e.worker || p.native.originRef !== e.originRef || p.native.engineIncarnation !== e.engineIncarnation) return denied();
+    if (p.native.originRef !== e.originRef || p.native.engineIncarnation !== e.engineIncarnation) return denied();
     const actual = await this.kernel.requestProof(ctx, p.executionRef, p.requestRef);
     if (!actual || !sameProof(proof(actual), p)) return denied();
     // Original proofs remain valid for closure after deadline/lease/fence loss.
   }
   async dispatch(ctx: TrustedContext, p: NativeDispatchProof, expires: unknown): Promise<void> {
+    if (p.worker !== this.configuration.enrollment.worker) return denied();
     const requested = instant(expires);
     await this.persisted(ctx, p);
     const execution = saved(await this.kernel.savedExecution(ctx, p.executionRef));
@@ -98,7 +116,9 @@ export class NativeAuthority {
         requested > instant(execution.admission.expiresAt)) return denied();
   }
   async delegated(ctx: TrustedContext, p: NativeDispatchProof, value: unknown): Promise<ReturnType<typeof cleanup>> {
-    const c = cleanup(value); await this.persisted(ctx, p);
+    const c = cleanup(value);
+    if (c.worker !== this.configuration.enrollment.worker) return denied();
+    await this.persisted(ctx, p);
     const actual = instant(await this.kernel.currentCleanupLease(ctx, c.cleanupRef, c.worker, c.token));
     if (instant(c.leaseExpiresAt) !== actual || actual <= now()) return denied();
     const scoped = await this.kernel.cleanupTransports(ctx, c.cleanupRef, c.worker, c.token);
@@ -175,7 +195,10 @@ export class NativeAuthority {
               await this.kernel.acknowledgeTransportClosed(ctx, c?.worker ?? p.worker, p,
                 c && { cleanupRef: c.cleanupRef, token: c.token });
               const a = this.#pending.get(key(ctx, p.executionRef, p.requestRef));
-              if (a && a.proof && sameProof(a.proof, p)) a.acknowledged = true;
+              // A real SQL ACK may precede the admit callback's post-claim lease
+              // await. Match the latched reservation, not proof attachment time.
+              if (a && a.native && p.worker === cfg.enrollment.worker && p.native.generation === a.saved.generation &&
+                  sameProof({ ...p, native: a.native }, p) && (!a.proof || sameProof(a.proof, p))) a.acknowledged = true;
             }
           }
         }

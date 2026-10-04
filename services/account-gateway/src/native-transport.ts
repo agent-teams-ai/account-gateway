@@ -85,10 +85,15 @@ export class NativeHTTPTransport implements NativeTransport {
       await authority.kernel.request(a.context, a.saved.admission.executionRef, a.requestId);
       return { kind: 'status' };
     }
-    await authority.prepare(a, bytes);
-    const envelope = Buffer.concat([Buffer.from(JSON.stringify({ requestRef: a.requestId, worker: cfg.enrollment.worker,
-      admission: a.saved.admission, descriptor: a.descriptor }).slice(0, -1) + ',"payload":'), bytes, Buffer.from('}')]);
-    if (a.signal.aborted || instant(a.saved.admission.expiresAt) <= now()) return denied();
+    let envelope: Buffer;
+    try {
+      await authority.prepare(a, bytes);
+      envelope = Buffer.concat([Buffer.from(JSON.stringify({ requestRef: a.requestId, worker: cfg.enrollment.worker,
+        admission: a.saved.admission, descriptor: a.descriptor }).slice(0, -1) + ',"payload":'), bytes, Buffer.from('}')]);
+      if (a.signal.aborted || instant(a.saved.admission.expiresAt) <= now()) return denied();
+    } catch (error) {
+      authority.reclaimUnstarted(a); throw error;
+    }
     a.outboundStarted = true;
     let hop: Awaited<ReturnType<typeof post>> | undefined;
     let finished = false, cancellation: Promise<void> | undefined;
@@ -123,8 +128,7 @@ export class NativeHTTPTransport implements NativeTransport {
         if (!p) {
           // A status-only admission has no dispatch proof. Verify actual SQL
           // readback; an uncertain first claim is conservatively fenced.
-          const status = await authority.kernel.request(a.context, a.saved.admission.executionRef, a.requestId);
-          if (status.effect !== 'not_dispatched') return denied();
+          await authority.reclaimDenied(a);
         } else await this.#settle(a);
         finished = true; hop.abort(); a.signal.removeEventListener('abort', onAbort); return { kind: 'status' };
       }

@@ -56,3 +56,34 @@ for controller application/review/commit. No other lane's workspace was edited.
 ## Primary qualification, 2026-10-04
 
 Terminal worker output retained as unqualified patch 88f7835a. In an isolated clone, fixed synthetic fixture reuse of the same native ID/birth pair; production uniqueness unchanged. Actual pinned TS7 typecheck, build and Foundation source-boundary check passed. New disposable PG17.10 plus real TCP suite: 9 PASS, 0 FAIL, 0 SKIP, including two requests in the same open execution at concurrency1. The peer is synthetic Go; actual protected Go/Node/SQL assembly and provider/RR tools/final/App remain unproved.
+
+## Independent P1/P2 correction, 2026-10-04
+
+Supplied source c5a93858d8bc0141f4310a389034740142b6c52e, PR8; independent
+`.spike-inputs/independent-review.md` REQUEST_CHANGES. Normative full53 SHA-256:
+`66a2393e7a55f76df1a78281af44379d0b455a0770d82f34e587dcca284157b0` (verified).
+P1 keeps SQL's immutable owner A proof; configured B must independently validate
+its actual exact current cleanup lease/scope. Dispatch/admit still require B.
+P2 reclaims definitely unstarted routes and SQL-denied/no-proof routes; exact
+SQL closure ACK matches the latched reservation even before proof attachment.
+Unknown/lost claim or POST remains retained; no replay, timed eviction or new ledger.
+Nine existing cases remain; four new real-SQL/TCP regressions cover A-expired/B-current,
+pre-POST failures, limit saturation/recovery and actual facade ACK-before-proof barrier.
+Worker verification: Node 24.21.0; five ingress tests PASS. TS contract typecheck
+NOT_RUN: pnpm's corepack target/compiler/types absent. PG/TCP and original-red
+execution NOT_RUN: pg/dependencies and a designated disposable PG17.10 unavailable.
+Primary must run the existing typecheck and exact PG fixture commands above with
+pinned dependencies and a fresh designated DB; synthetic peer is not provider E2E.
+One Git preflight failed on inaccessible linked-worktree metadata; no retry/commit/push.
+Exact bounded patch and before/after hashes: job `tmp/agent/p1p2-fix` artifacts.
+Only the two native TS modules, nearest PG/TCP test and this handoff are owned.
+Actual authenticated Node/Go/SQL assembly and provider/RR qualification remain incomplete.
+
+## Primary P1/P2 qualification
+
+Fresh isolated PG17.10 plus real TCP: all four new regressions fail on original
+c5 production; repaired source passes 13 tests with zero failures/skips.
+Pinned TS7 typecheck passes after one test-only helper annotation matching the
+actual string request-id port; no production repair beyond the worker patch.
+Receipts: qualification-node-p1p2-v1/results. Synthetic Go peer only; actual
+Go/Node/SQL, provider and RR final/App remain separate unproved acceptance.
