@@ -23,7 +23,11 @@ export interface AccountStatus {
   accountRef: string; ownerRef: string; profile: string; displayName: string;
   state: AccountState; revision: number; epoch: number;
 }
-export interface AccountPageQuery { ownerRef?: string; cursor?: string; limit?: number }
+export interface AccountPageQuery {
+  ownerRef?: string; cursor?: string; limit?: number;
+  // Internal authority filter: at most 100 owners; an empty set selects no rows.
+  allowedOwnerRefs?: readonly string[];
+}
 export interface AccountPage { accounts: readonly AccountStatus[]; nextCursor?: string }
 export interface OperationStatus {
   operationRef: string; state: OperationState; code?: string;

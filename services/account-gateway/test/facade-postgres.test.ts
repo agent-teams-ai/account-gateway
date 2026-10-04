@@ -155,6 +155,63 @@ test('exported SDK management routes persist duplicate mutation/readback and saf
     assert.equal(JSON.stringify([a, renamed, reconnected, disabled]).includes('fixture-key-private'), false);
   } finally { await f.stop(); }
 });
+test('exported SDK preparation with fresh operation IDs reads the original execution before and after unknown fencing', async () => {
+  const f = await fixture('lost_ack'); try {
+    assert.ok(f.prepared.state === 'applied' && f.prepared.result?.kind === 'execution');
+    const original = f.prepared.result;
+    assert.equal(original.accountRef, f.accountRef);
+    assert.equal(original.authorizationEpoch, f.saved.admission.authorizationEpoch);
+    // The existing kernel sticky-identity contract is the oracle, not an HMAC
+    // recomputed from facade implementation details.
+    async function readback(state: c.Execution['state']): Promise<void> {
+      const operationId = randomUUID();
+      const result = await f.client.prepare({ ...f.preparedInput, operationId });
+      assert.equal(result.operationRef, operationId); assert.equal(result.state, 'applied');
+      assert.ok(result.state === 'applied' && result.result?.kind === 'execution');
+      assert.deepEqual(result.result, { ...original, state });
+      assert.deepEqual(await f.client.operation(operationId), result);
+      const saved = await f.kernel.savedExecution(f.context, original.executionRef);
+      assert.deepEqual(saved.admission, f.saved.admission); assert.equal(saved.generation, f.saved.generation);
+      assert.equal((await pool.query('SELECT count(*)::int AS n FROM ag_kernel.executions WHERE consumer=$1', [f.context.consumerId])).rows[0].n, 1);
+    }
+    await readback('active');
+    // The existing fixture permits concurrency=1, also the kernel minimum.
+    // Its increase is denied by the original server policy; lower valid caps
+    // and a shorter approved deadline reach the persisted intent comparison.
+    const changed: { patch: Partial<c.Prepare>; status: number; code: c.SafeError['code'] }[] = [{
+      patch: { deadline: new Date(Date.parse(f.preparedInput.deadline) - 1000).toISOString() }, status: 409, code: 'conflict' }];
+    for (const key of Object.keys(limits) as (keyof typeof limits)[])
+      changed.push({ patch: { limits: { ...limits, [key]: key === 'concurrency' ? 2 : limits[key] - 1 } },
+        status: key === 'concurrency' ? 403 : 409, code: key === 'concurrency' ? 'forbidden' : 'conflict' });
+    for (const { patch, status, code } of changed) {
+      const response = await f.raw('/v1/executions', 'POST', { ...f.preparedInput, operationId: randomUUID(), ...patch });
+      assert.equal(response.status, status); assert.equal(c.safeError.parse(await response.json()).code, code);
+    }
+    const request = f.request();
+    await assert.rejects(f.execution.request(f.executionRef, request), denied('effect_unknown'));
+    assert.equal((await f.execution.status(f.executionRef, request.requestId)).effect, 'effect_unknown');
+    await readback('fenced');
+    // Prove the unknown fence alone denies a fresh request, before reconnect
+    // introduces an independent epoch change that could mask a fence defect.
+    await assert.rejects(f.execution.request(f.executionRef, f.request()), denied('not_dispatched'));
+    assert.equal(f.stats().calls, 1); assert.equal(f.stats().entries, 0);
+    const changedAfterUnknown = await f.raw('/v1/executions', 'POST', { ...f.preparedInput, operationId: randomUUID(), ...changed[0].patch });
+    assert.equal(changedAfterUnknown.status, 409); assert.equal(c.safeError.parse(await changedAfterUnknown.json()).code, 'conflict');
+    // Changing current account metadata/epoch cannot replace the saved choice.
+    const current = await f.client.get(f.accountRef);
+    const reconnected = await f.client.reconnect(f.accountRef, { operationId: randomUUID(), expectedMetadataRevision: current.metadataRevision,
+      credential: { kind: 'api_key', value: 'test-fixture-literal' } });
+    assert.ok(reconnected.state === 'applied' && reconnected.result?.kind === 'account');
+    assert.equal(reconnected.result.authorizationEpoch, original.authorizationEpoch + 1);
+    await readback('fenced');
+    await assert.rejects(f.execution.request(f.executionRef, f.request()), denied('not_dispatched'));
+    assert.equal(f.stats().calls, 1); assert.equal(f.stats().entries, 0);
+    const persisted = (await pool.query('SELECT request_count,state FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2', [f.context.consumerId, f.executionRef])).rows[0];
+    assert.equal(persisted.request_count, 1); assert.equal(persisted.state, 'fenced');
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1', [f.context.consumerId])).rows[0].n, 1);
+    await assert.rejects(f.client.prepare({ ...f.preparedInput, operationId: randomUUID(), bindingRevision: 4 }), denied('not_dispatched'));
+  } finally { await f.stop(); }
+});
 test('derived roles, immutable consumer scope and rotation deny unrelated management/operation/execution authority', async () => {
   const f = await fixture(); try {
     const asManagement = createManagementClient({ role: 'management', origin: f.origin, token: f.executionGrant.token });
@@ -342,6 +399,47 @@ test('original fractional admission tokens and prototype query names are rejecte
     }
     assert.equal(f.stats().calls, 0);
     assert.equal((await pool.query('SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1', [f.context.consumerId])).rows[0].n, 0);
+  } finally { await f.stop(); }
+});
+
+test('exported SDK account pagination scopes single and multiple configured owners before sizing pages and cursors', async () => {
+  const f = await fixture(); try {
+    const owners = ['workspace-fixture', 'workspace-other-fixture', 'workspace-third-fixture'];
+    f.bearers.replace([{ ...f.managementGrant, ownerRefs: owners }, f.executionGrant]);
+    const created: { accountRef: string; ownerRef: string }[] = [{ accountRef: f.accountRef, ownerRef: owners[0] }];
+    for (const ownerRef of owners) {
+      for (let i = ownerRef === owners[0] ? 1 : 0; i < 3; i++) {
+        const result = await f.client.connect({ operationId: randomUUID(), ownerRef, profileId: profile.profile,
+          displayName: 'Pagination fixture', credential: { kind: 'api_key', value: 'test-fixture-literal' } });
+        assert.ok(result.state === 'applied' && result.result?.kind === 'account');
+        created.push({ accountRef: result.result.accountRef, ownerRef });
+      }
+    }
+    created.sort((a, b) => a.accountRef < b.accountRef ? -1 : a.accountRef > b.accountRef ? 1 : 0);
+    // Observed UUID order supplies deterministic expected pages. Exclude the
+    // first row's owner so old consumer-wide pagination always leaks its cursor.
+    const foreignOwner = created[0].ownerRef, allowed = owners.filter(owner => owner !== foreignOwner);
+    for (const allowedOwners of [[allowed[0]], allowed]) {
+      f.bearers.replace([{ ...f.managementGrant, ownerRefs: allowedOwners }, f.executionGrant]);
+      for (const ownerRef of [undefined, ...allowedOwners]) {
+        const expected = created.filter(row => allowedOwners.includes(row.ownerRef) && (ownerRef === undefined || row.ownerRef === ownerRef));
+        for (const limit of [1, 2]) {
+          let cursor: string | undefined;
+          const seen: string[] = [];
+          for (let offset = 0; offset < expected.length; offset += limit) {
+            const page = await f.client.list({ limit, ...(ownerRef === undefined ? {} : { ownerRef }), ...(cursor === undefined ? {} : { cursor }) });
+            if (page.nextCursor !== undefined) assert.ok(expected.some(row => row.accountRef === page.nextCursor), 'cursor must belong to an allowed owner');
+            assert.ok(page.accounts.length > 0, 'foreign accounts must not create empty pages');
+            assert.deepEqual(page.accounts.map(a => a.accountRef), expected.slice(offset, offset + limit).map(a => a.accountRef));
+            assert.ok(page.accounts.every(a => allowedOwners.includes(a.ownerRef)));
+            assert.equal(page.nextCursor, offset + limit < expected.length ? expected[offset + limit - 1].accountRef : undefined);
+            seen.push(...page.accounts.map(a => a.accountRef)); cursor = page.nextCursor;
+          }
+          assert.deepEqual(seen, expected.map(a => a.accountRef)); assert.equal(cursor, undefined);
+        }
+      }
+      await assert.rejects(f.client.list({ ownerRef: foreignOwner, limit: 1 }), denied('not_dispatched'));
+    }
   } finally { await f.stop(); }
 });
 

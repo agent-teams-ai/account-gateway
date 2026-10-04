@@ -140,16 +140,21 @@ export class PostgresKernel implements DurableKernel {
     });
   }
   async accounts(context: TrustedContext, query: AccountPageQuery = {}): Promise<AccountPage> {
-    if (query.ownerRef !== undefined) identifier(query.ownerRef);
-    if (query.cursor !== undefined) uuid(query.cursor);
-    const limit = query.limit ?? 100;
+    const { ownerRef, cursor: after, limit: requestedLimit, allowedOwnerRefs } = query;
+    if (ownerRef !== undefined) identifier(ownerRef);
+    if (after !== undefined) uuid(after);
+    if (allowedOwnerRefs !== undefined && (!Array.isArray(allowedOwnerRefs) || allowedOwnerRefs.length > 100)) throw new KernelError('invalid');
+    const owners = allowedOwnerRefs === undefined ? null : Object.freeze([...allowedOwnerRefs]);
+    owners?.forEach(value => identifier(value));
+    const limit = requestedLimit ?? 100;
     integer(limit, 100);
     // UUID keyset cursor is an ordering boundary, never a foreign-reference lookup.
-    const owner = query.ownerRef ?? null, cursor = query.cursor ?? null;
+    const owner = ownerRef ?? null, cursor = after ?? null;
     return this.transaction(context, async tx => {
       const page = await tx.db.query(`SELECT * FROM accounts WHERE consumer=$1
         AND ($2::text IS NULL OR owner_ref=$2) AND ($3::uuid IS NULL OR ref>$3)
-        ORDER BY ref LIMIT $4`, [tx.consumer, owner, cursor, limit + 1]);
+        AND ($5::text[] IS NULL OR owner_ref=ANY($5::text[]))
+        ORDER BY ref LIMIT $4`, [tx.consumer, owner, cursor, limit + 1, owners]);
       const rows = page.rows.slice(0, limit);
       return { accounts: rows.map(accountStatus),
         ...(page.rows.length > limit ? { nextCursor: rows[rows.length - 1].ref } : {}) };

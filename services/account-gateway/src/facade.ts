@@ -424,8 +424,8 @@ export function createFacade(options: FacadeOptions): Server {
         // SDK strict schema; ordinary assignment could silently erase them.
         const input = parse(c.listQuery, Object.fromEntries(query));
         if (input.ownerRef && !grant.ownerRefs.includes(input.ownerRef)) throw new KernelError('denied');
-        const page = await management.accounts(context, input);
-        send(res, c.accounts, { accounts: page.accounts.filter(a => grant.ownerRefs.includes(a.ownerRef)).map(accountDTO), ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) }); return;
+        const page = await management.accounts(context, { ...input, allowedOwnerRefs: grant.ownerRefs });
+        send(res, c.accounts, { accounts: page.accounts.map(accountDTO), ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) }); return;
       }
       if (path === '/v1/accounts' && method === 'POST') {
         const input = parse(secretSubmission.connect, strictJSON(await body(req, ingressBytes), true)); identity = { operationRef: input.operationId };
@@ -477,7 +477,7 @@ export function createFacade(options: FacadeOptions): Server {
           if (!grant.ownerRefs.includes(a.ownerRef) || a.profile !== p.profileId) throw new KernelError('denied');
         }
         const issuer = await kernel.issuer(context); requireCurrent(grant);
-        const tuple = ['account-gateway/facade-prepare/v1', context.consumerId, input.operationId, input.invocationRef, input.attemptRef,
+        const tuple = ['account-gateway/facade-prepare/v1', context.consumerId, input.invocationRef, input.attemptRef,
           [...input.accountRefs], p.profileId, p.subjectRef, p.policyRevision, p.bindingRevision, issuer, input.deadline,
           input.limits.requests, input.limits.concurrency, input.limits.requestBytes, input.limits.outputBytes, input.limits.tokens];
         uncertain = true;
