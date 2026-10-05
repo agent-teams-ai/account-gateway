@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFile, readdir } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
+import { execFileSync } from 'node:child_process';
 import pg from 'pg';
 import { PostgresKernel } from '../src/postgres.ts';
-import { KernelError, defaults } from '../src/domain.ts';
+import { KernelError, defaults, factDefaults } from '../src/domain.ts';
 import type { TrustedContext, AccountIntent, ApprovedPreparation, OperationStatus, PrivateAdmission, CleanupClaim, TransportClosure, NativeReservation, NativeDispatchProof } from '../src/domain.ts';
 
 // Only a new, explicitly designated disposable localhost PostgreSQL 17.10 DB.
@@ -74,19 +75,36 @@ before(async () => {
       // A real accepted SQL002 row may have a closure token but no native
       // authority. Seed before003, without inventing its future native tuple.
       if (name.startsWith('002_')) {
-        a = new PostgresKernel(poolA); b = new PostgresKernel(poolB);
-        const account = await connected(nativeLegacy.ctx);
-        nativeLegacy.account = account.accountRef!;
-        nativeLegacy.worker = await worker(nativeLegacy.ctx);
-        const e = await prepared(nativeLegacy.ctx, nativeLegacy.account);
-        nativeLegacy.execution = e.result.executionRef!;
-        nativeLegacy.generation = (await admin.query('SELECT generation FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
-          [nativeLegacy.ctx.consumerId, nativeLegacy.execution])).rows[0].generation;
+        // Seed the accepted SQL002 state directly: the new kernel requires005.
+        // This still exercises upgrade of a populated DB with a real NULL binding.
+        nativeLegacy.account = randomUUID(); nativeLegacy.worker = randomUUID();
+        nativeLegacy.execution = randomUUID(); nativeLegacy.generation = randomUUID();
+        const c = nativeLegacy.ctx.consumerId;
+        await admin.query('INSERT INTO ag_kernel.consumers(consumer) VALUES ($1)', [c]);
+        await admin.query(`INSERT INTO ag_kernel.workers(consumer,worker,lease_until)
+          VALUES ($1,$2,clock_timestamp()+interval '30 seconds')`, [c, nativeLegacy.worker]);
+        await admin.query(`INSERT INTO ag_kernel.accounts(consumer,ref,owner_ref,profile,display_name,state)
+          VALUES ($1,$2,'workspace-fixture','mimo-test','Disposable SQL002','staging')`, [c, nativeLegacy.account]);
+        await admin.query(`INSERT INTO ag_kernel.operations(consumer,id,intent,state,account_ref)
+          VALUES ($1,'pre003-create','{}','applied',$2)`, [c, nativeLegacy.account]);
+        await admin.query(`INSERT INTO ag_kernel.candidates(consumer,generation,account_ref,operation_id,profile,
+          expected_revision,expected_epoch,state,native_identity,worker)
+          VALUES ($1,$2,$3,'pre003-create','mimo-test',1,1,'ready',$4,$5)`,
+        [c, nativeLegacy.generation, nativeLegacy.account, randomUUID(), nativeLegacy.worker]);
+        await admin.query(`UPDATE ag_kernel.accounts SET state='active',revision=2,active_generation=$3
+          WHERE consumer=$1 AND ref=$2`, [c, nativeLegacy.account, nativeLegacy.generation]);
+        await admin.query(`INSERT INTO ag_kernel.policy_fences(consumer,subject,revision)
+          VALUES ($1,'binding-fixture',1)`, [c]);
+        await admin.query(`INSERT INTO ag_kernel.executions(consumer,ref,invocation,attempt_ref,intent,account_ref,account_epoch,
+          profile,generation,policy_subject,policy_revision,binding_revision,issuer,policy_fence,deadline,
+          max_requests,max_concurrent,max_request_bytes,max_output_bytes,max_tokens,request_count,state)
+          SELECT $1,$2,'pre003-invocation','attempt-a','{}',$3,1,'mimo-test',$4,'binding-fixture',1,0,c.issuer,f.fence,
+            clock_timestamp()+interval '1 hour',4,1,4096,8192,5000,1,'open'
+          FROM ag_kernel.consumers c JOIN ag_kernel.policy_fences f ON f.consumer=c.consumer WHERE c.consumer=$1`,
+        [c, nativeLegacy.execution, nativeLegacy.account, nativeLegacy.generation]);
         await admin.query(`INSERT INTO ag_kernel.requests(consumer,execution_ref,id,effect,worker,closure_token)
           VALUES ($1,$2,'pre003','completed',$3,$4)`,
-        [nativeLegacy.ctx.consumerId, nativeLegacy.execution, nativeLegacy.worker, nativeLegacy.token]);
-        await admin.query('UPDATE ag_kernel.executions SET request_count=1 WHERE consumer=$1 AND ref=$2',
-          [nativeLegacy.ctx.consumerId, nativeLegacy.execution]);
+        [c, nativeLegacy.execution, nativeLegacy.worker, nativeLegacy.token]);
       }
     }
     migrated = true;
@@ -191,7 +209,9 @@ async function mutateAtConsumerLock<T>(ctx: TrustedContext, action: () => Promis
   } finally { await gate.query('ROLLBACK'); gate.release(); }
 }
 async function count(sql: string, values: unknown[]) {
-  return (await admin.query(sql, values)).rows[0].n as number;
+  const n = Number((await admin.query(sql, values)).rows[0].n);
+  assert.ok(Number.isSafeInteger(n) && n >= 0);
+  return n;
 }
 
 // Spare concurrency must not admit a fresh ID before maintenance observes owner loss.
@@ -1523,4 +1543,223 @@ test('B2a bounded cleanup prioritizes complete native proofs over legacy tokens'
   await assert.rejects(x.acknowledgeTransportClosed(ctx, delegate, remaining[0], authority), isCode('invalid'));
   await assert.rejects(x.settleCleanup(ctx, job.cleanupRef, delegate, job.token, true), isCode('conflict'));
   assert.equal(await occupancy(ctx, account.accountRef!), 1);
+});
+
+// Red when concurrent new IDs overrun an aggregate final slot, or saturation
+// stores attacker denial rows / prevents an existing run's exact closure.
+test('D-final final consumer fact slot is atomic and safety headroom is bounded', async () => {
+  const ctx = context();
+  const facts = { ...factDefaults, maxConsumerFacts: 28, maxAccountFacts: 28, workerSlots: 4, issuerSlots: 4 };
+  const x = new PostgresKernel(poolA, defaults, facts), y = new PostgresKernel(poolB, defaults, facts);
+  await x.issuer(ctx); // Provision bounded recovery slots before ordinary helpers.
+  const account = await connected(ctx), owner = await worker(ctx, x);
+  const original = await prepared(ctx, account.accountRef!, {}, x);
+  const first = await x.claim(ctx, original.result.executionRef!, 'spent-at-cap', owner, original.admission, reservation());
+  assert.ok(first.dispatch);
+  const intents = await Promise.all([approval(ctx, account.accountRef!), approval(ctx, account.accountRef!)]);
+  const results = await Promise.allSettled([x.prepare(ctx, intents[0]), y.prepare(ctx, intents[1])]);
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+  const denied = results.find(r => r.status === 'rejected');
+  assert.ok(denied?.status === 'rejected' && isCode('denied')(denied.reason));
+  const budget = async () => (await admin.query(`SELECT fact_used FROM ag_kernel.consumers WHERE consumer=$1`, [ctx.consumerId])).rows[0].fact_used;
+  assert.equal(Number(await budget()), 28);
+  const rows = await count('SELECT count(*) AS n FROM ag_kernel.operations WHERE consumer=$1', [ctx.consumerId]);
+  for (let n = 0; n < 3; n++) {
+    await assert.rejects(y.prepare(ctx, await approval(ctx, account.accountRef!)), isCode('denied'));
+    await assert.rejects(x.claim(ctx, original.result.executionRef!, 'new-denial-' + n, owner, original.admission, reservation()), isCode('denied'));
+  }
+  assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.operations WHERE consumer=$1', [ctx.consumerId]), rows);
+  assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.requests WHERE consumer=$1', [ctx.consumerId]), 1);
+  assert.deepEqual(await y.prepare(ctx, original.input), original.result);
+  await assert.rejects(x.prepare(ctx, { ...original.input, intentDigest: digest() }), isCode('conflict'));
+  assert.deepEqual(await y.operation(ctx, original.input.operationId), original.result);
+  assert.deepEqual((await y.savedExecution(ctx, original.result.executionRef!)).admission, original.admission);
+  const rejected = await x.rejectBeforeDispatch(ctx, owner, first.dispatch.closure, false);
+  assert.deepEqual(await y.claim(ctx, original.result.executionRef!, 'spent-at-cap', owner, original.admission, reservation()), { status: rejected });
+  const closeId = op();
+  const closed = await y.close(ctx, closeId, original.result.executionRef!);
+  assert.equal(closed.state, 'applied');
+  assert.deepEqual(await x.close(ctx, closeId, original.result.executionRef!), closed);
+  await assert.rejects(y.close(ctx, op(), original.result.executionRef!), isCode('denied'));
+  const fenceId = op(), fenced = await x.fence(ctx, fenceId, 'binding-fixture', 2);
+  assert.equal(fenced.state, 'applied');
+  assert.deepEqual(await y.fence(ctx, fenceId, 'binding-fixture', 2), fenced);
+  for (let n = 0; n < 3; n++) await assert.rejects(y.fence(ctx, op(), 'binding-fixture', 3 + n), isCode('denied'));
+  const disabled = await x.beginAccount(ctx, { operationId: op(), kind: 'disable', intentDigest: digest(),
+    accountRef: account.accountRef!, expectedRevision: account.revision! });
+  assert.equal(disabled.state, 'applied');
+  const delegate = await worker(ctx, y);
+  let found = false;
+  for (let n = 0; n < 3; n++) {
+    const job = await y.claimCleanup(ctx, delegate); assert.ok(job);
+    if (job.scope.kind === 'execution' && job.scope.executionRef === original.result.executionRef) {
+      assert.deepEqual(job.scope.transports, [first.dispatch.closure]);
+      await x.acknowledgeTransportClosed(ctx, delegate, job.scope.transports[0], { cleanupRef: job.cleanupRef, token: job.token });
+      found = true;
+    }
+    await y.settleCleanup(ctx, job.cleanupRef, delegate, job.token, true);
+  }
+  assert.ok(found);
+  assert.equal(await occupancy(ctx, account.accountRef!), 0);
+  assert.deepEqual(await x.request(ctx, original.result.executionRef!, 'spent-at-cap'), rejected);
+  assert.equal(Number(await budget()), 28, 'prepaid safety mutations cannot increase the budget');
+});
+
+type RetentionFixture = { ctx: TrustedContext; owner: string; safe: Awaited<ReturnType<typeof prepared>>;
+  unknown: Awaited<ReturnType<typeof prepared>>; safeProof: NativeDispatchProof; unknownProof: NativeDispatchProof };
+let retentionFixture: RetentionFixture;
+// Red when expiry alone compacts unresolved authority, or positively closed,
+// expired runs never compact their redundant intents while readback stays full.
+test('D-final only expired positively safe payloads compact; held evidence survives', async () => {
+  const ctx = context(), owner = await worker(ctx);
+  const cases = ['safe', 'unknown', 'occupied', 'cleanup-pending'] as const;
+  const now = (await admin.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
+  const deadline = new Date(now.getTime() + 2_000);
+  const executions = new Map<string, Awaited<ReturnType<typeof prepared>>>();
+  const proofs = new Map<string, NativeDispatchProof>();
+  for (const kind of cases) {
+    const account = await connected(ctx);
+    const e = await prepared(ctx, account.accountRef!, { deadline });
+    const claimed = await a.claim(ctx, e.result.executionRef!, kind, owner, e.admission, reservation());
+    assert.ok(claimed.dispatch);
+    executions.set(kind, e); proofs.set(kind, claimed.dispatch.closure);
+    if (kind === 'unknown') await a.effect(ctx, e.result.executionRef!, kind, owner, 'effect_unknown');
+    else {
+      await a.effect(ctx, e.result.executionRef!, kind, owner, 'response_started');
+      await a.effect(ctx, e.result.executionRef!, kind, owner, 'completed');
+    }
+    await a.close(ctx, op(), e.result.executionRef!);
+    if (kind === 'safe' || kind === 'cleanup-pending') await a.acknowledgeTransportClosed(ctx, owner, claimed.dispatch.closure);
+  }
+  for (let n = 0; n < cases.length; n++) {
+    const job = await b.claimCleanup(ctx, owner); assert.ok(job?.scope.kind === 'execution');
+    if (job.scope.executionRef === executions.get('safe')!.result.executionRef) await b.settleCleanup(ctx, job.cleanupRef, owner, job.token, true);
+  }
+  const payloads = async () => (await admin.query(`SELECT ref,intent,intent_hash FROM ag_kernel.executions
+    WHERE consumer=$1 ORDER BY ref`, [ctx.consumerId])).rows;
+  const before = await payloads();
+  assert.ok(before.every(row => row.intent !== null));
+  const used = await count('SELECT fact_used AS n FROM ag_kernel.consumers WHERE consumer=$1', [ctx.consumerId]);
+  await delay(Math.max(0, deadline.getTime() - Date.now()) + 50);
+  await a.reconcile(ctx);
+  const after = await payloads(), safe = executions.get('safe')!, unknown = executions.get('unknown')!;
+  for (const row of after) {
+    const old = before.find(r => r.ref === row.ref)!;
+    assert.deepEqual(row.intent_hash, old.intent_hash);
+    if (row.ref === safe.result.executionRef) assert.equal(row.intent, null);
+    else assert.deepEqual(row.intent, old.intent, 'equally old unresolved rows must retain their metadata');
+  }
+  const operationPayload = (await admin.query('SELECT intent,intent_hash FROM ag_kernel.operations WHERE consumer=$1 AND id=$2',
+    [ctx.consumerId, safe.input.operationId])).rows[0];
+  assert.equal(operationPayload.intent, null); assert.equal(operationPayload.intent_hash.length, 32);
+  assert.deepEqual(await b.prepare(ctx, safe.input), safe.result);
+  await assert.rejects(b.prepare(ctx, { ...safe.input, intentDigest: digest() }), isCode('conflict'));
+  assert.deepEqual(await b.operation(ctx, safe.input.operationId), safe.result);
+  assert.deepEqual((await b.savedExecution(ctx, safe.result.executionRef!)).admission, safe.admission);
+  assert.equal((await b.savedExecution(ctx, safe.result.executionRef!)).dispatchAllowed, false);
+  assert.equal((await b.request(ctx, unknown.result.executionRef!, 'unknown')).effect, 'effect_unknown');
+  assert.deepEqual(await b.requestProof(ctx, unknown.result.executionRef!, 'unknown'), proofs.get('unknown'));
+  assert.equal(await occupancy(ctx, unknown.result.accountRef!), 1);
+  assert.equal(await count('SELECT fact_used AS n FROM ag_kernel.consumers WHERE consumer=$1', [ctx.consumerId]), used);
+  retentionFixture = { ctx, owner, safe, unknown, safeProof: proofs.get('safe')!, unknownProof: proofs.get('unknown')! };
+});
+
+// Red when restart/restore forgets replay tombstones, unknown invocation/native
+// nonce bindings or old issuer epochs, or service/account caps ignore real rows.
+test('D-final tombstones and spent proofs survive restart/restore and all aggregate caps', async () => {
+  assert.ok(retentionFixture);
+  const { ctx, owner, safe, unknown, safeProof, unknownProof } = retentionFixture;
+  const used = await count('SELECT fact_used AS n FROM ag_kernel.consumers WHERE consumer=$1', [ctx.consumerId]);
+  const saturated = new PostgresKernel(poolB, defaults, { ...factDefaults, maxConsumerFacts: used, maxAccountFacts: used });
+  const beforeIssuer = await saturated.issuer(ctx);
+  // Actual logical backup into a NEW disposable DB, separately from normal
+  // kernel reconstruction. Never export the dump or CLI vendor diagnostics.
+  const restoredDatabase = database + '_restore';
+  assert.match(restoredDatabase, /^ag_kernel_test_[a-z0-9_]+$/);
+  const dumpExecutable = process.env.AG_KERNEL_TEST_PG_DUMP, psqlExecutable = process.env.AG_KERNEL_TEST_PSQL;
+  assert.ok(typeof dumpExecutable === 'string' && dumpExecutable.startsWith('/') && dumpExecutable.endsWith('/pg_dump'));
+  assert.ok(typeof psqlExecutable === 'string' && psqlExecutable.startsWith('/') && psqlExecutable.endsWith('/psql'));
+  await admin.query(`CREATE DATABASE "${restoredDatabase}"`);
+  const restoredURL = new URL(safeTestDsn()); restoredURL.pathname = '/' + restoredDatabase;
+  const cliEnv = (url: URL): NodeJS.ProcessEnv => ({ ...process.env, PGHOST: url.hostname,
+    PGPORT: url.port, PGUSER: decodeURIComponent(url.username), PGPASSWORD: decodeURIComponent(url.password),
+    PGDATABASE: decodeURIComponent(url.pathname.slice(1)) });
+  let stage = 'dump';
+  try {
+    const dump = execFileSync(dumpExecutable, ['--no-owner', '--no-acl', '--schema=ag_kernel', '--schema=ag_management'],
+      { env: cliEnv(new URL(safeTestDsn())), maxBuffer: 16_777_216, stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000 });
+    stage = 'restore';
+    execFileSync(psqlExecutable, ['--no-psqlrc', '--set=ON_ERROR_STOP=on'],
+      { env: cliEnv(restoredURL), input: dump, maxBuffer: 1_048_576,
+        stdio: ['pipe', 'pipe', 'pipe'], timeout: 15_000 });
+  } catch { throw new Error(`disposable ${stage} failed; vendor diagnostics withheld`); }
+  const restoredPool = new pg.Pool({ connectionString: restoredURL.toString(), max: 1 });
+  try {
+    const restored = new PostgresKernel(restoredPool);
+    assert.equal(await restored.issuer(ctx), beforeIssuer);
+    await restored.restore(ctx, beforeIssuer, randomUUID());
+    assert.deepEqual(await restored.prepare(ctx, safe.input), safe.result);
+    assert.deepEqual(await restored.prepare(ctx, unknown.input), unknown.result);
+    await assert.rejects(restored.prepare(ctx, { ...safe.input, operationId: op() }), isCode('denied'));
+    await assert.rejects(restored.prepare(ctx, { ...unknown.input, operationId: op(), intentDigest: digest() }), isCode('conflict'));
+    assert.equal((await restored.claim(ctx, safe.result.executionRef!, 'safe', owner, safe.admission, reservation())).dispatch, undefined);
+    assert.equal((await restored.claim(ctx, unknown.result.executionRef!, 'unknown', owner, unknown.admission, reservation())).status.effect, 'effect_unknown');
+    await assert.rejects(restored.claim(ctx, safe.result.executionRef!, 'restored-new-id', owner, safe.admission, reservation()), isCode('denied'));
+    assert.deepEqual(await restored.requestProof(ctx, safe.result.executionRef!, 'safe'), safeProof);
+    assert.deepEqual(await restored.requestProof(ctx, unknown.result.executionRef!, 'unknown'), unknownProof);
+    assert.equal((await restored.savedExecution(ctx, safe.result.executionRef!)).dispatchAllowed, false);
+  } finally { await restoredPool.end(); }
+  await saturated.restore(ctx, beforeIssuer, randomUUID());
+  const restarted = new PostgresKernel(poolA);
+  assert.deepEqual(await restarted.prepare(ctx, safe.input), safe.result);
+  assert.deepEqual(await restarted.prepare(ctx, unknown.input), unknown.result);
+  await assert.rejects(restarted.prepare(ctx, { ...safe.input, operationId: op() }), isCode('denied'));
+  await assert.rejects(restarted.prepare(ctx, { ...unknown.input, operationId: op(), intentDigest: digest() }), isCode('conflict'));
+  assert.deepEqual(await restarted.claim(ctx, safe.result.executionRef!, 'safe', owner, safe.admission, reservation()),
+    { status: { requestRef: 'safe', effect: 'completed' } });
+  assert.equal((await restarted.claim(ctx, unknown.result.executionRef!, 'unknown', owner, unknown.admission, reservation())).status.effect, 'effect_unknown');
+  await assert.rejects(restarted.claim(ctx, safe.result.executionRef!, 'new-after-restore', owner, safe.admission, reservation()), isCode('denied'));
+  assert.deepEqual(await restarted.requestProof(ctx, safe.result.executionRef!, 'safe'), safeProof);
+  assert.deepEqual(await restarted.requestProof(ctx, unknown.result.executionRef!, 'unknown'), unknownProof);
+  assert.equal((await restarted.savedExecution(ctx, safe.result.executionRef!)).dispatchAllowed, false);
+  await assert.rejects(restarted.restore(ctx, await restarted.issuer(ctx), beforeIssuer), isCode('conflict'));
+  // The finite prepaid recovery slots bound new boot/restore identities as well.
+  for (let n = 0; n < factDefaults.issuerSlots - 2; n++) await restarted.restore(ctx, await restarted.issuer(ctx), randomUUID());
+  await assert.rejects(restarted.restore(ctx, await restarted.issuer(ctx), randomUUID()), isCode('denied'));
+  let workers = await count('SELECT count(*) AS n FROM ag_kernel.workers WHERE consumer=$1', [ctx.consumerId]);
+  while (workers++ < factDefaults.workerSlots) await worker(ctx, restarted);
+  await assert.rejects(worker(ctx, restarted), isCode('denied'));
+  await restarted.heartbeat(ctx, owner);
+  assert.equal(await count('SELECT fact_used AS n FROM ag_kernel.consumers WHERE consumer=$1', [ctx.consumerId]), used);
+  assert.equal((await restarted.request(ctx, unknown.result.executionRef!, 'unknown')).effect, 'effect_unknown');
+  assert.equal(await occupancy(ctx, unknown.result.accountRef!), 1);
+
+  const accountCtx = context(); await a.issuer(accountCtx);
+  const account = await connected(accountCtx);
+  const accountUsed = await count('SELECT fact_used AS n FROM ag_kernel.accounts WHERE consumer=$1 AND ref=$2', [accountCtx.consumerId, account.accountRef]);
+  const accountCapped = new PostgresKernel(poolA, defaults, { ...factDefaults, maxAccountFacts: accountUsed });
+  await assert.rejects(accountCapped.prepare(accountCtx, await approval(accountCtx, account.accountRef!)), isCode('denied'));
+  assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.executions WHERE consumer=$1', [accountCtx.consumerId]), 0);
+  assert.equal((await accountCapped.beginAccount(accountCtx, { operationId: op(), kind: 'disable', intentDigest: digest(),
+    accountRef: account.accountRef!, expectedRevision: account.revision! })).state, 'applied');
+
+  // Last test intentionally saturates the shared service counter across consumers.
+  const left = context(), right = context();
+  const accounts = await Promise.all([connected(left), connected(right)]);
+  const inputs = await Promise.all([approval(left, accounts[0].accountRef!), approval(right, accounts[1].accountRef!)]);
+  const serviceUsed = await count('SELECT used AS n FROM ag_kernel.fact_budget', []);
+  const globalFacts = { ...factDefaults, maxServiceFacts: serviceUsed + 6, maxConsumerFacts: serviceUsed + 6, maxAccountFacts: Math.min(10_000, serviceUsed + 6) };
+  const x = new PostgresKernel(poolA, defaults, globalFacts), y = new PostgresKernel(poolB, defaults, globalFacts);
+  const results = await Promise.allSettled([x.prepare(left, inputs[0]), y.prepare(right, inputs[1])]);
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+  assert.ok(results.some(r => r.status === 'rejected' && isCode('denied')(r.reason)));
+  const accepted = results.findIndex(r => r.status === 'fulfilled');
+  const winner = results[accepted]; assert.ok(winner.status === 'fulfilled');
+  const winCtx = accepted === 0 ? left : right;
+  assert.equal((await x.close(winCtx, op(), winner.value.executionRef!)).state, 'applied');
+  const deniedConsumer = context();
+  await assert.rejects(y.issuer(deniedConsumer), isCode('denied'));
+  assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.consumers WHERE consumer=$1', [deniedConsumer.consumerId]), 0);
+  assert.equal(await count('SELECT used AS n FROM ag_kernel.fact_budget', []), serviceUsed + 6);
+  assert.deepEqual(await y.operation(winCtx, inputs[accepted].operationId), winner.value);
 });
