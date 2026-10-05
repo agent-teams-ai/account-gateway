@@ -58,7 +58,7 @@ export const oauthAuthorizationURL = z.string().min(1).max(4096).refine(value =>
       if (equal < 1 || /%(?![0-9a-fA-F]{2})/.test(part)) return false;
       const key = part.slice(0, equal);
       if (!/^[a-z_]+$/.test(key) || seen.has(key) ||
-          !(key in fixed || key in optional || key === 'state' || key === 'code_challenge')) return false;
+          !(Object.hasOwn(fixed, key) || Object.hasOwn(optional, key) || key === 'state' || key === 'code_challenge')) return false;
       seen.add(key);
     }
     for (const [key, expected] of Object.entries(fixed)) if (url.searchParams.get(key) !== expected) return false;

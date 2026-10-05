@@ -38,7 +38,9 @@ export interface OAuthScope {
 }
 export interface OAuthReadback {
   readonly operationId: string; readonly accountRef: string;
-  readonly state: 'staged' | 'completed' | 'rejected' | 'unknown';
+  // Native connect state is distinct from the completed custody outcome
+  // "staged" and from the future descriptor's qualification state.
+  readonly state: 'prepared' | 'entered' | 'completed' | 'expired' | 'unknown';
 }
 export interface OAuthBeginReadback extends OAuthReadback {
   readonly authorizationURL?: string;
@@ -60,7 +62,10 @@ export interface OAuthEnrollmentOptions {
   readonly profile: ManagedProfile; readonly native: OAuthEnrollmentNative;
   readonly descriptor?: OAuthDescriptorBoundary;
 }
-export type OAuthBeginInput = Pick<AccountIntent, 'operationId' | 'ownerRef' | 'profile' | 'displayName'>;
+export interface OAuthBeginInput {
+  readonly operationId: string; readonly ownerRef: string;
+  readonly profile: string; readonly displayName: string;
+}
 export interface OAuthBeginResult {
   readonly operation: OperationStatus;
   readonly authorizationURL?: string;
@@ -71,7 +76,7 @@ function oauthScope(j: CandidateJournal): OAuthScope {
 }
 function exactOAuthReadback(scope: OAuthScope, r: OAuthReadback): boolean {
   return r.operationId === scope.operationId && r.accountRef === scope.accountRef &&
-    ['staged','completed','rejected','unknown'].includes(r.state);
+    ['prepared','entered','completed','expired','unknown'].includes(r.state);
 }
 export interface ControlledProof {
   // Trusted qualified inert readback; MUST NOT probe a provider or compare tokens.
@@ -219,7 +224,7 @@ export class AccountManagement {
       // Return only an actually received Begin capability. It is never persisted
       // or reconstructed on duplicate Begin, GET, lost ACK or worker recovery.
       return Object.freeze({ operation: current, ...(current.state === 'pending' &&
-        begun.state === 'staged' && begun.authorizationURL !== undefined
+        begun.state === 'prepared' && begun.authorizationURL !== undefined
         ? { authorizationURL: begun.authorizationURL } : {}) });
     } catch {
       return Object.freeze({ operation: await this.kernel.unknownCandidate(ctx, intent.operationId, this.worker) });
@@ -230,19 +235,33 @@ export class AccountManagement {
     try {
       if (!this.oauth || !this.supportsOAuthProfile(journal.profile.profile) || journal.consumerId !== ctx.consumerId ||
           journal.profile.baseURL !== codexOAuthProfile.baseURL || journal.profile.model !== codexOAuthProfile.model ||
-          journal.profile.qualificationRef !== this.oauth.profile.qualificationRef) throw new KernelError('conflict');
+          journal.profile.qualificationRef !== this.oauth.profile.qualificationRef || journal.purpose !== 'create') throw new KernelError('conflict');
       await this.kernel.reconcile(ctx);
       const current = await this.kernel.operation(ctx, journal.operationId);
+      if (current.operationRef !== journal.operationId || current.accountRef !== journal.accountRef) throw new KernelError('conflict');
       if (current.state === 'applied' || current.state === 'rejected') return current;
+      // Reconciliation/uncertainty permanently spent the original authority.
+      // Later custody/qualification cannot turn unknown into a safe rejection,
+      // reactivate a row or manufacture a fresh candidate. Cleanup stays scoped
+      // to the original journal; absent physical proof it remains quarantined.
+      if (current.state === 'unknown') return current;
       // A new worker does not take over a live creating candidate or issue Begin.
       if (current.state === 'pending' && this.worker !== journal.worker) return current;
       const scope = oauthScope(journal);
       const result = begin ?? await this.oauth.native.read(scope);
-      if (!exactOAuthReadback(scope, result) || result.state === 'unknown' || result.state === 'rejected') throw new KernelError('conflict');
-      // Staged/user-interaction and completed custody are NOT route evidence.
+      if (!exactOAuthReadback(scope, result) || result.state === 'unknown' || result.state === 'expired') {
+        // Expiry/missing/unknown cannot attest token-exchange non-entry or erase
+        // an accepted effect. Retain the original spent candidate and cleanup.
+        throw new KernelError('conflict');
+      }
+      // Legitimate user interaction is waiting, not missing/unknown evidence.
+      if (result.state === 'prepared' || result.state === 'entered') return current;
+      // Completed custody (outcome "staged") is NOT route evidence.
       // An unavailable future descriptor adapter preserves truthful pending.
       if (!this.oauth.descriptor) return current;
-      const source = await this.oauth.descriptor.describe(scope);
+      let source: OAuthDescriptor;
+      try { source = await this.oauth.descriptor.describe(scope); }
+      catch { return current; } // Missing future endpoint is not a connect failure.
       if (source.operationId !== journal.operationId || source.accountRef !== journal.accountRef) throw new KernelError('conflict');
       if (source.state === 'staged' && source.qualification === 'pending') {
         if ('native' in source) throw new KernelError('conflict');
@@ -251,10 +270,14 @@ export class AccountManagement {
       if (source.state !== 'qualified' || source.qualification !== 'qualified') throw new KernelError('conflict');
       const descriptor = physicalCandidate(source.native);
       if (!exactCandidate(journal, descriptor)) throw new KernelError('conflict');
+      // Qualification can outlive the original worker lease. Observe durable
+      // loss again before entering the existing physical promotion sequence.
+      await this.kernel.reconcile(ctx);
+      const qualifiedOperation = await this.kernel.operation(ctx, journal.operationId);
+      if (qualifiedOperation.state !== 'pending') return qualifiedOperation;
       // A trusted descriptor pins the entire physical birth. Existing candidate
       // read/inert proof, mapping, activation readback and kernel ACK still apply.
-      // On owner loss it may bind cleanup identity, but cannot revive promotion.
-      return await this.readback(ctx, journal, this.worker, current.state === 'pending', descriptor);
+      return await this.readback(ctx, journal, this.worker, true, descriptor);
     } catch {
       return this.kernel.unknownCandidate(ctx, journal.operationId, journal.worker);
     }
@@ -333,10 +356,22 @@ export class AccountManagement {
       if (candidates[0].state === 'inactive' && !await this.proof.verify(journal, descriptor)) throw new KernelError('conflict');
       const mapping = Object.freeze({ ...journal, descriptor });
       await this.store.saveMapping(mapping); // Durable binding/proof receipt precedes native activation and kernel promotion.
+      if (qualified) {
+        await this.kernel.reconcile(ctx);
+        const current = await this.kernel.operation(ctx, journal.operationId);
+        if (current.state !== 'pending') return current;
+      }
       if (activate && candidates[0].state === 'inactive') {
         try { await this.native.setState(mapping,'active'); } catch { /* ACK loss: only exact readback, never HTTP retry. */ }
         const active = await this.native.read(journal);
         if (active.length !== 1 || active[0].state !== 'active' || !sameCandidate(descriptor,physicalCandidate(active[0]))) throw new KernelError('conflict');
+      }
+      if (qualified) {
+        // A late activation ACK never changes the original unknown effect into
+        // a not-dispatched rejection after worker-loss reconciliation.
+        await this.kernel.reconcile(ctx);
+        const current = await this.kernel.operation(ctx, journal.operationId);
+        if (current.state !== 'pending') return current;
       }
       return await this.kernel.acknowledgeCandidate(ctx, journal.operationId, worker,
         { generation: descriptor.generation, nativePhysicalIdentity: descriptor.nativePhysicalIdentity, profile: descriptor.profile });

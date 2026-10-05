@@ -245,14 +245,14 @@ export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OA
       const r = object(decode(bytes), ['operation','account_ref','state'],
         begin ? ['outcome','authorize_url'] : ['outcome']);
       if (r.operation !== scope.operationId || r.account_ref !== scope.accountRef ||
-          !['staged','completed','rejected','unknown'].includes(r.state as string)) throw new NativeFailure('invalid_readback');
+          !['prepared','entered','completed','expired','unknown'].includes(r.state as string)) throw new NativeFailure('invalid_readback');
       // Native outcome is not a safe DTO or a no-effect receipt. Validate its
       // bounded primitive shape then discard; never reflect vendor diagnostics.
       if (Object.hasOwn(r, 'outcome') && (typeof r.outcome !== 'string' ||
           !/^[a-z][a-z0-9_]{0,63}$/.test(r.outcome))) throw new NativeFailure('invalid_readback');
       let authorizationURL: string | undefined;
       if (Object.hasOwn(r, 'authorize_url')) {
-        if (!begin || r.state !== 'staged') throw new NativeFailure('invalid_readback');
+        if (!begin || r.state !== 'prepared') throw new NativeFailure('invalid_readback');
         const parsed = oauthAuthorizationURL.safeParse(r.authorize_url);
         if (!parsed.success) throw new NativeFailure('invalid_readback');
         authorizationURL = parsed.data;
