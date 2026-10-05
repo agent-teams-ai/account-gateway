@@ -38,8 +38,8 @@ boundaries:
     allow: {boundaries: [], packages: [], builtins: [], runtimeReferences: []}
   - id: kernel-postgres
     dependencyMode: runtime
-    roots: [services/account-gateway/src/postgres.ts]
-    entrypoints: [services/account-gateway/src/postgres.ts]
+    roots: [services/account-gateway/src/postgres.ts, services/account-gateway/src/retention.ts]
+    entrypoints: [services/account-gateway/src/postgres.ts, services/account-gateway/src/retention.ts]
     allow: {boundaries: [kernel-domain], packages: [pg], builtins: ['node:crypto'], runtimeReferences: []}
   - id: kernel-composition
     dependencyMode: runtime
@@ -50,7 +50,7 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/test/domain.test.ts, services/account-gateway/test/postgres.test.ts]
     entrypoints: [services/account-gateway/test/domain.test.ts, services/account-gateway/test/postgres.test.ts]
-    allow: {boundaries: [kernel-domain, kernel-postgres], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:timers/promises'], runtimeReferences: []}
+    allow: {boundaries: [kernel-domain, kernel-postgres], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:timers/promises', 'node:child_process'], runtimeReferences: []}
 
   - id: native-management
     dependencyMode: runtime

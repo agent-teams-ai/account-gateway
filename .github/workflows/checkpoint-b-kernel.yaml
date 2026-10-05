@@ -43,14 +43,18 @@ jobs:
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run typecheck
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run test:domain
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run test:management
-      - name: Prepare separate management database and pinned dump client
+      - name: Prepare separate management database and pinned dump/restore clients
         run: |
           docker exec "${{ job.services.postgres.id }}" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ag_kernel_test_management_ci'
           docker exec "${{ job.services.postgres.id }}" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ag_kernel_test_facade_ci'
           mkdir -p "$RUNNER_TEMP/gateway-pg-bin"
-          printf '#!/bin/sh\nexec docker exec %s pg_dump "$@"\n' "${{ job.services.postgres.id }}" > "$RUNNER_TEMP/gateway-pg-bin/pg_dump"
-          chmod 755 "$RUNNER_TEMP/gateway-pg-bin/pg_dump"
+          printf '#!/bin/sh\nexec docker exec -e PGHOST -e PGPORT -e PGUSER -e PGPASSWORD -e PGDATABASE "%s" pg_dump "$@"\n' "${{ job.services.postgres.id }}" > "$RUNNER_TEMP/gateway-pg-bin/pg_dump"
+          printf '#!/bin/sh\nexec docker exec -i -e PGHOST -e PGPORT -e PGUSER -e PGPASSWORD -e PGDATABASE "%s" psql "$@"\n' "${{ job.services.postgres.id }}" > "$RUNNER_TEMP/gateway-pg-bin/psql"
+          chmod 755 "$RUNNER_TEMP/gateway-pg-bin/pg_dump" "$RUNNER_TEMP/gateway-pg-bin/psql"
           "$RUNNER_TEMP/gateway-pg-bin/pg_dump" --version
+          "$RUNNER_TEMP/gateway-pg-bin/psql" --version
+          echo "AG_KERNEL_TEST_PG_DUMP=$RUNNER_TEMP/gateway-pg-bin/pg_dump" >> "$GITHUB_ENV"
+          echo "AG_KERNEL_TEST_PSQL=$RUNNER_TEMP/gateway-pg-bin/psql" >> "$GITHUB_ENV"
           echo "$RUNNER_TEMP/gateway-pg-bin" >> "$GITHUB_PATH"
       - run: node --test --test-concurrency=1 services/account-gateway/test/postgres.test.ts services/account-gateway/test/management-postgres.test.ts services/account-gateway/test/facade-postgres.test.ts
       - name: Synthetic native HTTP bridge against its own empty disposable database

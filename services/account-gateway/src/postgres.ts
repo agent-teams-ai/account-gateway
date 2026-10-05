@@ -1,13 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import {
-  KernelError, boundedConfig, approvedLimits, defaults, identifier, integer, revision as authorityRevision, uuid,
+  KernelError, boundedConfig, boundedFacts, approvedLimits, defaults, factDefaults, identifier, integer, revision as authorityRevision, uuid,
 } from './domain.ts';
 import type {
-  TrustedContext, DurableKernel, Bounds, AccountIntent, AccountStatus, OperationStatus,
+  TrustedContext, DurableKernel, Bounds, DurableFactBounds, AccountIntent, AccountStatus, OperationStatus,
   ApprovedPreparation, ExecutionStatus, NativeDescriptor, NativeCreatePermit,
   PrivateAdmission, ApprovedLimits, AccountPageQuery, AccountPage, ClaimResult, RequestStatus, Effect, CleanupClaim, TransportClosure, CleanupAuthority, NativeReservation, NativeDispatchProof, NativeBinding,
 } from './domain.ts';
+import { compactSafePayloads } from './retention.ts';
 
 type Row = Record<string, any>;
 type Tx = { db: PoolClient; consumer: string; issuer: string };
@@ -72,9 +73,11 @@ const dispatchProof = (r: Row): NativeDispatchProof => ({
 export class PostgresKernel implements DurableKernel {
   private readonly pool: Pool;
   private readonly bounds: Readonly<Bounds>;
-  constructor(pool: Pool, bounds: Bounds = defaults) {
+  private readonly facts: Readonly<DurableFactBounds>;
+  constructor(pool: Pool, bounds: Bounds = defaults, facts: DurableFactBounds = factDefaults) {
     this.pool = pool;
     this.bounds = boundedConfig(bounds);
+    this.facts = boundedFacts(facts);
   }
   private async transaction<T>(context: TrustedContext, body: (tx: Tx) => Promise<T>): Promise<T> {
     const consumer = context.consumerId;
@@ -84,8 +87,16 @@ export class PostgresKernel implements DurableKernel {
       db = await this.pool.connect();
       await db.query('BEGIN');
       await db.query('SET LOCAL search_path = ag_kernel, pg_catalog');
-      await db.query('INSERT INTO consumers(consumer) VALUES ($1) ON CONFLICT DO NOTHING', [consumer]);
+      // Global final-slot accounting has one explicit lock order: budget, then
+      // consumer. Limits may tighten, never silently reopen saturated history.
+      await db.query('SELECT singleton FROM fact_budget WHERE singleton FOR UPDATE');
+      await db.query('UPDATE fact_budget SET capacity=least(capacity,$1) WHERE singleton', [this.facts.maxServiceFacts]);
+      await db.query(`INSERT INTO consumers(consumer,fact_limit,account_fact_limit,worker_slots,issuer_slots)
+        VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+      [consumer, this.facts.maxConsumerFacts, this.facts.maxAccountFacts, this.facts.workerSlots, this.facts.issuerSlots]);
       const r = await db.query('SELECT issuer FROM consumers WHERE consumer=$1 FOR UPDATE', [consumer]);
+      await db.query(`UPDATE consumers SET fact_limit=least(fact_limit,$2),account_fact_limit=least(account_fact_limit,$3)
+        WHERE consumer=$1`, [consumer, this.facts.maxConsumerFacts, this.facts.maxAccountFacts]);
       await db.query('INSERT INTO issuer_epochs(consumer,issuer) VALUES ($1,$2) ON CONFLICT DO NOTHING', [consumer, r.rows[0].issuer]);
       const result = await body({ db, consumer, issuer: r.rows[0].issuer });
       await db.query('COMMIT');
@@ -93,6 +104,7 @@ export class PostgresKernel implements DurableKernel {
     } catch (error) {
       if (db) await db.query('ROLLBACK').catch(() => undefined);
       if (error instanceof KernelError) throw error;
+      if (typeof error === 'object' && error !== null && 'code' in error && error.code === '54000') throw new KernelError('denied');
       // Never export vendor exception bodies, query parameters or connection data.
       throw new KernelError('unavailable');
     } finally { db?.release(); }
@@ -103,7 +115,8 @@ export class PostgresKernel implements DurableKernel {
     return r.rows[0];
   }
   private async existing(tx: Tx, id: string, intent: object): Promise<OperationStatus | undefined> {
-    const r = await tx.db.query('SELECT *, intent=$3::jsonb AS matches FROM operations WHERE consumer=$1 AND id=$2',
+    const r = await tx.db.query(`SELECT *, intent_hash=sha256(convert_to($3::jsonb::text,'UTF8')) AS matches
+      FROM operations WHERE consumer=$1 AND id=$2`,
       [tx.consumer, id, JSON.stringify(intent)]);
     if (!r.rows[0]) return undefined;
     if (!r.rows[0].matches) throw new KernelError('conflict');
@@ -314,7 +327,8 @@ export class PostgresKernel implements DurableKernel {
     return this.transaction(context, async tx => {
       const old = await this.existing(tx, input.operationId, intent);
       if (old) return old;
-      const sticky = await tx.db.query('SELECT *,intent=$4::jsonb AS matches FROM executions WHERE consumer=$1 AND invocation=$2 AND attempt_ref=$3',
+      const sticky = await tx.db.query(`SELECT *,intent_hash=sha256(convert_to($4::jsonb::text,'UTF8')) AS matches
+        FROM executions WHERE consumer=$1 AND invocation=$2 AND attempt_ref=$3`,
         [tx.consumer, input.invocationRef, input.attemptRef, JSON.stringify(intent)]);
       let e = sticky.rows[0];
       if (e && !e.matches) throw new KernelError('conflict');
@@ -648,6 +662,7 @@ export class PostgresKernel implements DurableKernel {
         await tx.db.query("UPDATE executions SET state='closed' WHERE consumer=$1 AND ref=$2", [tx.consumer, e.ref]);
         await this.cleanup(tx, undefined, e.ref);
       }
+      await compactSafePayloads(tx.db, tx.consumer, this.bounds.maintenanceBatch);
     });
   }
   async restore(context: TrustedContext, expectedIssuer: string, freshIssuer: string): Promise<void> {

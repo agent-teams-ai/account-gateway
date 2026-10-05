@@ -1,8 +1,8 @@
 import { constants, openSync, closeSync, fstatSync, lstatSync, readSync } from 'node:fs';
 import { dirname, isAbsolute, normalize } from 'node:path';
 import { createHash } from 'node:crypto';
-import { approvedLimits, defaults, identifier, integer } from './domain.ts';
-import type { ApprovedLimits } from './domain.ts';
+import { approvedLimits, boundedFacts, defaults, identifier, integer } from './domain.ts';
+import type { ApprovedLimits, DurableFactBounds } from './domain.ts';
 import { FacadeBearers } from './facade.ts';
 import type { ManagementBearer, RunControlBearer } from './facade.ts';
 import { strictJSON } from './facade-ingress.ts';
@@ -15,6 +15,8 @@ export class ServiceError extends Error {
 }
 export interface ServiceConfig {
   readonly kernelDSN: string;
+  // Required operator input; implementation defaults are not qualified caps.
+  readonly durableFacts: Readonly<DurableFactBounds>;
   readonly facadeOrigin: string;
   readonly callbackOrigin: string;
   readonly native: Readonly<{ executable: string; sha256: string; bootstrapFile: string;
@@ -71,7 +73,11 @@ export function loadServiceConfig(file: string): ServiceConfig {
       // readFileSync would permit growth after fstat; bounded positional read below.
       bytes = readBounded(fd, bytes);
     } finally { closeSync(fd); }
-    const r = object(strictJSON(bytes), ['kernelDSN','facadeOrigin','callbackOrigin','native','consumer','profile','bearers','keys']);
+    const r = object(strictJSON(bytes), ['kernelDSN','durableFacts','facadeOrigin','callbackOrigin','native','consumer','profile','bearers','keys']);
+    // Use the kernel's existing bound authority after exact protected parsing.
+    // Missing, extra, nonnumeric or inconsistent values deny before startup IO.
+    const durableFacts = boundedFacts(object(r.durableFacts,
+      ['maxServiceFacts','maxConsumerFacts','maxAccountFacts','workerSlots','issuerSlots']) as unknown as DurableFactBounds);
     const n = object(r.native, ['executable','sha256','bootstrapFile','authorityDir','origin','originRef','uid','gid']);
     const c = object(r.consumer, ['consumerId','managementCredential','executionCredential','cleanupCredential','callbackCredential']);
     const p = object(r.profile, ['profile','model','baseURL','qualificationRef','limits','providerTokenUpperBound']);
@@ -118,7 +124,7 @@ export function loadServiceConfig(file: string): ServiceConfig {
     if (!['postgres:','postgresql:'].includes(u.protocol) || u.pathname.length < 2) deny();
     const facadeOrigin = origin(r.facadeOrigin), callbackOrigin = origin(r.callbackOrigin);
     if (new Set([facadeOrigin, callbackOrigin, native.origin]).size !== 3) deny();
-    return freeze({ kernelDSN, facadeOrigin, callbackOrigin, native, consumer, profile, bearers, keys });
+    return freeze({ kernelDSN, durableFacts, facadeOrigin, callbackOrigin, native, consumer, profile, bearers, keys });
   } catch { return deny(); }
 }
 function readBounded(fd: number, b: Buffer): Buffer {

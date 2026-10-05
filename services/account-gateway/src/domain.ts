@@ -110,6 +110,27 @@ export interface Bounds {
   maxRequests: number; maxConcurrent: number; maxRequestBytes: number; maxOutputBytes: number; maxTokens: number; maxRunMs: number;
   workerLeaseMs: number; cleanupLeaseMs: number; maintenanceBatch: number;
 }
+// Aggregate facts include prepaid, single-use closure/fence/disable slots and
+// bounded worker/issuer recovery slots. These are conservative implementation
+// defaults, not measured D-final capacity qualifications. No fact is evicted.
+export interface DurableFactBounds {
+  maxServiceFacts: number; maxConsumerFacts: number; maxAccountFacts: number;
+  workerSlots: number; issuerSlots: number;
+}
+export const factDefaults: Readonly<DurableFactBounds> = Object.freeze({
+  maxServiceFacts: 1_000_000, maxConsumerFacts: 100_000, maxAccountFacts: 10_000,
+  workerSlots: 16, issuerSlots: 32,
+});
+export function boundedFacts(input: DurableFactBounds): Readonly<DurableFactBounds> {
+  const caps: DurableFactBounds = { maxServiceFacts: 100_000_000, maxConsumerFacts: 10_000_000,
+    maxAccountFacts: 1_000_000, workerSlots: 1_024, issuerSlots: 1_024 };
+  if (!input || typeof input !== 'object' || Object.keys(input).length !== Object.keys(caps).length ||
+      Object.keys(input).some(key => !Object.hasOwn(caps, key))) throw new KernelError('invalid');
+  for (const key of Object.keys(caps) as (keyof DurableFactBounds)[]) integer(input[key], caps[key]);
+  if (input.maxAccountFacts > input.maxConsumerFacts || input.maxConsumerFacts > input.maxServiceFacts ||
+      1 + input.workerSlots + input.issuerSlots > input.maxConsumerFacts) throw new KernelError('invalid');
+  return Object.freeze({ ...input });
+}
 export const defaults: Readonly<Bounds> = Object.freeze({
   maxRequests: 32, maxConcurrent: 1, maxRequestBytes: 1_048_576, maxOutputBytes: 4_194_304, maxTokens: 100_000, maxRunMs: 3_600_000,
   workerLeaseMs: 30_000, cleanupLeaseMs: 30_000, maintenanceBatch: 100,
