@@ -52,8 +52,8 @@ CREATE TRIGGER executions_intent_hash BEFORE INSERT OR UPDATE ON executions
 -- Unique parent FKs bound those child rows. Existing operations are also counted,
 -- so migration grants fresh headroom without erasing any accepted authority.
 UPDATE consumers c SET
-  worker_slots=greatest(16,(SELECT count(*) FROM workers w WHERE w.consumer=c.consumer)),
-  issuer_slots=greatest(32,(SELECT count(*) FROM issuer_epochs i WHERE i.consumer=c.consumer));
+  worker_slots=greatest(16,(SELECT count(*)+1 FROM workers w WHERE w.consumer=c.consumer)),
+  issuer_slots=greatest(32,(SELECT count(*)+1 FROM issuer_epochs i WHERE i.consumer=c.consumer));
 UPDATE accounts a SET fact_used=2
   +5*(SELECT count(*) FROM candidates c WHERE c.consumer=a.consumer AND c.account_ref=a.ref)
   +3*(SELECT count(*) FROM executions e WHERE e.consumer=a.consumer AND e.account_ref=a.ref)

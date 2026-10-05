@@ -55,6 +55,46 @@ async function seedLegacyRequests(): Promise<void> {
       ($1,$2,'legacy-denied','not_dispatched',NULL),($1,$2,'legacy-dispatch','dispatch_started',$3),
       ($1,$2,'legacy-response','response_started',$3)`, [consumer, legacy.execution, legacy.worker]);
 }
+const recoveryHistory = { ctx: { consumerId: 'recovery-history-' + randomUUID() },
+  account: randomUUID(), execution: randomUUID(), generation: randomUUID(),
+  workers: Array.from({ length: 16 }, () => randomUUID()),
+  issuers: Array.from({ length: 32 }, () => randomUUID()), token: randomUUID(),
+  incarnation: randomUUID(), nonce: randomUUID() };
+// Accepted SQL003/004 state before bounded retention, with no live worker.
+async function seedRecoveryHistory(): Promise<void> {
+  const h = recoveryHistory, consumer = h.ctx.consumerId;
+  await admin.query('INSERT INTO ag_kernel.consumers(consumer,issuer) VALUES ($1,$2)', [consumer, h.issuers[0]]);
+  await admin.query(`INSERT INTO ag_kernel.workers(consumer,worker,lease_until)
+    SELECT $1,id,clock_timestamp()-interval '1 second' FROM unnest($2::uuid[]) AS id`, [consumer, h.workers]);
+  await admin.query(`INSERT INTO ag_kernel.issuer_epochs(consumer,issuer)
+    SELECT $1,id FROM unnest($2::uuid[]) AS id`, [consumer, h.issuers]);
+  await admin.query(`INSERT INTO ag_kernel.accounts(consumer,ref,owner_ref,profile,display_name,state)
+    VALUES ($1,$2,'workspace-fixture','mimo-test','Disposable recovery history','staging')`, [consumer, h.account]);
+  await admin.query(`INSERT INTO ag_kernel.operations(consumer,id,intent,state,account_ref)
+    VALUES ($1,'history-create','{}','applied',$2)`, [consumer, h.account]);
+  await admin.query(`INSERT INTO ag_kernel.candidates(consumer,generation,account_ref,operation_id,profile,
+    expected_revision,expected_epoch,state,native_identity,worker)
+    VALUES ($1,$2,$3,'history-create','mimo-test',1,1,'ready',$2,$4)`,
+  [consumer, h.generation, h.account, h.workers[0]]);
+  await admin.query(`UPDATE ag_kernel.accounts SET state='active',active_generation=$3
+    WHERE consumer=$1 AND ref=$2`, [consumer, h.account, h.generation]);
+  await admin.query(`INSERT INTO ag_kernel.policy_fences(consumer,subject,revision)
+    VALUES ($1,'binding-fixture',1)`, [consumer]);
+  await admin.query(`INSERT INTO ag_kernel.executions(consumer,ref,invocation,attempt_ref,intent,account_ref,account_epoch,
+    profile,generation,policy_subject,policy_revision,binding_revision,issuer,policy_fence,deadline,
+    max_requests,max_concurrent,max_request_bytes,max_output_bytes,max_tokens,request_count,state)
+    SELECT $1,$2,'history-invocation','attempt-a','{}',$3,1,'mimo-test',$4,'binding-fixture',1,0,c.issuer,f.fence,
+      clock_timestamp()+interval '1 hour',4,1,4096,8192,5000,1,'closed'
+    FROM ag_kernel.consumers c JOIN ag_kernel.policy_fences f ON f.consumer=c.consumer WHERE c.consumer=$1`,
+  [consumer, h.execution, h.account, h.generation]);
+  await admin.query(`INSERT INTO ag_kernel.requests(consumer,execution_ref,id,effect,worker,closure_token,
+    native_origin_ref,engine_incarnation,request_nonce,descriptor_generation)
+    VALUES ($1,$2,'history-unknown','effect_unknown',$3,$4,'sandbox-native-origin',$5,$6,$7)`,
+  [consumer, h.execution, h.workers[0], h.token, h.incarnation, h.nonce, h.generation]);
+  await admin.query(`INSERT INTO ag_kernel.cleanup(consumer,execution_ref,state,worker,token,lease_until)
+    VALUES ($1,$2,'claimed',$3,$4,clock_timestamp()-interval '1 second')`,
+  [consumer, h.execution, h.workers[0], randomUUID()]);
+}
 before(async () => {
   const connectionString = safeTestDsn();
   admin = new pg.Pool({ connectionString, max: 2 });
@@ -106,6 +146,7 @@ before(async () => {
           VALUES ($1,$2,'pre003','completed',$3,$4)`,
         [c, nativeLegacy.execution, nativeLegacy.worker, nativeLegacy.token]);
       }
+      if (name.startsWith('004_')) await seedRecoveryHistory();
     }
     migrated = true;
     a = new PostgresKernel(poolA);
@@ -1488,6 +1529,78 @@ test('B2a SQL003 legacy NULL native binding conservatively retains occupancy', a
   assert.equal(await occupancy(ctx, nativeLegacy.account), 1);
   assert.equal(await count('SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
     [ctx.consumerId, nativeLegacy.execution]), 1);
+});
+
+// Red on005 when all historical worker/issuer slots are consumed: both fresh
+// recovery identities deny, stranding cleanup and fresh-epoch restore at capacity.
+test('D-final populated SQL003/004 upgrade prepays fresh recovery authority at fact saturation', async () => {
+  const h = recoveryHistory, ctx = h.ctx;
+  const used = await count('SELECT fact_used AS n FROM ag_kernel.consumers WHERE consumer=$1', [ctx.consumerId]);
+  const accountUsed = await count('SELECT fact_used AS n FROM ag_kernel.accounts WHERE consumer=$1 AND ref=$2',
+    [ctx.consumerId, h.account]);
+  const kernel = new PostgresKernel(poolA, defaults,
+    { ...factDefaults, maxConsumerFacts: used, maxAccountFacts: accountUsed });
+  const budget = async () => count('SELECT used AS n FROM ag_kernel.fact_budget', []);
+  const serviceUsed = await budget();
+  assert.equal(serviceUsed, await count('SELECT 1+sum(fact_used) AS n FROM ag_kernel.consumers', []));
+  const proof: NativeDispatchProof = { executionRef: h.execution, requestRef: 'history-unknown',
+    worker: h.workers[0], token: h.token, native: { originRef: 'sandbox-native-origin',
+      engineIncarnation: h.incarnation, requestNonce: h.nonce, generation: h.generation } };
+  const saved = await kernel.savedExecution(ctx, h.execution);
+  assert.deepEqual(await kernel.requestProof(ctx, h.execution, 'history-unknown'), proof);
+  await assert.rejects(kernel.prepare(ctx, await approval(ctx, h.account)), isCode('denied'));
+  await assert.rejects(kernel.beginAccount(ctx, { operationId: op(), kind: 'create', intentDigest: digest(),
+    ownerRef: 'workspace-fixture', profile: 'mimo-test', displayName: 'Denied at capacity' }), isCode('denied'));
+  assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.operations WHERE consumer=$1', [ctx.consumerId]), 1);
+  await assert.rejects(kernel.heartbeat(ctx, h.workers[0]), isCode('denied'));
+  await assert.rejects(kernel.claimCleanup(ctx, h.workers[0]), isCode('denied'));
+  const closeId = op(), closed = await kernel.close(ctx, closeId, h.execution);
+  assert.equal(closed.state, 'applied');
+
+  const freshWorker = randomUUID(), freshIssuer = randomUUID();
+  const recovery = await Promise.allSettled([
+    kernel.heartbeat(ctx, freshWorker), kernel.restore(ctx, h.issuers[0], freshIssuer),
+  ]);
+  assert.deepEqual(recovery.map(result => result.status === 'fulfilled' ? 'fulfilled'
+    : result.reason instanceof KernelError ? result.reason.code : 'unexpected failure'),
+  ['fulfilled', 'fulfilled'], 'fresh worker and issuer must use prepaid migration headroom');
+  assert.equal(await kernel.issuer(ctx), freshIssuer);
+  assert.equal((await kernel.account(ctx, h.account)).state, 'quarantined');
+  const restored = await kernel.savedExecution(ctx, h.execution);
+  assert.deepEqual(restored.admission, saved.admission);
+  assert.equal(restored.state, 'fenced'); assert.equal(restored.dispatchAllowed, false);
+  assert.deepEqual(await kernel.close(ctx, closeId, h.execution), closed);
+  await assert.rejects(kernel.restore(ctx, freshIssuer, h.issuers[0]), isCode('conflict'));
+
+  // Restore also queues generation cleanup; acquire the expired execution lease
+  // through the public kernel without assuming ordering of the two UUIDs.
+  let executionJob: CleanupClaim | undefined;
+  for (let n = 0; n < 2; n++) {
+    const job = await kernel.claimCleanup(ctx, freshWorker); assert.ok(job);
+    if (job.scope.kind === 'execution') { executionJob = job; break; }
+  }
+  assert.ok(executionJob?.scope.kind === 'execution');
+  assert.equal(executionJob.scope.executionRef, h.execution);
+  assert.deepEqual(executionJob.scope.transports, [proof]);
+  await assert.rejects(kernel.settleCleanup(ctx, executionJob.cleanupRef, freshWorker, executionJob.token, true), isCode('conflict'));
+  await kernel.acknowledgeTransportClosed(ctx, freshWorker, proof,
+    { cleanupRef: executionJob.cleanupRef, token: executionJob.token });
+  await kernel.settleCleanup(ctx, executionJob.cleanupRef, freshWorker, executionJob.token, true);
+  assert.equal(await occupancy(ctx, h.account), 0);
+  assert.equal((await kernel.request(ctx, h.execution, 'history-unknown')).effect, 'effect_unknown');
+  assert.deepEqual(await kernel.requestProof(ctx, h.execution, 'history-unknown'), proof);
+  await assert.rejects(worker(ctx, kernel), isCode('denied'));
+  await assert.rejects(kernel.restore(ctx, freshIssuer, randomUUID()), isCode('denied'));
+  const workers = (await admin.query('SELECT worker FROM ag_kernel.workers WHERE consumer=$1', [ctx.consumerId])).rows;
+  assert.deepEqual(workers.map(row => row.worker).sort(), [...h.workers, freshWorker].sort());
+  const issuers = (await admin.query('SELECT issuer FROM ag_kernel.issuer_epochs WHERE consumer=$1', [ctx.consumerId])).rows;
+  assert.deepEqual(issuers.map(row => row.issuer).sort(), [...h.issuers, freshIssuer].sort());
+  assert.equal(accountUsed, 12); // Account, candidate, execution, operation and request prepayments.
+  assert.equal(used, 1 + 17 + 33 + accountUsed + 2); // Includes BOTH fresh permanent slots.
+  assert.equal(await count('SELECT fact_used AS n FROM ag_kernel.consumers WHERE consumer=$1', [ctx.consumerId]), used);
+  assert.equal(await count('SELECT fact_used AS n FROM ag_kernel.accounts WHERE consumer=$1 AND ref=$2',
+    [ctx.consumerId, h.account]), accountUsed);
+  assert.equal(await budget(), serviceUsed, 'recovery and exact cleanup neither charge again nor refund facts');
 });
 
 // Regression: replaying one spent native nonce on a different request/execution
