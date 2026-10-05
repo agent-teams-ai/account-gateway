@@ -64,6 +64,11 @@ async function close(s: Server | undefined): Promise<void> {
 // original protected Go parent. No recovery spawn, inference replay or PID lookup.
 export async function startService(configFile: string, signal?: AbortSignal): Promise<Service> {
   const cfg = loadServiceConfig(configFile); // Fully frozen before any await.
+  // Source checkpoint: future protected descriptor + OAuth dispatch adapter is
+  // unavailable/unqualified. Opt-in fails before PG, listener or native launch.
+  // Do not install the proposed F3 wire client, alias an API-key qualification
+  // receipt, or activate OAuth in the normal catalog from this source alone.
+  if (cfg.oauthEnrollment) throw new ServiceError('startup_denied');
   const pool = new pg.Pool({ connectionString: cfg.kernelDSN, max: 8, connectionTimeoutMillis: 5000,
     query_timeout: 5000, statement_timeout: 5000, idle_in_transaction_session_timeout: 5000 });
   pool.on('error', () => fail());

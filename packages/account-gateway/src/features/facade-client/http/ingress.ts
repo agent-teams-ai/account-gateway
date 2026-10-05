@@ -8,6 +8,9 @@ export const credential = z.discriminatedUnion('kind', [
 export const connect = z.strictObject({ operationId: c.reference, ownerRef: c.reference, profileId: c.reference,
   displayName: z.string().min(1).max(128), credential });
 export const reconnect = z.strictObject({ operationId: c.reference, expectedMetadataRevision: c.revision, credential });
+// Additive PKCE enrollment uses the v1 authority, never the historical raw
+// OAuth credential DTO above. That DTO does not implement a login flow.
+export const oauthBegin = c.oauthBegin;
 
 /** Approved native bytes are never parsed or converted into a generic protocol DTO. */
 export const nativeRequest = z.strictObject({ requestId: c.reference, admission: c.admission, body: z.instanceof(Uint8Array) })

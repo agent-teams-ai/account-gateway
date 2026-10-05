@@ -28,6 +28,51 @@ export interface CandidateNative {
   setState(mapping: CandidateMapping, state: 'active' | 'inactive'): Promise<void>;
   erase(mapping: CandidateMapping): Promise<void>;
 }
+// Consumer-owned protected enrollment ports. No SDK/vendor DTOs or token data.
+// Catalog evidence pins intent; it is never an account qualification receipt.
+export const codexOAuthProfile = Object.freeze({ profile: 'openai-codex-oauth-responses-v1',
+  baseURL: 'https://chatgpt.com/backend-api/codex', model: 'gpt-6.1-sol' });
+export interface OAuthScope {
+  readonly consumerId: string; readonly operationId: string; readonly ownerRef: string;
+  readonly accountRef: string; readonly generation: string;
+}
+export interface OAuthReadback {
+  readonly operationId: string; readonly accountRef: string;
+  readonly state: 'staged' | 'completed' | 'rejected' | 'unknown';
+}
+export interface OAuthBeginReadback extends OAuthReadback {
+  readonly authorizationURL?: string;
+}
+export interface OAuthEnrollmentNative {
+  begin(scope: OAuthScope): Promise<OAuthBeginReadback>;
+  read(scope: OAuthScope): Promise<OAuthReadback>;
+}
+export type OAuthDescriptor = {
+  readonly operationId: string; readonly accountRef: string;
+} & ({ readonly state: 'staged'; readonly qualification: 'pending' } |
+  { readonly state: 'qualified'; readonly qualification: 'qualified'; readonly native: PhysicalCandidate });
+export interface OAuthDescriptorBoundary {
+  // Future protected native accounts/check/profile result. Constructor injection
+  // is for source fixtures; no production HTTP descriptor adapter exists yet.
+  describe(scope: OAuthScope): Promise<OAuthDescriptor>;
+}
+export interface OAuthEnrollmentOptions {
+  readonly profile: ManagedProfile; readonly native: OAuthEnrollmentNative;
+  readonly descriptor?: OAuthDescriptorBoundary;
+}
+export type OAuthBeginInput = Pick<AccountIntent, 'operationId' | 'ownerRef' | 'profile' | 'displayName'>;
+export interface OAuthBeginResult {
+  readonly operation: OperationStatus;
+  readonly authorizationURL?: string;
+}
+function oauthScope(j: CandidateJournal): OAuthScope {
+  return Object.freeze({ consumerId: j.consumerId, operationId: j.operationId,
+    ownerRef: j.ownerRef, accountRef: j.accountRef, generation: j.generation });
+}
+function exactOAuthReadback(scope: OAuthScope, r: OAuthReadback): boolean {
+  return r.operationId === scope.operationId && r.accountRef === scope.accountRef &&
+    ['staged','completed','rejected','unknown'].includes(r.state);
+}
 export interface ControlledProof {
   // Trusted qualified inert readback; MUST NOT probe a provider or compare tokens.
   verify(scope: CandidateJournal, descriptor: PhysicalCandidate): Promise<boolean>;
@@ -104,12 +149,18 @@ export class AccountManagement {
   private readonly proof: ControlledProof;
   private readonly worker: string;
   private readonly profiles: ReadonlyMap<string, ManagedProfile>;
+  private readonly oauth?: Readonly<OAuthEnrollmentOptions>;
   constructor(options: { kernel: DurableKernel; store: ManagementStore; custody: IntentCustody;
-    native: CandidateNative; proof: ControlledProof; worker: string; profiles: readonly ManagedProfile[] }) {
+    native: CandidateNative; proof: ControlledProof; worker: string; profiles: readonly ManagedProfile[];
+    oauth?: OAuthEnrollmentOptions }) {
     uuid(options.worker);
     if (!options.profiles.length || options.profiles.length > 128) throw new KernelError('invalid');
     const profiles = new Map<string, ManagedProfile>();
-    for (const source of options.profiles) {
+    const oauth = options.oauth && Object.freeze({ profile: Object.freeze({ ...options.oauth.profile }),
+      native: options.oauth.native, descriptor: options.oauth.descriptor });
+    if (oauth && (oauth.profile.profile !== codexOAuthProfile.profile ||
+        oauth.profile.baseURL !== codexOAuthProfile.baseURL || oauth.profile.model !== codexOAuthProfile.model)) throw new KernelError('invalid');
+    for (const source of [...options.profiles, ...(oauth ? [oauth.profile] : [])]) {
       const p = Object.freeze({ profile: source.profile, baseURL: source.baseURL, model: source.model,
         qualificationRef: source.qualificationRef });
       identifier(p.profile, 64); identifier(p.qualificationRef);
@@ -118,8 +169,95 @@ export class AccountManagement {
       if (profiles.has(p.profile)) throw new KernelError('invalid');
       profiles.set(p.profile, p);
     }
+    if (profiles.size > 128 || (!oauth && profiles.has(codexOAuthProfile.profile))) throw new KernelError('invalid');
     this.kernel = options.kernel; this.store = options.store; this.custody = options.custody;
     this.native = options.native; this.proof = options.proof; this.worker = options.worker; this.profiles = profiles;
+    this.oauth = oauth;
+  }
+  supportsOAuthProfile(profile: string): boolean {
+    return this.oauth !== undefined && profile === codexOAuthProfile.profile;
+  }
+  async beginOAuth(context: TrustedContext, input: OAuthBeginInput): Promise<OAuthBeginResult> {
+    const ctx = captureContext(context);
+    // Capture primitives before any await. Owner authorization belongs to the
+    // trusted facade management grant, not caller-selected native headers.
+    const intent: AccountIntent = { kind: 'create', operationId: input.operationId,
+      ownerRef: input.ownerRef, profile: input.profile, displayName: input.displayName, intentDigest: '' };
+    identifier(intent.operationId); identifier(intent.ownerRef); identifier(intent.profile, 64); name(intent.displayName);
+    if (!this.supportsOAuthProfile(intent.profile!)) throw new KernelError('denied');
+    // No secret is staged in TS SQL. Native owns PKCE/state and token custody.
+    intent.intentDigest = this.custody.digest({ context: ctx, intent });
+    const operation = await this.kernel.beginAccount(ctx, Object.freeze(intent));
+    if (operation.state !== 'pending') return Object.freeze({ operation });
+    if (!operation.accountRef) throw new KernelError('unavailable');
+    const account = await this.kernel.account(ctx, operation.accountRef);
+    if (account.ownerRef !== intent.ownerRef || account.profile !== intent.profile) throw new KernelError('conflict');
+    const old = await this.store.readJournal(ctx, intent.operationId);
+    if (old) return Object.freeze({ operation: await this.oauthReadback(ctx, old) });
+    const permit = await this.kernel.startCandidate(ctx, intent.operationId, this.worker);
+    if (!permit) {
+      // Another request can be between permit and journal. Do not create a new
+      // permit, spin, or manufacture missing evidence; bounded pending is valid.
+      const spent = await this.store.readJournal(ctx, intent.operationId);
+      return Object.freeze({ operation: spent ? await this.oauthReadback(ctx, spent) :
+        await this.kernel.operation(ctx, intent.operationId) });
+    }
+    try {
+      if (permit.profile !== codexOAuthProfile.profile || permit.operationRef !== intent.operationId) throw new KernelError('conflict');
+      const scope: CandidateScope = Object.freeze({ consumerId: ctx.consumerId, operationId: intent.operationId,
+        accountRef: account.accountRef, ownerRef: account.ownerRef, purpose: 'create' });
+      // Commit original accountRef + immutable birth UUID before the sole Begin.
+      const journal = await this.store.journal(scope, permit.candidate, this.worker, this.oauth!.profile);
+      let begun: OAuthBeginReadback;
+      try { begun = await this.oauth!.native.begin(oauthScope(journal)); }
+      catch { return Object.freeze({ operation: await this.oauthReadback(ctx, journal) }); }
+      // Invalid ACK is ambiguous. Only Read can recover the same native intent.
+      if (!exactOAuthReadback(oauthScope(journal), begun)) {
+        return Object.freeze({ operation: await this.oauthReadback(ctx, journal) });
+      }
+      const current = await this.oauthReadback(ctx, journal, begun);
+      // Return only an actually received Begin capability. It is never persisted
+      // or reconstructed on duplicate Begin, GET, lost ACK or worker recovery.
+      return Object.freeze({ operation: current, ...(current.state === 'pending' &&
+        begun.state === 'staged' && begun.authorizationURL !== undefined
+        ? { authorizationURL: begun.authorizationURL } : {}) });
+    } catch {
+      return Object.freeze({ operation: await this.kernel.unknownCandidate(ctx, intent.operationId, this.worker) });
+    }
+  }
+  private async oauthReadback(ctx: TrustedContext, journal: CandidateJournal,
+    begin?: OAuthReadback): Promise<OperationStatus> {
+    try {
+      if (!this.oauth || !this.supportsOAuthProfile(journal.profile.profile) || journal.consumerId !== ctx.consumerId ||
+          journal.profile.baseURL !== codexOAuthProfile.baseURL || journal.profile.model !== codexOAuthProfile.model ||
+          journal.profile.qualificationRef !== this.oauth.profile.qualificationRef) throw new KernelError('conflict');
+      await this.kernel.reconcile(ctx);
+      const current = await this.kernel.operation(ctx, journal.operationId);
+      if (current.state === 'applied' || current.state === 'rejected') return current;
+      // A new worker does not take over a live creating candidate or issue Begin.
+      if (current.state === 'pending' && this.worker !== journal.worker) return current;
+      const scope = oauthScope(journal);
+      const result = begin ?? await this.oauth.native.read(scope);
+      if (!exactOAuthReadback(scope, result) || result.state === 'unknown' || result.state === 'rejected') throw new KernelError('conflict');
+      // Staged/user-interaction and completed custody are NOT route evidence.
+      // An unavailable future descriptor adapter preserves truthful pending.
+      if (!this.oauth.descriptor) return current;
+      const source = await this.oauth.descriptor.describe(scope);
+      if (source.operationId !== journal.operationId || source.accountRef !== journal.accountRef) throw new KernelError('conflict');
+      if (source.state === 'staged' && source.qualification === 'pending') {
+        if ('native' in source) throw new KernelError('conflict');
+        return current;
+      }
+      if (source.state !== 'qualified' || source.qualification !== 'qualified') throw new KernelError('conflict');
+      const descriptor = physicalCandidate(source.native);
+      if (!exactCandidate(journal, descriptor)) throw new KernelError('conflict');
+      // A trusted descriptor pins the entire physical birth. Existing candidate
+      // read/inert proof, mapping, activation readback and kernel ACK still apply.
+      // On owner loss it may bind cleanup identity, but cannot revive promotion.
+      return await this.readback(ctx, journal, this.worker, current.state === 'pending', descriptor);
+    } catch {
+      return this.kernel.unknownCandidate(ctx, journal.operationId, journal.worker);
+    }
   }
   async create(context: TrustedContext, input: CreateInput): Promise<OperationStatus> {
     const ctx = captureContext(context);
@@ -128,7 +266,7 @@ export class AccountManagement {
     const apiKey = input.apiKey;
     identifier(intent.operationId); identifier(intent.ownerRef); identifier(intent.profile, 64);
     name(intent.displayName); key(apiKey);
-    if (!this.profiles.has(intent.profile)) throw new KernelError('invalid');
+    if (!this.profiles.has(intent.profile) || this.supportsOAuthProfile(intent.profile)) throw new KernelError('invalid');
     intent.intentDigest = this.custody.digest({ context: ctx, intent, apiKey });
     return this.connect(ctx, Object.freeze(intent), apiKey);
   }
@@ -148,6 +286,7 @@ export class AccountManagement {
     const account = await this.kernel.account(ctx, operation.accountRef);
     const profile = this.profiles.get(account.profile);
     if (!profile) throw new KernelError('invalid');
+    if (this.supportsOAuthProfile(account.profile)) throw new KernelError('denied');
     const scope: CandidateScope = Object.freeze({ consumerId: ctx.consumerId, operationId: intent.operationId,
       accountRef: account.accountRef, ownerRef: account.ownerRef, purpose: intent.kind as 'create' | 'reconnect' });
     // A journal means a permit was already spent. Readback can never recreate.
@@ -179,12 +318,14 @@ export class AccountManagement {
       await this.store.eraseIntent(scope);
     }
   }
-  private async readback(ctx: TrustedContext, journal: CandidateJournal, worker = journal.worker, activate = true): Promise<OperationStatus> {
+  private async readback(ctx: TrustedContext, journal: CandidateJournal, worker = journal.worker,
+    activate = true, qualified?: PhysicalCandidate): Promise<OperationStatus> {
     try {
       const candidates = await this.native.read(journal);
       if (candidates.length !== 1 || !['inactive','active'].includes(candidates[0].state)) throw new KernelError('conflict');
       const descriptor = physicalCandidate(candidates[0]);
       if (!exactCandidate(journal, descriptor)) throw new KernelError('conflict');
+      if (qualified && !sameCandidate(qualified, descriptor)) throw new KernelError('conflict');
       const existing = await this.store.mapping(ctx,journal.generation);
       // An unexplained already-active row is not inert staging proof. Only a
       // persisted mapping from qualified staging permits activation recovery.
@@ -210,6 +351,7 @@ export class AccountManagement {
     const operation = await this.kernel.operation(ctx, operationId);
     const journal = await this.store.readJournal(ctx, operationId);
     if (!journal) return operation;
+    if (journal.profile.profile === codexOAuthProfile.profile) return this.oauthReadback(ctx, journal);
     await this.store.eraseIntent(journal);
     await this.kernel.reconcile(ctx);
     const current = await this.kernel.operation(ctx,operationId);
@@ -242,7 +384,11 @@ export class AccountManagement {
     return this.kernel.accounts(ctx, captured);
   }
   async operation(context: TrustedContext, id: string): Promise<OperationStatus> {
-    const ctx = captureContext(context); identifier(id); return this.kernel.operation(ctx, id);
+    const ctx = captureContext(context); identifier(id);
+    const operation = await this.kernel.operation(ctx, id);
+    if (operation.state !== 'pending' && operation.state !== 'unknown') return operation;
+    const journal = await this.store.readJournal(ctx, id);
+    return journal?.profile.profile === codexOAuthProfile.profile ? this.oauthReadback(ctx, journal) : operation;
   }
   async reconcile(context: TrustedContext): Promise<void> {
     const ctx = captureContext(context);

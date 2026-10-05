@@ -7,7 +7,7 @@ import { FacadeBearers } from './facade.ts';
 import type { ManagementBearer, RunControlBearer } from './facade.ts';
 import { strictJSON } from './facade-ingress.ts';
 import { object } from './native-wire.ts';
-import { physicalCandidate } from './management.ts';
+import { physicalCandidate, codexOAuthProfile } from './management.ts';
 
 export class ServiceError extends Error {
   readonly code: 'config_denied' | 'startup_denied' | 'runtime_denied' | 'shutdown_pending';
@@ -27,6 +27,14 @@ export interface ServiceConfig {
     qualificationRef: string; limits: Readonly<ApprovedLimits>; providerTokenUpperBound: number }>;
   readonly bearers: readonly (ManagementBearer | RunControlBearer)[];
   readonly keys: Readonly<{ intentAEAD: string; intentHMAC: string; facadeHMAC: string }>;
+  // Explicit source opt-in only. The service refuses startup until protected
+  // native descriptor/dispatch qualification can be composed at this boundary.
+  readonly oauthEnrollment?: OAuthEnrollmentConfig;
+}
+export interface OAuthEnrollmentConfig {
+  readonly enabled: true;
+  readonly profile: 'openai-codex-oauth-responses-v1';
+  readonly modelScope: readonly ['gpt-6.1-sol'];
 }
 const deny = (): never => { throw new ServiceError('config_denied'); };
 function text(v: unknown): string { if (typeof v !== 'string') return deny(); return v; }
@@ -58,6 +66,17 @@ function origin(v: unknown): string {
 function freeze<T>(v: T): T {
   if (v && typeof v === 'object') { Object.values(v).forEach(freeze); Object.freeze(v); } return v;
 }
+// No caller/provider endpoint override or inferred alias; API-key profile stays
+// the service default. Catalog evidence alone cannot enable a native account.
+export function captureOAuthEnrollmentConfig(value: unknown): OAuthEnrollmentConfig {
+  try {
+    const r = object(value, ['enabled','profile','modelScope']);
+    if (r.enabled !== true || r.profile !== codexOAuthProfile.profile || !Array.isArray(r.modelScope) ||
+        r.modelScope.length !== 1 || r.modelScope[0] !== codexOAuthProfile.model) return deny();
+    return Object.freeze({ enabled: true, profile: 'openai-codex-oauth-responses-v1',
+      modelScope: Object.freeze(['gpt-6.1-sol'] as const) });
+  } catch { return deny(); }
+}
 // Sole entry: synchronous capture/validation before the first startup await.
 // No provider credential or native custody bytes are read here.
 export function loadServiceConfig(file: string): ServiceConfig {
@@ -73,7 +92,8 @@ export function loadServiceConfig(file: string): ServiceConfig {
       // readFileSync would permit growth after fstat; bounded positional read below.
       bytes = readBounded(fd, bytes);
     } finally { closeSync(fd); }
-    const r = object(strictJSON(bytes), ['kernelDSN','durableFacts','facadeOrigin','callbackOrigin','native','consumer','profile','bearers','keys']);
+    const r = object(strictJSON(bytes), ['kernelDSN','durableFacts','facadeOrigin','callbackOrigin','native','consumer','profile','bearers','keys'], ['oauthEnrollment']);
+    const oauthEnrollment = Object.hasOwn(r, 'oauthEnrollment') ? captureOAuthEnrollmentConfig(r.oauthEnrollment) : undefined;
     // Use the kernel's existing bound authority after exact protected parsing.
     // Missing, extra, nonnumeric or inconsistent values deny before startup IO.
     const durableFacts = boundedFacts(object(r.durableFacts,
@@ -124,7 +144,8 @@ export function loadServiceConfig(file: string): ServiceConfig {
     if (!['postgres:','postgresql:'].includes(u.protocol) || u.pathname.length < 2) deny();
     const facadeOrigin = origin(r.facadeOrigin), callbackOrigin = origin(r.callbackOrigin);
     if (new Set([facadeOrigin, callbackOrigin, native.origin]).size !== 3) deny();
-    return freeze({ kernelDSN, durableFacts, facadeOrigin, callbackOrigin, native, consumer, profile, bearers, keys });
+    return freeze({ kernelDSN, durableFacts, facadeOrigin, callbackOrigin, native, consumer, profile, bearers, keys,
+      ...(oauthEnrollment === undefined ? {} : { oauthEnrollment }) });
   } catch { return deny(); }
 }
 function readBounded(fd: number, b: Buffer): Buffer {

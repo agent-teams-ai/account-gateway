@@ -7,7 +7,7 @@ import { secretSubmission } from '@agent-teams/account-gateway/http';
 import { KernelError, identifier, uuid } from './domain.ts';
 import type { ApprovedLimits, ClaimResult, DurableKernel, ExecutionRead, NativeDispatchProof,
   OperationStatus, PrivateAdmission, RequestStatus, SavedExecution, TrustedContext, CleanupAuthority } from './domain.ts';
-import { captureContext, physicalCandidate } from './management.ts';
+import { captureContext, physicalCandidate, codexOAuthProfile } from './management.ts';
 import type { AccountManagement, ManagementStore, PhysicalCandidate } from './management.ts';
 import { strictJSON, validateResponses } from './facade-ingress.ts';
 
@@ -245,7 +245,10 @@ export function createFacade(options: FacadeOptions): Server {
   const profiles = new Map<string, { dto: c.Profile; maxOutputTokens: number }>();
   for (const entry of options.profiles) {
     const dto = c.profile.parse(entry.dto);
-    if (dto.protocol !== 'openai-responses' || dto.modelIds.length !== 1 || dto.authKinds.length !== 1 || dto.authKinds[0] !== 'api_key' ||
+    const oauth = dto.authKinds[0] === 'oauth';
+    if (dto.protocol !== 'openai-responses' || dto.modelIds.length !== 1 || dto.authKinds.length !== 1 ||
+        (oauth ? !management.supportsOAuthProfile(dto.profileId) || dto.profileId !== codexOAuthProfile.profile ||
+          dto.modelIds[0] !== codexOAuthProfile.model : dto.authKinds[0] !== 'api_key' || dto.profileId === codexOAuthProfile.profile) ||
         profiles.has(dto.profileId) || !Number.isSafeInteger(entry.maxOutputTokens) || entry.maxOutputTokens < 1 || entry.maxOutputTokens > 10_000_000) throw new KernelError('invalid');
     profiles.set(dto.profileId, { dto: Object.freeze({ ...dto, authKinds: Object.freeze([...dto.authKinds]) as unknown as c.Profile['authKinds'],
       modelIds: Object.freeze([...dto.modelIds]) as unknown as string[] }), maxOutputTokens: entry.maxOutputTokens });
@@ -382,7 +385,7 @@ export function createFacade(options: FacadeOptions): Server {
         if (input.accountRefs.length > 16 || new Set(input.accountRefs).size !== input.accountRefs.length) throw new KernelError('invalid');
         input.accountRefs.forEach(uuid); identifier(input.profileId, 64);
         const profile = profiles.get(input.profileId);
-        if (!grant.profileIds.includes(input.profileId) || !profile || input.limits.tokens > profile.maxOutputTokens ||
+        if (!grant.profileIds.includes(input.profileId) || !profile || profile.dto.authKinds[0] !== 'api_key' || input.limits.tokens > profile.maxOutputTokens ||
             input.limits.requestBytes > ingressBytes || input.limits.concurrency > input.limits.requests ||
             (Object.keys(grant.limits) as (keyof ApprovedLimits)[]).some(key => input.limits[key] > grant.limits[key])) throw new KernelError('denied');
         requireCurrent(grant);
@@ -427,12 +430,16 @@ export function createFacade(options: FacadeOptions): Server {
       }
       if (opMatch && method === 'GET') {
         identity = { operationRef: parse(c.reference, opMatch[1]) }; uncertain = true;
-        const op = await kernel.operation(context, identity.operationRef!);
+        let op = await kernel.operation(context, identity.operationRef!);
         if (grant.role === 'execution' && op.executionRef !== grant.saved.admission.executionRef) throw new KernelError('denied');
         if (grant.role === 'management' && op.accountRef) {
           const account = await management.account(context, op.accountRef);
           if (!grant.ownerRefs.includes(account.ownerRef)) throw new KernelError('denied');
         }
+        // Check the owner BEFORE touching protected native readback. Reconcile
+        // only the original journal; the ordinary response has no capability.
+        requireCurrent(grant);
+        if (grant.role === 'management') op = await management.operation(context, identity.operationRef!);
         send(res, c.operation, await operationDTO(context, op)); return;
       }
       if (match) {
@@ -461,7 +468,7 @@ export function createFacade(options: FacadeOptions): Server {
         const supplied = savedCopy({ ...saved, admission: { ...admission, executionRef: ref, issuerEpoch: grant.saved.admission.issuerEpoch } });
         if (!sameSaved(saved, grant.saved) || !sameSaved(saved, supplied) || !saved.dispatchAllowed) throw new KernelError('denied');
         const profile = profiles.get(saved.admission.profileId);
-        if (!profile || saved.admission.limits.tokens > profile.maxOutputTokens || saved.admission.limits.requestBytes > ingressBytes) throw new KernelError('denied');
+        if (!profile || profile.dto.authKinds[0] !== 'api_key' || saved.admission.limits.tokens > profile.maxOutputTokens || saved.admission.limits.requestBytes > ingressBytes) throw new KernelError('denied');
         const raw = await body(req, Math.min(ingressBytes, saved.admission.limits.requestBytes));
         parse(secretSubmission.nativeRequest, { requestId: identity.requestRef, admission, body: raw });
         validateResponses(raw, profile.dto.modelIds, profile.maxOutputTokens);
@@ -515,9 +522,24 @@ export function createFacade(options: FacadeOptions): Server {
         const page = await management.accounts(context, { ...input, allowedOwnerRefs: grant.ownerRefs });
         send(res, c.accounts, { accounts: page.accounts.map(accountDTO), ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) }); return;
       }
+      if (path === '/v1/accounts/oauth/begin' && method === 'POST') {
+        const parsed = parse(c.oauthBegin, strictJSON(await body(req, Math.min(ingressBytes, 16_384)), true));
+        const input = Object.freeze({ ...parsed }); identity = { operationRef: input.operationId };
+        const profile = profiles.get(input.profileId);
+        if (!grant.ownerRefs.includes(input.ownerRef) || !profile || profile.dto.authKinds[0] !== 'oauth' ||
+            !management.supportsOAuthProfile(input.profileId)) throw new KernelError('denied');
+        requireCurrent(grant); uncertain = true;
+        const result = await management.beginOAuth(context, { operationId: input.operationId, ownerRef: input.ownerRef,
+          profile: input.profileId, displayName: input.displayName });
+        // A retired management grant never receives a newly returned owner URL.
+        requireCurrent(grant);
+        send(res, c.oauthBeginResponse, { operation: await operationDTO(context, result.operation),
+          ...(result.authorizationURL === undefined ? {} : { authorizationURL: result.authorizationURL }) },
+          result.operation.state === 'pending' ? 202 : 200); return;
+      }
       if (path === '/v1/accounts' && method === 'POST') {
         const input = parse(secretSubmission.connect, strictJSON(await body(req, ingressBytes), true)); identity = { operationRef: input.operationId };
-        if (!grant.ownerRefs.includes(input.ownerRef) || !profiles.has(input.profileId)) throw new KernelError('denied');
+        if (!grant.ownerRefs.includes(input.ownerRef) || profiles.get(input.profileId)?.dto.authKinds[0] !== 'api_key') throw new KernelError('denied');
         if (input.credential.kind !== 'api_key') throw new KernelError('invalid');
         requireCurrent(grant); uncertain = true;
         const op = await management.create(context, { operationId: input.operationId, ownerRef: input.ownerRef,
@@ -543,6 +565,7 @@ export function createFacade(options: FacadeOptions): Server {
             accountRef: ref, expectedRevision: input.expectedMetadataRevision }))); return;
         }
         if (method === 'POST' && accountMatch[2] === 'reconnect') {
+          if (profiles.get(account.profile)?.dto.authKinds[0] !== 'api_key') throw new KernelError('denied');
           const input = parse(secretSubmission.reconnect, strictJSON(await body(req, ingressBytes), true)); identity = { operationRef: input.operationId };
           if (input.credential.kind !== 'api_key') throw new KernelError('invalid');
           requireCurrent(grant); uncertain = true;
@@ -555,7 +578,7 @@ export function createFacade(options: FacadeOptions): Server {
         const input = parse(c.prepare, strictJSON(await body(req, ingressBytes), true)); identity = { operationRef: input.operationId };
         const p = grant.preparation;
         if (input.subjectRef !== p.subjectRef || input.policyRevision !== p.policyRevision || input.bindingRevision !== p.bindingRevision ||
-            input.profileId !== p.profileId || !profiles.has(p.profileId) || input.limits.tokens > profiles.get(p.profileId)!.maxOutputTokens ||
+            input.profileId !== p.profileId || profiles.get(p.profileId)?.dto.authKinds[0] !== 'api_key' || input.limits.tokens > profiles.get(p.profileId)!.maxOutputTokens ||
             input.limits.requestBytes > ingressBytes || input.accountRefs.some(ref => !p.accountRefs.includes(ref)) ||
             new Set(input.accountRefs).size !== input.accountRefs.length || input.limits.concurrency > input.limits.requests || Date.parse(input.deadline) <= Date.now() ||
             Date.parse(input.deadline) - Date.now() > p.maxRunMs ||

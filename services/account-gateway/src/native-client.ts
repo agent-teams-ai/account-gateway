@@ -1,8 +1,10 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { KernelError, identifier, uuid } from './domain.ts';
+import { oauthAuthorizationURL } from '@agent-teams/account-gateway/contracts';
 import { physicalCandidate } from './management.ts';
 import type { CandidateJournal, CandidateMapping, CandidateNative, NativeReadback, PhysicalCandidate } from './management.ts';
+import type { OAuthScope, OAuthEnrollmentNative, OAuthReadback, OAuthBeginReadback } from './management.ts';
 
 export type NativeFailureCode = 'unavailable' | 'deadline' | 'bounded' | 'redirect' | 'invalid_readback' | 'denied';
 export class NativeFailure extends Error {
@@ -13,9 +15,10 @@ export class NativeFailure extends Error {
 }
 // Existing private Go wire, supplied at native source 16d621c2. This is not SDK v1.
 const candidatesPath = '/private/native/v1/candidates';
-function object(value: unknown, keys: readonly string[]): Record<string, unknown> {
+function object(value: unknown, keys: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      Object.keys(value).length !== keys.length || keys.some(k => !Object.hasOwn(value,k))) throw new NativeFailure('invalid_readback');
+      Object.keys(value).some(k => !keys.includes(k) && !optional.includes(k)) ||
+      keys.some(k => !Object.hasOwn(value,k))) throw new NativeFailure('invalid_readback');
   return value as Record<string, unknown>;
 }
 function decode(bytes: Buffer): unknown {
@@ -89,15 +92,20 @@ function wireDescriptor(d: PhysicalCandidate): object {
   return { account_id: d.nativeId,generation: d.generation,created_at: d.createdAt,
     profile: d.profile,base_url: d.baseURL,model: d.model };
 }
-export class NativeManagementClient implements CandidateNative {
+export interface NativeManagementOptions {
+  readonly origin: string; readonly consumerId: string; readonly controlCredential: string;
+  readonly deadlineMs?: number; readonly bodyBytes?: number; readonly headerBytes?: number;
+}
+// One concrete bounded transport shared by the two private control adapters.
+// It carries no enrollment policy and never performs a second HTTP attempt.
+class NativeControlHTTP {
   readonly #origin: URL;
   readonly #consumer: string;
   readonly #control: string;
   readonly #deadlineMs: number;
   readonly #bodyBytes: number;
   readonly #headerBytes: number;
-  constructor(options: { origin: string; consumerId: string; controlCredential: string;
-    deadlineMs?: number; bodyBytes?: number; headerBytes?: number }) {
+  constructor(options: NativeManagementOptions) {
     let origin: URL;
     try { origin = new URL(options.origin); } catch { throw new KernelError('invalid'); }
     if (!(origin.protocol === 'https:' || (origin.protocol === 'http:' &&
@@ -113,11 +121,11 @@ export class NativeManagementClient implements CandidateNative {
     this.#origin = origin; this.#consumer = options.consumerId; this.#control = options.controlCredential;
     this.#deadlineMs = deadlineMs; this.#bodyBytes = bodyBytes; this.#headerBytes = headerBytes;
   }
-  private scope(scope: CandidateJournal): void {
+  protected scope(scope: Pick<CandidateJournal, 'consumerId' | 'generation' | 'accountRef' | 'ownerRef'>): void {
     if (scope.consumerId !== this.#consumer) throw new NativeFailure('denied');
     uuid(scope.generation); uuid(scope.accountRef); identifier(scope.ownerRef);
   }
-  private async call(method: 'POST' | 'GET' | 'PUT', path: string, value?: unknown): Promise<Buffer> {
+  protected async call(method: 'POST' | 'GET' | 'PUT', path: string, value?: unknown): Promise<Buffer> {
     let body: Buffer | undefined;
     try {
       body = value === undefined ? undefined : Buffer.from(JSON.stringify(value));
@@ -163,10 +171,12 @@ export class NativeManagementClient implements CandidateNative {
       if (body) req.end(body); else req.end();
     });
   }
+}
+export class NativeManagementClient extends NativeControlHTTP implements CandidateNative {
   async create(input: CandidateJournal, displayName: string, apiKey: string): Promise<void> {
     const scope = { consumerId: input.consumerId, generation: input.generation, accountRef: input.accountRef,
       ownerRef: input.ownerRef, profile: input.profile.profile };
-    if (scope.consumerId !== this.#consumer) throw new NativeFailure('denied');
+    this.scope(scope);
     uuid(scope.generation); uuid(scope.accountRef); identifier(scope.ownerRef); identifier(scope.profile, 64);
     if (typeof displayName !== 'string' || !displayName.isWellFormed() || displayName.length < 1 || displayName.length > 128 || Buffer.byteLength(displayName) > 400 || typeof apiKey !== 'string' ||
         !apiKey.isWellFormed() || Buffer.byteLength(apiKey) < 1 || Buffer.byteLength(apiKey) > 4096 || apiKey.trim() !== apiKey) throw new NativeFailure('bounded');
@@ -203,5 +213,61 @@ export class NativeManagementClient implements CandidateNative {
       const ack = object(decode(bytes),['state','credentials_erased']);
       if (ack.state !== 'tombstoned' || ack.credentials_erased !== true) throw new NativeFailure('invalid_readback');
     } catch { throw new NativeFailure('invalid_readback'); }
+  }
+}
+
+// F3 fda94684 is a proposed wire input, not accepted native qualification.
+// The trusted outer composition binds a concrete consumer AND authorized owner.
+// This class is not installed by startService. No descriptor HTTP method exists:
+// custody completion cannot stand in for future native accounts/check evidence.
+export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OAuthEnrollmentNative {
+  readonly #owner: string;
+  constructor(options: NativeManagementOptions & { readonly ownerRef: string }) {
+    super(options);
+    identifier(options.ownerRef);
+    this.#owner = options.ownerRef;
+  }
+  private capture(input: OAuthScope): OAuthScope {
+    const scope = Object.freeze({ consumerId: input.consumerId, operationId: input.operationId,
+      ownerRef: input.ownerRef, accountRef: input.accountRef, generation: input.generation });
+    this.scope(scope); identifier(scope.operationId);
+    if (scope.ownerRef !== this.#owner) throw new NativeFailure('denied');
+    return scope;
+  }
+  private wire(scope: OAuthScope): object {
+    // Exact native input; no client, redirect, endpoint, profile, display name,
+    // raw code, PKCE verifier or credential is accepted from the consumer.
+    return { operation: scope.operationId, owner_ref: scope.ownerRef,
+      account_ref: scope.accountRef, generation: scope.generation };
+  }
+  private ack(bytes: Buffer, scope: OAuthScope, begin: boolean): OAuthBeginReadback {
+    try {
+      const r = object(decode(bytes), ['operation','account_ref','state'],
+        begin ? ['outcome','authorize_url'] : ['outcome']);
+      if (r.operation !== scope.operationId || r.account_ref !== scope.accountRef ||
+          !['staged','completed','rejected','unknown'].includes(r.state as string)) throw new NativeFailure('invalid_readback');
+      // Native outcome is not a safe DTO or a no-effect receipt. Validate its
+      // bounded primitive shape then discard; never reflect vendor diagnostics.
+      if (Object.hasOwn(r, 'outcome') && (typeof r.outcome !== 'string' ||
+          !/^[a-z][a-z0-9_]{0,63}$/.test(r.outcome))) throw new NativeFailure('invalid_readback');
+      let authorizationURL: string | undefined;
+      if (Object.hasOwn(r, 'authorize_url')) {
+        if (!begin || r.state !== 'staged') throw new NativeFailure('invalid_readback');
+        const parsed = oauthAuthorizationURL.safeParse(r.authorize_url);
+        if (!parsed.success) throw new NativeFailure('invalid_readback');
+        authorizationURL = parsed.data;
+      }
+      return Object.freeze({ operationId: scope.operationId, accountRef: scope.accountRef,
+        state: r.state as OAuthReadback['state'], ...(authorizationURL === undefined ? {} : { authorizationURL }) });
+    } catch { throw new NativeFailure('invalid_readback'); }
+  }
+  async begin(input: OAuthScope): Promise<OAuthBeginReadback> {
+    const scope = this.capture(input);
+    return this.ack(await this.call('POST', '/private/native/v1/oauth/connect', this.wire(scope)), scope, true);
+  }
+  async read(input: OAuthScope): Promise<OAuthReadback> {
+    const scope = this.capture(input);
+    const result = this.ack(await this.call('POST', '/private/native/v1/oauth/connect/read', this.wire(scope)), scope, false);
+    return Object.freeze({ operationId: result.operationId, accountRef: result.accountRef, state: result.state });
   }
 }
