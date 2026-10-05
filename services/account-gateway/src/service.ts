@@ -87,10 +87,13 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   let child: ReturnType<typeof spawn> | undefined, options: FacadeOptions | undefined;
   let notify: (() => void) | undefined;
   const pulse = () => { notify?.(); notify = undefined; };
+  function startupActive() {
+    if (stopping || invalid || exited || signal?.aborted) throw new ServiceError('startup_denied');
+  }
   const waitFor = async (predicate: () => boolean, ms: number) => {
     const deadline = Date.now() + ms;
     while (!predicate()) {
-      if (invalid || exited) throw new ServiceError('runtime_denied');
+      startupActive();
       await bounded(new Promise<void>(resolve => { notify = resolve; }), Math.max(1, deadline - Date.now()));
     }
   };
@@ -131,7 +134,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   function stop(): Promise<'retired' | 'pending'> {
     if (stopWork) return stopWork;
     if (stopping) return stopped;
-    stopping = true; denyAdmission(); install(); wakeSleep?.();
+    stopping = true; denyAdmission(); install(); pulse(); wakeSleep?.();
     // Signal only the original ChildProcess handle. The protected Go parent
     // alone decides exact-engine retirement and retains launcher disk evidence.
     if (child && !exited) {
@@ -151,13 +154,16 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   const onAbort = () => { void stop(); };
   signal?.addEventListener('abort', onAbort, { once: true });
   try {
-    if (signal?.aborted) throw new ServiceError('startup_denied');
+    startupActive();
     // Migrations are an operator prerequisite. Startup merely verifies access.
     await pool.query('SELECT 1 FROM ag_kernel.accounts LIMIT 0');
+    startupActive();
     await pool.query('SELECT native_created_at FROM ag_management.physical_mappings LIMIT 0');
+    startupActive();
     await pool.query('SELECT transport_occupied,closure_token,native_origin_ref,engine_incarnation,request_nonce,descriptor_generation FROM ag_kernel.requests LIMIT 0');
+    startupActive();
     await listen(callback, cfg.callbackOrigin);
-    if (stopping) throw new ServiceError('startup_denied');
+    startupActive();
     child = spawn(cfg.native.executable, ['--bootstrap-file', cfg.native.bootstrapFile, '--authority-dir', cfg.native.authorityDir,
       '--origin-ref', cfg.native.originRef, '--engine-uid', String(cfg.native.uid), '--engine-gid', String(cfg.native.gid)],
     { env: {}, stdio: ['ignore','pipe','pipe'], detached: false });
@@ -201,6 +207,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     child.stdout!.once('end', () => { if (buffer.length || !terminal) fail(); });
     child.stdout!.on('error', fail); child.stderr!.on('error', fail);
     await waitFor(() => original !== undefined, 5000);
+    startupActive();
     const binding = original!;
     const enrollment = Object.freeze({ originRef: binding.originRef, engineIncarnation: binding.incarnation, worker });
     const authority = new NativeAuthority({ kernel, store, config: { origin: cfg.native.origin,
@@ -209,15 +216,16 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
         tokens: p.limits.tokens }], timeoutMs: 5000, closureWaitMs: 1000, maxPending: 128 } });
     handler = authority.createServer(); install();
     await waitFor(() => ready, 10_000);
-    if (stopping || invalid || exited) throw new ServiceError('startup_denied');
+    startupActive();
     await kernel.heartbeat(ctx, worker);
+    startupActive();
     options = { kernel, management, store, bearers, enrollment, transport: new NativeHTTPTransport(authority),
       profiles: [{ dto: { profileId: p.profile, protocol: 'openai-responses', modelIds: [p.model], authKinds: ['api_key'] },
         maxOutputTokens: p.limits.tokens }], intentHmacKey: keyBytes(cfg.keys.facadeHMAC), ingressBytes: Math.max(1024, p.limits.requestBytes),
       bufferBytes: 65_536 };
     facade = createFacade(options); facade.on('error', fail);
     await listen(facade, cfg.facadeOrigin);
-    if (stopping || invalid || exited) throw new ServiceError('startup_denied');
+    startupActive();
     async function tick(): Promise<void> {
         await kernel.heartbeat(ctx, worker);
         if (stopping) return;
@@ -250,6 +258,9 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     })().catch(fail);
     return Object.freeze({ binding, stopped, stop });
   } catch {
-    await stop(); throw new ServiceError('startup_denied');
+    await stop();
+    // A listen already in flight at cancellation can finish after stop's snapshot.
+    await Promise.all([close(facade), close(callback), close(handler)]);
+    throw new ServiceError('startup_denied');
   }
 }

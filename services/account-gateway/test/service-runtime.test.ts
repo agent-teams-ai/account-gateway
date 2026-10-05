@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { constants, openSync, closeSync, fstatSync, readSync, lstatSync } from 'node:fs';
+import { constants, openSync, closeSync, fstatSync, readSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createServer } from 'node:https';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -12,9 +12,20 @@ import * as c from '@agent-teams/account-gateway/contracts';
 import { createManagementClient, createExecutionClient } from '@agent-teams/account-gateway/http';
 import { startService } from '../src/service.ts';
 import type { Service } from '../src/service.ts';
-import { loadServiceConfig } from '../src/service-config.ts';
 import { strictJSON } from '../src/facade-ingress.ts';
 import { object } from '../src/native-wire.ts';
+
+// Fixture-owned input projection. Actual startService validates production
+// configuration; this test independently checks the disposable designation.
+interface FixtureConfig {
+  kernelDSN: string; facadeOrigin: string; callbackOrigin: string;
+  native: { bootstrapFile: string; authorityDir: string; uid: number; gid: number;
+    executable: string; origin: string };
+  consumer: { consumerId: string };
+  profile: { profile: string; model: string; qualificationRef: string;
+    baseURL: string; limits: c.Prepare['limits']; providerTokenUpperBound: number };
+  bearers: { role: 'management' | 'run-control'; ownerRefs: string[]; token: string }[];
+}
 
 const installation = '/opt/account-gateway-service-entry';
 const fail = (phase: string): never => { throw new Error('service fixture: ' + phase); };
@@ -40,7 +51,7 @@ function disposable(dsn: string, kind: 'kernel' | 'native'): string {
   return u.pathname.slice(1);
 }
 
-test('production service entry: safe create, SAME OPEN concurrency1, authenticated closure, exact parent retirement',
+test('production service entry: awaited startup abort rollback, safe create, SAME OPEN concurrency1, authenticated closure, exact parent retirement',
   { timeout: 75_000 }, async () => {
     if (process.env.AG_SERVICE_ENTRY_ALLOW !== 'new_disposable_root_pg17_10' || process.geteuid?.() !== 0)
       fail('NOT_RUN explicit root disposable fixture required');
@@ -53,7 +64,7 @@ test('production service entry: safe create, SAME OPEN concurrency1, authenticat
       manifest.normHash === '66a2393e7a55f76df1a78281af44379d0b455a0770d82f34e587dcca284157b0', 'fixture source pins');
     ensure(typeof manifest.serviceConfig === 'string' && /^\/root\/account_gateway_service_entry_[a-f0-9]{32}\/service.json$/.test(manifest.serviceConfig), 'fixture root');
     ensure(typeof manifest.nativeDSN === 'string', 'native database designation');
-    const configFile = manifest.serviceConfig as string, cfg = loadServiceConfig(configFile), nativeDSN = manifest.nativeDSN as string;
+    const configFile = manifest.serviceConfig as string, cfg = strictJSON(protectedFile(configFile)) as FixtureConfig, nativeDSN = manifest.nativeDSN as string;
     ensure(cfg.native.bootstrapFile === dirname(configFile) + '/bootstrap.json' && cfg.native.authorityDir === dirname(configFile) + '/authority' &&
       cfg.native.uid === 65534 && cfg.native.gid === 65534 && process.env.NODE_TLS_REJECT_UNAUTHORIZED !== '0', 'protected disposable launch');
     const kernelDB = disposable(cfg.kernelDSN, 'kernel'), nativeDB = disposable(nativeDSN, 'native');
@@ -70,7 +81,7 @@ test('production service entry: safe create, SAME OPEN concurrency1, authenticat
     const kernelPool = new pg.Pool({ connectionString: cfg.kernelDSN, max: 2, connectionTimeoutMillis: 5000, query_timeout: 5000 });
     const nativePool = new pg.Pool({ connectionString: nativeDSN, max: 2, connectionTimeoutMillis: 5000, query_timeout: 5000 });
     kernelPool.on('error', () => undefined); nativePool.on('error', () => undefined);
-    let service: Service | undefined, calls = 0, violation = false;
+    let service: Service | undefined, calls = 0, violation = false, phase = 'fixture';
     const upstream = createServer({ cert: protectedFile(installation + '/tls/server.pem'), key: protectedFile(installation + '/tls/server-key.pem'),
       maxHeaderSize: 16_384, headersTimeout: 5000, requestTimeout: 5000 }, (req, res) => {
       void (async () => {
@@ -111,13 +122,60 @@ test('production service entry: safe create, SAME OPEN concurrency1, authenticat
       // are required, but no migration/build/install runs inside this test.
       ensure((await kernelPool.query('SELECT 1 FROM ag_kernel.consumers UNION ALL SELECT 1 FROM ag_kernel.accounts UNION ALL SELECT 1 FROM ag_kernel.executions UNION ALL SELECT 1 FROM ag_kernel.operations UNION ALL SELECT 1 FROM ag_management.physical_mappings LIMIT 1')).rowCount === 0, 'new kernel fixture');
       ensure((await nativePool.query('SELECT 1 FROM public.accounts LIMIT 1')).rowCount === 0, 'new native fixture');
+      phase = 'startup-rollback';
+      const children = '/proc/self/task/' + process.pid + '/children';
+      ensure(readdirSync(cfg.native.authorityDir).length === 0 && readFileSync(children, 'utf8').trim() === '', 'unused protected launcher');
+      const abort = new AbortController(), lock = await kernelPool.connect();
+      let startup: Promise<boolean> | undefined;
+      try {
+        await lock.query('BEGIN');
+        await lock.query("SET LOCAL lock_timeout = '1000ms'");
+        // Block the LAST schema probe: earlier probes are followed by SQL that
+        // pool.end() rejects, so they cannot expose the historical listener leak.
+        await lock.query('LOCK TABLE ag_kernel.requests IN ACCESS EXCLUSIVE MODE');
+        const blocker = (await lock.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
+        startup = startService(configFile, abort.signal).then(s => { service = s; return false; },
+          (error: unknown) => error instanceof Error && 'code' in error && error.code === 'startup_denied');
+        const probe = 'SELECT transport_occupied,closure_token,native_origin_ref,engine_incarnation,request_nonce,descriptor_generation FROM ag_kernel.requests LIMIT 0';
+        const deadline = Date.now() + 2000; let blocked = false;
+        do {
+          blocked = (await kernelPool.query<{ blocked: boolean }>(`SELECT EXISTS (
+            SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()
+            AND query=$1 AND wait_event_type='Lock' AND $2::int=ANY(pg_blocking_pids(pid))) AS blocked`, [probe, blocker])).rows[0].blocked;
+          if (!blocked) await delay(10);
+        } while (!blocked && Date.now() < deadline);
+        ensure(blocked, 'observed startup relation-lock wait');
+        abort.abort(); // Shutdown snapshots the still-unbound callback here.
+      } finally {
+        abort.abort();
+        try { await lock.query('ROLLBACK'); } finally { lock.release(); }
+        if (startup) assert.equal(await Promise.race([startup,
+          delay(15_000, undefined, { ref: false }).then(() => fail('startup rollback bound'))]), true, 'aborted awaited startup rejects');
+      }
+      ensure(readFileSync(children, 'utf8').trim() === '' && readdirSync(cfg.native.authorityDir).length === 0, 'no protected child or launcher evidence');
+      // Rebinding proves ports are free even when failed startup cleared admission.
+      for (const origin of [cfg.callbackOrigin, cfg.facadeOrigin, cfg.native.origin]) {
+        const listener = createServer();
+        try {
+          await Promise.race([new Promise<void>((resolve, reject) => {
+            listener.once('error', () => reject(new Error('service fixture: rollback port available'))); listener.listen(Number(new URL(origin).port), '127.0.0.1', resolve);
+          }), delay(1000, undefined, { ref: false }).then(() => fail('rollback port bind bound'))]);
+        } finally {
+          await Promise.race([new Promise<void>(resolve => listener.close(() => resolve())),
+            delay(1000, undefined, { ref: false }).then(() => fail('rollback port close bound'))]);
+        }
+      }
+      assert.equal(calls, 0, 'cancelled startup must not enter upstream');
       await new Promise<void>((resolve, reject) => { upstream.once('error', reject); upstream.listen(Number(base.port), '127.0.0.1', resolve); });
+      phase = 'startup';
       service = await startService(configFile);
       const initial = service.binding;
       ensure(typeof initial.pid === 'string' && typeof initial.birthTicks === 'string', 'decimal production binding');
       const client = createManagementClient({ role: 'management', origin: cfg.facadeOrigin, token: management!.token, timeoutMs: 5000 });
+      phase = 'catalog';
       const catalog = await client.profiles();
       ensure(catalog.profiles.length === 1 && catalog.profiles[0].profileId === cfg.profile.profile && catalog.profiles[0].modelIds[0] === cfg.profile.model, 'fixed safe catalog');
+      phase = 'connect';
       const created = await client.connect({ operationId: randomUUID(), ownerRef, profileId: cfg.profile.profile,
         displayName: 'Disposable service fixture', credential: { kind: 'api_key', value: dummy } });
       ensure(created.state === 'applied' && created.result?.kind === 'account', 'authenticated physical account staging');
@@ -127,8 +185,9 @@ test('production service entry: safe create, SAME OPEN concurrency1, authenticat
       const prepare: c.Prepare = { operationId: randomUUID(), invocationRef: randomUUID(), attemptRef: 'service-fixture-attempt',
         accountRefs: [accountRef], subjectRef: 'service-fixture-binding', policyRevision: 1, bindingRevision: 1,
         profileId: cfg.profile.profile, limits: { ...cfg.profile.limits }, deadline: new Date(Date.now() + 45_000).toISOString() };
+      phase = 'run-access';
       const accessResponse = await fetch(cfg.facadeOrigin + '/internal/v1/run-access', { method: 'POST',
-        headers: { authorization: 'Bearer ' + control!.token, 'content-type': 'application/json' }, body: JSON.stringify(prepare), signal: AbortSignal.timeout(5000) });
+        headers: { authorization: 'Bearer ' + control!.token, accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify(prepare), signal: AbortSignal.timeout(5000) });
       assert.equal(accessResponse.status, 200);
       const access = object(await accessResponse.json(), ['operation','bearer','admission']);
       const op = c.preparationOperation.parse(access.operation), admission = c.admission.parse(access.admission);
@@ -136,17 +195,20 @@ test('production service entry: safe create, SAME OPEN concurrency1, authenticat
       if (op.state !== 'applied' || op.result?.kind !== 'execution') return fail('execution result');
       const executionRef = op.result.executionRef;
       const execution = createExecutionClient({ role: 'execution', origin: cfg.facadeOrigin, token: access.bearer as string, timeoutMs: 5000 });
-      const wrongRole = await fetch(cfg.facadeOrigin + '/v1/accounts', { headers: { authorization: 'Bearer ' + access.bearer }, signal: AbortSignal.timeout(5000) });
+      const wrongRole = await fetch(cfg.facadeOrigin + '/v1/accounts', { headers: { authorization: 'Bearer ' + access.bearer,
+        accept: 'application/json', 'content-type': 'application/json' }, signal: AbortSignal.timeout(5000) });
       assert.equal(wrongRole.status, 403); await wrongRole.body?.cancel();
       for (let i = 1; i <= 2; i++) {
-        const requestId = randomUUID(), result = await execution.request(executionRef, { requestId, admission,
+        phase = 'stream';
+      const requestId = randomUUID(), result = await execution.request(executionRef, { requestId, admission,
           body: Buffer.from(JSON.stringify({ model: cfg.profile.model, input: [{ role: 'user', content: 'service question ' + i }],
             stream: true, store: false, service_tier: 'default' })) });
         ensure(result.kind === 'stream', 'actual stream'); if (result.kind !== 'stream') return fail('stream');
         const reader = result.body.getReader(), chunks: Uint8Array[] = []; let size = 0;
         for (;;) { const next = await reader.read(); if (next.done) break; size += next.value.length; ensure(size <= 65_536, 'output bound'); chunks.push(next.value); }
         ensure(Buffer.concat(chunks).includes(Buffer.from('response.completed')), 'actual completed Responses');
-        assert.equal((await execution.status(executionRef, requestId)).effect, 'completed');
+        phase = 'closure';
+      assert.equal((await execution.status(executionRef, requestId)).effect, 'completed');
         let released = false;
         for (let n = 0; n < 100 && !released; n++) {
           const row = (await kernelPool.query('SELECT effect,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3',
@@ -162,11 +224,15 @@ test('production service entry: safe create, SAME OPEN concurrency1, authenticat
       const rows = (await kernelPool.query('SELECT native_origin_ref,engine_incarnation,request_nonce,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2', [cfg.consumer.consumerId, executionRef])).rows;
       ensure(rows.length === 2 && rows.every(r => r.native_origin_ref === initial.originRef && r.engine_incarnation === initial.incarnation && !r.transport_occupied) &&
         new Set(rows.map(r => r.request_nonce)).size === 2, 'original enrolled native proof for both claims');
+      phase = 'retirement';
       assert.equal(await service.stop(), 'retired', 'original Go parent must emit exact same-binding retirement and exit zero');
       assert.equal(await service.stopped, 'retired');
       await assert.rejects(fetch(cfg.facadeOrigin + '/v1/profiles', { signal: AbortSignal.timeout(1000) }), () => true);
       service = undefined;
-    } catch { fail('lifecycle failed; vendor/config/payload details withheld'); }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'service fixture: rollback port available') throw error;
+      fail('lifecycle failed: ' + phase);
+    }
     finally {
       await service?.stop(); upstream.closeAllConnections(); await new Promise<void>(resolve => upstream.close(() => resolve()));
       await Promise.all([kernelPool.end(), nativePool.end()]);
