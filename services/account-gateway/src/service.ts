@@ -67,7 +67,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   const pool = new pg.Pool({ connectionString: cfg.kernelDSN, max: 8, connectionTimeoutMillis: 5000,
     query_timeout: 5000, statement_timeout: 5000, idle_in_transaction_session_timeout: 5000 });
   pool.on('error', () => fail());
-  const kernel = new PostgresKernel(pool), worker = randomUUID(), ctx = Object.freeze({ consumerId: cfg.consumer.consumerId });
+  const kernel = new PostgresKernel(pool, undefined, cfg.durableFacts), worker = randomUUID(), ctx = Object.freeze({ consumerId: cfg.consumer.consumerId });
   const custody = new IntentSecrets(keyBytes(cfg.keys.intentAEAD), keyBytes(cfg.keys.intentHMAC));
   const store = new PostgresManagementStore(pool, custody);
   const bearers = new FacadeBearers(cfg.bearers), p = cfg.profile;

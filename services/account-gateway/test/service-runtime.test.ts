@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { constants, openSync, closeSync, fstatSync, readSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
+import { constants, openSync, closeSync, fstatSync, readSync, lstatSync, readFileSync, readdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createServer } from 'node:https';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -19,12 +19,27 @@ import { object } from '../src/native-wire.ts';
 // configuration; this test independently checks the disposable designation.
 interface FixtureConfig {
   kernelDSN: string; facadeOrigin: string; callbackOrigin: string;
+  durableFacts: { maxServiceFacts: number; maxConsumerFacts: number; maxAccountFacts: number;
+    workerSlots: number; issuerSlots: number };
   native: { bootstrapFile: string; authorityDir: string; uid: number; gid: number;
     executable: string; origin: string };
   consumer: { consumerId: string };
   profile: { profile: string; model: string; qualificationRef: string;
     baseURL: string; limits: c.Prepare['limits']; providerTokenUpperBound: number };
   bearers: { role: 'management' | 'run-control'; ownerRefs: string[]; token: string }[];
+}
+
+// TEST numbers only, deliberately distinct from safety defaults. These are not
+// measured production caps. The protected fixture factory must supply them.
+const testFacts: FixtureConfig['durableFacts'] = Object.freeze({
+  maxServiceFacts: 128, maxConsumerFacts: 96, maxAccountFacts: 64, workerSlots: 2, issuerSlots: 3,
+});
+async function assertStoredFacts(pool: pg.Pool, consumer: string, expected: FixtureConfig['durableFacts']): Promise<void> {
+  const rows = (await pool.query<FixtureConfig['durableFacts']>(`SELECT
+    b.capacity::integer AS "maxServiceFacts",c.fact_limit::integer AS "maxConsumerFacts",
+    c.account_fact_limit::integer AS "maxAccountFacts",c.worker_slots AS "workerSlots",c.issuer_slots AS "issuerSlots"
+    FROM ag_kernel.fact_budget b CROSS JOIN ag_kernel.consumers c WHERE b.singleton AND c.consumer=$1`, [consumer])).rows;
+  assert.deepEqual(rows, [expected], 'configured facts must reach actual persisted kernel policy');
 }
 
 const installation = '/opt/account-gateway-service-entry';
@@ -65,6 +80,7 @@ test('production service entry: awaited startup abort rollback, safe create, SAM
     ensure(typeof manifest.serviceConfig === 'string' && /^\/root\/account_gateway_service_entry_[a-f0-9]{32}\/service.json$/.test(manifest.serviceConfig), 'fixture root');
     ensure(typeof manifest.nativeDSN === 'string', 'native database designation');
     const configFile = manifest.serviceConfig as string, cfg = strictJSON(protectedFile(configFile)) as FixtureConfig, nativeDSN = manifest.nativeDSN as string;
+    assert.deepEqual(cfg.durableFacts, testFacts, 'explicit TEST fact configuration required');
     ensure(cfg.native.bootstrapFile === dirname(configFile) + '/bootstrap.json' && cfg.native.authorityDir === dirname(configFile) + '/authority' &&
       cfg.native.uid === 65534 && cfg.native.gid === 65534 && process.env.NODE_TLS_REJECT_UNAUTHORIZED !== '0', 'protected disposable launch');
     const kernelDB = disposable(cfg.kernelDSN, 'kernel'), nativeDB = disposable(nativeDSN, 'native');
@@ -122,6 +138,19 @@ test('production service entry: awaited startup abort rollback, safe create, SAM
       // are required, but no migration/build/install runs inside this test.
       ensure((await kernelPool.query('SELECT 1 FROM ag_kernel.consumers UNION ALL SELECT 1 FROM ag_kernel.accounts UNION ALL SELECT 1 FROM ag_kernel.executions UNION ALL SELECT 1 FROM ag_kernel.operations UNION ALL SELECT 1 FROM ag_management.physical_mappings LIMIT 1')).rowCount === 0, 'new kernel fixture');
       ensure((await nativePool.query('SELECT 1 FROM public.accounts LIMIT 1')).rowCount === 0, 'new native fixture');
+      phase = 'fact-config-denial';
+      // Regression: silently defaulting, accepting extra keys or bypassing the
+      // numeric/hierarchy checks would launch instead of returning config_denied.
+      for (const durableFacts of [undefined, { ...testFacts, extra: 1 },
+        { ...testFacts, issuerSlots: 0 }, { ...testFacts, maxAccountFacts: 97 }]) {
+        const invalidFile = dirname(configFile) + '/invalid-facts-' + randomUUID() + '.json';
+        writeFileSync(invalidFile, JSON.stringify({ ...cfg, durableFacts }), { flag: 'wx', mode: 0o600 });
+        try {
+          await assert.rejects(async () => {
+            const unexpected = await startService(invalidFile); await unexpected.stop();
+          }, (error: unknown) => error instanceof Error && 'code' in error && error.code === 'config_denied');
+        } finally { unlinkSync(invalidFile); }
+      }
       phase = 'startup-rollback';
       const children = '/proc/self/task/' + process.pid + '/children';
       ensure(readdirSync(cfg.native.authorityDir).length === 0 && readFileSync(children, 'utf8').trim() === '', 'unused protected launcher');
@@ -169,6 +198,10 @@ test('production service entry: awaited startup abort rollback, safe create, SAM
       await new Promise<void>((resolve, reject) => { upstream.once('error', reject); upstream.listen(Number(base.port), '127.0.0.1', resolve); });
       phase = 'startup';
       service = await startService(configFile);
+      // Regression: losing the service constructor's third argument persists
+      // safety defaults instead of these independent protected TEST values.
+      phase = 'service-fact-wiring';
+      await assertStoredFacts(kernelPool, cfg.consumer.consumerId, testFacts);
       const initial = service.binding;
       ensure(typeof initial.pid === 'string' && typeof initial.birthTicks === 'string', 'decimal production binding');
       const client = createManagementClient({ role: 'management', origin: cfg.facadeOrigin, token: management!.token, timeoutMs: 5000 });
