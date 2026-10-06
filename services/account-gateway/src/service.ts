@@ -101,6 +101,85 @@ function captured(value: unknown, originRef: string): ProcessBinding {
 }
 const same = (a: ProcessBinding, b: ProcessBinding) =>
   Object.keys(a).every(k => a[k as keyof ProcessBinding] === b[k as keyof ProcessBinding]);
+
+// Private root composition. Selectors only filter the protected native journal;
+// its complete stored old binding, not a PID supplied by SQL, proves teardown.
+export function composeServiceRetirementReadback(native: Pick<ServiceConfig['native'], 'executable' | 'authorityDir' | 'originRef'>) {
+  const { executable, authorityDir, originRef } = native;
+  let active: ReturnType<typeof spawn> | true | undefined;
+  return async (current: ProcessBinding, selector: Readonly<{ originRef: string; engineIncarnation: string }>,
+    signal: AbortSignal): Promise<Retirement | undefined> => {
+    let input: Buffer;
+    const selected = { originRef: selector.originRef, engineIncarnation: selector.engineIncarnation };
+    try {
+      current = captured(current, originRef); uuid(selected.engineIncarnation);
+      if (active || signal.aborted || selected.originRef !== originRef || selected.engineIncarnation === current.incarnation) return;
+      input = Buffer.from(JSON.stringify({ current, selectors: [selected] }));
+      if (input.length > 4096) return;
+    } catch { return; }
+    return new Promise(resolve => {
+      const deadline = Date.now() + 5000;
+      let query: ReturnType<typeof spawn>;
+      active = true; // Reserve custody before the synchronous spawn boundary.
+      try {
+        query = spawn(executable, ['--read-retirement', '--authority-dir', authorityDir, '--origin-ref', originRef],
+          { env: {}, cwd: '/', stdio: ['pipe','pipe','pipe'], shell: false, detached: false });
+        active = query;
+      } catch { active = undefined; resolve(undefined); return; }
+      let failed = false, done = false, eof = false, sent = false, bytes = 0, diagnostics = 0;
+      const chunks: Buffer[] = [];
+      let timer: ReturnType<typeof setTimeout>;
+      const finish = (receipt?: Retirement) => {
+        if (done) return;
+        done = true; clearTimeout(timer); signal.removeEventListener('abort', terminate);
+        resolve(receipt);
+      };
+      const terminate = () => {
+        if (done || failed) return;
+        failed = true; chunks.length = 0; clearTimeout(timer);
+        // This readonly subprocess is the only signal target. Reserve disposal
+        // time within the five-second call budget; late output cannot be reused.
+        try { query.kill('SIGKILL'); } catch { /* finite denial only */ }
+        query.stdin?.destroy(); query.stdout?.destroy(); query.stderr?.destroy();
+        timer = setTimeout(() => finish(), Math.max(1, Math.min(500, deadline - Date.now())));
+      };
+      timer = setTimeout(terminate, Math.max(1, deadline - Date.now() - 500));
+      query.once('error', terminate);
+      query.stdin!.on('error', terminate);
+      query.stdout!.on('error', terminate);
+      query.stderr!.on('error', terminate);
+      query.stdin!.once('finish', () => { sent = true; });
+      query.stdout!.once('end', () => { eof = true; });
+      query.stdout!.on('data', (b: Buffer) => {
+        if (failed || done) return;
+        bytes += b.length;
+        if (bytes > 4096) terminate(); else chunks.push(b);
+      });
+      query.stderr!.on('data', (b: Buffer) => {
+        diagnostics += b.length; if (diagnostics > 4096) terminate();
+      });
+      query.once('close', (code, exitSignal) => {
+        // Logical timeout cannot release physical custody. Only this exact
+        // handle's close permits another query, even after finish() resolved.
+        if (active === query) active = undefined;
+        if (done) return;
+        if (failed || signal.aborted || Date.now() >= deadline || !sent || !eof || code !== 0 || exitSignal !== null) { finish(); return; }
+        try {
+          const reply = object(strictJSON(Buffer.concat(chunks)), ['receipts']);
+          if (!Array.isArray(reply.receipts) || reply.receipts.length !== 1) throw new ServiceError('runtime_denied');
+          const r = object(reply.receipts[0], ['binding','scope','method']), old = captured(r.binding, originRef);
+          if (old.incarnation !== selected.engineIncarnation || old.incarnation === current.incarnation ||
+              old.bootId !== current.bootId || old.lockDevice !== current.lockDevice || old.lockInode !== current.lockInode ||
+              r.scope !== 'exact-local-process-transport-teardown-v1' ||
+              !['observed-child-exit','reacquired-after-supervisor-loss'].includes(r.method as string)) throw new ServiceError('runtime_denied');
+          finish(Object.freeze({ binding: old, scope: r.scope, method: r.method as string }));
+        } catch { finish(); }
+      });
+      signal.addEventListener('abort', terminate, { once: true });
+      if (signal.aborted) terminate(); else query.stdin!.end(input);
+    });
+  };
+}
 async function bounded<T>(work: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try { return await Promise.race([work, new Promise<never>((_, reject) => {
@@ -131,6 +210,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   const store = new PostgresManagementStore(pool, custody);
   const control = composeServiceControl(cfg, kernel, store, custody, worker);
   const { profiles, bearers, management, catalog } = control;
+  const readRetirement = composeServiceRetirementReadback(cfg.native), readbackAbort = new AbortController();
   let handler: Server | undefined, facade: Server | undefined;
   let original: ProcessBinding | undefined, ready = false, invalid = false, stopping = false;
   let terminal: 'retired' | 'pending' | undefined, retirement: Retirement | undefined;
@@ -184,7 +264,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   function stop(): Promise<'retired' | 'pending'> {
     if (stopWork) return stopWork;
     if (stopping) return stopped;
-    stopping = true; denyAdmission(); install(); pulse(); wakeSleep?.();
+    stopping = true; readbackAbort.abort(); denyAdmission(); install(); pulse(); wakeSleep?.();
     // Signal only the original ChildProcess handle. The protected Go parent
     // alone decides exact-engine retirement and retains launcher disk evidence.
     if (child && !exited) {
@@ -285,10 +365,19 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
           if (claim.scope.transports.length > 2) closed = false;
           for (const t of claim.scope.transports.slice(0, 2)) {
             if (stopping) { closed = false; break; }
-            if (!t.native || !t.token || t.native.originRef !== binding.originRef || t.native.engineIncarnation !== binding.incarnation) { closed = false; continue; }
-            try { await cancelFacadeTransport(options!, ctx, { ...t, native: t.native, token: t.token }, claim); }
+            if (!t.native || !t.token || t.native.originRef !== binding.originRef) { closed = false; continue; }
+            try {
+              if (t.native.engineIncarnation === binding.incarnation)
+                await cancelFacadeTransport(options!, ctx, { ...t, native: t.native, token: t.token }, claim);
+              else {
+                const receipt = await readRetirement(binding, t.native, readbackAbort.signal);
+                if (!receipt || stopping) { closed = false; continue; }
+                await kernel.acknowledgeTransportClosed(ctx, worker, t, { cleanupRef: claim.cleanupRef, token: claim.token });
+              }
+            }
             catch { closed = false; }
           }
+          if (stopping) return;
           await kernel.settleCleanup(ctx, claim.cleanupRef, worker, claim.token, closed);
         }
     }
