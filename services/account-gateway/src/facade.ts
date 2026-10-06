@@ -614,7 +614,7 @@ export function createFacade(options: FacadeOptions): Server {
       }
       if (path === '/v1/policy-fences' && method === 'POST') {
         const input = parse(c.fence, strictJSON(await body(req, ingressBytes), true)); identity = { operationRef: input.operationId };
-        if (input.subjectRef !== grant.preparation.subjectRef || input.revision !== grant.preparation.policyRevision) throw new KernelError('denied');
+        if (input.subjectRef !== grant.preparation.subjectRef || input.revision < grant.preparation.policyRevision) throw new KernelError('denied');
         requireCurrent(grant); uncertain = true;
         send(res, c.acknowledgementOperation, await operationDTO(context, await kernel.fence(context, input.operationId, input.subjectRef, input.revision))); return;
       }
