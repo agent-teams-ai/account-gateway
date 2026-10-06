@@ -245,6 +245,50 @@ test('source catalog: singleton compatibility and finite simultaneous per-profil
   assert.equal(catalog[2].qualificationRef, 'source-codex');
 });
 
+test('consumer-control capture is finite, detached and single-read before composition', () => {
+  const limits = { requests: 4, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 100 };
+  const profile = { profile: 'synthetic-profile', baseURL: 'https://fixture.invalid/v1', model: 'fixture-model',
+    qualificationRef: 'synthetic-only', limits, providerTokenUpperBound: 1000 };
+  const control = { token: 'synthetic-consumer-control', role: 'consumer-control' as const, consumerId: 'synthetic-consumer',
+    profileIds: [profile.profile], limits, maxRunMs: 1000 };
+  const capture = (value: unknown) => captureServiceBearers([value], control.consumerId, [profile]);
+  assert.deepEqual(capture(control), [control]);
+  const catalog = Array.from({ length: 128 }, (_, i) => ({ ...profile, profile: 'profile-' + i }));
+  assert.equal(captureServiceBearers([{ ...control, profileIds: catalog.map(p => p.profile) }], control.consumerId, catalog).length, 1);
+  const denied = (value: unknown) => assert.throws(() => capture(value), e => e instanceof ServiceError && e.code === 'config_denied');
+  for (const profileIds of [undefined, [], [profile.profile, profile.profile], ['unknown'], ['bad/profile'], ['x'.repeat(65)],
+    Array.from({ length: 129 }, (_, i) => 'profile-' + i), null, 'profile']) denied({ ...control, profileIds });
+  const { profileIds: _ids, ...absent } = control; denied(absent);
+  for (const maxRunMs of [0, 3_600_001, 1.5]) denied({ ...control, maxRunMs });
+  const maximum = capture({ ...control, maxRunMs: 3_600_000 })[0];
+  assert.ok(maximum.role === 'consumer-control'); assert.equal(maximum.maxRunMs, 3_600_000);
+  for (const key of Object.keys(limits) as (keyof typeof limits)[])
+    denied({ ...control, limits: { ...limits, [key]: limits[key] + 1 } });
+  denied({ ...control, limits: { ...limits, concurrency: 5 } });
+  for (const extra of [{ consumerId: 'foreign' }, { ownerRefs: ['owner'] }, { preparation: {} }, { role: '*' }]) denied({ ...control, ...extra });
+  const callerIds = [profile.profile], reads = new Map<string, number>();
+  const supplied = { ...control, profileIds: callerIds, limits: { ...limits } };
+  const getters = Object.fromEntries(Object.entries(supplied).map(([key, value]) => [key, {
+    enumerable: true, get() { const count = (reads.get(key) ?? 0) + 1; reads.set(key, count); return count === 1 ? value : undefined; },
+  }]));
+  const captured = capture(Object.defineProperties({}, getters));
+  assert.ok([...reads.values()].every(count => count === 1));
+  callerIds[0] = 'unknown'; supplied.limits.tokens = 1000; supplied.maxRunMs = 3_600_000;
+  assert.deepEqual(captured, [control]);
+  assert.ok(captured[0].role === 'consumer-control');
+  assert.ok(Object.isFrozen(captured[0]) && Object.isFrozen(captured[0].profileIds) && Object.isFrozen(captured[0].limits));
+  const earlyIds = [profile.profile];
+  const mutating = capture({ ...control, profileIds: earlyIds, get maxRunMs() { earlyIds.push('unknown'); return 1000; } });
+  assert.deepEqual(mutating[0].profileIds, [profile.profile], 'later scalar getter cannot widen an already captured list');
+  const mapping = new FacadeBearers(captured), grant = mapping.resolve(control.token);
+  assert.ok(grant && grant.role === 'consumer-control');
+  assert.equal(mapping.authorizesOwner({ consumerId: control.consumerId }, 'new-opaque-owner', profile.profile), true);
+  assert.equal(mapping.authorizesOwner({ consumerId: 'foreign' }, 'new-opaque-owner', profile.profile), false);
+  assert.equal(mapping.authorizesOwner({ consumerId: control.consumerId }, 'new-opaque-owner', 'unknown'), false);
+  mapping.replace([]); assert.equal(mapping.current(grant), false);
+  assert.equal(mapping.authorizesOwner({ consumerId: control.consumerId }, 'new-opaque-owner', profile.profile), false);
+});
+
 // Fixture-owned input projection. Actual startService validates production
 // configuration; this test independently checks the disposable designation.
 interface FixtureConfig {

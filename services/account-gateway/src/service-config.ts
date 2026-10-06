@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { approvedLimits, boundedFacts, defaults, identifier, integer } from './domain.ts';
 import type { ApprovedLimits, DurableFactBounds } from './domain.ts';
 import { FacadeBearers } from './facade.ts';
-import type { ManagementBearer, RunControlBearer } from './facade.ts';
+import type { ManagementBearer, RunControlBearer, ConsumerControlBearer } from './facade.ts';
 import { strictJSON } from './facade-ingress.ts';
 import { object } from './native-wire.ts';
 import { physicalCandidate, codexOAuthProfile } from './management.ts';
@@ -25,7 +25,7 @@ export interface ServiceConfig {
     executionCredential: string; cleanupCredential: string; callbackCredential: string }>;
   readonly profile: ServiceProfile;
   readonly secondProfile?: ServiceProfile;
-  readonly bearers: readonly (ManagementBearer | RunControlBearer)[];
+  readonly bearers: readonly (ManagementBearer | RunControlBearer | ConsumerControlBearer)[];
   readonly keys: Readonly<{ intentAEAD: string; intentHMAC: string; facadeHMAC: string }>;
   // Explicit opt-in with its own qualification and limits, captured before IO.
   readonly oauthEnrollment?: OAuthEnrollmentConfig;
@@ -128,13 +128,26 @@ export function captureServiceProfiles(input: Pick<ServiceConfig, 'profile' | 's
 export function captureServiceBearers(value: unknown, consumerId: string, profiles: readonly ServiceProfile[]): ServiceConfig['bearers'] {
   try {
     if (!Array.isArray(value) || !value.length || value.length > 128) return deny();
-    const bearers = value as (ManagementBearer | RunControlBearer)[];
-    for (const b of bearers) {
+    const bearers = value.map(value => {
+      const b = value as ManagementBearer | RunControlBearer | ConsumerControlBearer;
+      const role = b.role;
+      if (role === 'consumer-control') {
+        object(b, ['token','role','consumerId','profileIds','limits','maxRunMs']);
+        const supplied = b.profileIds;
+        if (!Array.isArray(supplied)) return deny();
+        const length = supplied.length;
+        if (length < 1 || length > 128) return deny();
+        const profileIds = Array.from({ length }, (_, i) => supplied[i]);
+        const limits = { ...b.limits };
+        object(limits, ['requests','concurrency','requestBytes','outputBytes','tokens']);
+        return { role, profileIds, limits, token: b.token, consumerId: b.consumerId, maxRunMs: b.maxRunMs };
+      }
       if (b.role === 'management') {
         object(b, ['token','role','consumerId','ownerRefs','preparation'], ['profileIds']);
         object(b.preparation, ['accountRefs','subjectRef','policyRevision','bindingRevision','profileId','limits','maxRunMs']);
       } else object(b, ['token','role','consumerId','ownerRefs','profileIds','limits','maxRunMs']);
-    }
+      return b;
+    });
     const mapping = new FacadeBearers(bearers);
     const captured = bearers.map(b => {
       const token = b.token;
