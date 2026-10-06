@@ -24,6 +24,7 @@ import { NativeManagementClient, NativeOAuthEnrollmentClient, NativeFailure } fr
 import { createFacade, FacadeBearers } from '../src/facade.ts';
 import type { ManagementBearer } from '../src/facade.ts';
 import { captureOAuthEnrollmentConfig, ServiceError } from '../src/service-config.ts';
+import { NativeAuthority } from '../src/native-authority.ts';
 
 // Reuse management-postgres's disposable guard and migration procedure. Its
 // helper is private to that suite; exporting it would widen the ten owned paths.
@@ -51,12 +52,23 @@ before(async () => {
   try {
     const version = (await pool.query("SELECT current_database() AS db,current_setting('server_version') AS version")).rows[0];
     assert.equal(version.db, selected.database); assert.match(version.version, /^17\.10(?:$| )/);
-    assert.equal((await pool.query("SELECT 1 FROM pg_namespace WHERE nspname IN ('ag_kernel','ag_management')")).rowCount,
-      0, 'requires empty disposable DB; never overwrite a schema');
-    const directory = new URL('../migrations/', import.meta.url);
-    for (const file of (await readdir(directory)).filter(f => /^\d{3}_.*\.sql$/.test(f)).sort()) {
-      await pool.query(await readFile(new URL(file, directory), 'utf8'));
+    const schemas = (await pool.query("SELECT 1 FROM pg_namespace WHERE nspname IN ('ag_kernel','ag_management')")).rowCount;
+    if (schemas === 0) {
+      const directory = new URL('../migrations/', import.meta.url);
+      for (const file of (await readdir(directory)).filter(f => /^\d{3}_.*\.sql$/.test(f)).sort()) {
+        await pool.query(await readFile(new URL(file, directory), 'utf8'));
+      }
+    } else {
+      assert.equal(schemas, 2, 'refuse partially migrated fixture; never overwrite a schema');
+      // Root can reuse the explicitly designated compatible populated F fixture.
+      // Each case allocates its own consumer; existing rows are never cleared.
+      await pool.query(`SELECT a.active_generation,c.native_identity,j.qualification_ref,m.native_created_at,
+        w.lease_until FROM ag_kernel.accounts a,ag_kernel.candidates c,ag_management.candidate_journal j,
+        ag_management.physical_mappings m,ag_kernel.workers w LIMIT 0`);
     }
+    const maximum = (await pool.query('SELECT coalesce(max(native_id),4000)::text AS maximum FROM ag_management.physical_mappings')).rows[0].maximum;
+    nextNativeId = Math.max(4000, Number(maximum));
+    assert.ok(Number.isSafeInteger(nextNativeId) && nextNativeId < Number.MAX_SAFE_INTEGER - 1000, 'finite fresh synthetic identity space');
   } catch (error) {
     if (error instanceof assert.AssertionError) throw error;
     throw new Error('NOT_RUN: disposable PostgreSQL setup unavailable; vendor details withheld');
@@ -130,11 +142,43 @@ async function fixture(options: FixtureOptions = {}) {
   let descriptorPatch: Partial<PhysicalCandidate> = {}, descriptorIdentity: Partial<Pick<OAuthDescriptor, 'operationId' | 'accountRef'>> = {};
   let replyPatch: Record<string, unknown> = {}, beginPatch: Record<string, unknown> = {};
   let responseURL = authorizationURL(), fixtureFailure: unknown;
+  let callbackOrigin = '';
+  const refreshRequests: ConnectWire[] = [];
+  const refreshModes = new Map<string, 'drop' | 'unknown' | 'idle'>();
+  const callbackToken = 'synthetic-refresh-callback';
+  let refreshBarrier: { generation: string; entered: ReturnType<typeof Promise.withResolvers<void>>;
+    released: ReturnType<typeof Promise.withResolvers<void>> } | undefined;
+  const callback = (route: string, body: unknown, token = callbackToken) => fetch(callbackOrigin + '/private/native/v1/' + route,
+    { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },
+      body: JSON.stringify(body), redirect: 'manual', signal: AbortSignal.timeout(4500) });
   let descriptorBarrier: { entered: ReturnType<typeof Promise.withResolvers<void>>;
     released: ReturnType<typeof Promise.withResolvers<void>> } | undefined;
   const nativeServer = createServer((req, res) => {
     void (async () => {
       assert.equal(req.headers.authorization, 'Bearer ' + control);
+      if (req.method === 'POST' && req.url === '/private/native/v1/oauth/refresh') {
+        const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk as Buffer);
+        const submitted = JSON.parse(Buffer.concat(chunks).toString()) as ConnectWire;
+        assert.deepEqual(Object.keys(submitted).sort(), ['account_ref','generation','operation','owner_ref']);
+        refreshRequests.push(submitted);
+        // A second transaction must acquire the real consumer lock NOWAIT.
+        // This goes RED if the selector holds its transaction across native HTTP.
+        const independent = await pool.connect();
+        try {
+          await independent.query('BEGIN');
+          await independent.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE NOWAIT', [context.consumerId]);
+          await independent.query('COMMIT');
+        } finally { await independent.query('ROLLBACK'); independent.release(); }
+        const reply = await callback('oauth-refresh-authority', { consumerId: context.consumerId,
+          operationId: submitted.operation, accountRef: submitted.account_ref, generation: submitted.generation });
+        assert.equal(reply.status, 200, 'committed active authority before refresh');
+        assert.deepEqual(await reply.json(), { ok: true, ownerRef: submitted.owner_ref });
+        const barrier = refreshBarrier;
+        if (barrier?.generation === submitted.generation) { barrier.entered.resolve(); await barrier.released.promise; }
+        const mode = refreshModes.get(submitted.generation) ?? 'idle';
+        if (mode === 'drop') { req.socket.destroy(); return; }
+        res.end(JSON.stringify({ operation: submitted.operation, account_ref: submitted.account_ref, state: mode })); return;
+      }
       if (req.method === 'POST' && (req.url === '/private/native/v1/oauth/connect' ||
           req.url === '/private/native/v1/oauth/connect/read')) {
         const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk as Buffer);
@@ -218,7 +262,7 @@ async function fixture(options: FixtureOptions = {}) {
       proof: { async verify(j, d) {
         const row = rows.get(j.generation);
         return descriptorMode === 'qualified' && row?.state === 'inactive' && sameCandidate(row, d);
-      } }, oauth: { profile: oauthProfile, native: oauth, ...(withDescriptor ? { descriptor } : {}) } });
+      } }, oauth: { profile: oauthProfile, native: oauth, ...(withDescriptor ? { descriptor } : {}) }, refresh: oauth });
   }
   let management = manager(), facade: Server | undefined;
   const token = 'synthetic-management-token', foreignToken = 'synthetic-foreign-owner';
@@ -228,6 +272,13 @@ async function fixture(options: FixtureOptions = {}) {
         profileId: oauthProfile.profile, limits: bounds, maxRunMs: 60_000 } };
   }
   const bearers = new FacadeBearers([grant(token, [owner]), grant(foreignToken, ['foreign-owner'])]);
+  const authority = new NativeAuthority({ kernel, store, oauthOwners: { store, bearers }, oauthRefreshOwners: { store, bearers },
+    config: { origin: nativeOrigin, enrollment: { originRef: 'synthetic-refresh-origin', engineIncarnation: randomUUID(),
+      worker, qualificationRef: oauthProfile.qualificationRef }, consumers: [{ consumerId: context.consumerId,
+      executionCredential: 'synthetic-refresh-execution', cleanupCredential: 'synthetic-refresh-cleanup', callbackCredential: callbackToken }],
+      profiles: [{ ...oauthProfile, requestBytes: bounds.requestBytes, outputBytes: bounds.outputBytes,
+        tokens: bounds.tokens, providerTokenUpperBound: 1000 }], timeoutMs: 5000 } });
+  const callbackServer = authority.createServer(); callbackOrigin = await listen(callbackServer);
   async function startFacade(): Promise<string> {
     facade = createFacade({ kernel: new PostgresKernel(pool), management, store, bearers,
       profiles: [{ dto: { profileId: oauthProfile.profile, protocol: 'openai-responses',
@@ -240,7 +291,8 @@ async function fixture(options: FixtureOptions = {}) {
   let origin = await startFacade();
   const client = () => createManagementClient({ role: 'management', origin, token });
   return { context, kernel, store, worker, oauth, native, descriptorBoundary: descriptor, rows, requests, observedJournals, descriptorScopes, activationMappings,
-    client, foreign: () => createManagementClient({ role: 'management', origin, token: foreignToken }),
+    client, callback, bearers, grant: () => grant(token, [owner]), refreshRequests, refreshModes,
+    foreign: () => createManagementClient({ role: 'management', origin, token: foreignToken }),
     management: () => management, manager, origin: () => origin,
     state(value: OAuthReadback['state']) { connectState = value; },
     descriptor(value: DescriptorMode, patch: Partial<PhysicalCandidate> = {}, identity: typeof descriptorIdentity = {}) {
@@ -252,12 +304,18 @@ async function fixture(options: FixtureOptions = {}) {
       descriptorBarrier = { entered: Promise.withResolvers<void>(), released: Promise.withResolvers<void>() };
       return { entered: descriptorBarrier.entered.promise, release: descriptorBarrier.released.resolve };
     },
+    holdRefresh(generation: string) {
+      refreshBarrier = { generation, entered: Promise.withResolvers<void>(), released: Promise.withResolvers<void>() };
+      const barrier = refreshBarrier;
+      return { entered: barrier.entered.promise, release() { refreshBarrier = undefined; barrier.released.resolve(); } };
+    },
     stats: () => ({ begins, candidateCreates, candidateReads, activations, unexpected }),
     async assertHealthy() { if (fixtureFailure) throw fixtureFailure; assert.equal(unexpected, 0); assert.equal(candidateCreates, 0); },
     async restart(targetWorker = worker, withDescriptor = descriptorMode !== 'absent') {
       if (facade) await stop(facade); management = manager(targetWorker, withDescriptor); origin = await startFacade();
     },
-    async close() { descriptorBarrier?.released.resolve(); if (facade) await stop(facade); await stop(nativeServer); },
+    async close() { descriptorBarrier?.released.resolve(); refreshBarrier?.released.resolve();
+      if (facade) await stop(facade); await stop(callbackServer); await stop(nativeServer); },
   };
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -288,6 +346,131 @@ async function assertInert(f: Fixture, j: CandidateJournal, expected: 'pending' 
 const code = (value: KernelError['code']) => (e: unknown): boolean => e instanceof KernelError && e.code === value;
 const denied = (e: unknown): boolean => e instanceof GatewayError && e.code === 'safe_error' &&
   e.diagnostic?.code === 'forbidden';
+
+async function activeOAuth(f: Fixture): Promise<CandidateJournal> {
+  f.state('prepared');
+  const command = input(); await f.client().beginOAuth(sdkInput(command));
+  f.state('completed'); f.descriptor('qualified');
+  assert.equal((await f.client().readOAuth(command.operationId)).state, 'applied');
+  return journal(f, command);
+}
+function selectors(j: CandidateJournal): object {
+  return { consumerId: j.consumerId, operationId: j.operationId, accountRef: j.accountRef, generation: j.generation };
+}
+
+// RED if selection spans HTTP/callback with the consumer lock, if failed A is
+// retried in the same tick, or if cursor advancement waits for a successful ACK.
+// Native F2's durable no-second-entry proof belongs to its existing real PG case.
+test('F refresh: committed real journal/HTTP selection advances past dropped ACK and unknown A to B', async () => {
+  const f = await fixture({ descriptor: 'qualified' });
+  try {
+    const journals = [await activeOAuth(f), await activeOAuth(f)].sort((a, b) => a.generation.localeCompare(b.generation));
+    const [a, b] = journals;
+    const manager = f.manager();
+    const accountBefore = await f.kernel.account(f.context, a.accountRef);
+    const mappingBefore = await f.store.mapping(f.context, a.generation);
+    const execution = await f.kernel.prepare(f.context, { operationId: randomUUID(), intentDigest: 'refresh-valid-use',
+      invocationRef: 'refresh-use-' + randomUUID(), attemptRef: 'refresh-attempt', permittedAccounts: [a.accountRef],
+      profile: oauthProfile.profile, policySubject: 'refresh-binding', policyRevision: 2, bindingRevision: 3,
+      issuerEpoch: await f.kernel.issuer(f.context), deadline: new Date(Date.now() + 45_000), limits: bounds });
+    assert.ok(execution.executionRef);
+    const savedBefore = await f.kernel.savedExecution(f.context, execution.executionRef);
+    const operationsBefore = (await pool.query('SELECT count(*)::int AS n FROM ag_kernel.operations WHERE consumer=$1',
+      [f.context.consumerId])).rows[0].n;
+    assert.equal(await manager.refreshOAuth(f.context, true), 'idle');
+    assert.deepEqual(f.refreshRequests, [], 'an acquired cleanup claim suppresses even an eligible active refresh');
+    f.refreshModes.set(a.generation, 'drop');
+    const hold = f.holdRefresh(a.generation), pending = manager.refreshOAuth(f.context);
+    try {
+      await Promise.race([hold.entered, delay(3500).then(() => { throw new Error('refresh never reached real HTTP callback'); })]);
+      assert.equal(await manager.refreshOAuth(f.context), 'idle', 'held request cannot overlap another selection');
+      assert.deepEqual(f.refreshRequests, [wire(scope(a))]);
+    } finally { hold.release(); }
+    assert.equal(await pending, 'deferred');
+    assert.deepEqual(f.refreshRequests, [wire(scope(a))], 'one HTTP, no immediate retry after dropped ACK');
+    assert.equal(await manager.refreshOAuth(f.context), 'observed');
+    assert.deepEqual(f.refreshRequests, [wire(scope(a)), wire(scope(b))]);
+    f.refreshModes.set(a.generation, 'unknown');
+    assert.equal(await manager.refreshOAuth(f.context), 'deferred');
+    assert.equal(await manager.refreshOAuth(f.context), 'observed');
+    assert.deepEqual(f.refreshRequests, [wire(scope(a)), wire(scope(b)), wire(scope(a)), wire(scope(b))]);
+    assert.deepEqual(await f.kernel.account(f.context, a.accountRef), accountBefore);
+    assert.deepEqual(await f.kernel.savedExecution(f.context, execution.executionRef), savedBefore);
+    assert.deepEqual(await f.store.readJournal(f.context, a.operationId), a);
+    assert.deepEqual(await f.store.mapping(f.context, a.generation), mappingBefore);
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM ag_kernel.operations WHERE consumer=$1',
+      [f.context.consumerId])).rows[0].n, operationsBefore, 'refresh creates no kernel operation');
+    await f.assertHealthy();
+  } finally { await f.close(); }
+});
+
+// RED if refresh reuses staging-capable connect authority, derives owner from
+// the body, or accepts the original physical mapping after reconnect promotion.
+test('F refresh authority: exact selectors require ACTIVE generation while connect retains staging', async () => {
+  const f = await fixture({ descriptor: 'qualified' });
+  try {
+    const command = input(); await f.client().beginOAuth(sdkInput(command));
+    const old = await journal(f, command);
+    assert.equal((await f.callback('oauth-owner-authority', selectors(old))).status, 200);
+    assert.equal((await f.callback('oauth-refresh-authority', selectors(old))).status, 403);
+    f.state('completed'); assert.equal((await f.client().readOAuth(command.operationId)).state, 'applied');
+    const accepted = await f.callback('oauth-refresh-authority', selectors(old));
+    assert.equal(accepted.status, 200); assert.deepEqual(await accepted.json(), { ok: true, ownerRef: owner });
+    for (const changed of [{ ...selectors(old), ownerRef: owner }, { ...selectors(old), operationId: randomUUID() },
+      { ...selectors(old), generation: randomUUID() }, { ...selectors(old), accountRef: randomUUID() },
+      { ...selectors(old), consumerId: 'foreign-consumer' }]) {
+      const response = await f.callback('oauth-refresh-authority', changed);
+      assert.equal(response.status, 403); assert.deepEqual(await response.json(), { code: 'denied' });
+    }
+    assert.equal((await f.callback('oauth-refresh-authority?alias=1', selectors(old))).status, 403);
+    const current = await f.kernel.account(f.context, old.accountRef), operationId = randomUUID();
+    await f.kernel.beginAccount(f.context, { kind: 'reconnect', operationId, accountRef: old.accountRef,
+      expectedRevision: current.revision, intentDigest: 'controlled-refresh-reconnect' });
+    const permit = await f.kernel.startCandidate(f.context, operationId, f.worker); assert.ok(permit); assert.ok(permit.candidate);
+    const replacement = await f.store.journal({ consumerId: f.context.consumerId, operationId,
+      accountRef: old.accountRef, ownerRef: owner, purpose: 'reconnect' }, permit.candidate, f.worker, oauthProfile);
+    const descriptor = { ...codexOAuthProfile, generation: replacement.generation, nativePhysicalIdentity: replacement.generation,
+      nativeId: ++nextNativeId, createdAt: birth };
+    await f.store.saveMapping({ ...replacement, descriptor });
+    assert.equal((await f.kernel.acknowledgeCandidate(f.context, operationId, f.worker, descriptor)).state, 'applied');
+    assert.ok(await f.store.mapping(f.context, old.generation), 'old physical evidence remains present');
+    assert.equal((await f.callback('oauth-refresh-authority', selectors(old))).status, 403);
+    assert.equal((await f.callback('oauth-refresh-authority', selectors(replacement))).status, 200);
+    f.bearers.replace([]);
+    assert.equal((await f.callback('oauth-refresh-authority', selectors(replacement))).status, 403);
+    f.bearers.replace([f.grant()]);
+    assert.equal((await f.callback('oauth-refresh-authority', selectors(replacement))).status, 200);
+    await pool.query("UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND worker=$2",
+      [f.context.consumerId, f.worker]);
+    assert.equal((await f.callback('oauth-refresh-authority', selectors(replacement))).status, 403);
+    assert.equal(await f.store.nextOAuthRefresh(f.context, f.worker, oauthProfile), undefined);
+  } finally { await f.close(); }
+});
+
+// RED if the management grant is captured before SQL: replace it while a real
+// callback waits on the consumer lock, then observe denial over authenticated HTTP.
+test('F refresh authority: grant replacement during real SQL wait denies the callback', async () => {
+  const f = await fixture({ descriptor: 'qualified' }), gate = await pool.connect();
+  let pending: Promise<Response> | undefined;
+  try {
+    const j = await activeOAuth(f);
+    await gate.query('BEGIN');
+    await gate.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE', [f.context.consumerId]);
+    const pid = (await gate.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
+    pending = f.callback('oauth-refresh-authority', selectors(j)); void pending.catch(() => undefined);
+    const deadline = Date.now() + 2500; let blocked = false;
+    while (!blocked && Date.now() < deadline) {
+      await gate.query('SELECT pg_stat_clear_snapshot()');
+      blocked = ((await gate.query('SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))', [pid])).rowCount ?? 0) > 0;
+      if (!blocked) await delay(10);
+    }
+    assert.equal(blocked, true, 'callback reached actual SQL lock');
+    f.bearers.replace([]); await gate.query('COMMIT');
+    assert.equal((await pending).status, 403);
+  } finally {
+    await gate.query('ROLLBACK'); gate.release(); await pending?.catch(() => undefined); await f.close();
+  }
+});
 
 // Regression: invented staged DTO/URL restriction changes a real prepared Begin
 // into unknown; ordinary waiting/completed custody must stay inert through GET.

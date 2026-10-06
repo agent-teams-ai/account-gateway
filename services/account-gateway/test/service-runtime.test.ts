@@ -19,6 +19,8 @@ import type { ServiceConfig } from '../src/service-config.ts';
 import { strictJSON } from '../src/facade-ingress.ts';
 import { object } from '../src/native-wire.ts';
 import { captureOAuthEnrollmentConfig, captureServiceProfiles, captureServiceBearers, openRouterProfile, ServiceError } from '../src/service-config.ts';
+import { AccountManagement } from '../src/management.ts';
+import { PostgresKernel } from '../src/postgres.ts';
 
 // Keep the production restart scenario executable against the exact old base:
 // its meaningful RED must be missing automatic closure, not a missing import.
@@ -418,6 +420,25 @@ test('production service entry: startup rollback, SAME OPEN, abrupt held-stream 
     const nativePool = new pg.Pool({ connectionString: nativeDSN, max: 2, connectionTimeoutMillis: 5000, query_timeout: 5000 });
     kernelPool.on('error', () => undefined); nativePool.on('error', () => undefined);
     let service: Service | undefined, calls = 0, violation = false, phase = 'fixture';
+    // Observe the REAL current tick and its REAL SQL cleanup claim without
+    // replacing either result or authority. RED if refresh moves before cleanup
+    // or receives false after any acquired claim, including old-incarnation work.
+    const claimCleanup = PostgresKernel.prototype.claimCleanup, refreshOAuth = AccountManagement.prototype.refreshOAuth;
+    let acquiredThisTick: boolean | undefined, skippedRefreshTicks = 0, tickViolation = false;
+    PostgresKernel.prototype.claimCleanup = async function (this: PostgresKernel, ...args: Parameters<typeof claimCleanup>) {
+      const claim = await claimCleanup.apply(this, args);
+      if (args[0].consumerId === cfg.consumer.consumerId) acquiredThisTick = claim !== undefined;
+      return claim;
+    };
+    AccountManagement.prototype.refreshOAuth = async function (this: AccountManagement, ...args: Parameters<typeof refreshOAuth>) {
+      const result = await refreshOAuth.apply(this, args);
+      if (args[0].consumerId === cfg.consumer.consumerId) {
+        if (acquiredThisTick === undefined || (args[1] ?? false) !== acquiredThisTick) tickViolation = true;
+        if (acquiredThisTick) { skippedRefreshTicks++; if (result !== 'idle') tickViolation = true; }
+        acquiredThisTick = undefined;
+      }
+      return result;
+    };
     const held = new Map<number, () => void>();
     // These references are captured only from this test's fresh owned process
     // tree, never an existing daemon or an unverified/reused numeric PID.
@@ -667,6 +688,7 @@ test('production service entry: startup rollback, SAME OPEN, abrupt held-stream 
       let cleanup = await cleanupRow(); const settlementDeadline = Date.now() + 5000;
       while (cleanup?.state !== 'done' && Date.now() < settlementDeadline) { await delay(25); cleanup = await cleanupRow(); }
       ensure(cleanup?.state === 'done' && cleanup.worker !== originalProof.worker && cleanup.token, 'current delegated cleanup settled');
+      ensure(skippedRefreshTicks > 0 && !tickViolation, 'actual acquired cleanup tick skips refresh after retirement and settlement');
       // Dynamic execution bearers are intentionally local to a service lifetime;
       // remint under run-control from the SAME original persisted preparation.
       const refreshed = await run(oldInput);
@@ -716,6 +738,8 @@ test('production service entry: startup rollback, SAME OPEN, abrupt held-stream 
         finally { if (owned) await owned.close(); }
       } finally {
         await service?.stop(); held.forEach(resolve => resolve());
+        PostgresKernel.prototype.claimCleanup = claimCleanup;
+        AccountManagement.prototype.refreshOAuth = refreshOAuth;
         upstream.closeAllConnections(); await new Promise<void>(resolve => upstream.close(() => resolve()));
         await Promise.all([kernelPool.end(), nativePool.end()]);
       }

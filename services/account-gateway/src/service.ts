@@ -49,7 +49,8 @@ export function composeServiceControl(cfg: Pick<ServiceConfig, 'native' | 'consu
     ...(oauthProfile ? { oauth: { profile: oauthProfile, native: {
       begin: (scope: OAuthScope) => forScope(scope).begin(scope),
       read: (scope: OAuthScope) => forScope(scope).read(scope),
-    }, descriptor: { describe: (scope: OAuthScope) => forScope(scope).describe(scope) } } } : {}),
+    }, descriptor: { describe: (scope: OAuthScope) => forScope(scope).describe(scope) } },
+      refresh: { refresh: (scope: OAuthScope) => forScope(scope).refresh(scope) } } : {}),
     proof: { async verify(j, d) {
       const p = profiles.find(p => p.profile === j.profile.profile);
       const rows = await native.read(j);
@@ -67,7 +68,8 @@ export function composeServiceControl(cfg: Pick<ServiceConfig, 'native' | 'consu
 export function composeServiceNative(cfg: Pick<ServiceConfig, 'native' | 'consumer' | 'oauthEnrollment'>,
   control: ReturnType<typeof composeServiceControl>, kernel: DurableKernel & ExecutionRead, store: ManagementStore,
   enrollment: NonNullable<FacadeOptions['enrollment']>) {
-  const authority = new NativeAuthority({ kernel, store, ...(cfg.oauthEnrollment ? { oauthOwners: { store, bearers: control.bearers } } : {}),
+  const authority = new NativeAuthority({ kernel, store, ...(cfg.oauthEnrollment ? {
+    oauthOwners: { store, bearers: control.bearers }, oauthRefreshOwners: { store, bearers: control.bearers } } : {}),
     profileLimits: control.profiles.map(p => ({ profile: p.profile, limits: p.limits })), config: { origin: cfg.native.origin,
       enrollment: { ...enrollment, qualificationRef: control.profiles[0].qualificationRef }, consumers: [cfg.consumer],
       profiles: control.profiles.map(p => ({ ...p, requestBytes: p.limits.requestBytes, outputBytes: p.limits.outputBytes,
@@ -380,6 +382,8 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
           if (stopping) return;
           await kernel.settleCleanup(ctx, claim.cleanupRef, worker, claim.token, closed);
         }
+        if (stopping) return;
+        await management.refreshOAuth(ctx, claim !== undefined);
     }
     maintenance = (async () => {
       while (!stopping) {

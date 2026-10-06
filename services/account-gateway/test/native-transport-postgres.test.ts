@@ -11,7 +11,8 @@ import pg from 'pg';
 import { PostgresKernel } from '../src/postgres.ts';
 import { AccountManagement } from '../src/management.ts';
 import { IntentSecrets, PostgresManagementStore } from '../src/management-store.ts';
-import { NativeManagementClient } from '../src/native-client.ts';
+import { NativeManagementClient, NativeOAuthEnrollmentClient, NativeFailure } from '../src/native-client.ts';
+import type { OAuthScope } from '../src/management.ts';
 import { createFacade, FacadeBearers } from '../src/facade.ts';
 import { NativeAuthority } from '../src/native-authority.ts';
 import { NativeHTTPTransport } from '../src/native-transport.ts';
@@ -50,6 +51,70 @@ async function listen(s: Server): Promise<string> {
   const a = s.address(); assert.ok(a && typeof a === 'object'); return 'http://127.0.0.1:' + a.port;
 }
 async function stop(s: Server): Promise<void> { s.closeAllConnections(); await new Promise<void>(resolve => s.close(() => resolve())); }
+
+// Decoder/transport risk only: the journal/current owner authority is exercised
+// once at the real F PostgreSQL boundary in oauth-enrollment-postgres.test.ts.
+// RED if this maintenance method accepts token/version DTOs, an identity alias,
+// a redirect replay, or the enrollment client's configurable 30s refresh deadline.
+test('private refresh HTTP: original four fields, finite safe ACK and one capped attempt', { timeout: 15_000 }, async () => {
+  const scope: OAuthScope = { consumerId: 'refresh-transport-fixture', operationId: 'original-connect-operation',
+    accountRef: randomUUID(), generation: randomUUID(), ownerRef: 'refresh-owner' };
+  const control = 'synthetic-refresh-control', sent: unknown[] = [];
+  let status = 200, reply: Buffer | undefined;
+  let requestObserved = Promise.withResolvers<void>(), fixtureError: unknown;
+  const peer = createServer((req, res) => {
+    void (async () => {
+      assert.equal(req.method, 'POST'); assert.equal(req.url, '/private/native/v1/oauth/refresh');
+      assert.equal(req.headers.authorization, 'Bearer ' + control);
+      const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk as Buffer);
+      sent.push(JSON.parse(Buffer.concat(chunks).toString()) as unknown);
+      requestObserved.resolve();
+      if (reply === undefined) return; // Hold only this local fixture socket.
+      res.writeHead(status, { 'content-type': 'application/json', ...(status === 307 ? { location: '/other-route' } : {}) });
+      res.end(reply);
+    })().catch(error => { fixtureError = error; res.destroy(); });
+  });
+  const origin = await listen(peer);
+  const client = new NativeOAuthEnrollmentClient({ origin, consumerId: scope.consumerId, ownerRef: scope.ownerRef,
+    controlCredential: control, deadlineMs: 30_000 });
+  const expected = { operation: scope.operationId, account_ref: scope.accountRef,
+    owner_ref: scope.ownerRef, generation: scope.generation };
+  const ack = (state: string, extra: object = {}) => ({ operation: scope.operationId, account_ref: scope.accountRef, state, ...extra });
+  try {
+    for (const state of ['idle','prepared','entered','completed','unknown'] as const) {
+      reply = Buffer.from(JSON.stringify(ack(state, { refresh_ref: 'opaque-refresh-attempt' })));
+      const before = sent.length;
+      assert.deepEqual(await client.refresh(scope), { operationId: scope.operationId, accountRef: scope.accountRef,
+        state, refreshRef: 'opaque-refresh-attempt' });
+      assert.deepEqual(sent.slice(before), [expected]);
+    }
+    const invalid = [ack('expired'), ack('completed', { credentialVersion: 2 }), ack('completed', { tokens: {} }),
+      ack('completed', { operation: 'foreign-operation' }), ack('completed', { account_ref: randomUUID() }),
+      ack('completed', { refresh_ref: '' }), ack('completed', { refresh_ref: 'x'.repeat(129) })];
+    const duplicate = '{"operation":"' + scope.operationId + '","account_ref":"' + scope.accountRef +
+      '","state":"idle","st\\u0061te":"completed"}';
+    for (const bytes of [...invalid.map(value => Buffer.from(JSON.stringify(value))), Buffer.from(duplicate), Buffer.from([0xff])]) {
+      reply = bytes; const before = sent.length;
+      await assert.rejects(client.refresh(scope), (e: unknown) => e instanceof NativeFailure && e.code === 'invalid_readback');
+      assert.deepEqual(sent.slice(before), [expected], 'bad readback cannot retry or export native body');
+    }
+    status = 307; reply = Buffer.from('{}');
+    let before = sent.length;
+    await assert.rejects(client.refresh(scope), (e: unknown) => e instanceof NativeFailure && e.code === 'redirect');
+    assert.deepEqual(sent.slice(before), [expected], 'no redirect followup');
+    status = 200; reply = undefined; before = sent.length; requestObserved = Promise.withResolvers<void>();
+    const pending = client.refresh(scope); void pending.catch(() => undefined);
+    await requestObserved.promise;
+    // Input replacement after dispatch cannot alter the original identity tuple.
+    const originalOperation = scope.operationId;
+    Object.assign(scope, { operationId: 'later-operation' });
+    await assert.rejects(Promise.race([pending, new Promise<never>((_, reject) => {
+      const timer = setTimeout(() => reject(new Error('refresh exceeded 5s deadline allowance')), 6000); timer.unref();
+    })]), (e: unknown) => e instanceof NativeFailure && e.code === 'deadline');
+    assert.equal(originalOperation, expected.operation); assert.deepEqual(sent.slice(before), [expected]);
+    if (fixtureError) throw fixtureError;
+  } finally { await stop(peer); }
+});
 type Mode = 'complete' | 'unclosed' | 'closeFailed' | 'partial' | 'overflow' | 'noentry' | 'lost-admit-ack' | 'redirect' | 'held' | 'early-ack';
 interface NativeInput { requestRef: string; worker: string; admission: PrivateAdmission; descriptor: Descriptor }
 function latch() {
