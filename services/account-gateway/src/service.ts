@@ -106,23 +106,26 @@ const same = (a: ProcessBinding, b: ProcessBinding) =>
 // its complete stored old binding, not a PID supplied by SQL, proves teardown.
 export function composeServiceRetirementReadback(native: Pick<ServiceConfig['native'], 'executable' | 'authorityDir' | 'originRef'>) {
   const { executable, authorityDir, originRef } = native;
+  let active: ReturnType<typeof spawn> | true | undefined;
   return async (current: ProcessBinding, selector: Readonly<{ originRef: string; engineIncarnation: string }>,
     signal: AbortSignal): Promise<Retirement | undefined> => {
     let input: Buffer;
     const selected = { originRef: selector.originRef, engineIncarnation: selector.engineIncarnation };
     try {
       current = captured(current, originRef); uuid(selected.engineIncarnation);
-      if (signal.aborted || selected.originRef !== originRef || selected.engineIncarnation === current.incarnation) return;
+      if (active || signal.aborted || selected.originRef !== originRef || selected.engineIncarnation === current.incarnation) return;
       input = Buffer.from(JSON.stringify({ current, selectors: [selected] }));
       if (input.length > 4096) return;
     } catch { return; }
     return new Promise(resolve => {
       const deadline = Date.now() + 5000;
       let query: ReturnType<typeof spawn>;
+      active = true; // Reserve custody before the synchronous spawn boundary.
       try {
         query = spawn(executable, ['--read-retirement', '--authority-dir', authorityDir, '--origin-ref', originRef],
           { env: {}, cwd: '/', stdio: ['pipe','pipe','pipe'], shell: false, detached: false });
-      } catch { resolve(undefined); return; }
+        active = query;
+      } catch { active = undefined; resolve(undefined); return; }
       let failed = false, done = false, eof = false, sent = false, bytes = 0, diagnostics = 0;
       const chunks: Buffer[] = [];
       let timer: ReturnType<typeof setTimeout>;
@@ -156,6 +159,9 @@ export function composeServiceRetirementReadback(native: Pick<ServiceConfig['nat
         diagnostics += b.length; if (diagnostics > 4096) terminate();
       });
       query.once('close', (code, exitSignal) => {
+        // Logical timeout cannot release physical custody. Only this exact
+        // handle's close permits another query, even after finish() resolved.
+        if (active === query) active = undefined;
         if (done) return;
         if (failed || signal.aborted || Date.now() >= deadline || !sent || !eof || code !== 0 || exitSignal !== null) { finish(); return; }
         try {

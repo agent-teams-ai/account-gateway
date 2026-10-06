@@ -6,7 +6,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { constants, openSync, closeSync, fstatSync, readSync, lstatSync, readFileSync, readdirSync, writeFileSync, unlinkSync, mkdirSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createServer } from 'node:https';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -50,17 +50,21 @@ test('retirement readback: real readonly child, exact decimal binding, strict bo
     // handwritten TS contract is independently typechecked before execution.
     const source = `#!${process.execPath}
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import type { ProcessBinding, Retirement } from ${JSON.stringify(fileURLToPath(new URL('../src/service.ts', import.meta.url)))};
 const args = process.argv.slice(2), mode = basename(args[2]);
 assert.deepEqual(args, ['--read-retirement', '--authority-dir', args[2], '--origin-ref', 'source-local']);
 assert.equal(process.cwd(), '/');
+if (mode === 'latched') appendFileSync(args[2] + '.spawns', 'spawn\\n');
 let bytes = 0; const chunks: Buffer[] = [];
 for await (const chunk of process.stdin) { const b = Buffer.from(chunk as Uint8Array); bytes += b.length; assert.ok(bytes <= 4096); chunks.push(b); }
 const input: { current: ProcessBinding; selectors: { originRef: string; engineIncarnation: string }[] } = JSON.parse(Buffer.concat(chunks).toString());
 assert.deepEqual(input, ${JSON.stringify({ current, selectors: [selector] })});
-writeFileSync(args[2] + '.pid', String(process.pid), { flag: 'wx' });
+writeFileSync(args[2] + '.pid', String(process.pid), { flag: mode === 'latched' ? 'w' : 'wx' });
+if (mode === 'latched') await new Promise<void>(resolve => {
+  const poll = setInterval(() => { if (existsSync(args[2] + '.release')) { clearInterval(poll); resolve(); } }, 10);
+});
 const receipt = { binding: { ...input.current, incarnation: input.selectors[0].engineIncarnation, pid: '123', birthTicks: '9007199254740997' },
   scope: 'exact-local-process-transport-teardown-v1', method: mode === 'observed' ? 'observed-child-exit' : 'reacquired-after-supervisor-loss' } satisfies Retirement;
 let output = JSON.stringify({ receipts: [receipt] });
@@ -96,6 +100,21 @@ if (mode === 'no-eof' || mode === 'abort') setTimeout(() => process.stdout.write
     writeFileSync(executable, source, { mode: 0o700 });
     try {
       await typecheckFixture(executable);
+      const latchedPath = join(dir, 'latched');
+      const latched = composeServiceRetirementReadback({ executable, authorityDir: latchedPath, originRef: current.originRef });
+      const first = latched(current, selector, new AbortController().signal);
+      try {
+        const readyDeadline = Date.now() + 3000;
+        while (!existsSync(latchedPath + '.pid') && Date.now() < readyDeadline) await delay(10);
+        assert.ok(existsSync(latchedPath + '.pid'), 'exact owned helper is active');
+        for (let tick = 0; tick < 3; tick++)
+          assert.equal(await latched(current, selector, new AbortController().signal), undefined, 'active helper denies another tick');
+        assert.equal(readFileSync(latchedPath + '.spawns', 'utf8'), 'spawn\n', 'only one actual executable spawned');
+      } finally { writeFileSync(latchedPath + '.release', 'release'); }
+      assert.equal((await first)?.binding.incarnation, selector.engineIncarnation, 'positive exact close');
+      assert.equal((await latched(current, selector, new AbortController().signal))?.binding.incarnation,
+        selector.engineIncarnation, 'same adapter permits lookup after close');
+      assert.equal(readFileSync(latchedPath + '.spawns', 'utf8'), 'spawn\nspawn\n');
       const read = (mode: string, signal = new AbortController().signal) => composeServiceRetirementReadback({
         executable, authorityDir: join(dir, mode), originRef: current.originRef })(current, selector, signal);
       for (const mode of ['observed','reacquired']) {
@@ -225,6 +244,137 @@ function disposable(dsn: string, kind: 'kernel' | 'native'): string {
   return u.pathname.slice(1);
 }
 
+// HOST-only root fixture exception: the isolated standard-library bridge owns
+// both pidfds for the entire loss experiment. No numeric signal fallback.
+interface FixtureProcess { pid: string; birthTicks: string; parent: string }
+interface FixtureProcessHandles { kill(): Promise<void>; close(): Promise<void> }
+type FixturePinRequest = { bootId: string; processes: readonly [FixtureProcess, FixtureProcess] } | { command: 'kill' };
+async function pinFixtureProcesses(bootId: string, processes: readonly [FixtureProcess, FixtureProcess]): Promise<FixtureProcessHandles> {
+  const source = String.raw`
+import json, os, select, signal, sys, time
+fds = []
+deadline = time.monotonic() + 20
+def read_command():
+    line = b''
+    while not line.endswith(b'\n'):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([0], [], [], remaining)[0]:
+            raise RuntimeError()
+        chunk = os.read(0, 4097 - len(line))
+        line += chunk
+        if not chunk or len(line) > 4096 or b'\n' in line[:-1]:
+            raise RuntimeError()
+    return json.loads(line)
+def reply(state):
+    print(json.dumps({'state': state}), flush=True)
+try:
+    if not hasattr(os, 'pidfd_open') or not hasattr(signal, 'pidfd_send_signal'):
+        raise RuntimeError()
+    request = read_command()
+    if set(request) != {'bootId', 'processes'} or len(request['processes']) != 2:
+        raise RuntimeError()
+    # Capture BOTH handles before inspecting actual birth, parent or boot.
+    for p in request['processes']:
+        if set(p) != {'pid', 'birthTicks', 'parent'} or not all(isinstance(v, str) and v.isdecimal() and int(v) > 0 for v in p.values()):
+            raise RuntimeError()
+        fds.append(os.pidfd_open(int(p['pid']), 0))
+    if request['processes'][0]['pid'] == request['processes'][1]['pid']:
+        raise RuntimeError()
+    with open('/proc/sys/kernel/random/boot_id', 'r', encoding='ascii') as stream:
+        if stream.read(128).strip() != request['bootId']:
+            raise RuntimeError()
+    if select.select(fds, [], [], 0)[0]:
+        raise RuntimeError()
+    for p in request['processes']:
+        with open('/proc/' + p['pid'] + '/stat', 'r', encoding='ascii') as stream:
+            stat = stream.read(4097)
+        if len(stat) > 4096:
+            raise RuntimeError()
+        fields = stat[stat.rfind(')') + 2:].split()
+        if fields[0] == 'Z' or fields[1] != p['parent'] or fields[19] != p['birthTicks']:
+            raise RuntimeError()
+    if select.select(fds, [], [], 0)[0]:
+        raise RuntimeError()
+    reply('pinned')
+    command = read_command()
+    if command == {'command': 'kill'}:
+        for fd in fds:
+            try:
+                signal.pidfd_send_signal(fd, signal.SIGKILL, None, 0)
+            except ProcessLookupError:
+                pass
+        pending = list(fds)
+        death_deadline = min(deadline, time.monotonic() + 5)
+        while pending:
+            remaining = death_deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError()
+            exited = select.select(pending, [], [], remaining)[0]
+            pending = [fd for fd in pending if fd not in exited]
+        reply('exited')
+        command = read_command()
+    if command != {'command': 'close'}:
+        raise RuntimeError()
+except BaseException:
+    sys.exit(1)
+finally:
+    for fd in fds:
+        os.close(fd)
+`;
+  const child = spawn('/usr/bin/python3', ['-I', '-u', '-c', source],
+    { env: {}, cwd: '/', stdio: ['pipe', 'pipe', 'pipe'], shell: false, detached: false });
+  let ended = false, lost = false, killed = false, output = '', bytes = 0, diagnostics = 0;
+  let pending: { expected: 'pinned' | 'exited'; resolve(): void; reject(error: Error): void } | undefined;
+  const deny = () => {
+    lost = true; pending?.reject(new Error('service fixture: pinned bridge lost')); pending = undefined;
+  };
+  const closed = new Promise<boolean>(resolve => child.once('close', (code, exitSignal) => {
+    const accepted = !lost && !pending && code === 0 && exitSignal === null && output === '';
+    ended = true; deny(); resolve(accepted);
+  }));
+  child.on('error', deny); child.stdin.on('error', deny); child.stdout.on('error', deny); child.stderr.on('error', deny);
+  child.stderr.on('data', (chunk: Buffer) => { diagnostics += chunk.length; if (diagnostics > 1024) deny(); });
+  child.stdout.on('data', (chunk: Buffer) => {
+    bytes += chunk.length; if (lost || bytes > 1024) { deny(); return; }
+    output += chunk.toString('utf8');
+    const newline = output.indexOf('\n'); if (newline < 0) return;
+    const line = output.slice(0, newline); output = output.slice(newline + 1);
+    try {
+      const message = object(strictJSON(Buffer.from(line)), ['state']);
+      if (!pending || output !== '' || message.state !== pending.expected) { deny(); return; }
+      const accepted = pending; pending = undefined; accepted.resolve();
+    } catch { deny(); }
+  });
+  const bounded = async <T>(work: Promise<T>, ms: number): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try { return await Promise.race([work, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('service fixture: pinned bridge deadline')), ms);
+    })]); } finally { clearTimeout(timer); }
+  };
+  const send = async (message: FixturePinRequest, expected: 'pinned' | 'exited') => {
+    if (lost || ended || pending) fail('pinned bridge unavailable');
+    const input = Buffer.from(JSON.stringify(message) + '\n'); ensure(input.length <= 4096, 'pinned bridge input bound');
+    const receipt = new Promise<void>((resolve, reject) => { pending = { expected, resolve, reject }; });
+    child.stdin.write(input); await bounded(receipt, 6000);
+  };
+  const close = async () => {
+    if (!ended && !lost) child.stdin.end('{"command":"close"}\n');
+    else if (!ended) child.kill('SIGKILL'); // Only our retained bridge ChildProcess.
+    try { ensure(await bounded(closed, 5000), 'pinned bridge exact close'); }
+    catch (error) {
+      if (!ended) child.kill('SIGKILL');
+      await bounded(closed, 1000).catch(() => undefined); throw error;
+    }
+  };
+  try { await send({ bootId, processes }, 'pinned'); }
+  catch { deny(); await close().catch(() => undefined); return fail('pinned bridge capture'); }
+  return { async kill() {
+    if (killed) return;
+    try { await send({ command: 'kill' }, 'exited'); killed = true; }
+    catch { deny(); throw new Error('service fixture: pinned bridge signal unknown'); }
+  }, close };
+}
+
 test('production service entry: startup rollback, SAME OPEN, abrupt held-stream loss and automatic exact old retirement closure',
   { timeout: 150_000 }, async () => {
     if (process.env.AG_SERVICE_ENTRY_ALLOW !== 'new_disposable_root_pg17_10' || process.geteuid?.() !== 0)
@@ -271,7 +421,7 @@ test('production service entry: startup rollback, SAME OPEN, abrupt held-stream 
     const held = new Map<number, () => void>();
     // These references are captured only from this test's fresh owned process
     // tree, never an existing daemon or an unverified/reused numeric PID.
-    const owned: { pid: string; birthTicks: string }[] = [];
+    let owned: FixtureProcessHandles | undefined;
     const processState = (pid: string) => {
       try {
         const stat = readFileSync('/proc/' + pid + '/stat', 'utf8'), fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
@@ -280,12 +430,6 @@ test('production service entry: startup rollback, SAME OPEN, abrupt held-stream 
         if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined;
         throw error;
       }
-    };
-    const killOwned = (p: { pid: string; birthTicks: string }) => {
-      const actual = processState(p.pid);
-      if (!actual) return;
-      ensure(actual.birthTicks === p.birthTicks, 'owned fixture process birth');
-      if (actual.state !== 'Z') process.kill(Number(p.pid), 'SIGKILL');
     };
     const upstream = createServer({ cert: protectedFile(installation + '/tls/server.pem'), key: protectedFile(installation + '/tls/server-key.pem'),
       maxHeaderSize: 16_384, headersTimeout: 5000, requestTimeout: 5000 }, (req, res) => {
@@ -479,16 +623,13 @@ test('production service entry: startup rollback, SAME OPEN, abrupt held-stream 
       phase = 'abrupt-owned-supervisor-engine-loss';
       const childIds = readFileSync('/proc/self/task/' + process.pid + '/children', 'utf8').trim().split(/\s+/);
       ensure(childIds.length === 1 && /^[1-9][0-9]*$/.test(childIds[0]), 'sole owned Go supervisor');
-      const parent = processState(childIds[0]), engine = processState(initial.pid);
-      ensure(parent?.parent === String(process.pid) && engine?.parent === childIds[0] &&
-        engine.birthTicks === initial.birthTicks && readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() === initial.bootId,
-      'captured exact fresh process tree');
-      owned.push({ pid: childIds[0], birthTicks: parent!.birthTicks }, { pid: initial.pid, birthTicks: initial.birthTicks });
-      owned.forEach(killOwned);
-      const deathDeadline = Date.now() + 5000;
-      while (owned.some(p => { const s = processState(p.pid); return s && s.birthTicks === p.birthTicks && s.state !== 'Z'; }) && Date.now() < deathDeadline) await delay(10);
-      ensure(owned.every(p => { const s = processState(p.pid); return !s || s.birthTicks === p.birthTicks && s.state === 'Z'; }), 'verified exact supervisor and engine exit');
-      owned.length = 0;
+      const parent = processState(childIds[0]); ensure(parent, 'captured supervisor birth');
+      owned = await pinFixtureProcesses(initial.bootId, [
+        { pid: childIds[0], birthTicks: parent!.birthTicks, parent: String(process.pid) },
+        { pid: initial.pid, birthTicks: initial.birthTicks, parent: childIds[0] },
+      ]);
+      await owned.kill(); // Both retained pidfds report exit, never PID absence.
+      await owned.close(); owned = undefined;
       assert.equal(await service.stopped, 'pending', 'abrupt loss has no graceful parent receipt');
       await oldReader.cancel().catch(() => undefined); service = undefined;
       assert.equal((await oldRow()).transport_occupied, true, 'death alone is not SQL closure');
@@ -570,8 +711,13 @@ test('production service entry: startup rollback, SAME OPEN, abrupt held-stream 
       fail('lifecycle failed: ' + phase);
     }
     finally {
-      await service?.stop(); owned.forEach(killOwned); held.forEach(resolve => resolve());
-      upstream.closeAllConnections(); await new Promise<void>(resolve => upstream.close(() => resolve()));
-      await Promise.all([kernelPool.end(), nativePool.end()]);
+      try {
+        try { if (owned) await owned.kill(); }
+        finally { if (owned) await owned.close(); }
+      } finally {
+        await service?.stop(); held.forEach(resolve => resolve());
+        upstream.closeAllConnections(); await new Promise<void>(resolve => upstream.close(() => resolve()));
+        await Promise.all([kernelPool.end(), nativePool.end()]);
+      }
     }
   });
