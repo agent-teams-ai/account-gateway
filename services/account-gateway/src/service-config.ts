@@ -23,19 +23,28 @@ export interface ServiceConfig {
     authorityDir: string; origin: string; originRef: string; uid: number; gid: number }>;
   readonly consumer: Readonly<{ consumerId: string; managementCredential: string;
     executionCredential: string; cleanupCredential: string; callbackCredential: string }>;
-  readonly profile: Readonly<{ profile: string; model: string; baseURL: string;
-    qualificationRef: string; limits: Readonly<ApprovedLimits>; providerTokenUpperBound: number }>;
+  readonly profile: ServiceProfile;
+  readonly secondProfile?: ServiceProfile;
   readonly bearers: readonly (ManagementBearer | RunControlBearer)[];
   readonly keys: Readonly<{ intentAEAD: string; intentHMAC: string; facadeHMAC: string }>;
-  // Explicit source opt-in only. The service refuses startup until protected
-  // native descriptor/dispatch qualification can be composed at this boundary.
+  // Explicit opt-in with its own qualification and limits, captured before IO.
   readonly oauthEnrollment?: OAuthEnrollmentConfig;
 }
 export interface OAuthEnrollmentConfig {
   readonly enabled: true;
   readonly profile: 'openai-codex-oauth-responses-v1';
   readonly modelScope: readonly ['gpt-6.1-sol'];
+  readonly qualificationRef?: string;
+  readonly limits?: Readonly<ApprovedLimits>;
+  readonly providerTokenUpperBound?: number;
 }
+export interface ServiceProfile {
+  readonly profile: string; readonly model: string; readonly baseURL: string;
+  readonly qualificationRef: string; readonly limits: Readonly<ApprovedLimits>;
+  readonly providerTokenUpperBound: number;
+}
+export const openRouterProfile = Object.freeze({ profile: 'openrouter-openai-responses-apikey-v1',
+  baseURL: 'https://openrouter.ai/api/v1', model: 'openai/gpt-5.4-mini' });
 const deny = (): never => { throw new ServiceError('config_denied'); };
 function text(v: unknown): string { if (typeof v !== 'string') return deny(); return v; }
 function path(v: unknown): string {
@@ -70,11 +79,75 @@ function freeze<T>(v: T): T {
 // the service default. Catalog evidence alone cannot enable a native account.
 export function captureOAuthEnrollmentConfig(value: unknown): OAuthEnrollmentConfig {
   try {
-    const r = object(value, ['enabled','profile','modelScope']);
+    const r = object(value, ['enabled','profile','modelScope'], ['qualificationRef','limits','providerTokenUpperBound']);
     if (r.enabled !== true || r.profile !== codexOAuthProfile.profile || !Array.isArray(r.modelScope) ||
         r.modelScope.length !== 1 || r.modelScope[0] !== codexOAuthProfile.model) return deny();
+    const supplied = ['qualificationRef','limits','providerTokenUpperBound'].filter(k => Object.hasOwn(r, k));
+    if (supplied.length && supplied.length !== 3) return deny();
+    const qualified = supplied.length ? captureProfile({ ...codexOAuthProfile, qualificationRef: r.qualificationRef,
+      limits: r.limits, providerTokenUpperBound: r.providerTokenUpperBound }) : undefined;
     return Object.freeze({ enabled: true, profile: 'openai-codex-oauth-responses-v1',
-      modelScope: Object.freeze(['gpt-6.1-sol'] as const) });
+      modelScope: Object.freeze(['gpt-6.1-sol'] as const), ...(qualified ? {
+        qualificationRef: qualified.qualificationRef, limits: qualified.limits,
+        providerTokenUpperBound: qualified.providerTokenUpperBound } : {}) });
+  } catch { return deny(); }
+}
+function captureProfile(value: unknown): ServiceProfile {
+  const p = object(value, ['profile','model','baseURL','qualificationRef','limits','providerTokenUpperBound']);
+  const profile = { profile: text(p.profile), model: text(p.model), baseURL: text(p.baseURL), qualificationRef: text(p.qualificationRef),
+    limits: approvedLimits(object(p.limits, ['requests','concurrency','requestBytes','outputBytes','tokens']) as unknown as ApprovedLimits, defaults),
+    providerTokenUpperBound: p.providerTokenUpperBound as number };
+  identifier(profile.qualificationRef);
+  physicalCandidate({ ...profile, generation: '00000000-0000-4000-8000-000000000001',
+    nativePhysicalIdentity: '00000000-0000-4000-8000-000000000001', nativeId: 1, createdAt: '2000-01-01T00:00:00Z' });
+  integer(profile.providerTokenUpperBound, 10_000_000);
+  if (profile.limits.tokens > profile.providerTokenUpperBound) deny();
+  return freeze(profile);
+}
+// Pure server configuration capture is shared by startup and source HTTP tests.
+// The singleton stays compatible; only the optional second tuple is fixed.
+export function captureServiceProfiles(input: Pick<ServiceConfig, 'profile' | 'secondProfile' | 'oauthEnrollment'>): readonly ServiceProfile[] {
+  try {
+    const first = captureProfile(input.profile);
+    if (first.profile !== 'openai-responses-apikey-v1') return deny();
+    const profiles = [first];
+    if (input.secondProfile !== undefined) {
+      const p = captureProfile(input.secondProfile);
+      if (p.profile !== openRouterProfile.profile || p.baseURL !== openRouterProfile.baseURL || p.model !== openRouterProfile.model) return deny();
+      profiles.push(p);
+    }
+    if (input.oauthEnrollment !== undefined) {
+      const o = captureOAuthEnrollmentConfig(input.oauthEnrollment);
+      if (!o.limits || !o.qualificationRef || !o.providerTokenUpperBound) return deny();
+      profiles.push(captureProfile({ ...codexOAuthProfile, qualificationRef: o.qualificationRef,
+        limits: o.limits, providerTokenUpperBound: o.providerTokenUpperBound }));
+    }
+    return Object.freeze(profiles);
+  } catch { return deny(); }
+}
+export function captureServiceBearers(value: unknown, consumerId: string, profiles: readonly ServiceProfile[]): ServiceConfig['bearers'] {
+  try {
+    if (!Array.isArray(value) || !value.length) return deny();
+    const bearers = value as (ManagementBearer | RunControlBearer)[];
+    for (const b of bearers) {
+      if (b.consumerId !== consumerId || !['management','run-control'].includes(b.role)) deny();
+      if (b.role === 'management') {
+        object(b, ['token','role','consumerId','ownerRefs','preparation']);
+        object(b.preparation, ['accountRefs','subjectRef','policyRevision','bindingRevision','profileId','limits','maxRunMs']);
+      } else object(b, ['token','role','consumerId','ownerRefs','profileIds','limits','maxRunMs']);
+      const ids = b.role === 'management' ? [b.preparation.profileId] : b.profileIds;
+      if (!Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length) deny();
+      const grant = b.role === 'management' ? b.preparation : b;
+      for (const id of ids) {
+        const p = profiles.find(p => p.profile === id);
+        if (!p) return deny();
+        approvedLimits(grant.limits, { ...defaults, maxRequests: p.limits.requests, maxConcurrent: p.limits.concurrency,
+          maxRequestBytes: p.limits.requestBytes, maxOutputBytes: p.limits.outputBytes, maxTokens: p.limits.tokens });
+      }
+      integer(grant.maxRunMs, defaults.maxRunMs);
+    }
+    new FacadeBearers(bearers);
+    return freeze(bearers);
   } catch { return deny(); }
 }
 // Sole entry: synchronous capture/validation before the first startup await.
@@ -92,7 +165,7 @@ export function loadServiceConfig(file: string): ServiceConfig {
       // readFileSync would permit growth after fstat; bounded positional read below.
       bytes = readBounded(fd, bytes);
     } finally { closeSync(fd); }
-    const r = object(strictJSON(bytes), ['kernelDSN','durableFacts','facadeOrigin','callbackOrigin','native','consumer','profile','bearers','keys'], ['oauthEnrollment']);
+    const r = object(strictJSON(bytes), ['kernelDSN','durableFacts','facadeOrigin','callbackOrigin','native','consumer','profile','bearers','keys'], ['oauthEnrollment','secondProfile']);
     const oauthEnrollment = Object.hasOwn(r, 'oauthEnrollment') ? captureOAuthEnrollmentConfig(r.oauthEnrollment) : undefined;
     // Use the kernel's existing bound authority after exact protected parsing.
     // Missing, extra, nonnumeric or inconsistent values deny before startup IO.
@@ -100,7 +173,6 @@ export function loadServiceConfig(file: string): ServiceConfig {
       ['maxServiceFacts','maxConsumerFacts','maxAccountFacts','workerSlots','issuerSlots']) as unknown as DurableFactBounds);
     const n = object(r.native, ['executable','sha256','bootstrapFile','authorityDir','origin','originRef','uid','gid']);
     const c = object(r.consumer, ['consumerId','managementCredential','executionCredential','cleanupCredential','callbackCredential']);
-    const p = object(r.profile, ['profile','model','baseURL','qualificationRef','limits','providerTokenUpperBound']);
     const k = object(r.keys, ['intentAEAD','intentHMAC','facadeHMAC']);
     const native = { executable: path(n.executable), sha256: text(n.sha256), bootstrapFile: path(n.bootstrapFile),
       authorityDir: path(n.authorityDir), origin: origin(n.origin), originRef: text(n.originRef), uid: n.uid as number, gid: n.gid as number };
@@ -109,35 +181,13 @@ export function loadServiceConfig(file: string): ServiceConfig {
     if (!/^[a-f0-9]{64}$/.test(native.sha256) || imageHash(native.executable) !== native.sha256) deny();
     const consumer = { consumerId: text(c.consumerId), managementCredential: text(c.managementCredential),
       executionCredential: text(c.executionCredential), cleanupCredential: text(c.cleanupCredential), callbackCredential: text(c.callbackCredential) };
-    const profile = { profile: text(p.profile), model: text(p.model), baseURL: text(p.baseURL), qualificationRef: text(p.qualificationRef),
-      limits: approvedLimits(p.limits as ApprovedLimits, defaults), providerTokenUpperBound: p.providerTokenUpperBound as number };
-    if (profile.profile !== 'openai-responses-apikey-v1') deny();
-    identifier(consumer.consumerId); identifier(profile.qualificationRef);
-    physicalCandidate({ ...profile, generation: '00000000-0000-4000-8000-000000000001',
-      nativePhysicalIdentity: '00000000-0000-4000-8000-000000000001', nativeId: 1, createdAt: '2000-01-01T00:00:00Z' });
-    integer(profile.providerTokenUpperBound, 10_000_000);
-    if (profile.limits.tokens > profile.providerTokenUpperBound) deny();
+    identifier(consumer.consumerId);
+    const profile = captureProfile(r.profile), secondProfile = r.secondProfile === undefined ? undefined : captureProfile(r.secondProfile);
+    const profiles = captureServiceProfiles({ profile, secondProfile, oauthEnrollment });
     const keys = { intentAEAD: text(k.intentAEAD), intentHMAC: text(k.intentHMAC), facadeHMAC: text(k.facadeHMAC) };
     Object.values(keys).forEach(keyBytes);
     if (new Set(Object.values(keys)).size !== 3) deny();
-    if (!Array.isArray(r.bearers) || !r.bearers.length) deny();
-    const bearers = r.bearers as (ManagementBearer | RunControlBearer)[];
-    for (const b of bearers) {
-      if (b.consumerId !== consumer.consumerId || !['management','run-control'].includes(b.role)) deny();
-      if (b.role === 'management') {
-        object(b, ['token','role','consumerId','ownerRefs','preparation']);
-        object(b.preparation, ['accountRefs','subjectRef','policyRevision','bindingRevision','profileId','limits','maxRunMs']);
-        if (b.preparation.profileId !== profile.profile) deny();
-      } else {
-        object(b, ['token','role','consumerId','ownerRefs','profileIds','limits','maxRunMs']);
-        if (b.profileIds.some(id => id !== profile.profile)) deny();
-      }
-      const grant = b.role === 'management' ? b.preparation : b;
-      approvedLimits(grant.limits, { ...defaults, maxRequests: profile.limits.requests, maxConcurrent: profile.limits.concurrency,
-        maxRequestBytes: profile.limits.requestBytes, maxOutputBytes: profile.limits.outputBytes, maxTokens: profile.limits.tokens });
-      integer(grant.maxRunMs, defaults.maxRunMs);
-    }
-    new FacadeBearers(bearers);
+    const bearers = captureServiceBearers(r.bearers, consumer.consumerId, profiles);
     const credentials = [consumer.managementCredential, consumer.executionCredential, consumer.cleanupCredential, consumer.callbackCredential, ...bearers.map(b => b.token)];
     if (credentials.some(t => !/^[A-Za-z0-9._~-]{16,1024}$/.test(t)) || new Set(credentials).size !== credentials.length) deny();
     const kernelDSN = text(r.kernelDSN), u = new URL(kernelDSN);
@@ -145,6 +195,7 @@ export function loadServiceConfig(file: string): ServiceConfig {
     const facadeOrigin = origin(r.facadeOrigin), callbackOrigin = origin(r.callbackOrigin);
     if (new Set([facadeOrigin, callbackOrigin, native.origin]).size !== 3) deny();
     return freeze({ kernelDSN, durableFacts, facadeOrigin, callbackOrigin, native, consumer, profile, bearers, keys,
+      ...(secondProfile === undefined ? {} : { secondProfile }),
       ...(oauthEnrollment === undefined ? {} : { oauthEnrollment }) });
   } catch { return deny(); }
 }

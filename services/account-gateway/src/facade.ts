@@ -106,6 +106,13 @@ export class FacadeBearers {
     return found;
   }
   current(grant: Grant): boolean { return this.#entries.some(row => row.grant === grant); }
+  // Protected owner lookup uses current management policy, never a raw bearer
+  // or a cached consumer-to-owner association. Replacement revokes immediately.
+  authorizesOwner(context: TrustedContext, ownerRef: string, profileId: string): boolean {
+    return this.#entries.some(({ grant }) => grant.role === 'management' &&
+      grant.consumerId === context.consumerId && grant.ownerRefs.includes(ownerRef) &&
+      grant.preparation.profileId === profileId);
+  }
   // Synchronous CAS after SQL read: identical issuance retains its token and
   // original saved tuple. No neighboring grant is replaced or evicted.
   upsertExecution(control: RunControlGrant, input: SavedExecution): string {
@@ -157,7 +164,8 @@ export interface FacadeOptions {
   readonly management: AccountManagement;
   readonly store: Pick<ManagementStore, 'mapping'>;
   readonly bearers: FacadeBearers;
-  readonly profiles: readonly { readonly dto: c.Profile; readonly maxOutputTokens: number }[];
+  readonly profiles: readonly { readonly dto: c.Profile; readonly maxOutputTokens: number;
+    readonly limits?: Readonly<ApprovedLimits> }[];
   readonly intentHmacKey: Uint8Array;
   readonly enrollment?: NativeEnrollment;
   readonly transport?: NativeTransport;
@@ -242,7 +250,7 @@ export function createFacade(options: FacadeOptions): Server {
       !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 3_600_000 ||
       !Number.isSafeInteger(bufferBytes) || bufferBytes < 1024 || bufferBytes > 1_048_576 || options.intentHmacKey.byteLength !== 32) throw new KernelError('invalid');
   const hmac = Buffer.from(options.intentHmacKey);
-  const profiles = new Map<string, { dto: c.Profile; maxOutputTokens: number }>();
+  const profiles = new Map<string, { dto: c.Profile; maxOutputTokens: number; limits?: Readonly<ApprovedLimits> }>();
   for (const entry of options.profiles) {
     const dto = c.profile.parse(entry.dto);
     const oauth = dto.authKinds[0] === 'oauth';
@@ -251,9 +259,15 @@ export function createFacade(options: FacadeOptions): Server {
           dto.modelIds[0] !== codexOAuthProfile.model : dto.authKinds[0] !== 'api_key' || dto.profileId === codexOAuthProfile.profile) ||
         profiles.has(dto.profileId) || !Number.isSafeInteger(entry.maxOutputTokens) || entry.maxOutputTokens < 1 || entry.maxOutputTokens > 10_000_000) throw new KernelError('invalid');
     profiles.set(dto.profileId, { dto: Object.freeze({ ...dto, authKinds: Object.freeze([...dto.authKinds]) as unknown as c.Profile['authKinds'],
-      modelIds: Object.freeze([...dto.modelIds]) as unknown as string[] }), maxOutputTokens: entry.maxOutputTokens });
+      modelIds: Object.freeze([...dto.modelIds]) as unknown as string[] }), maxOutputTokens: entry.maxOutputTokens,
+      ...(entry.limits === undefined ? {} : { limits: Object.freeze(parse(c.limits, entry.limits)) }) });
   }
   if (!profiles.size || profiles.size > 128) throw new KernelError('invalid');
+  const withinProfile = (id: string, limits: ApprovedLimits): boolean => {
+    const p = profiles.get(id);
+    return !!p && limits.tokens <= p.maxOutputTokens && (!p.limits ||
+      (Object.keys(p.limits) as (keyof ApprovedLimits)[]).every(k => limits[k] <= p.limits![k]));
+  };
   const enrollment = options.enrollment && Object.freeze({ originRef: options.enrollment.originRef,
     engineIncarnation: options.enrollment.engineIncarnation, worker: options.enrollment.worker });
   if (enrollment) { identifier(enrollment.originRef); uuid(enrollment.engineIncarnation); uuid(enrollment.worker); }
@@ -385,7 +399,7 @@ export function createFacade(options: FacadeOptions): Server {
         if (input.accountRefs.length > 16 || new Set(input.accountRefs).size !== input.accountRefs.length) throw new KernelError('invalid');
         input.accountRefs.forEach(uuid); identifier(input.profileId, 64);
         const profile = profiles.get(input.profileId);
-        if (!grant.profileIds.includes(input.profileId) || !profile || profile.dto.authKinds[0] !== 'api_key' || input.limits.tokens > profile.maxOutputTokens ||
+        if (!grant.profileIds.includes(input.profileId) || !profile || !withinProfile(input.profileId, input.limits) ||
             input.limits.requestBytes > ingressBytes || input.limits.concurrency > input.limits.requests ||
             (Object.keys(grant.limits) as (keyof ApprovedLimits)[]).some(key => input.limits[key] > grant.limits[key])) throw new KernelError('denied');
         requireCurrent(grant);
@@ -468,7 +482,7 @@ export function createFacade(options: FacadeOptions): Server {
         const supplied = savedCopy({ ...saved, admission: { ...admission, executionRef: ref, issuerEpoch: grant.saved.admission.issuerEpoch } });
         if (!sameSaved(saved, grant.saved) || !sameSaved(saved, supplied) || !saved.dispatchAllowed) throw new KernelError('denied');
         const profile = profiles.get(saved.admission.profileId);
-        if (!profile || profile.dto.authKinds[0] !== 'api_key' || saved.admission.limits.tokens > profile.maxOutputTokens || saved.admission.limits.requestBytes > ingressBytes) throw new KernelError('denied');
+        if (!profile || !withinProfile(saved.admission.profileId, saved.admission.limits) || saved.admission.limits.requestBytes > ingressBytes) throw new KernelError('denied');
         const raw = await body(req, Math.min(ingressBytes, saved.admission.limits.requestBytes));
         parse(secretSubmission.nativeRequest, { requestId: identity.requestRef, admission, body: raw });
         validateResponses(raw, profile.dto.modelIds, profile.maxOutputTokens);
@@ -526,7 +540,7 @@ export function createFacade(options: FacadeOptions): Server {
         const parsed = parse(c.oauthBegin, strictJSON(await body(req, Math.min(ingressBytes, 16_384)), true));
         const input = Object.freeze({ ...parsed }); identity = { operationRef: input.operationId };
         const profile = profiles.get(input.profileId);
-        if (!grant.ownerRefs.includes(input.ownerRef) || !profile || profile.dto.authKinds[0] !== 'oauth' ||
+        if (!grant.ownerRefs.includes(input.ownerRef) || grant.preparation.profileId !== input.profileId || !profile || profile.dto.authKinds[0] !== 'oauth' ||
             !management.supportsOAuthProfile(input.profileId)) throw new KernelError('denied');
         requireCurrent(grant); uncertain = true;
         const result = await management.beginOAuth(context, { operationId: input.operationId, ownerRef: input.ownerRef,
@@ -578,7 +592,7 @@ export function createFacade(options: FacadeOptions): Server {
         const input = parse(c.prepare, strictJSON(await body(req, ingressBytes), true)); identity = { operationRef: input.operationId };
         const p = grant.preparation;
         if (input.subjectRef !== p.subjectRef || input.policyRevision !== p.policyRevision || input.bindingRevision !== p.bindingRevision ||
-            input.profileId !== p.profileId || profiles.get(p.profileId)?.dto.authKinds[0] !== 'api_key' || input.limits.tokens > profiles.get(p.profileId)!.maxOutputTokens ||
+            input.profileId !== p.profileId || !withinProfile(p.profileId, input.limits) ||
             input.limits.requestBytes > ingressBytes || input.accountRefs.some(ref => !p.accountRefs.includes(ref)) ||
             new Set(input.accountRefs).size !== input.accountRefs.length || input.limits.concurrency > input.limits.requests || Date.parse(input.deadline) <= Date.now() ||
             Date.parse(input.deadline) - Date.now() > p.maxRunMs ||

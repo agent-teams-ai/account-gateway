@@ -2,9 +2,10 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { KernelError, identifier, uuid } from './domain.ts';
 import { oauthAuthorizationURL } from '@agent-teams/account-gateway/contracts';
-import { physicalCandidate } from './management.ts';
+import { codexOAuthProfile, exactCandidate, physicalCandidate } from './management.ts';
 import type { CandidateJournal, CandidateMapping, CandidateNative, NativeReadback, PhysicalCandidate } from './management.ts';
 import type { OAuthScope, OAuthEnrollmentNative, OAuthReadback, OAuthBeginReadback } from './management.ts';
+import type { OAuthDescriptor, OAuthDescriptorBoundary } from './management.ts';
 
 export type NativeFailureCode = 'unavailable' | 'deadline' | 'bounded' | 'redirect' | 'invalid_readback' | 'denied';
 export class NativeFailure extends Error {
@@ -187,7 +188,7 @@ export class NativeManagementClient extends NativeControlHTTP implements Candida
     this.scope(input);
     const generation = input.generation;
     const result = readback(await this.call('GET', candidatesPath + '/' + generation));
-    if (result.generation !== generation) throw new NativeFailure('invalid_readback');
+    if (!exactCandidate(input, result)) throw new NativeFailure('invalid_readback');
     return Object.freeze([result]);
   }
   private descriptor(input: CandidateMapping): PhysicalCandidate {
@@ -216,11 +217,9 @@ export class NativeManagementClient extends NativeControlHTTP implements Candida
   }
 }
 
-// F3 fda94684 is a proposed wire input, not accepted native qualification.
-// The trusted outer composition binds a concrete consumer AND authorized owner.
-// This class is not installed by startService. No descriptor HTTP method exists:
-// custody completion cannot stand in for future native accounts/check evidence.
-export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OAuthEnrollmentNative {
+// The trusted outer composition binds a concrete consumer AND original owner.
+// Completed custody remains pending until separate exact descriptor readback.
+export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OAuthEnrollmentNative, OAuthDescriptorBoundary {
   readonly #owner: string;
   constructor(options: NativeManagementOptions & { readonly ownerRef: string }) {
     super(options);
@@ -269,5 +268,26 @@ export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OA
     const scope = this.capture(input);
     const result = this.ack(await this.call('POST', '/private/native/v1/oauth/connect/read', this.wire(scope)), scope, false);
     return Object.freeze({ operationId: result.operationId, accountRef: result.accountRef, state: result.state });
+  }
+  async describe(input: OAuthScope): Promise<OAuthDescriptor> {
+    const scope = this.capture(input);
+    const bytes = await this.call('POST', '/private/native/v1/oauth/connect/descriptor', this.wire(scope));
+    try {
+      const r = object(decode(bytes), ['operation','account_ref','state','qualification'], ['native']);
+      if (r.operation !== scope.operationId || r.account_ref !== scope.accountRef) throw new NativeFailure('invalid_readback');
+      const logical = { operationId: scope.operationId, accountRef: scope.accountRef };
+      if (r.state === 'staged' && r.qualification === 'pending' && !Object.hasOwn(r, 'native')) {
+        return Object.freeze({ ...logical, state: 'staged', qualification: 'pending' });
+      }
+      if (r.state !== 'qualified' || r.qualification !== 'qualified') throw new NativeFailure('invalid_readback');
+      const d = object(r.native, ['account_id','generation','created_at','profile','base_url','model']);
+      const native = physicalCandidate({ nativeId: d.account_id as number, generation: d.generation as string,
+        nativePhysicalIdentity: d.generation as string, createdAt: d.created_at as string,
+        profile: d.profile as string, baseURL: d.base_url as string, model: d.model as string });
+      if (native.generation !== scope.generation || native.nativePhysicalIdentity !== scope.generation ||
+          native.profile !== codexOAuthProfile.profile || native.baseURL !== codexOAuthProfile.baseURL ||
+          native.model !== codexOAuthProfile.model) throw new NativeFailure('invalid_readback');
+      return Object.freeze({ ...logical, state: 'qualified', qualification: 'qualified', native });
+    } catch { throw new NativeFailure('invalid_readback'); }
   }
 }

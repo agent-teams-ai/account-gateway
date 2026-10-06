@@ -1,11 +1,11 @@
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { identifier } from './domain.ts';
-import type { DurableKernel, ExecutionRead, NativeDispatchProof, SavedExecution, TrustedContext } from './domain.ts';
-import type { NativeCallback, NativeTransport } from './facade.ts';
+import { approvedLimits, defaults, identifier, uuid } from './domain.ts';
+import type { ApprovedLimits, DurableKernel, ExecutionRead, NativeDispatchProof, SavedExecution, TrustedContext } from './domain.ts';
+import type { FacadeBearers, NativeCallback, NativeTransport } from './facade.ts';
 import type { ManagementStore } from './management.ts';
-import { physicalCandidate } from './management.ts';
+import { codexOAuthProfile, exactCandidate, physicalCandidate } from './management.ts';
 import { validateResponses } from './facade-ingress.ts';
 import { admission, binding, cleanup, config, denied, descriptor, instant, jsonBody, now, object,
   physicallyClosed, proof, receipt, sameAdmission, sameDescriptor, sameProof, saved, singleton } from './native-wire.ts';
@@ -20,7 +20,10 @@ export interface Association {
   ackStarted?: boolean; closeRef?: string;
 }
 export interface AuthorityOptions { readonly config: BridgeConfig; readonly kernel: DurableKernel & ExecutionRead;
-  readonly store: Pick<ManagementStore, 'mapping'> }
+  readonly store: Pick<ManagementStore, 'mapping'>;
+  readonly profileLimits?: readonly { readonly profile: string; readonly limits: Readonly<ApprovedLimits> }[];
+  readonly oauthOwners?: { readonly store: Pick<ManagementStore, 'readJournal'>;
+    readonly bearers: Pick<FacadeBearers, 'authorizesOwner'> } }
 const hash = (s: string) => createHash('sha256').update(s).digest();
 const key = (ctx: TrustedContext, ref: string, id: string) => JSON.stringify([ctx.consumerId, ref, id]);
 
@@ -30,10 +33,31 @@ export class NativeAuthority {
   readonly configuration: Configuration;
   readonly kernel: DurableKernel & ExecutionRead;
   readonly #store: Pick<ManagementStore, 'mapping'>;
+  readonly #owners: AuthorityOptions['oauthOwners'];
+  readonly #limits = new Map<string, Readonly<ApprovedLimits>>();
   readonly #pending = new Map<string, Association>();
   readonly #callers: readonly { hash: Buffer; consumerId: string }[];
   constructor(options: AuthorityOptions) {
-    this.configuration = config(options.config); this.kernel = options.kernel; this.#store = options.store;
+    // The legacy wire validator couples its single enrollment receipt to every
+    // profile. Validate each tuple with its own receipt, retaining the original
+    // enrollment ACK receipt and all shared transport/control bounds.
+    const base = config({ ...options.config, profiles: options.config.profiles.slice(0, 1) });
+    if (options.config.profiles.length > 3) denied();
+    const profiles = options.config.profiles.map(p => config({ ...options.config,
+      enrollment: { ...options.config.enrollment, qualificationRef: p.qualificationRef }, profiles: [p] }).profiles[0]);
+    if (new Set(profiles.map(p => p.profile)).size !== profiles.length) denied();
+    this.configuration = Object.freeze({ ...base, profiles: Object.freeze(profiles) });
+    if (options.profileLimits) {
+      if (options.profileLimits.length !== profiles.length) denied();
+      for (const entry of options.profileLimits) {
+        const p = profiles.find(p => p.profile === entry.profile);
+        const limits = Object.freeze(approvedLimits(entry.limits, defaults));
+        if (!p || this.#limits.has(entry.profile) || limits.requestBytes !== p.requestBytes ||
+            limits.outputBytes !== p.outputBytes || limits.tokens !== p.tokens) denied();
+        this.#limits.set(entry.profile, limits);
+      }
+    }
+    this.kernel = options.kernel; this.#store = options.store; this.#owners = options.oauthOwners;
     this.#callers = this.configuration.consumers.map(c => ({ hash: hash(c.callbackCredential), consumerId: c.consumerId }));
   }
   consumer(ctx: TrustedContext) {
@@ -87,14 +111,44 @@ export class NativeAuthority {
         mapping.generation !== fresh.generation) return denied();
     const physical = physicalCandidate(mapping.descriptor), d = descriptor(physical);
     const profile = this.configuration.profiles.find(p => p.profile === fresh.admission.profileId);
-    if (!profile || mapping.profile.qualificationRef !== profile.qualificationRef || physical.nativePhysicalIdentity !== fresh.generation ||
+    const limits = this.#limits.get(fresh.admission.profileId);
+    if (!profile || mapping.profile.profile !== profile.profile || mapping.profile.baseURL !== profile.baseURL ||
+        mapping.profile.model !== profile.model || mapping.profile.qualificationRef !== profile.qualificationRef || physical.nativePhysicalIdentity !== fresh.generation ||
         d.generation !== fresh.generation || d.profile !== profile.profile || d.base_url !== profile.baseURL || d.model !== profile.model ||
         fresh.admission.limits.requestBytes > profile.requestBytes || fresh.admission.limits.outputBytes > profile.outputBytes ||
-        fresh.admission.limits.tokens > profile.tokens || bytes.byteLength > fresh.admission.limits.requestBytes) return denied();
+        fresh.admission.limits.tokens > profile.tokens || bytes.byteLength > fresh.admission.limits.requestBytes ||
+        limits && (Object.keys(limits) as (keyof ApprovedLimits)[]).some(k => fresh.admission.limits[k] > limits[k])) return denied();
     instant(d.created_at); validateResponses(bytes, [profile.model], profile.providerTokenUpperBound);
     await this.kernel.currentWorkerLease(a.context, this.configuration.enrollment.worker);
     if (a.signal.aborted) return denied();
     a.descriptor = d; a.ready = true;
+  }
+  async #owner(ctx: TrustedContext, value: unknown): Promise<{ ok: true; ownerRef: string }> {
+    const r = object(value, ['consumerId','operationId','accountRef','generation']);
+    if (!this.#owners || r.consumerId !== ctx.consumerId) return denied();
+    identifier(r.operationId); uuid(r.accountRef); uuid(r.generation);
+    const j = await this.#owners.store.readJournal(ctx, r.operationId);
+    const p = this.configuration.profiles.find(p => p.profile === codexOAuthProfile.profile);
+    if (!j || !p || j.consumerId !== ctx.consumerId || j.operationId !== r.operationId ||
+        j.accountRef !== r.accountRef || j.generation !== r.generation || !['create','reconnect'].includes(j.purpose) ||
+        j.profile.profile !== codexOAuthProfile.profile || j.profile.baseURL !== codexOAuthProfile.baseURL ||
+        j.profile.model !== codexOAuthProfile.model || j.profile.qualificationRef !== p.qualificationRef ||
+        p.baseURL !== codexOAuthProfile.baseURL || p.model !== codexOAuthProfile.model) return denied();
+    identifier(j.ownerRef);
+    const op = await this.kernel.operation(ctx, j.operationId);
+    const account = await this.kernel.account(ctx, j.accountRef);
+    if (op.operationRef !== j.operationId || op.accountRef !== j.accountRef || !['pending','applied'].includes(op.state) ||
+        account.accountRef !== j.accountRef || account.ownerRef !== j.ownerRef || account.profile !== j.profile.profile ||
+        !['staging','active'].includes(account.state)) return denied();
+    const mapping = await this.#store.mapping(ctx, j.generation);
+    if (mapping && (mapping.consumerId !== ctx.consumerId || mapping.operationId !== j.operationId ||
+        mapping.accountRef !== j.accountRef || mapping.ownerRef !== j.ownerRef || mapping.generation !== j.generation ||
+        mapping.purpose !== j.purpose || mapping.profile.qualificationRef !== j.profile.qualificationRef ||
+        mapping.profile.profile !== j.profile.profile || mapping.profile.baseURL !== j.profile.baseURL ||
+        mapping.profile.model !== j.profile.model || !exactCandidate(j, physicalCandidate(mapping.descriptor)))) return denied();
+    // No external await after inspecting the live replacement-sensitive grant.
+    if (!this.#owners.bearers.authorizesOwner(ctx, j.ownerRef, j.profile.profile)) return denied();
+    return { ok: true, ownerRef: j.ownerRef };
   }
   async persisted(ctx: TrustedContext, p: NativeDispatchProof): Promise<void> {
     this.consumer(ctx);
@@ -163,14 +217,16 @@ export class NativeAuthority {
       res.once('close', () => clearTimeout(timer)); res.once('finish', () => clearTimeout(timer));
       const send = (status: number, body: unknown) => { if (!res.destroyed) { res.writeHead(status, { 'content-type': 'application/json', connection: 'close' }); res.end(JSON.stringify(body)); } };
       void (async () => {
-        if (req.method !== 'POST' || !req.url || !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack)$/.test(req.url) ||
+        if (req.method !== 'POST' || !req.url || !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority)$/.test(req.url) ||
             req.rawHeaders.length > 64 || singleton(req, 'content-type') !== 'application/json' ||
             req.rawHeaders.some((h, i) => i % 2 === 0 && ['content-encoding','transfer-encoding'].includes(h.toLowerCase()))) return denied();
         const authorization = singleton(req, 'authorization');
         if (!authorization || authorization.length > 1031 || !/^Bearer [A-Za-z0-9._~+/-]{16,1024}=*$/.test(authorization)) return denied();
         const h = hash(authorization.slice(7)), caller = this.#callers.find(c => timingSafeEqual(c.hash, h));
         if (!caller) return denied();
-        const ctx = Object.freeze({ consumerId: caller.consumerId }), body = await jsonBody(req, cfg.controlBytes);
+        const ownerLookup = req.url.endsWith('/oauth-owner-authority');
+        const ctx = Object.freeze({ consumerId: caller.consumerId }), body = await jsonBody(req, ownerLookup ? Math.min(1024, cfg.controlBytes) : cfg.controlBytes);
+        if (ownerLookup) { send(200, await this.#owner(ctx, body)); return; }
         if (req.url.endsWith('/enrollment')) {
           const r = object(body, ['originRef','engineIncarnation','qualificationRef']), e = cfg.enrollment;
           if (r.originRef !== e.originRef || r.engineIncarnation !== e.engineIncarnation || r.qualificationRef !== e.qualificationRef) return denied();
