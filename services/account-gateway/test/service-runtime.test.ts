@@ -22,7 +22,6 @@ import { captureOAuthEnrollmentConfig, captureServiceProfiles, captureServiceBea
 import { AccountManagement } from '../src/management.ts';
 import { PostgresKernel } from '../src/postgres.ts';
 import { FacadeBearers } from '../src/facade.ts';
-import { KernelError } from '../src/domain.ts';
 
 // Keep the production restart scenario executable against the exact old base:
 // its meaningful RED must be missing automatic closure, not a missing import.
@@ -184,7 +183,7 @@ test('source catalog: singleton compatibility and finite simultaneous per-profil
   assert.deepEqual(captureServiceBearers([explicit], grant.consumerId, profiles)[0], explicit);
   for (const profileIds of [[], [profile.profile, profile.profile], ['bad/profile'], ['x'.repeat(65)],
     Array.from({ length: 129 }, (_, i) => 'profile-' + i)]) {
-    assert.throws(() => new FacadeBearers([{ ...grant, profileIds }]), e => e instanceof KernelError && e.code === 'invalid');
+    assert.throws(() => new FacadeBearers([{ ...grant, profileIds }]), e => e instanceof Error && 'code' in e && e.code === 'invalid');
     denied(() => captureServiceBearers([{ ...grant, profileIds }], grant.consumerId, profiles));
   }
   for (const profileIds of [['unconfigured'], [1], null, 'profile'])
