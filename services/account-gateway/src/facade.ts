@@ -29,6 +29,8 @@ export interface PreparationPolicy {
 export interface ManagementBearer {
   readonly token: string; readonly role: 'management'; readonly consumerId: string;
   readonly ownerRefs: readonly string[]; readonly preparation: PreparationPolicy;
+  // Absent retains management access to every configured profile.
+  readonly profileIds?: readonly string[];
 }
 export interface ExecutionBearer {
   readonly token: string; readonly role: 'execution'; readonly consumerId: string;
@@ -47,6 +49,8 @@ export interface RunAccess {
 export type ConfiguredBearer = ManagementBearer | ExecutionBearer | RunControlBearer;
 type RunControlGrant = Omit<RunControlBearer, 'token'>;
 type Grant = Omit<ManagementBearer, 'token'> | Omit<ExecutionBearer, 'token'> | RunControlGrant;
+const permitsManagementProfile = (grant: Omit<ManagementBearer, 'token'>, profileId: string): boolean =>
+  grant.profileIds === undefined || grant.profileIds.includes(profileId);
 function savedCopy(s: SavedExecution): SavedExecution {
   const a = s.admission;
   const wire = parse(c.admission, { invocationRef: a.invocationRef, attemptRef: a.attemptRef, accountRef: a.accountRef,
@@ -91,7 +95,18 @@ export class FacadeBearers {
         entry.ownerRefs.forEach(value => parse(c.reference, value));
         p.accountRefs.forEach(uuid); parse(c.reference, p.subjectRef); parse(c.reference, p.profileId);
         parse(c.revision, p.policyRevision); parse(c.revision, p.bindingRevision);
+        const suppliedProfileIds = entry.profileIds;
+        let profileIds: readonly string[] | undefined;
+        if (suppliedProfileIds !== undefined) {
+          if (!Array.isArray(suppliedProfileIds)) throw new KernelError('invalid');
+          const length = suppliedProfileIds.length;
+          if (length > 128) throw new KernelError('invalid');
+          profileIds = Array.from({ length }, (_, i) => suppliedProfileIds[i]);
+          if (!profileIds.length || new Set(profileIds).size !== profileIds.length) throw new KernelError('invalid');
+          for (const id of profileIds) { parse(c.reference, id); identifier(id, 64); }
+        }
         grant = Object.freeze({ role: 'management', consumerId: entry.consumerId,
+          ...(profileIds === undefined ? {} : { profileIds: Object.freeze(profileIds) }),
           ownerRefs: Object.freeze([...entry.ownerRefs]), preparation: Object.freeze({ ...p,
             accountRefs: Object.freeze([...p.accountRefs]), limits: Object.freeze(parse(c.limits, p.limits)) }) });
       }
@@ -528,7 +543,9 @@ export function createFacade(options: FacadeOptions): Server {
         return;
       }
       if (grant.role !== 'management') throw new KernelError('denied');
-      if (path === '/v1/profiles' && method === 'GET') { send(res, c.profiles, { profiles: [...profiles.values()].map(p => p.dto) }); return; }
+      if (path === '/v1/profiles' && method === 'GET') {
+        send(res, c.profiles, { profiles: [...profiles.values()].filter(p => permitsManagementProfile(grant, p.dto.profileId)).map(p => p.dto) }); return;
+      }
       if (path === '/v1/accounts' && method === 'GET') {
         const query = new Map<string, unknown>();
         for (const [key, value] of url.searchParams) {
@@ -540,13 +557,15 @@ export function createFacade(options: FacadeOptions): Server {
         const input = parse(c.listQuery, Object.fromEntries(query));
         if (input.ownerRef && !grant.ownerRefs.includes(input.ownerRef)) throw new KernelError('denied');
         const page = await management.accounts(context, { ...input, allowedOwnerRefs: grant.ownerRefs });
-        send(res, c.accounts, { accounts: page.accounts.map(accountDTO), ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) }); return;
+        send(res, c.accounts, { accounts: page.accounts.filter(a => permitsManagementProfile(grant, a.profile)).map(accountDTO),
+          ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) }); return;
       }
       if (path === '/v1/accounts/oauth/begin' && method === 'POST') {
         const parsed = parse(c.oauthBegin, strictJSON(await body(req, Math.min(ingressBytes, 16_384)), true));
         const input = Object.freeze({ ...parsed }); identity = { operationRef: input.operationId };
         const profile = profiles.get(input.profileId);
-        if (!grant.ownerRefs.includes(input.ownerRef) || grant.preparation.profileId !== input.profileId || !profile || profile.dto.authKinds[0] !== 'oauth' ||
+        if (!grant.ownerRefs.includes(input.ownerRef) || !permitsManagementProfile(grant, input.profileId) ||
+            grant.preparation.profileId !== input.profileId || !profile || profile.dto.authKinds[0] !== 'oauth' ||
             !management.supportsOAuthProfile(input.profileId)) throw new KernelError('denied');
         requireCurrent(grant); uncertain = true;
         const result = await management.beginOAuth(context, { operationId: input.operationId, ownerRef: input.ownerRef,
@@ -559,7 +578,8 @@ export function createFacade(options: FacadeOptions): Server {
       }
       if (path === '/v1/accounts' && method === 'POST') {
         const input = parse(secretSubmission.connect, strictJSON(await body(req, ingressBytes), true)); identity = { operationRef: input.operationId };
-        if (!grant.ownerRefs.includes(input.ownerRef) || profiles.get(input.profileId)?.dto.authKinds[0] !== 'api_key') throw new KernelError('denied');
+        if (!grant.ownerRefs.includes(input.ownerRef) || !permitsManagementProfile(grant, input.profileId) ||
+            profiles.get(input.profileId)?.dto.authKinds[0] !== 'api_key') throw new KernelError('denied');
         if (input.credential.kind !== 'api_key') throw new KernelError('invalid');
         requireCurrent(grant); uncertain = true;
         const op = await management.create(context, { operationId: input.operationId, ownerRef: input.ownerRef,
@@ -570,7 +590,7 @@ export function createFacade(options: FacadeOptions): Server {
       if (accountMatch) {
         const ref = parse(c.reference, accountMatch[1]);
         const account = await management.account(context, ref);
-        if (!grant.ownerRefs.includes(account.ownerRef)) throw new KernelError('denied');
+        if (!grant.ownerRefs.includes(account.ownerRef) || !permitsManagementProfile(grant, account.profile)) throw new KernelError('denied');
         if (method === 'GET' && !accountMatch[2]) { send(res, c.account, accountDTO(account)); return; }
         if (method === 'PATCH' && !accountMatch[2]) {
           const input = parse(c.rename, strictJSON(await body(req, ingressBytes), true)); identity = { operationRef: input.operationId };

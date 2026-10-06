@@ -81,10 +81,27 @@ async function sourceHTTP(oauth: boolean) {
     issuer: async () => issuer, heartbeat: async () => {}, reconcile: async () => {},
     account: async (c, id) => accounts.get(scopeKey(c, id)) ?? missing(),
     operation: async (c, id) => operations.get(scopeKey(c, id)) ?? missing(),
-    accounts: async c => ({ accounts: [...accounts.values()].filter(a => accounts.has(scopeKey(c, a.accountRef))) }),
+    accounts: async (c, query = {}) => {
+      const rows = [...accounts.values()].filter(a => accounts.has(scopeKey(c, a.accountRef)) &&
+        (!query.ownerRef || a.ownerRef === query.ownerRef) && (!query.allowedOwnerRefs || query.allowedOwnerRefs.includes(a.ownerRef)) &&
+        (!query.cursor || a.accountRef > query.cursor)).sort((a, b) => a.accountRef.localeCompare(b.accountRef));
+      const page = rows.slice(0, query.limit ?? 100);
+      return { accounts: page, ...(rows.length > page.length ? { nextCursor: page.at(-1)!.accountRef } : {}) };
+    },
     async beginAccount(c, intent) {
       const key = scopeKey(c, intent.operationId), old = operations.get(key); if (old) return old;
-      if (intent.kind !== 'create' || !intent.ownerRef || !intent.profile) return missing();
+      if (intent.kind !== 'create') {
+        const account = await kernel.account(c, intent.accountRef!);
+        if (account.revision !== intent.expectedRevision) throw new KernelError('conflict');
+        const op: OperationStatus = { operationRef: intent.operationId, accountRef: account.accountRef, state: 'pending' };
+        if (intent.kind === 'rename' || intent.kind === 'disable') {
+          if (intent.kind === 'rename') account.displayName = intent.displayName!;
+          else { account.state = 'disabled'; account.epoch++; }
+          account.revision++; op.state = 'applied'; op.revision = account.revision; op.epoch = account.epoch;
+        }
+        operations.set(key, op); return op;
+      }
+      if (!intent.ownerRef || !intent.profile) return missing();
       const accountRef = randomUUID();
       accounts.set(scopeKey(c, accountRef), { accountRef, ownerRef: intent.ownerRef, profile: intent.profile,
         displayName: intent.displayName!, state: 'staging', revision: 1, epoch: 1 });
@@ -97,7 +114,9 @@ async function sourceHTTP(oauth: boolean) {
     },
     async acknowledgeCandidate(c, id) {
       const op = await kernel.operation(c, id), account = await kernel.account(c, op.accountRef!);
-      account.state = 'active'; op.state = 'applied'; op.revision = 1; op.epoch = 1; return op;
+      if (op.state !== 'pending') return op;
+      if (account.state === 'active') { account.revision++; account.epoch++; }
+      account.state = 'active'; op.state = 'applied'; op.revision = account.revision; op.epoch = account.epoch; return op;
     },
     async unknownCandidate(c, id) { const op = await kernel.operation(c, id); op.state = 'unknown'; return op; },
     async prepare(c, approval) {
@@ -633,6 +652,87 @@ test('source HTTP: same fenced original remints only scoped readback and close, 
     const restoredClosedDenied = await closedMint(); assert.equal(restoredClosedDenied.status, 403);
     assert.equal((await restoredClosedDenied.json() as { effect: string }).effect, 'effect_unknown');
     assert.equal(f.executions.size, 2); assert.equal(f.seen.length, nativeCalls);
+  } finally { await f.close(); }
+});
+
+test('source HTTP: explicit management profile capability denies same-owner MiMo before effects and permits OpenRouter', async () => {
+  const f = await sourceHTTP(false);
+  try {
+    const initial = f.cfg.bearers.find(b => b.role === 'management');
+    assert.ok(initial && initial.role === 'management');
+    assert.equal(initial.preparation.profileId, f.profile.profile);
+    const restricted = { ...initial, ownerRefs: ['owner-one'], profileIds: [f.secondProfile.profile] };
+    f.control.bearers.replace([restricted, ...f.cfg.bearers.filter(b => b.role === 'run-control')]);
+    let creates = 0, mutations = 0;
+    const create = f.control.management.create.bind(f.control.management), begin = f.kernel.beginAccount.bind(f.kernel);
+    f.control.management.create = async (...args) => { creates++; return create(...args); };
+    f.kernel.beginAccount = async (...args) => { mutations++; return begin(...args); };
+    const connect = (profileId: string, ownerRef = 'owner-one') => f.publicCall('/v1/accounts', {
+      operationId: randomUUID(), ownerRef, profileId, displayName: 'Fixture', credential: { kind: 'api_key', value: 'fixture-write-only' } });
+    const forbidden = await connect(f.profile.profile);
+    assert.equal(forbidden.status, 403, 'same-owner MiMo denied before effects; managementCreates=' + creates +
+      ' nativeCreates=' + f.seen.filter(r => r.path === 'POST /private/native/v1/candidates').length);
+    assert.equal(creates, 0); assert.equal(mutations, 0); assert.equal(f.seen.length, 0); assert.equal(f.journals.size, 0);
+    assert.equal((await connect(f.secondProfile.profile, 'owner-two')).status, 403, 'permitted profile cannot upgrade owner authority');
+    assert.equal(creates, 0); assert.equal(mutations, 0);
+    const allowed = await connect(f.secondProfile.profile); assert.equal(allowed.status, 200);
+    const op = await allowed.json() as { operationRef: string; result: { accountRef: string } };
+    assert.equal(creates, 1); assert.equal(mutations, 1);
+    assert.equal(f.seen.filter(r => r.path === 'POST /private/native/v1/candidates').length, 1);
+    const accountRef = op.result.accountRef;
+    // Fixture-owned rows pin ordering so filtering cannot silently refill a page
+    // or substitute its cursor, and the foreign owner remains excluded by the kernel.
+    const foreignProfile = '00000000-0000-4000-8000-000000000001', foreignOwner = '00000000-0000-4000-8000-000000000002';
+    const seed = (ref: string, ownerRef: string, profile: string) => f.accounts.set(f.scopeKey(f.context, ref), {
+      accountRef: ref, ownerRef, profile, displayName: 'Fixture', state: 'active', revision: 1, epoch: 1 });
+    seed(foreignProfile, 'owner-one', f.profile.profile); seed(foreignOwner, 'owner-two', f.secondProfile.profile);
+    assert.equal((await f.publicCall('/v1/accounts/' + foreignProfile)).status, 403);
+    assert.equal((await f.publicCall('/v1/accounts/' + foreignOwner)).status, 403);
+    assert.equal((await f.publicCall('/v1/accounts/' + accountRef)).status, 200);
+    const catalog = await f.publicCall('/v1/profiles'); assert.equal(catalog.status, 200);
+    assert.deepEqual((await catalog.json() as { profiles: { profileId: string }[] }).profiles.map(p => p.profileId), [f.secondProfile.profile]);
+    const list = await f.publicCall('/v1/accounts?limit=1'); assert.equal(list.status, 200);
+    assert.deepEqual(await list.json(), { accounts: [], nextCursor: foreignProfile });
+    const next = await f.publicCall('/v1/accounts?limit=1&cursor=' + foreignProfile); assert.equal(next.status, 200);
+    assert.deepEqual((await next.json() as { accounts: { accountRef: string }[] }).accounts.map(a => a.accountRef), [accountRef]);
+    assert.equal((await f.publicCall('/v1/accounts?ownerRef=owner-two')).status, 403);
+    const named = (ref: string, kind: 'rename' | 'reconnect' | 'disable', expectedMetadataRevision = 1) => fetch(
+      f.facadeOrigin + '/v1/accounts/' + ref + (kind === 'rename' ? '' : '/' + kind), {
+        method: kind === 'rename' ? 'PATCH' : 'POST', headers: { authorization: 'Bearer ' + restricted.token, 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify({ operationId: randomUUID(), expectedMetadataRevision,
+          ...(kind === 'rename' ? { displayName: 'Renamed' } : kind === 'reconnect' ? { credential: { kind: 'api_key', value: 'fixture-write-only' } } : {}) }) });
+    const beforeNative = f.seen.length;
+    for (const kind of ['rename', 'reconnect', 'disable'] as const) {
+      assert.equal((await named(foreignProfile, kind)).status, 403);
+      assert.equal((await named(foreignOwner, kind)).status, 403);
+    }
+    assert.equal(mutations, 1); assert.equal(f.seen.length, beforeNative);
+    assert.equal((await named(accountRef, 'rename')).status, 200);
+    const renamed = await f.publicCall('/v1/accounts/' + accountRef);
+    assert.equal((await renamed.json() as { displayName: string }).displayName, 'Renamed');
+    const reconnected = await named(accountRef, 'reconnect', 2); assert.equal(reconnected.status, 200);
+    const reconnectOp = await reconnected.json() as { result: { metadataRevision: number; authorizationEpoch: number } };
+    assert.equal(reconnectOp.result.metadataRevision, 3); assert.equal(reconnectOp.result.authorizationEpoch, 2);
+    assert.equal(f.seen.filter(r => r.path === 'POST /private/native/v1/candidates').length, 2);
+    const active = await (await f.publicCall('/v1/accounts/' + accountRef)).json() as {
+      state: string; metadataRevision: number; authorizationEpoch: number };
+    assert.equal(active.state, 'active'); assert.equal(active.metadataRevision, 3); assert.equal(active.authorizationEpoch, 2);
+    const beforeStaleNative = f.seen.length, beforeStaleOperations = f.operations.size;
+    assert.equal((await named(accountRef, 'disable', 2)).status, 409); assert.equal(mutations, 4);
+    assert.equal(f.seen.length, beforeStaleNative); assert.equal(f.operations.size, beforeStaleOperations);
+    assert.deepEqual(await (await f.publicCall('/v1/accounts/' + accountRef)).json(), active);
+    assert.equal((await named(accountRef, 'disable', 3)).status, 200); assert.equal(mutations, 5);
+    assert.equal((await f.publicCall('/v1/operations/' + op.operationRef)).status, 200, 'accepted operation readback survives');
+    // Removing the opt-in retains both configured API-key profiles under one
+    // token whose preparation remains MiMo, just like the existing RR caller.
+    f.control.bearers.replace(f.cfg.bearers);
+    const broad = await f.publicCall('/v1/profiles'); assert.equal(broad.status, 200);
+    assert.deepEqual((await broad.json() as { profiles: { profileId: string }[] }).profiles.map(p => p.profileId), [f.profile.profile, f.secondProfile.profile]);
+    const broadCreate = await connect(f.profile.profile); assert.equal(broadCreate.status, 200);
+    const accepted = await broadCreate.json() as { operationRef: string; result: { accountRef: string } };
+    f.control.bearers.replace([restricted]);
+    assert.equal((await f.publicCall('/v1/accounts/' + accepted.result.accountRef)).status, 403);
+    assert.equal((await f.publicCall('/v1/operations/' + accepted.operationRef)).status, 200, 'narrowing retains accepted operation readback');
   } finally { await f.close(); }
 });
 
