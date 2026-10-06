@@ -145,11 +145,11 @@ class NativeControlHTTP {
         headers: { authorization: 'Bearer ' + this.#control, accept: 'application/json',
           connection: 'close', ...(body ? { 'content-type': 'application/json', 'content-length': String(body.length) } : {}) },
       });
-      req.maxHeadersCount = 64;
+      req.maxHeadersCount = 65;
       const timer = setTimeout(() => { finish(new NativeFailure('deadline')); req.destroy(); }, this.#deadlineMs);
       req.on('error', () => finish(new NativeFailure('unavailable')));
       req.on('response', res => {
-        // Node's maxHeadersCount truncates headers; independently reject overflow.
+        // Retain one overflow sentinel beyond 64 pairs; Node truncates the rest.
         if (res.rawHeaders.length > 128) {
           finish(new NativeFailure('bounded')); res.destroy(); req.destroy(); return;
         }
