@@ -99,8 +99,8 @@ async function fixture() {
   const input = (patch: Partial<c.Prepare> = {}): c.Prepare => ({ operationId: randomUUID(), invocationRef: randomUUID(), attemptRef: 'attempt-fixture',
     accountRefs: [accountRef], subjectRef: 'binding-fixture', policyRevision: 2, bindingRevision: 3, profileId: profile.profile,
     limits: { ...limits }, deadline: new Date(Date.now() + 45_000).toISOString(), ...patch });
-  const raw = (value: unknown, token = control.token, path = '/internal/v1/run-access', method = 'POST') => fetch(origin + path, {
-    method, headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json', accept: 'application/json' },
+  const raw = (value: unknown, token = control.token, path = '/internal/v1/run-access', method = 'POST', headers: Record<string, string> = {}) => fetch(origin + path, {
+    method, headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json', accept: 'application/json', ...headers },
     body: value === undefined ? undefined : JSON.stringify(value) });
   async function mint(value: c.Prepare): Promise<RunAccess> {
     const res = await raw(value); assert.equal(res.status, 200);
@@ -188,10 +188,10 @@ test('parallel run issuance and same-run retry preserve independent HTTP executi
 });
 
 // Red if a lost prepare response repins after settings/metadata change, modified
-// intent silently mints, restart rearms old credentials, or SQL terminal state
-// (close, binding fence, reconnect epoch, deadline) is bypassed during recovery.
-test('original prepare recovery survives settings drift and denies terminal authority', async t => {
-  for (const terminal of ['close', 'fence', 'reconnect', 'expiry'] as const) await t.test(terminal, async () => {
+// intent silently mints, restart rearms old credentials, or scoped fenced
+// recovery bypasses SQL dispatch, close, deadline or restore issuer denial.
+test('original prepare recovery survives settings drift and preserves scoped fenced authority', async t => {
+  for (const terminal of ['close', 'fence', 'reconnect', 'expiry', 'restore'] as const) await t.test(terminal, async () => {
     const f = await fixture(); try {
       const value = f.input(terminal === 'expiry' ? { deadline: new Date(Date.now() + 5000).toISOString() } : {});
       const lost = await f.raw(value); assert.equal(lost.status, 200); await lost.body?.cancel(); // Caller discarded the private reply.
@@ -208,6 +208,18 @@ test('original prepare recovery survives settings drift and denies terminal auth
       assert.deepEqual(recovered.admission, projection);
       assert.deepEqual((await f.kernel.savedExecution(f.context, op.executionRef)).admission, original.admission);
       const changed = await f.raw({ ...value, bindingRevision: 4 }); assert.equal(changed.status, 409); c.safeError.parse(await changed.json());
+      // Persist a synthetic accepted effect through the real kernel, without
+      // entering HTTP transport or any native/provider fixture. Recovery may
+      // observe this fact, but neither its ID nor a fresh ID may dispatch again.
+      const requestId = randomUUID(), peer = f.options.enrollment;
+      const accepted = await f.kernel.claim(f.context, op.executionRef, requestId, peer.worker, original.admission,
+        { originRef: peer.originRef, engineIncarnation: peer.engineIncarnation, requestNonce: randomUUID() });
+      assert.ok(accepted.dispatch);
+      await f.kernel.effect(f.context, op.executionRef, requestId, peer.worker, 'response_started');
+      await f.kernel.effect(f.context, op.executionRef, requestId, peer.worker, 'completed');
+      await f.kernel.acknowledgeTransportClosed(f.context, peer.worker, accepted.dispatch.closure);
+      const active = f.execution(recovered);
+      assert.equal((await active.client.status(active.ref, requestId)).effect, 'completed');
       if (terminal === 'close') {
         await f.restart(); await assert.rejects(f.request(recovered), forbidden);
         const reinstalled = await f.mint(value);
@@ -218,8 +230,61 @@ test('original prepare recovery survives settings drift and denies terminal auth
       else if (terminal === 'reconnect') {
         const current = await f.management.account(f.context, f.accountRef);
         await f.management.reconnect(f.context, { operationId: randomUUID(), accountRef: f.accountRef, expectedRevision: current.revision, apiKey: randomUUID() });
+      } else if (terminal === 'restore') {
+        // Restore also fences rows previously closed; their original issuer
+        // must not become eligible for the fenced readback issuance exception.
+        const e = f.execution(recovered); await e.client.close(e.ref, { operationId: randomUUID(), reason: 'completed' });
+        assert.equal((await f.kernel.savedExecution(f.context, op.executionRef)).state, 'closed');
+        const freshIssuer = randomUUID();
+        await f.kernel.restore(f.context, original.admission.issuerEpoch, freshIssuer);
+        assert.equal(await f.kernel.issuer(f.context), freshIssuer);
+        assert.equal((await f.kernel.savedExecution(f.context, op.executionRef)).state, 'fenced');
       } else await delay(Math.max(1, Date.parse(value.deadline) - Date.now() + 30));
-      const terminalReply = await f.raw(value); assert.equal(terminalReply.status, 403); c.safeError.parse(await terminalReply.json());
+      if (terminal === 'fence' || terminal === 'reconnect') {
+        // Lose volatile grants, then recover only the immutable original scope.
+        const previous = recovered;
+        await f.restart();
+        recovered = await f.mint(value);
+        assert.notEqual(recovered.bearer, previous.bearer);
+        assert.deepEqual(recovered.admission, projection);
+        assert.deepEqual(await f.mint(value), recovered);
+        const e = f.execution(recovered), saved = await f.kernel.savedExecution(f.context, e.ref);
+        assert.equal(e.ref, op.executionRef); assert.equal(saved.state, 'fenced'); assert.equal(saved.dispatchAllowed, false);
+        assert.equal(saved.generation, original.generation); assert.deepEqual(saved.admission, original.admission);
+        const read = await f.raw(undefined, recovered.bearer, '/v1/executions/' + e.ref, 'GET');
+        assert.equal(read.status, 200);
+        assert.deepEqual(c.execution.parse(await read.json()), { executionRef: e.ref, accountRef: original.admission.accountRef,
+          authorizationEpoch: original.admission.authorizationEpoch, profileId: original.admission.profileId,
+          deadline: original.admission.expiresAt, state: 'fenced' });
+        const operation = await f.raw(undefined, recovered.bearer, '/v1/operations/' + value.operationId, 'GET');
+        assert.equal(operation.status, 200);
+        assert.deepEqual(c.preparationOperation.parse(await operation.json()), recovered.operation);
+        await denied(await f.raw(undefined, recovered.bearer, '/v1/executions/' + randomUUID(), 'GET'));
+        const changedFenced = await f.raw({ ...value, bindingRevision: 4 });
+        assert.equal(changedFenced.status, 409); c.safeError.parse(await changedFenced.json());
+        const closeId = randomUUID(); await e.client.close(e.ref, { operationId: closeId, reason: 'cancelled' });
+        assert.deepEqual(await f.kernel.savedExecution(f.context, e.ref), saved);
+        const cleanup = await pool.query('SELECT execution_ref FROM ag_kernel.cleanup WHERE consumer=$1 AND execution_ref=$2', [f.context.consumerId, e.ref]);
+        assert.equal(cleanup.rowCount, 1); assert.equal(cleanup.rows[0].execution_ref, e.ref);
+        assert.deepEqual(await f.mint(value), recovered, 'close of fenced row retains scoped access');
+      } else {
+        const terminalReply = await f.raw(value); assert.equal(terminalReply.status, 403);
+        const error = c.safeError.parse(await terminalReply.json());
+        assert.equal(error.code, 'forbidden'); assert.equal(error.operationRef, value.operationId);
+        assert.equal(error.effect, 'effect_unknown'); // Accepted original preparation survives mint denial.
+      }
+      const e = f.execution(recovered);
+      if (terminal !== 'expiry') assert.equal((await e.client.status(e.ref, requestId)).effect, 'completed');
+      for (const id of [requestId, randomUUID()]) {
+        const response = await f.raw({ model: profile.model, stream: true, store: false, service_tier: 'default', input: 'synthetic fixture' },
+          recovered.bearer, '/v1/executions/' + e.ref + '/requests', 'POST', { accept: 'text/event-stream',
+            'x-gateway-admission': JSON.stringify(recovered.admission), 'x-gateway-request-id': id });
+        const error = await denied(response); assert.equal(error.code, 'forbidden');
+        assert.equal(error.requestRef, terminal === 'expiry' ? undefined : id);
+      }
+      assert.equal((await f.kernel.request(f.context, e.ref, requestId)).effect, 'completed');
+      const final = await f.kernel.savedExecution(f.context, e.ref);
+      assert.equal(final.generation, original.generation); assert.deepEqual(final.admission, original.admission);
       await assert.rejects(f.request(recovered), forbidden);
       assert.equal(await f.count(), 1); assert.deepEqual(f.stats(), { transportCalls: 0, entries: 0 });
     } finally { await f.stop(); }
