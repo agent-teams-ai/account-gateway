@@ -6,7 +6,6 @@ import type { AccountStatus, DurableKernel, ExecutionRead, NativeDispatchProof, 
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer, request } from 'node:http';
 import type { Server } from 'node:http';
-import { once } from 'node:events';
 import { createFacade } from '../src/facade.ts';
 import { IntentSecrets } from '../src/management-store.ts';
 import { codexOAuthProfile } from '../src/management.ts';
@@ -306,7 +305,11 @@ test('source HTTP: current management fences monotonically for its exact subject
     assert.equal(prepares, 0); assert.equal(calls.length, 1);
     // Send headers alone so the real handler captures GX and awaits its body.
     // Replacing even the same token retires that captured immutable capability.
-    const captured = once(f.facade, 'request');
+    const captured = new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => { f.facade.off('request', onRequest); reject(error); };
+      const onRequest = () => { f.facade.off('error', onError); resolve(); };
+      f.facade.once('request', onRequest); f.facade.once('error', onError);
+    });
     let stale: ReturnType<typeof request> | undefined;
     const staleResponse = new Promise<number>((resolve, reject) => {
       stale = request(f.facadeOrigin + '/v1/policy-fences', { method: 'POST', headers: {
