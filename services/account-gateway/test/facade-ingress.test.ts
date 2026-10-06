@@ -58,7 +58,8 @@ test('SDK control numeric tokens cannot round into an accepted integer authority
 // Source boundary fixtures have test-owned committed state and real HTTP hops.
 // They qualify neither SQL transactions nor Go middleware/provider transport.
 async function sourceHTTP(oauth: boolean) {
-  const consumerId = 'source-consumer', worker = randomUUID(), issuer = randomUUID();
+  const consumerId = 'source-consumer', worker = randomUUID();
+  let issuer: string = randomUUID();
   const context = { consumerId }, enrollment = { originRef: 'source-origin', engineIncarnation: randomUUID(), worker };
   const limits = { requests: 4, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 100 };
   const profile = { profile: 'openai-responses-apikey-v1', baseURL: 'https://api.xiaomimimo.com/v1', model: 'mimo-v2-flash',
@@ -71,6 +72,7 @@ async function sourceHTTP(oauth: boolean) {
   const preparationIntents = new Map<string, string>();
   const journals = new Map<string, CandidateJournal>(), mappings = new Map<string, CandidateMapping>();
   const executions = new Map<string, SavedExecution>(), requests = new Map<string, RequestStatus>(), proofs = new Map<string, NativeDispatchProof>();
+  const executionCleanup = new Set<string>();
   const custody = new IntentSecrets(randomBytes(32), randomBytes(32));
   const staged = new Map<string, string>();
   const scopeKey = (c: { consumerId: string }, id: string) => JSON.stringify([c.consumerId, id]);
@@ -137,12 +139,27 @@ async function sourceHTTP(oauth: boolean) {
       accountRef: s.admission.accountRef, epoch: s.admission.authorizationEpoch, state: s.state, deadline: s.admission.expiresAt }; },
     async close(c, operationId, executionRef) {
       const saved = await kernel.savedExecution(c, executionRef);
-      executions.set(scopeKey(c, executionRef), { ...saved, state: 'closed', dispatchAllowed: false });
-      const op: OperationStatus = { operationRef: operationId, executionRef, state: 'applied' };
+      // SQL close transitions only open rows; fenced rows retain scoped readback.
+      if (saved.state === 'open') executions.set(scopeKey(c, executionRef), { ...saved, state: 'closed', dispatchAllowed: false });
+      executionCleanup.add(scopeKey(c, executionRef));
+      const op: OperationStatus = { operationRef: operationId, executionRef, accountRef: saved.admission.accountRef, state: 'applied' };
       operations.set(scopeKey(c, operationId), op); return op;
     },
+    async restore(c, expectedIssuer, freshIssuer) {
+      if (expectedIssuer !== issuer) throw new KernelError('conflict');
+      if (expectedIssuer === freshIssuer) throw new KernelError('invalid');
+      issuer = freshIssuer;
+      // Restore fences every execution, including closed rows, without repinning.
+      for (const [key, saved] of executions) if (key === scopeKey(c, saved.admission.executionRef)) {
+        executions.set(key, { ...saved, state: 'fenced', dispatchAllowed: false });
+        executionCleanup.add(key);
+      }
+      for (const [key, account] of accounts) if (key === scopeKey(c, account.accountRef) && ['active', 'staging'].includes(account.state)) {
+        account.state = 'quarantined'; account.epoch++;
+      }
+    },
     currentCleanupLease: missing, rejectBeforeDispatch: missing, fence: missing,
-    restore: missing, claimCleanup: missing, cleanupTransports: missing, settleCleanup: missing,
+    claimCleanup: missing, cleanupTransports: missing, settleCleanup: missing,
   };
   const store: ManagementStore = {
     stage: async (s, key) => { staged.set(scopeKey(s, s.operationId), key); return true; },
@@ -262,7 +279,7 @@ async function sourceHTTP(oauth: boolean) {
     fetch(facadeOrigin + path, { method: body === undefined ? 'GET' : 'POST', headers: { authorization: 'Bearer ' + token,
       'content-type': 'application/json', accept: path.includes('/requests') ? 'text/event-stream' : 'application/json',
       ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  return { context, consumer, control, authority, cfg, kernel, store, journals, mappings, accounts, operations, executions, requests,
+  return { context, consumer, control, authority, cfg, kernel, store, journals, mappings, accounts, operations, executions, requests, executionCleanup,
     publicCall, callback, seen, forwarded, profile, secondProfile, begins: () => begins,
     owner: (value: string | undefined) => { bodyOwner = value; },
     descriptor: (value: unknown, mode: typeof descriptorMode = 'normal') => { descriptorReply = value; descriptorMode = mode; },
@@ -505,7 +522,6 @@ test('source HTTP: same fenced original remints only scoped readback and close, 
     assert.equal((await retained.json() as Access).bearer, run.bearer);
     // Lose the issued execution mapping while keeping current configured policy.
     f.control.bearers.replace(f.cfg.bearers);
-    f.kernel.issuer = async () => { throw new Error('same original must retain its persisted issuer'); };
     const remint = await mint(); assert.equal(remint.status, 200, 'same fenced original must receive scoped access');
     const scoped = await remint.json() as Access;
     assert.equal(scoped.operation.operationRef, input.operationId);
@@ -550,7 +566,6 @@ test('source HTTP: same fenced original remints only scoped readback and close, 
     // Even an applied prepare cannot supply the exception without the original lookup.
     const operation = f.kernel.operation;
     f.kernel.operation = async (context, id) => { if (id === input.operationId) throw new KernelError('unknown'); return operation(context, id); };
-    f.kernel.issuer = async () => original.admission.issuerEpoch;
     f.kernel.prepare = prepare;
     assert.equal((await mint()).status, 403);
     f.kernel.operation = operation;
@@ -560,6 +575,10 @@ test('source HTTP: same fenced original remints only scoped readback and close, 
     f.kernel.prepare = async (...args) => { const op = await prepare(...args); f.control.bearers.replace(f.cfg.bearers); return op; };
     assert.equal((await mint()).status, 403);
     f.kernel.prepare = prepare;
+    const currentIssuer = f.kernel.issuer;
+    f.kernel.issuer = async (...args) => { const current = await currentIssuer(...args); f.control.bearers.replace(f.cfg.bearers); return current; };
+    assert.equal((await mint()).status, 403, 'grant replacement during current issuer proof denies issuance');
+    f.kernel.issuer = currentIssuer;
     f.executions.set(executionKey, { ...fenced, admission: { ...fenced.admission, expiresAt: new Date(0).toISOString() } });
     assert.equal((await mint()).status, 403, 'original expiry still denies remint');
     f.executions.set(executionKey, fenced);
@@ -568,10 +587,52 @@ test('source HTTP: same fenced original remints only scoped readback and close, 
     const closeId = randomUUID(), close = await f.publicCall('/v1/executions/' + ref + '/close',
       { operationId: closeId, reason: 'cancelled' }, final.bearer);
     assert.equal(close.status, 200); assert.deepEqual(await close.json(), { operationRef: closeId, state: 'applied' });
-    assert.equal((await f.kernel.savedExecution(f.context, ref)).state, 'closed');
-    assert.equal((await mint()).status, 403, 'closed original is not a fenced issuance exception');
+    assert.deepEqual(await f.kernel.savedExecution(f.context, ref), fenced);
+    assert.ok(f.executionCleanup.has(executionKey));
+    const closeRead = await f.publicCall('/v1/operations/' + closeId, undefined, final.bearer);
+    assert.equal(closeRead.status, 200); assert.deepEqual(await closeRead.json(), { operationRef: closeId, state: 'applied' });
+    const afterClose = await mint(); assert.equal(afterClose.status, 200, 'close of fenced original retains scoped readback');
+    const retainedAfterClose = await afterClose.json() as Access;
+    assert.equal(retainedAfterClose.bearer, final.bearer);
+    assert.equal(retainedAfterClose.operation.result.state, 'fenced');
+    const afterCloseStatus = await f.publicCall('/v1/executions/' + ref + '/requests/' + requestId, undefined, final.bearer,
+      { accept: 'application/json' });
+    assert.equal(afterCloseStatus.status, 200); assert.equal((await afterCloseStatus.json() as { effect: string }).effect, 'effect_unknown');
+    assert.equal((await f.publicCall('/v1/executions/' + randomUUID(), undefined, final.bearer)).status, 403);
     await denyDispatch(final.bearer, final.admission);
-    assert.equal(f.executions.size, 1); assert.equal(f.seen.length, nativeCalls);
+
+    // A distinct row actually closed from open still denies identical remint.
+    const closedInput = { ...input, operationId: randomUUID(), invocationRef: 'source-closed-original' };
+    const closedMint = () => f.publicCall('/internal/v1/run-access', closedInput, 'source-public-run');
+    const openReply = await closedMint(); assert.equal(openReply.status, 200);
+    const open = await openReply.json() as Access, closedRef = open.operation.result.executionRef;
+    const closedOriginal = await f.kernel.savedExecution(f.context, closedRef);
+    const closedReply = await f.publicCall('/v1/executions/' + closedRef + '/close', { operationId: randomUUID(), reason: 'completed' }, open.bearer);
+    assert.equal(closedReply.status, 200);
+    assert.equal((await f.kernel.savedExecution(f.context, closedRef)).state, 'closed');
+    const closedDenied = await closedMint(); assert.equal(closedDenied.status, 403);
+    assert.equal((await closedDenied.json() as { effect: string }).effect, 'effect_unknown');
+
+    // Restore between the final saved read and issuance must be observed by a
+    // fresh server issuer proof, even though exact prepare accepts the old HMAC.
+    f.control.bearers.replace(f.cfg.bearers);
+    const savedExecution = f.kernel.savedExecution, freshIssuer = randomUUID();
+    let reads = 0;
+    f.kernel.savedExecution = async (...args) => {
+      const saved = await savedExecution(...args);
+      if (++reads === 2) await f.kernel.restore(f.context, original.admission.issuerEpoch, freshIssuer);
+      return saved;
+    };
+    const restoredDenied = await mint(); assert.equal(restoredDenied.status, 403);
+    assert.equal((await restoredDenied.json() as { effect: string }).effect, 'effect_unknown');
+    f.kernel.savedExecution = savedExecution;
+    assert.equal(await f.kernel.issuer(f.context), freshIssuer);
+    const restoredClosed = await f.kernel.savedExecution(f.context, closedRef);
+    assert.equal(restoredClosed.state, 'fenced'); assert.equal(restoredClosed.generation, closedOriginal.generation);
+    assert.deepEqual(restoredClosed.admission, closedOriginal.admission);
+    const restoredClosedDenied = await closedMint(); assert.equal(restoredClosedDenied.status, 403);
+    assert.equal((await restoredClosedDenied.json() as { effect: string }).effect, 'effect_unknown');
+    assert.equal(f.executions.size, 2); assert.equal(f.seen.length, nativeCalls);
   } finally { await f.close(); }
 });
 

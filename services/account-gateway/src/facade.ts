@@ -431,6 +431,9 @@ export function createFacade(options: FacadeOptions): Server {
           issuerEpoch: issuer, deadline: new Date(input.deadline), limits: input.limits });
         if (op.state !== 'applied' || !op.executionRef) throw new KernelError('unavailable');
         const saved = savedCopy(await kernel.savedExecution(context, op.executionRef));
+        // Exact original intent keeps its persisted issuer for HMAC/readback;
+        // restore rotation must still deny the fenced issuance exception.
+        if (saved.state === 'fenced' && await kernel.issuer(context) !== saved.admission.issuerEpoch) throw new KernelError('denied');
         requireCurrent(grant);
         const bearer = bearers.upsertExecution(grant, saved, original);
         const { executionRef: _execution, issuerEpoch: _issuer, ...projection } = saved.admission;
