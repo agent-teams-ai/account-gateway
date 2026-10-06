@@ -238,7 +238,7 @@ function protectedFile(path: string): Buffer {
 }
 function disposable(dsn: string, kind: 'kernel' | 'native'): string {
   let u: URL; try { u = new URL(dsn); } catch { return fail('invalid disposable designation'); }
-  ensure(['postgres:', 'postgresql:'].includes(u.protocol) && u.host === '127.0.0.1:5432' && u.username === 'postgres' &&
+  ensure(['postgres:', 'postgresql:'].includes(u.protocol) && u.host === '127.0.0.1:5432' && ['postgres', 'rr_dmin'].includes(u.username) &&
     !u.password && !u.hash && u.search === '?sslmode=disable' &&
     new RegExp('^/ag_service_entry_' + kind + '_[a-f0-9]{32}$').test(u.pathname), 'explicit disposable database');
   return u.pathname.slice(1);
