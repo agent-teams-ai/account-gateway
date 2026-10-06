@@ -132,8 +132,10 @@ export function captureServiceBearers(value: unknown, consumerId: string, profil
     for (const b of bearers) {
       if (b.consumerId !== consumerId || !['management','run-control'].includes(b.role)) deny();
       if (b.role === 'management') {
-        object(b, ['token','role','consumerId','ownerRefs','preparation']);
+        object(b, ['token','role','consumerId','ownerRefs','preparation'], ['profileIds']);
         object(b.preparation, ['accountRefs','subjectRef','policyRevision','bindingRevision','profileId','limits','maxRunMs']);
+        if (b.profileIds !== undefined && (!Array.isArray(b.profileIds) ||
+            b.profileIds.some(id => !profiles.some(p => p.profile === id)))) deny();
       } else object(b, ['token','role','consumerId','ownerRefs','profileIds','limits','maxRunMs']);
       const ids = b.role === 'management' ? [b.preparation.profileId] : b.profileIds;
       if (!Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length) deny();

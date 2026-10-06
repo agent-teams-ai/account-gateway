@@ -21,6 +21,8 @@ import { object } from '../src/native-wire.ts';
 import { captureOAuthEnrollmentConfig, captureServiceProfiles, captureServiceBearers, openRouterProfile, ServiceError } from '../src/service-config.ts';
 import { AccountManagement } from '../src/management.ts';
 import { PostgresKernel } from '../src/postgres.ts';
+import { FacadeBearers } from '../src/facade.ts';
+import { KernelError } from '../src/domain.ts';
 
 // Keep the production restart scenario executable against the exact old base:
 // its meaningful RED must be missing automatic closure, not a missing import.
@@ -172,6 +174,30 @@ test('source catalog: singleton compatibility and finite simultaneous per-profil
       profileId: secondProfile.profile, limits: secondProfile.limits, maxRunMs: 1000 } };
   assert.equal(captureServiceBearers([grant], grant.consumerId, profiles).length, 1);
   const denied = (work: () => unknown) => assert.throws(work, e => e instanceof ServiceError && e.code === 'config_denied');
+  const legacy = new FacadeBearers([grant]).resolve(grant.token);
+  assert.ok(legacy && legacy.role === 'management'); assert.equal(Object.hasOwn(legacy, 'profileIds'), false);
+  // Management narrowing is independent of the preparation profile and caps.
+  const explicit = { ...grant, profileIds: [secondProfile.profile],
+    preparation: { ...grant.preparation, profileId: profile.profile, limits: profile.limits } };
+  assert.deepEqual(captureServiceBearers([explicit], grant.consumerId, profiles)[0], explicit);
+  for (const profileIds of [[], [profile.profile, profile.profile], ['bad/profile'], ['x'.repeat(65)],
+    Array.from({ length: 129 }, (_, i) => 'profile-' + i)]) {
+    assert.throws(() => new FacadeBearers([{ ...grant, profileIds }]), e => e instanceof KernelError && e.code === 'invalid');
+    denied(() => captureServiceBearers([{ ...grant, profileIds }], grant.consumerId, profiles));
+  }
+  for (const profileIds of [['unconfigured'], [1], null, 'profile'])
+    denied(() => captureServiceBearers([{ ...grant, profileIds }], grant.consumerId, profiles));
+  assert.equal(new FacadeBearers([{ ...grant, profileIds: Array.from({ length: 128 }, (_, i) => 'profile-' + i) }]).resolve(grant.token)?.role, 'management');
+  const callerIds = [profile.profile], configured = { ...grant, profileIds: callerIds };
+  const mapping = new FacadeBearers([configured]), captured = mapping.resolve(grant.token);
+  assert.ok(captured && captured.role === 'management');
+  callerIds[0] = secondProfile.profile;
+  assert.deepEqual(captured.profileIds, [profile.profile]); assert.notEqual(captured.profileIds, callerIds);
+  assert.ok(Object.isFrozen(captured.profileIds));
+  mapping.replace([configured]);
+  assert.equal(mapping.current(captured), false);
+  const replaced = mapping.resolve(grant.token); assert.ok(replaced && replaced.role === 'management');
+  assert.deepEqual(replaced.profileIds, [secondProfile.profile]);
   for (const patch of [{ profile: profile.profile }, { profile: 'openrouter-alias' }, { baseURL: profile.baseURL },
     { model: profile.model }, { endpoint: secondProfile.baseURL }, { providerTokenUpperBound: 49 },
     { limits: { ...limits, concurrency: 5 } }]) {
