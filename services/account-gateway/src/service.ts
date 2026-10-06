@@ -206,7 +206,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   const cfg = loadServiceConfig(configFile); // Fully frozen before any await.
   const pool = new pg.Pool({ connectionString: cfg.kernelDSN, max: 8, connectionTimeoutMillis: 5000,
     query_timeout: 5000, statement_timeout: 5000, idle_in_transaction_session_timeout: 5000 });
-  pool.on('error', () => fail());
+  pool.on('error', fail);
   const kernel = new PostgresKernel(pool, undefined, cfg.durableFacts), worker = randomUUID(), ctx = Object.freeze({ consumerId: cfg.consumer.consumerId });
   const custody = new IntentSecrets(keyBytes(cfg.keys.intentAEAD), keyBytes(cfg.keys.intentHMAC));
   const store = new PostgresManagementStore(pool, custody);
@@ -217,6 +217,12 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   let original: ProcessBinding | undefined, ready = false, invalid = false, stopping = false;
   let terminal: 'retired' | 'pending' | undefined, retirement: Retirement | undefined;
   let child: ReturnType<typeof spawn> | undefined, options: FacadeOptions | undefined;
+  type StartupStage = 'starting' | 'ready' | 'heartbeat' | 'facade-listen';
+  let startupStage: StartupStage | undefined = 'starting';
+  let startupFailure: { cause: unknown; stage: StartupStage } | undefined;
+  function retainStartupFailure(cause: unknown) {
+    if (startupStage !== undefined && !startupFailure) startupFailure = { cause, stage: startupStage };
+  }
   let notify: (() => void) | undefined;
   const pulse = () => { notify?.(); notify = undefined; };
   function startupActive() {
@@ -241,7 +247,10 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   let inFlightTick: Promise<void> = Promise.resolve(), enrollmentWaiters = 0;
   let wakeSleep: (() => void) | undefined;
   function denyAdmission() { bearers.replace([]); facade?.closeAllConnections(); }
-  function fail() { invalid = true; denyAdmission(); pulse(); void stop(); }
+  function fail(error?: unknown) {
+    if (!stopping && error !== undefined) retainStartupFailure(error);
+    invalid = true; denyAdmission(); pulse(); void stop();
+  }
   const callback = createServer({ maxHeaderSize: 16_384, headersTimeout: 5000, requestTimeout: 5000,
     keepAliveTimeout: 1000, connectionsCheckingInterval: 100 }, (req, res) => {
     // Go's first enrollment can arrive before stdout's actual starting binding.
@@ -299,7 +308,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     child = spawn(cfg.native.executable, ['--bootstrap-file', cfg.native.bootstrapFile, '--authority-dir', cfg.native.authorityDir,
       '--origin-ref', cfg.native.originRef, '--engine-uid', String(cfg.native.uid), '--engine-gid', String(cfg.native.gid)],
     { env: {}, stdio: ['ignore','pipe','pipe'], detached: false });
-    child.once('error', () => { exited = true; exitResolve(); fail(); });
+    child.once('error', error => { exited = true; exitResolve(); fail(error); });
     child.once('exit', () => { exited = true; denyAdmission(); pulse(); if (!stopping) fail(); });
     child.once('close', code => {
       exitCode = code; exited = true; exitResolve(); denyAdmission(); pulse();
@@ -334,7 +343,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
           pulse();
         }
         if (buffer.length > 4096) throw new ServiceError('runtime_denied');
-      } catch { fail(); }
+      } catch (error) { fail(error); }
     });
     child.stdout!.once('end', () => { if (buffer.length || !terminal) fail(); });
     child.stdout!.on('error', fail); child.stderr!.on('error', fail);
@@ -344,13 +353,16 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     const enrollment = Object.freeze({ originRef: binding.originRef, engineIncarnation: binding.incarnation, worker });
     const { authority, transport } = composeServiceNative(cfg, control, kernel, store, enrollment);
     handler = authority.createServer(); install();
+    startupStage = 'ready';
     await waitFor(() => ready, 10_000);
     startupActive();
+    startupStage = 'heartbeat';
     await kernel.heartbeat(ctx, worker);
     startupActive();
     options = { kernel, management, store, bearers, enrollment, transport,
       profiles: catalog, intentHmacKey: keyBytes(cfg.keys.facadeHMAC), ingressBytes: Math.max(1024, ...profiles.map(p => p.limits.requestBytes)),
       bufferBytes: 65_536 };
+    startupStage = 'facade-listen';
     facade = createFacade(options); facade.on('error', fail);
     await listen(facade, cfg.facadeOrigin);
     startupActive();
@@ -395,11 +407,19 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
         });
       }
     })().catch(fail);
+    startupStage = undefined;
     return Object.freeze({ binding, stopped, stop });
-  } catch {
-    await stop();
-    // A listen already in flight at cancellation can finish after stop's snapshot.
-    await Promise.all([close(facade), close(callback), close(handler)]);
-    throw new ServiceError('startup_denied');
+  } catch (error) {
+    retainStartupFailure(error);
+    const denied = new ServiceError('startup_denied');
+    Object.defineProperties(denied, {
+      cause: { value: startupFailure!.cause, enumerable: false },
+      startupStage: { value: startupFailure!.stage, enumerable: false },
+    });
+    try {
+      await stop();
+      // A listen already in flight at cancellation can finish after stop's snapshot.
+      await Promise.all([close(facade), close(callback), close(handler)]);
+    } finally { throw denied; }
   }
 }

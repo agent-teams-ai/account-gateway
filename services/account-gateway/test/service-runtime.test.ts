@@ -616,7 +616,19 @@ test('production service entry: startup rollback, SAME OPEN, abrupt held-stream 
         await lock.query('LOCK TABLE ag_kernel.requests IN ACCESS EXCLUSIVE MODE');
         const blocker = (await lock.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
         startup = startService(configFile, abort.signal).then(s => { service = s; return false; },
-          (error: unknown) => error instanceof Error && 'code' in error && error.code === 'startup_denied');
+          (error: unknown) => {
+            assert.ok(error instanceof ServiceError);
+            assert.equal(error.code, 'startup_denied');
+            assert.ok(error.cause instanceof ServiceError);
+            assert.equal(error.cause.code, 'startup_denied');
+            assert.equal(Object.getOwnPropertyDescriptor(error, 'startupStage')?.value, 'starting');
+            for (const field of ['cause', 'startupStage']) {
+              assert.equal(Object.getOwnPropertyDescriptor(error, field)?.enumerable, false);
+              assert.equal(Object.hasOwn({ ...error }, field), false);
+              assert.equal(Object.hasOwn(JSON.parse(JSON.stringify(error)), field), false);
+            }
+            return true;
+          });
         const probe = 'SELECT transport_occupied,closure_token,native_origin_ref,engine_incarnation,request_nonce,descriptor_generation FROM ag_kernel.requests LIMIT 0';
         const deadline = Date.now() + 2000; let blocked = false;
         do {
