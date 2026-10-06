@@ -272,12 +272,21 @@ export class PostgresKernel implements DurableKernel {
       if (!['creating','quarantined'].includes(c.state)) throw new KernelError('denied');
       if (c.state === 'creating' && c.worker !== worker) throw new KernelError('denied');
       const a = await this.one(tx, 'SELECT * FROM accounts WHERE consumer=$1 AND ref=$2', [tx.consumer, c.account_ref]);
-      const stale = a.revision !== c.expected_revision || a.epoch !== c.expected_epoch ||
+      // Only initial staging birth tolerates metadata rename after its permit.
+      // Reconnect still loses metadata CAS; no authority fence is waived.
+      const stagingRename = a.state === 'staging' && c.old_generation === null &&
+        a.active_generation === null && a.revision >= c.expected_revision;
+      const stale = acknowledged.state === 'unknown' || (!stagingRename && a.revision !== c.expected_revision) ||
+        a.profile !== c.profile || a.epoch !== c.expected_epoch ||
         a.active_generation !== c.old_generation || c.state === 'quarantined' || !['staging','active','quarantined'].includes(a.state);
       await tx.db.query("UPDATE candidates SET native_identity=$3,state=$4 WHERE consumer=$1 AND generation=$2",
         [tx.consumer, c.generation, proof.nativePhysicalIdentity, stale ? 'quarantined' : 'ready']);
       if (stale) {
-        await tx.db.query("UPDATE operations SET state='rejected',code='revision_conflict' WHERE consumer=$1 AND id=$2", [tx.consumer, id]);
+        // A consumed candidate with exact physical proof may have effected.
+        // Bind cleanup identity and preserve prior unknown/fence classification
+        // atomically; it can never become a definitely-not-dispatched rejection.
+        await tx.db.query(`UPDATE operations SET state='unknown',code=CASE WHEN state='unknown' THEN code ELSE 'revision_conflict' END
+          WHERE consumer=$1 AND id=$2`, [tx.consumer, id]);
         await this.cleanup(tx, c.generation);
       } else {
         const promoted = (await tx.db.query(`UPDATE accounts SET active_generation=$3,state='active',

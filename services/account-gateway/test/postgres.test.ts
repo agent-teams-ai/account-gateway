@@ -439,10 +439,22 @@ test('staging, rename and reconnect use separate revision and epoch CAS', async 
   const sc = await a.startCandidate(ctx, stale.operationRef, w); assert.ok(sc);
   const renamed = await a.beginAccount(ctx, { operationId: op(), kind: 'rename', intentDigest: digest(),
     accountRef: active.accountRef, expectedRevision: promoted.revision, displayName: 'CAS winner' });
-  const lost = await a.acknowledgeCandidate(ctx, stale.operationRef, w,
-    { generation: sc.candidate, nativePhysicalIdentity: randomUUID(), profile: sc.profile });
-  assert.equal(lost.state, 'rejected');
-  assert.equal((await a.account(ctx, active.accountRef!)).revision, renamed.revision);
+  const staleProof = { generation: sc.candidate, nativePhysicalIdentity: randomUUID(), profile: sc.profile };
+  const lost = await a.acknowledgeCandidate(ctx, stale.operationRef, w, staleProof);
+  assert.equal(lost.state, 'unknown'); assert.equal(lost.code, 'revision_conflict');
+  const retained = await a.account(ctx, active.accountRef!);
+  assert.equal(retained.revision, renamed.revision); assert.equal(retained.displayName, 'CAS winner');
+  assert.equal(retained.epoch, promoted.epoch); assert.equal(retained.state, 'active');
+  const route = (await admin.query('SELECT active_generation FROM ag_kernel.accounts WHERE consumer=$1 AND ref=$2',
+    [ctx.consumerId, active.accountRef])).rows[0];
+  assert.equal(route.active_generation, pending.candidate, 'stale reconnect cannot replace the old active generation');
+  const staleCandidate = (await admin.query('SELECT state,native_identity FROM ag_kernel.candidates WHERE consumer=$1 AND generation=$2',
+    [ctx.consumerId, sc.candidate])).rows[0];
+  assert.equal(staleCandidate.state, 'quarantined'); assert.equal(staleCandidate.native_identity, staleProof.nativePhysicalIdentity);
+  assert.equal(await count('SELECT count(*)::integer n FROM ag_kernel.cleanup WHERE consumer=$1 AND generation=$2',
+    [ctx.consumerId, sc.candidate]), 1);
+  assert.deepEqual(await b.acknowledgeCandidate(ctx, stale.operationRef, w, staleProof), lost);
+  assert.equal(await b.startCandidate(ctx, stale.operationRef, w), undefined);
   await a.effect(ctx, e.result.executionRef!, 'old-before-promotion', w, 'response_started');
   await a.effect(ctx, e.result.executionRef!, 'old-before-promotion', w, 'completed');
   await a.acknowledgeTransportClosed(ctx, w, oldClaim.dispatch.closure);

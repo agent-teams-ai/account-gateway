@@ -366,13 +366,8 @@ export class AccountManagement {
         const active = await this.native.read(journal);
         if (active.length !== 1 || active[0].state !== 'active' || !sameCandidate(descriptor,physicalCandidate(active[0]))) throw new KernelError('conflict');
       }
-      if (qualified) {
-        // A late activation ACK never changes the original unknown effect into
-        // a not-dispatched rejection after worker-loss reconciliation.
-        await this.kernel.reconcile(ctx);
-        const current = await this.kernel.operation(ctx, journal.operationId);
-        if (current.state !== 'pending') return current;
-      }
+      // Final ACK atomically observes fences and binds exact cleanup identity,
+      // including a disable committed after the pending check or activation.
       return await this.kernel.acknowledgeCandidate(ctx, journal.operationId, worker,
         { generation: descriptor.generation, nativePhysicalIdentity: descriptor.nativePhysicalIdentity, profile: descriptor.profile });
     } catch {

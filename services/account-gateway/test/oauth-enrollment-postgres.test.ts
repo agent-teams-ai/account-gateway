@@ -9,6 +9,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { readFile, readdir } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
 import * as c from '@agent-teams/account-gateway/contracts';
 import { createManagementClient, GatewayError } from '@agent-teams/account-gateway/http';
@@ -238,7 +239,7 @@ async function fixture(options: FixtureOptions = {}) {
   }
   let origin = await startFacade();
   const client = () => createManagementClient({ role: 'management', origin, token });
-  return { context, kernel, store, worker, oauth, rows, requests, observedJournals, descriptorScopes, activationMappings,
+  return { context, kernel, store, worker, oauth, native, descriptorBoundary: descriptor, rows, requests, observedJournals, descriptorScopes, activationMappings,
     client, foreign: () => createManagementClient({ role: 'management', origin, token: foreignToken }),
     management: () => management, manager, origin: () => origin,
     state(value: OAuthReadback['state']) { connectState = value; },
@@ -363,19 +364,24 @@ test('F source: waiting ignores even a qualified injection; pending/missing desc
   });
 });
 
-// Regression: completed/staged custody infers a physical ID, skips committed
-// inactive proof or truncates CreatedAt before native activation and SQL ACK.
-test('F source: exact qualified descriptor alone promotes the original candidate and retains nanosecond birth', async () => {
+// Red if metadata rename rejects an already-effected initial birth, overwrites
+// the latest name, rotates authority, or bypasses exact qualified inactive proof.
+test('F source: staging rename preserves original qualified birth and epoch while retaining latest metadata', async () => {
   const f = await fixture({ descriptor: 'pending' }), command = input();
   try {
     await f.client().beginOAuth(sdkInput(command)); const j = await journal(f, command);
+    const original = await f.kernel.account(f.context, j.accountRef);
+    const renamed = await f.management().rename(f.context, { operationId: randomUUID(), accountRef: j.accountRef,
+      expectedRevision: original.revision, displayName: 'Latest staging name' });
+    assert.equal(renamed.state, 'applied'); assert.equal(renamed.epoch, original.epoch);
     f.state('completed'); assert.equal((await f.client().readOAuth(command.operationId)).state, 'pending');
     await assertInert(f, j);
     f.descriptor('qualified');
     const applied = await f.client().readOAuth(command.operationId);
     assert.ok(applied.state === 'applied' && applied.result?.kind === 'account');
     assert.equal(applied.result.accountRef, j.accountRef);
-    assert.equal(applied.result.authorizationEpoch, 1); assert.equal(applied.result.metadataRevision, 2);
+    assert.equal(applied.result.authorizationEpoch, original.epoch);
+    assert.equal(applied.result.metadataRevision, renamed.revision! + 1);
     const mapping = await f.store.mapping(f.context, j.generation); assert.ok(mapping);
     assert.equal(mapping.descriptor.createdAt, birth); assert.equal(mapping.descriptor.nativePhysicalIdentity, j.generation);
     assert.equal(mapping.descriptor.nativeId, f.rows.get(j.generation)?.nativeId);
@@ -383,7 +389,11 @@ test('F source: exact qualified descriptor alone promotes the original candidate
     const saved = (await pool.query('SELECT active_generation FROM ag_kernel.accounts WHERE consumer=$1 AND ref=$2',
       [f.context.consumerId, j.accountRef])).rows[0];
     assert.equal(saved.active_generation, j.generation);
-    assert.equal((await f.client().get(j.accountRef)).state, 'active');
+    const account = await f.client().get(j.accountRef);
+    assert.equal(account.state, 'active'); assert.equal(account.displayName, 'Latest staging name');
+    assert.equal(account.authorizationEpoch, original.epoch);
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM ag_kernel.cleanup WHERE consumer=$1',
+      [f.context.consumerId])).rows[0].n, 0, 'harmless staging rename must not schedule birth cleanup');
     await f.restart();
     const before = f.stats();
     assert.deepEqual(await f.client().readOAuth(command.operationId), applied);
@@ -391,6 +401,70 @@ test('F source: exact qualified descriptor alone promotes the original candidate
     assert.deepEqual(f.stats(), before, 'applied readback cannot activate or Begin again');
     await assertPinned(f, j);
   } finally { await f.close(); }
+});
+
+// Red if final ACK overwrites a committed disable's unknown with rejected,
+// promotes through its epoch/state fence, or loses exact physical cleanup proof.
+test('F source: disable wins final native ACK atomically without erasing effected classification', async () => {
+  const f = await fixture({ descriptor: 'qualified' }), command = input(), pending: Promise<unknown>[] = [];
+  const gate = await pool.connect();
+  try {
+    await f.client().beginOAuth(sdkInput(command)); const j = await journal(f, command);
+    f.state('completed'); assert.equal((await f.oauth.read(scope(j))).state, 'completed');
+    const qualified = await f.descriptorBoundary.describe(scope(j)); assert.equal(qualified.state, 'qualified');
+    assert.ok(qualified.state === 'qualified');
+    const [inactive] = await f.native.read(j); assert.ok(inactive);
+    assert.equal(inactive.state, 'inactive'); assert.equal(sameCandidate(inactive, qualified.native), true);
+    const mapping = { ...j, descriptor: qualified.native }; await f.store.saveMapping(mapping);
+    await f.native.setState(mapping, 'active');
+    const [active] = await f.native.read(j); assert.ok(active);
+    assert.equal(active.state, 'active'); assert.equal(sameCandidate(active, qualified.native), true);
+    const original = await f.kernel.account(f.context, j.accountRef);
+    assert.equal((await f.kernel.operation(f.context, command.operationId)).state, 'pending');
+    await gate.query('BEGIN');
+    await gate.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE', [f.context.consumerId]);
+    const gatePid = (await gate.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
+    async function blockedBy(pid: number): Promise<number> {
+      const until = process.hrtime.bigint() + 5_000_000_000n;
+      while (process.hrtime.bigint() < until) {
+        await gate.query('SELECT pg_stat_clear_snapshot()');
+        const blocked = (await gate.query(`SELECT pid FROM pg_stat_activity WHERE datname=current_database()
+          AND $1=ANY(pg_blocking_pids(pid)) AND wait_event_type='Lock'`, [pid])).rows[0];
+        if (blocked) return blocked.pid as number;
+        await delay(10);
+      }
+      throw new Error('final ACK fixture did not reach the real SQL lock boundary');
+    }
+    const disable = f.management().disable(f.context, { operationId: randomUUID(), accountRef: j.accountRef,
+      expectedRevision: original.revision }); pending.push(disable); void disable.catch(() => undefined);
+    const disablePid = await blockedBy(gatePid);
+    const proof = { generation: active.generation, nativePhysicalIdentity: active.nativePhysicalIdentity, profile: active.profile };
+    const ack = f.kernel.acknowledgeCandidate(f.context, command.operationId, f.worker, proof);
+    pending.push(ack); void ack.catch(() => undefined);
+    assert.notEqual(await blockedBy(disablePid), disablePid, 'ACK waits behind the actual disable transaction');
+    await gate.query('COMMIT');
+    assert.equal((await disable).state, 'applied');
+    const result = await ack; assert.equal(result.state, 'unknown'); assert.equal(result.code, 'account_disabled');
+    const visible = await f.client().readOAuth(command.operationId);
+    assert.ok(visible.state === 'unknown' && visible.error?.effect === 'effect_unknown');
+    const account = await f.kernel.account(f.context, j.accountRef);
+    assert.equal(account.state, 'disabled'); assert.equal(account.epoch, original.epoch + 1);
+    const saved = (await pool.query(`SELECT a.active_generation,c.state,c.native_identity FROM ag_kernel.accounts a
+      JOIN ag_kernel.candidates c ON c.consumer=a.consumer AND c.account_ref=a.ref
+      WHERE a.consumer=$1 AND a.ref=$2 AND c.generation=$3`, [f.context.consumerId, j.accountRef, j.generation])).rows[0];
+    assert.equal(saved.active_generation, null); assert.equal(saved.state, 'quarantined');
+    assert.equal(saved.native_identity, proof.nativePhysicalIdentity);
+    const cleanup = await f.kernel.claimCleanup(f.context, f.worker);
+    assert.ok(cleanup?.scope.kind === 'generation'); assert.equal(cleanup.scope.generation, j.generation);
+    assert.deepEqual(cleanup.scope.descriptor, proof);
+    assert.deepEqual(await f.kernel.acknowledgeCandidate(f.context, command.operationId, f.worker, proof), result);
+    await assert.rejects(f.kernel.acknowledgeCandidate(f.context, command.operationId, f.worker,
+      { ...proof, nativePhysicalIdentity: randomUUID() }), code('conflict'));
+    assert.equal(await f.kernel.startCandidate(f.context, command.operationId, f.worker), undefined);
+    assert.equal((await f.client().beginOAuth(sdkInput(command))).operation.state, 'unknown');
+    assert.equal(f.stats().activations, 1); assert.deepEqual(f.activationMappings, [mapping.descriptor]);
+    await assertPinned(f, j);
+  } finally { await gate.query('ROLLBACK'); gate.release(); await Promise.allSettled(pending); await f.close(); }
 });
 
 // Regression: a profile/model/origin/birth/account substitution still saves a
@@ -448,7 +522,7 @@ test('F source: ambiguous or expired connect readback quarantines without recrea
 // account, or conflates custody outcome staged with actual connect state.
 test('F source: native read rejects URL and correlation changes; completed discards custody outcome', async t => {
   for (const variant of [{ authorize_url: authorizationURL() }, { operation: randomUUID() },
-    { account_ref: randomUUID() }, { state: 'staged' }, { token: 'synthetic-forbidden' }]) {
+    { account_ref: randomUUID() }, { token: 'synthetic-forbidden' }]) {
     await t.test(Object.keys(variant)[0], async () => {
       const f = await fixture(), command = input();
       try {
