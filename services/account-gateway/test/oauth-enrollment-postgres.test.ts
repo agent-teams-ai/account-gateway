@@ -394,6 +394,41 @@ test('F refresh: committed real journal/HTTP selection advances past dropped ACK
     assert.equal(await manager.refreshOAuth(f.context), 'deferred');
     assert.equal(await manager.refreshOAuth(f.context), 'observed');
     assert.deepEqual(f.refreshRequests, [wire(scope(a)), wire(scope(b)), wire(scope(a)), wire(scope(b))]);
+    // RED on 8261bb3: shutdown during selection still starts native HTTP after SQL unlocks.
+    const gate = await pool.connect(), shutdown = new AbortController(), wait = new AbortController();
+    const attemptsBefore = f.refreshRequests.length;
+    let selecting: Promise<Awaited<ReturnType<AccountManagement['refreshOAuth']>>> | undefined;
+    try {
+      await f.kernel.heartbeat(f.context, f.worker);
+      await gate.query('BEGIN');
+      await gate.query("SET LOCAL statement_timeout='3500ms'");
+      await gate.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE', [f.context.consumerId]);
+      const pid = (await gate.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
+      selecting = Promise.race([manager.refreshOAuth(f.context, false, shutdown.signal),
+        delay(6500, undefined, { signal: wait.signal }).then(() => { throw new Error('shutdown refresh did not settle'); })]);
+      void selecting.catch(() => undefined);
+      const deadline = process.hrtime.bigint() + 2_500_000_000n; let blocked = false;
+      while (!blocked && process.hrtime.bigint() < deadline) {
+        await gate.query('SELECT pg_stat_clear_snapshot()');
+        blocked = ((await gate.query(`SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
+          AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))`, [pid])).rowCount ?? 0) > 0;
+        if (!blocked) await delay(10);
+      }
+      assert.equal(blocked, true, 'refresh selector reached the actual consumer SQL lock');
+      assert.equal(f.refreshRequests.length, attemptsBefore, 'no native HTTP while SQL selection is blocked');
+      shutdown.abort(); await gate.query('COMMIT');
+      const result = await selecting;
+      await gate.query('BEGIN');
+      await gate.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE NOWAIT', [f.context.consumerId]);
+      await gate.query('COMMIT');
+      assert.equal(f.refreshRequests.length, attemptsBefore, 'shutdown during selection must not start native HTTP');
+      assert.equal(result, 'idle');
+    } finally {
+      shutdown.abort();
+      const rollback = { text: 'ROLLBACK', query_timeout: 3500 };
+      try { await gate.query(rollback); }
+      finally { gate.release(); await selecting?.catch(() => undefined); wait.abort(); }
+    }
     assert.deepEqual(await f.kernel.account(f.context, a.accountRef), accountBefore);
     assert.deepEqual(await f.kernel.savedExecution(f.context, execution.executionRef), savedBefore);
     assert.deepEqual(await f.store.readJournal(f.context, a.operationId), a);

@@ -198,9 +198,10 @@ export class AccountManagement {
     this.oauth = oauth;
     this.refreshNative = options.refresh;
   }
-  async refreshOAuth(context: TrustedContext, cleanupAcquired = false): Promise<'idle' | 'deferred' | 'observed'> {
+  async refreshOAuth(context: TrustedContext, cleanupAcquired = false,
+    signal?: AbortSignal): Promise<'idle' | 'deferred' | 'observed'> {
     const ctx = captureContext(context);
-    if (cleanupAcquired || this.refreshInFlight || !this.oauth || !this.refreshNative ||
+    if (signal?.aborted || cleanupAcquired || this.refreshInFlight || !this.oauth || !this.refreshNative ||
         !this.store.nextOAuthRefresh) return 'idle';
     this.refreshInFlight = true;
     try {
@@ -214,7 +215,10 @@ export class AccountManagement {
           mapping.profile.qualificationRef !== this.oauth.profile.qualificationRef ||
           !exactCandidate(mapping, physicalCandidate(mapping.descriptor))) throw new KernelError('conflict');
       let result: OAuthRefreshReadback;
-      try { result = await this.refreshNative.refresh(oauthScope(mapping)); }
+      try {
+        if (signal?.aborted) return 'idle';
+        result = await this.refreshNative.refresh(oauthScope(mapping));
+      }
       catch { return 'deferred'; }
       if (result.operationId !== mapping.operationId || result.accountRef !== mapping.accountRef ||
           !['idle','prepared','entered','completed','unknown'].includes(result.state)) return 'deferred';

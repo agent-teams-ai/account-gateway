@@ -383,7 +383,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
           await kernel.settleCleanup(ctx, claim.cleanupRef, worker, claim.token, closed);
         }
         if (stopping) return;
-        await management.refreshOAuth(ctx, claim !== undefined);
+        await management.refreshOAuth(ctx, claim !== undefined, readbackAbort.signal);
     }
     maintenance = (async () => {
       while (!stopping) {
