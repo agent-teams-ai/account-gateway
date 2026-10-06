@@ -114,6 +114,8 @@ async function sourceHTTP(oauth: boolean) {
     },
     async acknowledgeCandidate(c, id) {
       const op = await kernel.operation(c, id), account = await kernel.account(c, op.accountRef!);
+      if (op.state !== 'pending') return op;
+      if (account.state === 'active') { account.revision++; account.epoch++; }
       account.state = 'active'; op.state = 'applied'; op.revision = account.revision; op.epoch = account.epoch; return op;
     },
     async unknownCandidate(c, id) { const op = await kernel.operation(c, id); op.state = 'unknown'; return op; },
@@ -708,9 +710,18 @@ test('source HTTP: explicit management profile capability denies same-owner MiMo
     assert.equal((await named(accountRef, 'rename')).status, 200);
     const renamed = await f.publicCall('/v1/accounts/' + accountRef);
     assert.equal((await renamed.json() as { displayName: string }).displayName, 'Renamed');
-    assert.equal((await named(accountRef, 'reconnect', 2)).status, 200);
+    const reconnected = await named(accountRef, 'reconnect', 2); assert.equal(reconnected.status, 200);
+    const reconnectOp = await reconnected.json() as { result: { metadataRevision: number; authorizationEpoch: number } };
+    assert.equal(reconnectOp.result.metadataRevision, 3); assert.equal(reconnectOp.result.authorizationEpoch, 2);
     assert.equal(f.seen.filter(r => r.path === 'POST /private/native/v1/candidates').length, 2);
-    assert.equal((await named(accountRef, 'disable', 2)).status, 200); assert.equal(mutations, 4);
+    const active = await (await f.publicCall('/v1/accounts/' + accountRef)).json() as {
+      state: string; metadataRevision: number; authorizationEpoch: number };
+    assert.equal(active.state, 'active'); assert.equal(active.metadataRevision, 3); assert.equal(active.authorizationEpoch, 2);
+    const beforeStaleNative = f.seen.length, beforeStaleOperations = f.operations.size;
+    assert.equal((await named(accountRef, 'disable', 2)).status, 409); assert.equal(mutations, 4);
+    assert.equal(f.seen.length, beforeStaleNative); assert.equal(f.operations.size, beforeStaleOperations);
+    assert.deepEqual(await (await f.publicCall('/v1/accounts/' + accountRef)).json(), active);
+    assert.equal((await named(accountRef, 'disable', 3)).status, 200); assert.equal(mutations, 5);
     assert.equal((await f.publicCall('/v1/operations/' + op.operationRef)).status, 200, 'accepted operation readback survives');
     // Removing the opt-in retains both configured API-key profiles under one
     // token whose preparation remains MiMo, just like the existing RR caller.
