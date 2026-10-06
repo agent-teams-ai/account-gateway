@@ -23,6 +23,8 @@ export interface AuthorityOptions { readonly config: BridgeConfig; readonly kern
   readonly store: Pick<ManagementStore, 'mapping'>;
   readonly profileLimits?: readonly { readonly profile: string; readonly limits: Readonly<ApprovedLimits> }[];
   readonly oauthOwners?: { readonly store: Pick<ManagementStore, 'readJournal'>;
+    readonly bearers: Pick<FacadeBearers, 'authorizesOwner'> };
+  readonly oauthRefreshOwners?: { readonly store: Pick<ManagementStore, 'activeOAuthRefresh'>;
     readonly bearers: Pick<FacadeBearers, 'authorizesOwner'> } }
 const hash = (s: string) => createHash('sha256').update(s).digest();
 const key = (ctx: TrustedContext, ref: string, id: string) => JSON.stringify([ctx.consumerId, ref, id]);
@@ -34,6 +36,7 @@ export class NativeAuthority {
   readonly kernel: DurableKernel & ExecutionRead;
   readonly #store: Pick<ManagementStore, 'mapping'>;
   readonly #owners: AuthorityOptions['oauthOwners'];
+  readonly #refreshOwners: AuthorityOptions['oauthRefreshOwners'];
   readonly #limits = new Map<string, Readonly<ApprovedLimits>>();
   readonly #pending = new Map<string, Association>();
   readonly #callers: readonly { hash: Buffer; consumerId: string }[];
@@ -58,6 +61,7 @@ export class NativeAuthority {
       }
     }
     this.kernel = options.kernel; this.#store = options.store; this.#owners = options.oauthOwners;
+    this.#refreshOwners = options.oauthRefreshOwners;
     this.#callers = this.configuration.consumers.map(c => ({ hash: hash(c.callbackCredential), consumerId: c.consumerId }));
   }
   consumer(ctx: TrustedContext) {
@@ -150,6 +154,25 @@ export class NativeAuthority {
     if (!this.#owners.bearers.authorizesOwner(ctx, j.ownerRef, j.profile.profile)) return denied();
     return { ok: true, ownerRef: j.ownerRef };
   }
+  async #refreshOwner(ctx: TrustedContext, value: unknown): Promise<{ ok: true; ownerRef: string }> {
+    const r = object(value, ['consumerId','operationId','accountRef','generation']);
+    if (!this.#refreshOwners?.store.activeOAuthRefresh || r.consumerId !== ctx.consumerId) return denied();
+    identifier(r.operationId); uuid(r.accountRef); uuid(r.generation);
+    const p = this.configuration.profiles.find(p => p.profile === codexOAuthProfile.profile);
+    if (!p || p.baseURL !== codexOAuthProfile.baseURL || p.model !== codexOAuthProfile.model) return denied();
+    // One committed read binds journal, active generation, immutable physical
+    // mapping and current worker lease. Connect's staging owner path is separate.
+    const j = await this.#refreshOwners.store.activeOAuthRefresh(ctx, this.configuration.enrollment.worker,
+      { consumerId: ctx.consumerId, operationId: r.operationId, accountRef: r.accountRef, generation: r.generation }, p);
+    if (!j || j.consumerId !== ctx.consumerId || j.operationId !== r.operationId ||
+        j.accountRef !== r.accountRef || j.generation !== r.generation || !['create','reconnect'].includes(j.purpose) ||
+        j.profile.profile !== p.profile || j.profile.baseURL !== p.baseURL || j.profile.model !== p.model ||
+        j.profile.qualificationRef !== p.qualificationRef || !exactCandidate(j, physicalCandidate(j.descriptor))) return denied();
+    identifier(j.ownerRef);
+    // Final synchronous lookup observes replacement during the SQL await.
+    if (!this.#refreshOwners.bearers.authorizesOwner(ctx, j.ownerRef, j.profile.profile)) return denied();
+    return { ok: true, ownerRef: j.ownerRef };
+  }
   async persisted(ctx: TrustedContext, p: NativeDispatchProof): Promise<void> {
     this.consumer(ctx);
     const e = this.configuration.enrollment;
@@ -217,7 +240,7 @@ export class NativeAuthority {
       res.once('close', () => clearTimeout(timer)); res.once('finish', () => clearTimeout(timer));
       const send = (status: number, body: unknown) => { if (!res.destroyed) { res.writeHead(status, { 'content-type': 'application/json', connection: 'close' }); res.end(JSON.stringify(body)); } };
       void (async () => {
-        if (req.method !== 'POST' || !req.url || !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority)$/.test(req.url) ||
+        if (req.method !== 'POST' || !req.url || !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-refresh-authority)$/.test(req.url) ||
             req.rawHeaders.length > 64 || singleton(req, 'content-type') !== 'application/json' ||
             req.rawHeaders.some((h, i) => i % 2 === 0 && ['content-encoding','transfer-encoding'].includes(h.toLowerCase()))) return denied();
         const authorization = singleton(req, 'authorization');
@@ -225,8 +248,10 @@ export class NativeAuthority {
         const h = hash(authorization.slice(7)), caller = this.#callers.find(c => timingSafeEqual(c.hash, h));
         if (!caller) return denied();
         const ownerLookup = req.url.endsWith('/oauth-owner-authority');
-        const ctx = Object.freeze({ consumerId: caller.consumerId }), body = await jsonBody(req, ownerLookup ? Math.min(1024, cfg.controlBytes) : cfg.controlBytes);
+        const refreshLookup = req.url.endsWith('/oauth-refresh-authority');
+        const ctx = Object.freeze({ consumerId: caller.consumerId }), body = await jsonBody(req, ownerLookup || refreshLookup ? Math.min(1024, cfg.controlBytes) : cfg.controlBytes);
         if (ownerLookup) { send(200, await this.#owner(ctx, body)); return; }
+        if (refreshLookup) { send(200, await this.#refreshOwner(ctx, body)); return; }
         if (req.url.endsWith('/enrollment')) {
           const r = object(body, ['originRef','engineIncarnation','qualificationRef']), e = cfg.enrollment;
           if (r.originRef !== e.originRef || r.engineIncarnation !== e.engineIncarnation || r.qualificationRef !== e.qualificationRef) return denied();

@@ -49,6 +49,16 @@ export interface OAuthEnrollmentNative {
   begin(scope: OAuthScope): Promise<OAuthBeginReadback>;
   read(scope: OAuthScope): Promise<OAuthReadback>;
 }
+export interface OAuthRefreshReadback {
+  readonly operationId: string; readonly accountRef: string;
+  readonly state: 'idle' | 'prepared' | 'entered' | 'completed' | 'unknown';
+  readonly refreshRef?: string;
+}
+export interface OAuthRefreshNative {
+  // Native alone owns due time, credential version and durable attempt identity.
+  refresh(scope: OAuthScope): Promise<OAuthRefreshReadback>;
+}
+export type OAuthSelectors = Pick<OAuthScope, 'consumerId' | 'operationId' | 'accountRef' | 'generation'>;
 export type OAuthDescriptor = {
   readonly operationId: string; readonly accountRef: string;
 } & ({ readonly state: 'staged'; readonly qualification: 'pending' } |
@@ -99,6 +109,11 @@ export interface ManagementStore {
   cleanupAllowed(context: TrustedContext, cleanupRef: string, worker: string, token: string,
     generation: string, identity: string, profile: string): Promise<boolean>;
   expire(context: TrustedContext): Promise<readonly CandidateJournal[]>;
+  // Optional for existing enrollment-only adapters; absence cannot grant refresh.
+  nextOAuthRefresh?(context: TrustedContext, worker: string, profile: ManagedProfile,
+    after?: string): Promise<CandidateMapping | undefined>;
+  activeOAuthRefresh?(context: TrustedContext, worker: string, selectors: OAuthSelectors,
+    profile: ManagedProfile): Promise<CandidateMapping | undefined>;
 }
 export type CreateInput = Pick<AccountIntent, 'operationId' | 'ownerRef' | 'profile' | 'displayName'> & { apiKey: string };
 export type ReconnectInput = Pick<AccountIntent, 'operationId' | 'accountRef' | 'expectedRevision'> & { apiKey: string };
@@ -155,9 +170,12 @@ export class AccountManagement {
   private readonly worker: string;
   private readonly profiles: ReadonlyMap<string, ManagedProfile>;
   private readonly oauth?: Readonly<OAuthEnrollmentOptions>;
+  private readonly refreshNative?: OAuthRefreshNative;
+  private refreshCursor?: string;
+  private refreshInFlight = false;
   constructor(options: { kernel: DurableKernel; store: ManagementStore; custody: IntentCustody;
     native: CandidateNative; proof: ControlledProof; worker: string; profiles: readonly ManagedProfile[];
-    oauth?: OAuthEnrollmentOptions }) {
+    oauth?: OAuthEnrollmentOptions; refresh?: OAuthRefreshNative }) {
     uuid(options.worker);
     if (!options.profiles.length || options.profiles.length > 128) throw new KernelError('invalid');
     const profiles = new Map<string, ManagedProfile>();
@@ -178,6 +196,34 @@ export class AccountManagement {
     this.kernel = options.kernel; this.store = options.store; this.custody = options.custody;
     this.native = options.native; this.proof = options.proof; this.worker = options.worker; this.profiles = profiles;
     this.oauth = oauth;
+    this.refreshNative = options.refresh;
+  }
+  async refreshOAuth(context: TrustedContext, cleanupAcquired = false,
+    signal?: AbortSignal): Promise<'idle' | 'deferred' | 'observed'> {
+    const ctx = captureContext(context);
+    if (signal?.aborted || cleanupAcquired || this.refreshInFlight || !this.oauth || !this.refreshNative ||
+        !this.store.nextOAuthRefresh) return 'idle';
+    this.refreshInFlight = true;
+    try {
+      const mapping = await this.store.nextOAuthRefresh(ctx, this.worker, this.oauth.profile, this.refreshCursor);
+      if (!mapping) { this.refreshCursor = undefined; return 'idle'; }
+      // Advance before external await, including a dropped ACK or native UNKNOWN.
+      // This hint is never an authority, retry receipt or durable refresh ledger.
+      this.refreshCursor = mapping.generation;
+      if (mapping.consumerId !== ctx.consumerId || mapping.profile.profile !== this.oauth.profile.profile ||
+          mapping.profile.baseURL !== this.oauth.profile.baseURL || mapping.profile.model !== this.oauth.profile.model ||
+          mapping.profile.qualificationRef !== this.oauth.profile.qualificationRef ||
+          !exactCandidate(mapping, physicalCandidate(mapping.descriptor))) throw new KernelError('conflict');
+      let result: OAuthRefreshReadback;
+      try {
+        if (signal?.aborted) return 'idle';
+        result = await this.refreshNative.refresh(oauthScope(mapping));
+      }
+      catch { return 'deferred'; }
+      if (result.operationId !== mapping.operationId || result.accountRef !== mapping.accountRef ||
+          !['idle','prepared','entered','completed','unknown'].includes(result.state)) return 'deferred';
+      return result.state === 'unknown' ? 'deferred' : 'observed';
+    } finally { this.refreshInFlight = false; }
   }
   supportsOAuthProfile(profile: string): boolean {
     return this.oauth !== undefined && profile === codexOAuthProfile.profile;

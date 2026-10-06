@@ -2,9 +2,9 @@ import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:
 import type { Pool, PoolClient } from 'pg';
 import { KernelError, identifier, uuid } from './domain.ts';
 import type { TrustedContext } from './domain.ts';
-import { captureContext, exactCandidate, physicalCandidate } from './management.ts';
+import { captureContext, codexOAuthProfile, exactCandidate, physicalCandidate } from './management.ts';
 import type { AcceptedIntent, CandidateJournal, CandidateMapping, CandidateScope, IntentCustody,
-  ManagedProfile, ManagementStore } from './management.ts';
+  ManagedProfile, ManagementStore, OAuthSelectors } from './management.ts';
 
 export interface IntentEnvelope { readonly nonce: Buffer; readonly ciphertext: Buffer; readonly tag: Buffer }
 function scopeCopy(s: CandidateScope): CandidateScope {
@@ -72,6 +72,39 @@ const journalValues = (j: CandidateJournal): readonly unknown[] => [j.consumerId
   j.ownerRef, j.purpose, j.generation, j.worker, j.profile.profile, j.profile.baseURL, j.profile.model, j.profile.qualificationRef];
 function sameJournal(a: CandidateJournal, b: CandidateJournal): boolean {
   return JSON.stringify(journalValues(a)) === JSON.stringify(journalValues(b));
+}
+type MappingRow = JournalRow & { native_physical_identity: string; native_id: string; native_created_at: string };
+function mappingRow(r: MappingRow): CandidateMapping {
+  const j = journalRow(r);
+  const descriptor = physicalCandidate({ generation: j.generation, nativePhysicalIdentity: r.native_physical_identity,
+    nativeId: Number(r.native_id), createdAt: r.native_created_at, profile: j.profile.profile,
+    baseURL: j.profile.baseURL, model: j.profile.model });
+  if (!exactCandidate(j, descriptor)) throw new KernelError('conflict');
+  return Object.freeze({ ...j, descriptor });
+}
+// Both selection and the protected callback use the same active physical scope.
+// The journal's worker is historical; the CURRENT service lease gates maintenance.
+const activeOAuthMapping = `SELECT j.*,m.native_physical_identity,m.native_id,m.native_created_at
+  FROM ag_kernel.accounts a JOIN ag_kernel.candidates c
+    ON c.consumer=a.consumer AND c.account_ref=a.ref AND c.generation=a.active_generation
+  JOIN ag_management.candidate_journal j
+    ON j.consumer=c.consumer AND j.generation=c.generation AND j.account_ref=a.ref
+      AND j.operation_id=c.operation_id AND j.owner_ref=a.owner_ref AND j.profile=c.profile
+  JOIN ag_management.physical_mappings m ON m.consumer=j.consumer AND m.generation=j.generation
+  JOIN ag_kernel.operations o ON o.consumer=j.consumer AND o.id=j.operation_id AND o.account_ref=a.ref
+  WHERE a.consumer=$1 AND a.state='active' AND a.profile=$3 AND c.state='ready'
+    AND c.native_identity=j.generation AND m.native_physical_identity=j.generation
+    AND j.profile=$3 AND j.base_url=$4 AND j.model=$5 AND j.qualification_ref=$6
+    AND j.purpose IN ('create','reconnect') AND o.state='applied' AND o.intent->>'kind'=j.purpose
+    AND EXISTS (SELECT 1 FROM ag_kernel.workers w WHERE w.consumer=a.consumer AND w.worker=$2
+      AND w.lease_until>clock_timestamp())`;
+function refreshProfile(source: ManagedProfile): ManagedProfile {
+  const p = Object.freeze({ profile: source.profile, baseURL: source.baseURL,
+    model: source.model, qualificationRef: source.qualificationRef });
+  if (p.profile !== codexOAuthProfile.profile || p.baseURL !== codexOAuthProfile.baseURL ||
+      p.model !== codexOAuthProfile.model) throw new KernelError('invalid');
+  identifier(p.qualificationRef);
+  return p;
 }
 
 export class PostgresManagementStore implements ManagementStore {
@@ -201,6 +234,36 @@ export class PostgresManagementStore implements ManagementStore {
         nativeId: Number(r.native_id), createdAt: r.native_created_at, profile: j.profile.profile, baseURL: j.profile.baseURL, model: j.profile.model });
       if (!exactCandidate(j,descriptor)) throw new KernelError('conflict');
       return Object.freeze({ ...j, descriptor });
+    });
+  }
+  async nextOAuthRefresh(context: TrustedContext, worker: string, source: ManagedProfile,
+    after?: string): Promise<CandidateMapping | undefined> {
+    const ctx = captureContext(context), p = refreshProfile(source), cursor = after;
+    uuid(worker); if (cursor !== undefined) uuid(cursor);
+    return this.tx(ctx.consumerId, async db => {
+      const values = [ctx.consumerId, worker, p.profile, p.baseURL, p.model, p.qualificationRef];
+      const select = async (after: string | undefined): Promise<MappingRow | undefined> =>
+        (await db.query<MappingRow>(activeOAuthMapping +
+          ' AND ($7::uuid IS NULL OR j.generation>$7::uuid) ORDER BY j.generation LIMIT 1',
+        [...values, after ?? null])).rows[0];
+      // At most two finite LIMIT 1 reads; no OFFSET or materialized account list.
+      const row = await select(cursor) ?? (cursor === undefined ? undefined : await select(undefined));
+      return row ? mappingRow(row) : undefined;
+    }); // tx COMMIT and release precede native HTTP, never span callback awaits.
+  }
+  async activeOAuthRefresh(context: TrustedContext, worker: string, input: OAuthSelectors,
+    source: ManagedProfile): Promise<CandidateMapping | undefined> {
+    const ctx = captureContext(context), p = refreshProfile(source);
+    const s = Object.freeze({ consumerId: input.consumerId, operationId: input.operationId,
+      accountRef: input.accountRef, generation: input.generation });
+    uuid(worker); identifier(s.operationId); uuid(s.accountRef); uuid(s.generation);
+    if (s.consumerId !== ctx.consumerId) throw new KernelError('denied');
+    return this.tx(ctx.consumerId, async db => {
+      const row = (await db.query<MappingRow>(activeOAuthMapping +
+        ' AND j.operation_id=$7 AND j.account_ref=$8 AND j.generation=$9 LIMIT 1',
+      [ctx.consumerId, worker, p.profile, p.baseURL, p.model, p.qualificationRef,
+        s.operationId, s.accountRef, s.generation])).rows[0];
+      return row ? mappingRow(row) : undefined;
     });
   }
   async cleanupAllowed(context: TrustedContext, cleanupRef: string, worker: string, token: string,

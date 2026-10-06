@@ -6,6 +6,7 @@ import { codexOAuthProfile, exactCandidate, physicalCandidate } from './manageme
 import type { CandidateJournal, CandidateMapping, CandidateNative, NativeReadback, PhysicalCandidate } from './management.ts';
 import type { OAuthScope, OAuthEnrollmentNative, OAuthReadback, OAuthBeginReadback } from './management.ts';
 import type { OAuthDescriptor, OAuthDescriptorBoundary } from './management.ts';
+import type { OAuthRefreshNative, OAuthRefreshReadback } from './management.ts';
 
 export type NativeFailureCode = 'unavailable' | 'deadline' | 'bounded' | 'redirect' | 'invalid_readback' | 'denied';
 export class NativeFailure extends Error {
@@ -126,7 +127,8 @@ class NativeControlHTTP {
     if (scope.consumerId !== this.#consumer) throw new NativeFailure('denied');
     uuid(scope.generation); uuid(scope.accountRef); identifier(scope.ownerRef);
   }
-  protected async call(method: 'POST' | 'GET' | 'PUT', path: string, value?: unknown): Promise<Buffer> {
+  protected async call(method: 'POST' | 'GET' | 'PUT', path: string, value?: unknown,
+    deadlineMs = this.#deadlineMs): Promise<Buffer> {
     let body: Buffer | undefined;
     try {
       body = value === undefined ? undefined : Buffer.from(JSON.stringify(value));
@@ -146,7 +148,7 @@ class NativeControlHTTP {
           connection: 'close', ...(body ? { 'content-type': 'application/json', 'content-length': String(body.length) } : {}) },
       });
       req.maxHeadersCount = 65;
-      const timer = setTimeout(() => { finish(new NativeFailure('deadline')); req.destroy(); }, this.#deadlineMs);
+      const timer = setTimeout(() => { finish(new NativeFailure('deadline')); req.destroy(); }, Math.min(deadlineMs, this.#deadlineMs));
       req.on('error', () => finish(new NativeFailure('unavailable')));
       req.on('response', res => {
         // Retain one overflow sentinel beyond 64 pairs; Node truncates the rest.
@@ -219,7 +221,7 @@ export class NativeManagementClient extends NativeControlHTTP implements Candida
 
 // The trusted outer composition binds a concrete consumer AND original owner.
 // Completed custody remains pending until separate exact descriptor readback.
-export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OAuthEnrollmentNative, OAuthDescriptorBoundary {
+export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OAuthEnrollmentNative, OAuthDescriptorBoundary, OAuthRefreshNative {
   readonly #owner: string;
   constructor(options: NativeManagementOptions & { readonly ownerRef: string }) {
     super(options);
@@ -268,6 +270,19 @@ export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OA
     const scope = this.capture(input);
     const result = this.ack(await this.call('POST', '/private/native/v1/oauth/connect/read', this.wire(scope)), scope, false);
     return Object.freeze({ operationId: result.operationId, accountRef: result.accountRef, state: result.state });
+  }
+  async refresh(input: OAuthScope): Promise<OAuthRefreshReadback> {
+    const scope = this.capture(input);
+    const bytes = await this.call('POST', '/private/native/v1/oauth/refresh', this.wire(scope), 5000);
+    try {
+      const r = object(decode(bytes), ['operation','account_ref','state'], ['refresh_ref']);
+      if (r.operation !== scope.operationId || r.account_ref !== scope.accountRef ||
+          !['idle','prepared','entered','completed','unknown'].includes(r.state as string)) throw new NativeFailure('invalid_readback');
+      if (Object.hasOwn(r, 'refresh_ref')) identifier(r.refresh_ref);
+      return Object.freeze({ operationId: scope.operationId, accountRef: scope.accountRef,
+        state: r.state as OAuthRefreshReadback['state'],
+        ...(Object.hasOwn(r, 'refresh_ref') ? { refreshRef: r.refresh_ref as string } : {}) });
+    } catch { throw new NativeFailure('invalid_readback'); }
   }
   async describe(input: OAuthScope): Promise<OAuthDescriptor> {
     const scope = this.capture(input);
