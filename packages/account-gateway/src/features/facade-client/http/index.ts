@@ -3,10 +3,11 @@ import * as c from '../contracts/index.js';
 
 import { connect, reconnect, nativeRequest } from './ingress.js';
 export * as secretSubmission from './ingress.js';
-const config = z.strictObject({ role: z.enum(['management', 'execution']), origin: z.string().url(), token: z.string().min(1).max(16384),
+const config = z.strictObject({ role: z.enum(['management', 'execution', 'consumer-control']), origin: z.string().url(), token: z.string().min(1).max(16384),
   responseBytes: z.number().int().min(1024).max(1048576).default(65536), timeoutMs: z.number().int().min(1).max(3600000).default(30000),
   bufferBytes: z.number().int().min(1024).max(1048576).default(65536) });
 export type ManagementConfig = z.input<typeof config> & { role: 'management' };
+export type ConsumerControlConfig = z.input<typeof config> & { role: 'consumer-control' };
 export type ExecutionConfig = z.input<typeof config> & { role: 'execution' };
 export type Connect = z.infer<typeof connect>;
 export type Reconnect = z.infer<typeof reconnect>;
@@ -26,7 +27,7 @@ export const operationPath = (operationId: string) => `/v1/operations/${id(opera
 export const requestPath = (executionRef: string, requestId: string) => `/v1/executions/${id(executionRef)}/requests/${id(requestId)}`;
 
 type Identity = { operationRef?: string; requestRef?: string };
-function transport(input: ManagementConfig | ExecutionConfig, role: 'management' | 'execution') {
+function transport(input: ManagementConfig | ExecutionConfig | ConsumerControlConfig, role: 'management' | 'execution' | 'consumer-control') {
   if (typeof process === 'undefined' || !process.versions?.node) throw new GatewayError('invalid_input', 'not_dispatched');
   const settings = valid(config, input);
   if (settings.role !== role) throw new GatewayError('invalid_input', 'not_dispatched');
@@ -144,10 +145,10 @@ function transport(input: ManagementConfig | ExecutionConfig, role: 'management'
 }
 export type NativeResponse = { kind: 'stream'; requestRef: string; body: ReadableStream<Uint8Array>; cancel(): Promise<void> } | { kind: 'status'; status: c.RequestStatus };
 export type NativeRequest = z.infer<typeof nativeRequest>;
-export function createManagementClient(settings: ManagementConfig) {
-  const { json } = transport(settings, 'management');
+function accountClient(settings: ManagementConfig | ConsumerControlConfig, role: 'management' | 'consumer-control') {
+  const { json } = transport(settings, role);
   const mutate = (path: string, method: string, input: { operationId: string }, options?: CallOptions, schema = c.accountOperation) => json(path, schema, method, input, options, { operationRef: input.operationId });
-  return Object.freeze({
+  return { json, client: Object.freeze({
     profiles: (options?: CallOptions) => json('/v1/profiles', c.profiles, 'GET', undefined, options),
     list: (input: c.ListQuery = {}, options?: CallOptions) => {
       const query = new URLSearchParams(Object.entries(valid(c.listQuery, input)).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
@@ -167,8 +168,33 @@ export function createManagementClient(settings: ManagementConfig) {
     reconnect: (accountRef: string, input: Reconnect, options?: CallOptions) => mutate(`/v1/accounts/${id(accountRef)}/reconnect`, 'POST', valid(reconnect, input), options),
     disable: (accountRef: string, input: c.Disable, options?: CallOptions) => mutate(`/v1/accounts/${id(accountRef)}/disable`, 'POST', valid(c.disable, input), options),
     operation: (operationId: string, options?: CallOptions) => json(operationPath(operationId), c.operation, 'GET', undefined, options, { operationRef: operationId }),
-    prepare: (input: c.Prepare, options?: CallOptions) => mutate('/v1/executions', 'POST', valid(c.prepare, input), options, c.preparationOperation),
     fence: (input: c.Fence, options?: CallOptions) => mutate('/v1/policy-fences', 'POST', valid(c.fence, input), options, c.acknowledgementOperation),
+  }) };
+}
+export function createManagementClient(settings: ManagementConfig) {
+  const { client, json } = accountClient(settings, 'management');
+  return Object.freeze({ ...client,
+    prepare: (input: c.Prepare, options?: CallOptions) => {
+      const parsed = valid(c.prepare, input);
+      return json('/v1/executions', c.preparationOperation, 'POST', parsed, options, { operationRef: parsed.operationId });
+    },
+  });
+}
+const runAccessResponse = z.strictObject({ operation: c.preparationOperation,
+  bearer: z.string().regex(/^[A-Za-z0-9._~-]{16,1024}$/), admission: c.admission })
+  .refine(v => v.operation.state === 'applied' && v.operation.result?.kind === 'execution' &&
+    v.operation.result.accountRef === v.admission.accountRef &&
+    v.operation.result.authorizationEpoch === v.admission.authorizationEpoch &&
+    v.operation.result.deadline === v.admission.expiresAt);
+const consumerList = c.listQuery.extend({ ownerRef: c.reference });
+export function createConsumerControlClient(settings: ConsumerControlConfig) {
+  const { client, json } = accountClient(settings, 'consumer-control');
+  return Object.freeze({ ...client,
+    list: (input: c.ListQuery & { ownerRef: string }, options?: CallOptions) => client.list(valid(consumerList, input), options),
+    runAccess: (input: c.Prepare, options?: CallOptions) => {
+      const parsed = valid(c.prepare, input);
+      return json('/internal/v1/run-access', runAccessResponse, 'POST', parsed, options, { operationRef: parsed.operationId });
+    },
   });
 }
 export function createExecutionClient(settings: ExecutionConfig) {
@@ -185,3 +211,4 @@ export function createExecutionClient(settings: ExecutionConfig) {
 }
 export type ManagementClient = ReturnType<typeof createManagementClient>;
 export type ExecutionClient = ReturnType<typeof createExecutionClient>;
+export type ConsumerControlClient = ReturnType<typeof createConsumerControlClient>;

@@ -7,13 +7,13 @@ import { readFile, readdir } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
 import * as c from '@agent-teams/account-gateway/contracts';
-import { createManagementClient, createExecutionClient, GatewayError } from '@agent-teams/account-gateway/http';
+import { createManagementClient, createExecutionClient, createConsumerControlClient, GatewayError } from '@agent-teams/account-gateway/http';
 import { createFacade, FacadeBearers, cancelFacadeTransport } from '../src/facade.ts';
-import type { FacadeOptions, ManagementBearer, NativeCallback, NativePermit, NativeTransport } from '../src/facade.ts';
+import type { FacadeOptions, ManagementBearer, ConsumerControlBearer, NativeCallback, NativePermit, NativeTransport } from '../src/facade.ts';
 import { PostgresKernel } from '../src/postgres.ts';
-import { AccountManagement } from '../src/management.ts';
+import { AccountManagement, codexOAuthProfile } from '../src/management.ts';
 import { IntentSecrets, PostgresManagementStore } from '../src/management-store.ts';
-import { NativeManagementClient } from '../src/native-client.ts';
+import { NativeManagementClient, NativeOAuthEnrollmentClient } from '../src/native-client.ts';
 import type { NativeDispatchProof } from '../src/domain.ts';
 
 let pool: pg.Pool;
@@ -50,18 +50,23 @@ async function stop(server: ReturnType<typeof createServer>): Promise<void> { se
 
 // Explicit synthetic native peer, not Go/provider evidence. Real management
 // HTTP -> encrypted custody/mapping SQL and real kernel claims are exercised.
-async function fixture(mode: 'normal' | 'lost_ack' | 'overflow' | 'held' | 'missing' = 'normal') {
+async function fixture(mode: 'normal' | 'lost_ack' | 'overflow' | 'held' | 'missing' = 'normal', controlProfiles = false) {
   const context = { consumerId: 'facade-' + randomUUID() }, kernel = new PostgresKernel(pool);
   const custody = new IntentSecrets(randomBytes(32), randomBytes(32)), store = new PostgresManagementStore(pool, custody);
   const worker = randomUUID(), incarnation = randomUUID(), managementToken = 'fixture-management-' + randomUUID(), executionToken = 'fixture-execution-' + randomUUID();
   await kernel.heartbeat(context, worker);
-  let creates = 0, calls = 0, entries = 0, cancelled = 0;
+  let creates = 0, calls = 0, entries = 0, cancelled = 0, oauthReads = 0;
   let last: { callback: NativeCallback; proof: NativeDispatchProof; permit: NativePermit } | undefined;
   const raws: Uint8Array[] = [], nativeRows = new Map<string, { descriptor: object; state: string }>();
   const native = createServer((req, res) => {
     void (async () => {
       const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk as Uint8Array));
       const input = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown> : {};
+      if (req.url === '/private/native/v1/oauth/connect' || req.url === '/private/native/v1/oauth/connect/read') {
+        if (req.url.endsWith('/read')) oauthReads++;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ operation: input.operation, account_ref: input.account_ref, state: 'prepared' })); return;
+      }
       const generation = req.url?.split('/')[5] ?? '';
       if (req.method === 'POST' && req.url === '/private/native/v1/candidates') {
         creates++;
@@ -77,7 +82,8 @@ async function fixture(mode: 'normal' | 'lost_ack' | 'overflow' | 'held' | 'miss
     })().catch(() => { res.statusCode = 500; res.end('{}'); });
   });
   const nativeOrigin = await listen(native);
-  const management = new AccountManagement({ kernel, store, custody, worker, profiles: [profile], proof: { async verify() { return true; } },
+  const management = new AccountManagement({ kernel, store, custody, worker, profiles: [profile], oauth: controlProfiles ? { profile: { ...codexOAuthProfile, qualificationRef: 'synthetic-only' },
+      native: new NativeOAuthEnrollmentClient({ origin: nativeOrigin, consumerId: context.consumerId, ownerRef: 'new-opaque-owner', controlCredential: 'synthetic-control' }) } : undefined, proof: { async verify() { return true; } },
     native: new NativeManagementClient({ origin: nativeOrigin, consumerId: context.consumerId, controlCredential: 'synthetic-control' }) });
   let managementGrant: ManagementBearer = { role: 'management', token: managementToken, consumerId: context.consumerId, ownerRefs: ['workspace-fixture'],
     preparation: { accountRefs: [], subjectRef: 'binding-fixture', policyRevision: 2, bindingRevision: 3, profileId: profile.profile, limits, maxRunMs: 60_000 } };
@@ -103,7 +109,10 @@ async function fixture(mode: 'normal' | 'lost_ack' | 'overflow' | 'held' | 'miss
       // the exact synthetic native teardown acknowledgement separately.
     })() };
   }, async cancel() { cancelled++; } };
-  const options: FacadeOptions = { kernel, management, store, bearers, profiles: [{ dto: safeProfile, maxOutputTokens: 1000 }],
+  const options: FacadeOptions = { kernel, management, store, bearers, profiles: [{ dto: safeProfile, maxOutputTokens: 1000 }, ...(controlProfiles ? [
+      { dto: { ...safeProfile, profileId: 'ungranted-profile' }, maxOutputTokens: 1000 },
+      { dto: { ...safeProfile, profileId: codexOAuthProfile.profile, modelIds: [codexOAuthProfile.model], authKinds: ['oauth'] as c.Profile['authKinds'] }, maxOutputTokens: 1000 },
+    ] : [])],
     intentHmacKey: randomBytes(32), enrollment: mode === 'missing' ? undefined : { originRef: 'synthetic-origin', engineIncarnation: incarnation, worker }, transport: mode === 'missing' ? undefined : transport,
     timeoutMs: 5000, bufferBytes: 4096 };
   const server = createFacade(options);
@@ -126,7 +135,7 @@ async function fixture(mode: 'normal' | 'lost_ack' | 'overflow' | 'held' | 'miss
   const raw = async (path: string, method = 'GET', payload?: unknown, token = managementToken, headers: Record<string, string> = {}) => fetch(origin + path, {
     method, headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json', accept: 'application/json', ...headers }, body: payload === undefined ? undefined : JSON.stringify(payload) });
   return { context, kernel, store, worker, bearers, managementGrant, executionGrant, server, origin, client, execution, created, accountRef, executionRef, saved, admission, prepared, preparedInput,
-    request, raw, options, stats: () => ({ creates, calls, entries, cancelled }), last: () => { assert.ok(last); return last; }, raws,
+    request, raw, options, stats: () => ({ creates, calls, entries, cancelled, oauthReads }), last: () => { assert.ok(last); return last; }, raws,
     stop: async () => { await stop(server); await stop(native); } };
   } catch (error) {
     await stop(server); await stop(native);
@@ -469,4 +478,123 @@ test('empty server-approved account set permits enrollment while denying executi
     assert.equal(f.stats().calls, 0);
     assert.equal((await pool.query('SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1', [f.context.consumerId])).rows[0].n, 0);
   } finally { await f.stop(); }
+});
+
+test('consumer-control SDK admits a new opaque owner and fences profiles, consumers and execution roles', async () => {
+  const f = await fixture('normal', true); try {
+    const ownerRef = 'new-opaque-owner', token = 'synthetic-consumer-' + randomUUID();
+    const control: ConsumerControlBearer = { role: 'consumer-control', token, consumerId: f.context.consumerId,
+      profileIds: [profile.profile, codexOAuthProfile.profile], limits, maxRunMs: 60_000 };
+    const narrow = { ...control, token: 'synthetic-narrow-' + randomUUID(), profileIds: ['ungranted-profile'] };
+    const foreign = { ...control, token: 'synthetic-foreign-' + randomUUID(), consumerId: 'foreign-' + randomUUID() };
+    const run = { ...control, role: 'run-control' as const, token: 'synthetic-run-' + randomUUID(), ownerRefs: ['workspace-fixture'] };
+    f.bearers.replace([f.managementGrant, f.executionGrant, control, narrow, foreign, run]);
+    const client = createConsumerControlClient({ role: 'consumer-control', origin: f.origin, token });
+    const restricted = createConsumerControlClient({ role: 'consumer-control', origin: f.origin, token: narrow.token });
+    const other = createConsumerControlClient({ role: 'consumer-control', origin: f.origin, token: foreign.token });
+    const connect = { operationId: randomUUID(), ownerRef, profileId: profile.profile, displayName: 'Dynamic',
+      credential: { kind: 'api_key' as const, value: 'synthetic-dynamic-key' } };
+    await assert.rejects(f.client.connect(connect), denied('not_dispatched'));
+    await assert.rejects(restricted.connect(connect), denied('not_dispatched'));
+    await assert.rejects(client.connect({ ...connect, profileId: 'ungranted-profile' }), denied('not_dispatched'));
+    assert.equal((await f.raw('/v1/accounts', 'POST', { ...connect, consumerId: foreign.consumerId }, token)).status, 400);
+    const created = await client.connect(connect);
+    assert.ok(created.state === 'applied' && created.result?.kind === 'account');
+    const ref = created.result.accountRef, account = await client.get(ref);
+    assert.equal(account.ownerRef, ownerRef); assert.equal(account.profileId, profile.profile);
+    assert.deepEqual(await client.operation(connect.operationId), created);
+    assert.deepEqual((await client.profiles()).profiles.map(p => p.profileId), control.profileIds);
+    assert.deepEqual((await client.list({ ownerRef, limit: 1 })).accounts, [account]);
+    assert.throws(() => client.list({} as { ownerRef: string }), e => e instanceof GatewayError && e.code === 'invalid_input');
+    assert.equal((await f.raw('/v1/accounts', 'GET', undefined, token)).status, 403);
+    assert.deepEqual((await restricted.list({ ownerRef })).accounts, []);
+    for (const deniedClient of [restricted, other]) {
+      await assert.rejects(deniedClient.get(ref), denied());
+      await assert.rejects(deniedClient.operation(connect.operationId), denied());
+    }
+    await assert.rejects(f.client.get(ref), denied());
+    const prepare = { ...f.preparedInput, operationId: randomUUID(), invocationRef: 'dynamic-' + randomUUID(),
+      accountRefs: [ref], subjectRef: 'opaque-subject' };
+    await assert.rejects(restricted.runAccess(prepare), denied()); await assert.rejects(other.runAccess(prepare), denied());
+    await assert.rejects(client.runAccess({ ...prepare, profileId: 'ungranted-profile' }), denied());
+    for (const key of Object.keys(limits) as (keyof typeof limits)[])
+      await assert.rejects(client.runAccess({ ...prepare, limits: { ...limits, [key]: limits[key] + 1 } }), denied());
+    await assert.rejects(client.runAccess({ ...prepare, deadline: new Date(Date.now() + 120_000).toISOString() }), denied());
+    const access = await client.runAccess(prepare);
+    assert.ok(access.operation.state === 'applied' && access.operation.result?.kind === 'execution');
+    const saved = await f.kernel.savedExecution(f.context, access.operation.result.executionRef);
+    const { executionRef: _ref, issuerEpoch: _epoch, ...admission } = saved.admission;
+    assert.deepEqual(access.admission, admission);
+    assert.deepEqual(f.bearers.resolve(access.bearer), { role: 'execution', consumerId: f.context.consumerId, saved });
+    assert.deepEqual(await client.runAccess(prepare), access);
+    assert.deepEqual(await client.operation(prepare.operationId), access.operation);
+    await assert.rejects(restricted.operation(prepare.operationId), denied());
+    await assert.rejects(other.operation(prepare.operationId), denied());
+    const executor = createExecutionClient({ role: 'execution', origin: f.origin, token: access.bearer });
+    const closeId = randomUUID(), closed = await executor.close(_ref, { operationId: closeId, reason: 'cancelled' });
+    assert.deepEqual(await client.operation(closeId), closed);
+    await assert.rejects(restricted.operation(closeId), denied());
+    await assert.rejects(other.operation(closeId), denied());
+    for (const path of ['/v1/executions', '/v1/executions/' + _ref + '/close', '/v1/executions/' + _ref + '/requests'])
+      assert.equal((await f.raw(path, 'POST', prepare, token, path.endsWith('/requests') ? { accept: 'text/event-stream' } : {})).status, 403);
+    for (const path of ['/v1/executions/' + _ref, '/v1/executions/' + _ref + '/requests/request-fixture'])
+      assert.equal((await f.raw(path, 'GET', undefined, token)).status, 403);
+    assert.equal((await f.raw('/v1/accounts/' + ref, 'GET', undefined, access.bearer)).status, 403);
+    for (const path of ['/v1/profiles', '/v1/accounts?ownerRef=' + ownerRef])
+      assert.equal((await f.raw(path, 'GET', undefined, run.token)).status, 403);
+    assert.equal((await f.raw('/internal/v1/run-access', 'POST', { ...prepare, operationId: randomUUID() }, run.token)).status, 403);
+    assert.equal(Object.hasOwn(client, 'prepare') || Object.hasOwn(client, 'request') || Object.hasOwn(client, 'close'), false);
+    const oauth = { operationId: randomUUID(), ownerRef, profileId: codexOAuthProfile.profile, displayName: 'Dynamic OAuth' };
+    const begun = await client.beginOAuth(oauth); assert.equal(begun.operation.state, 'pending');
+    const reads = f.stats().oauthReads;
+    await assert.rejects(restricted.readOAuth(oauth.operationId), denied()); await assert.rejects(other.readOAuth(oauth.operationId), denied());
+    await assert.rejects(restricted.beginOAuth({ ...oauth, operationId: randomUUID() }), denied());
+    assert.equal(f.stats().oauthReads, reads, 'profile/consumer denial precedes protected reconciliation');
+    assert.deepEqual(await client.readOAuth(oauth.operationId), begun.operation); assert.equal(f.stats().oauthReads, reads + 1);
+    const rename = await client.rename(ref, { operationId: randomUUID(), expectedMetadataRevision: account.metadataRevision, displayName: 'Renamed' });
+    assert.ok(rename.state === 'applied' && rename.result?.kind === 'account');
+    const reconnected = await client.reconnect(ref, { operationId: randomUUID(), expectedMetadataRevision: rename.result.metadataRevision,
+      credential: { kind: 'api_key', value: 'synthetic-reconnected-key' } });
+    assert.ok(reconnected.state === 'applied' && reconnected.result?.kind === 'account');
+    await client.disable(ref, { operationId: randomUUID(), expectedMetadataRevision: reconnected.result.metadataRevision });
+    const fence = { operationId: randomUUID(), subjectRef: 'dynamic-fence', revision: 5 };
+    await assert.rejects(f.client.fence(fence), denied());
+    assert.deepEqual(await client.fence(fence), { operationRef: fence.operationId, state: 'applied' });
+    assert.deepEqual(await client.operation(fence.operationId), { operationRef: fence.operationId, state: 'applied' });
+    assert.equal(f.stats().calls, 0); assert.equal(f.stats().entries, 0);
+  } finally { await f.stop(); }
+});
+
+test('consumer-control replacement during real SQL waits denies readback and issuance and revokes derived execution', async () => {
+  const f = await fixture(); const lock = await pool.connect(); try {
+    const control: ConsumerControlBearer = { role: 'consumer-control', token: 'synthetic-control-' + randomUUID(),
+      consumerId: f.context.consumerId, profileIds: [profile.profile], limits, maxRunMs: 60_000 };
+    f.bearers.replace([f.managementGrant, control]);
+    const client = createConsumerControlClient({ role: 'consumer-control', token: control.token, origin: f.origin });
+    for (const mode of ['readback', 'issuance'] as const) {
+      const access = await client.runAccess(f.preparedInput);
+      const retired = f.bearers.resolve(control.token); assert.ok(retired);
+      await lock.query('BEGIN');
+      await lock.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE', [f.context.consumerId]);
+      const pid: number = (await lock.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+      const input = { ...f.preparedInput, operationId: randomUUID(), invocationRef: 'revoked-' + randomUUID() };
+      const pending = mode === 'readback' ? client.operation(f.created.operationRef) : client.runAccess(input);
+      void pending.catch(() => undefined);
+      const deadline = Date.now() + 2000; let waiting = false;
+      while (!waiting && Date.now() < deadline) {
+        waiting = (await pool.query('SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))) AS waiting', [pid])).rows[0].waiting;
+        if (!waiting) await delay(10);
+      }
+      assert.equal(waiting, true, 'actual facade SQL await is blocked by the owned fixture transaction');
+      f.bearers.replace([f.managementGrant]); await lock.query('ROLLBACK');
+      await assert.rejects(pending, denied());
+      if (mode === 'issuance') await assert.rejects(f.kernel.operation(f.context, input.operationId),
+        e => e instanceof Error && 'code' in e && e.code === 'unknown');
+      assert.equal(f.bearers.current(retired), false); assert.equal(f.bearers.resolve(access.bearer), undefined);
+      assert.equal((await f.raw('/v1/executions/' + f.executionRef, 'GET', undefined, access.bearer)).status, 401);
+      assert.deepEqual(await f.client.operation(f.preparedInput.operationId), f.prepared, 'accepted preparation survives revoke');
+      f.bearers.replace([f.managementGrant, control]);
+    }
+    assert.equal(f.stats().calls, 0); assert.equal(f.stats().entries, 0);
+  } finally { await lock.query('ROLLBACK'); lock.release(); await f.stop(); }
 });
