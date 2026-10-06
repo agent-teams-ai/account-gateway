@@ -47,7 +47,10 @@ function disposable(): { dsn: string; database: string } {
 }
 before(async () => {
   const selected = disposable();
-  pool = new pg.Pool({ connectionString: selected.dsn, max: 6, connectionTimeoutMillis: 5000 });
+  // Session defaults also bound selector SQL and BEGIN/COMMIT/ROLLBACK, not just the blocker.
+  const config = { connectionString: selected.dsn, max: 6, connectionTimeoutMillis: 5000,
+    statement_timeout: 10_000, query_timeout: 12_000 } satisfies pg.PoolConfig;
+  pool = new pg.Pool(config);
   pool.on('error', () => undefined);
   try {
     const version = (await pool.query("SELECT current_database() AS db,current_setting('server_version') AS version")).rows[0];
@@ -397,14 +400,16 @@ test('F refresh: committed real journal/HTTP selection advances past dropped ACK
     // RED on 8261bb3: shutdown during selection still starts native HTTP after SQL unlocks.
     const gate = await pool.connect(), shutdown = new AbortController(), wait = new AbortController();
     const attemptsBefore = f.refreshRequests.length;
-    let selecting: Promise<Awaited<ReturnType<AccountManagement['refreshOAuth']>>> | undefined;
+    let rawRefresh: ReturnType<AccountManagement['refreshOAuth']> | undefined;
     try {
       await f.kernel.heartbeat(f.context, f.worker);
       await gate.query('BEGIN');
       await gate.query("SET LOCAL statement_timeout='3500ms'");
       await gate.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE', [f.context.consumerId]);
       const pid = (await gate.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
-      selecting = Promise.race([manager.refreshOAuth(f.context, false, shutdown.signal),
+      rawRefresh = manager.refreshOAuth(f.context, false, shutdown.signal);
+      void rawRefresh.catch(() => undefined);
+      const selecting = Promise.race([rawRefresh,
         delay(6500, undefined, { signal: wait.signal }).then(() => { throw new Error('shutdown refresh did not settle'); })]);
       void selecting.catch(() => undefined);
       const deadline = process.hrtime.bigint() + 2_500_000_000n; let blocked = false;
@@ -419,15 +424,22 @@ test('F refresh: committed real journal/HTTP selection advances past dropped ACK
       shutdown.abort(); await gate.query('COMMIT');
       const result = await selecting;
       await gate.query('BEGIN');
+      await gate.query("SET LOCAL statement_timeout='3500ms'");
       await gate.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE NOWAIT', [f.context.consumerId]);
       await gate.query('COMMIT');
       assert.equal(f.refreshRequests.length, attemptsBefore, 'shutdown during selection must not start native HTTP');
       assert.equal(result, 'idle');
     } finally {
-      shutdown.abort();
+      shutdown.abort(); wait.abort();
       const rollback = { text: 'ROLLBACK', query_timeout: 3500 };
+      let discard = false;
       try { await gate.query(rollback); }
-      finally { gate.release(); await selecting?.catch(() => undefined); wait.abort(); }
+      catch (error) { discard = true; throw error; }
+      finally {
+        // An uncertain transaction must never return to the pool; release before joining.
+        try { gate.release(discard); }
+        finally { await rawRefresh?.catch(() => undefined); }
+      }
     }
     assert.deepEqual(await f.kernel.account(f.context, a.accountRef), accountBefore);
     assert.deepEqual(await f.kernel.savedExecution(f.context, execution.executionRef), savedBefore);
