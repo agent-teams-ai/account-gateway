@@ -84,9 +84,11 @@ function transport(input: ManagementConfig | ExecutionConfig, role: 'management'
       }
       const result = schema.safeParse(parsed);
       if (!result.success) throw handle.failure('invalid_response');
-      if (identity.operationRef && 'operationRef' in (result.data as object) && (result.data as c.Operation).operationRef !== identity.operationRef) throw handle.failure('invalid_response');
+      const operation = 'operation' in (result.data as object)
+        ? (result.data as c.OAuthBeginResponse).operation : result.data as c.Operation;
+      if (identity.operationRef && 'operationRef' in operation && operation.operationRef !== identity.operationRef) throw handle.failure('invalid_response');
       if (identity.requestRef && 'requestRef' in (result.data as object) && (result.data as c.RequestStatus).requestRef !== identity.requestRef) throw handle.failure('invalid_response');
-      if (response.status === 202 && 'state' in (result.data as object) && (result.data as c.Operation).state !== 'pending') throw handle.failure('invalid_response');
+      if (response.status === 202 && 'state' in operation && operation.state !== 'pending') throw handle.failure('invalid_response');
       return result.data;
     } catch (error) {
       const failure = error instanceof GatewayError ? error : handle.failure(handle.controller.signal.aborted ? 'cancelled' : 'invalid_response');
@@ -153,6 +155,14 @@ export function createManagementClient(settings: ManagementConfig) {
     },
     get: (accountRef: string, options?: CallOptions) => json(`/v1/accounts/${id(accountRef)}`, c.account, 'GET', undefined, options),
     connect: (input: Connect, options?: CallOptions) => mutate('/v1/accounts', 'POST', valid(connect, input), options),
+    // One call, no automatic retry or readback. A lost Begin URL is not rebuilt.
+    beginOAuth: (input: c.OAuthBegin, options?: CallOptions): Promise<c.OAuthBeginResponse> => {
+      const captured = valid(c.oauthBegin, input);
+      return json('/v1/accounts/oauth/begin', c.oauthBeginResponse, 'POST', captured, options,
+        { operationRef: captured.operationId });
+    },
+    readOAuth: (operationId: string, options?: CallOptions): Promise<c.Operation> =>
+      json(operationPath(operationId), c.accountOperation, 'GET', undefined, options, { operationRef: operationId }),
     rename: (accountRef: string, input: c.Rename, options?: CallOptions) => mutate(`/v1/accounts/${id(accountRef)}`, 'PATCH', valid(c.rename, input), options),
     reconnect: (accountRef: string, input: Reconnect, options?: CallOptions) => mutate(`/v1/accounts/${id(accountRef)}/reconnect`, 'POST', valid(reconnect, input), options),
     disable: (accountRef: string, input: c.Disable, options?: CallOptions) => mutate(`/v1/accounts/${id(accountRef)}/disable`, 'POST', valid(c.disable, input), options),

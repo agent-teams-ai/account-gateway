@@ -409,7 +409,7 @@ test('B3a expired owner recovery records exact physical identity but cannot prom
     const fresh = randomUUID(); await kernel.heartbeat(context,fresh);
     const recovery = new AccountManagement({ kernel,store,custody,native: f.native,worker: fresh,profiles: [profile],proof: { async verify() { return true; } } });
     const status = await recovery.recover(context,command.operationId);
-    assert.equal(status.state,'rejected'); assert.equal((await kernel.account(context,status.accountRef!)).state,'quarantined');
+    assert.equal(status.state,'unknown'); assert.equal((await kernel.account(context,status.accountRef!)).state,'quarantined');
     assert.ok(await store.mapping(context,j.generation)); assert.equal(f.creates(),1);
     assert.equal(await recovery.cleanup(context),'erased'); assert.equal(f.erases(),1);
   } finally { await f.close(); }

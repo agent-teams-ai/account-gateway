@@ -30,6 +30,47 @@ export const operation = z.discriminatedUnion('state', [
   (v.error.effect !== 'rejected_before_dispatch' || v.state === 'rejected')
 ));
 export const accountOperation = operation.refine(v => v.state !== 'applied' || v.result?.kind === 'account');
+/** Enrollment carries no credential, callback, model or provider-origin input. */
+export const oauthBegin = z.strictObject({ operationId: reference, ownerRef: reference,
+  profileId: reference, displayName: z.string().min(1).max(128) });
+// This is a temporary owner capability, not safe account/operation metadata.
+// Validate it without including Zod issues or the original URL in diagnostics.
+export const oauthAuthorizationURL = z.string().min(1).max(4096).refine(value => {
+  try {
+    if (/[^\u0021-\u007e]/.test(value) || value.includes('\\') ||
+        !value.startsWith('https://auth.openai.com/oauth/authorize?')) return false;
+    const url = new URL(value);
+    if (url.origin !== 'https://auth.openai.com' || url.pathname !== '/oauth/authorize' ||
+        url.username || url.password || url.hash || value.includes('#')) return false;
+    const fixed: Readonly<Record<string, string>> = {
+      client_id: 'app_EMoamEEZ73f0CkXaXp7hrann', response_type: 'code',
+      redirect_uri: 'http://localhost:1455/auth/callback', code_challenge_method: 'S256',
+      scope: 'openid profile email offline_access',
+    };
+    const optional: Readonly<Record<string, string>> = {
+      id_token_add_organizations: 'true', codex_cli_simplified_flow: 'true', originator: 'codex_cli_rs',
+    };
+    const seen = new Set<string>();
+    // Reject percent/case/Unicode aliases in names, invalid escapes in values,
+    // empty query members and duplicates before URLSearchParams normalization.
+    for (const part of url.search.slice(1).split('&')) {
+      const equal = part.indexOf('=');
+      if (equal < 1 || /%(?![0-9a-fA-F]{2})/.test(part)) return false;
+      const key = part.slice(0, equal);
+      if (!/^[a-z_]+$/.test(key) || seen.has(key) ||
+          !(Object.hasOwn(fixed, key) || Object.hasOwn(optional, key) || key === 'state' || key === 'code_challenge')) return false;
+      seen.add(key);
+    }
+    for (const [key, expected] of Object.entries(fixed)) if (url.searchParams.get(key) !== expected) return false;
+    for (const [key, expected] of Object.entries(optional)) if (seen.has(key) && url.searchParams.get(key) !== expected) return false;
+    return /^[A-Za-z0-9_-]{43}$/.test(url.searchParams.get('code_challenge') ?? '') &&
+      /^[A-Za-z0-9_-]{16,512}$/.test(url.searchParams.get('state') ?? '');
+  } catch { return false; }
+});
+/** Only Begin may return a URL; every ordinary read retains the safe union. */
+export const oauthBeginResponse = z.strictObject({ operation: accountOperation,
+  authorizationURL: oauthAuthorizationURL.optional() })
+  .refine(v => v.authorizationURL === undefined || v.operation.state === 'pending');
 export const preparationOperation = operation.refine(v => v.state !== 'applied' || v.result?.kind === 'execution');
 export const acknowledgementOperation = operation.refine(v => v.state !== 'applied' || !v.result);
 export const execution = z.strictObject({ executionRef: reference, accountRef: reference, authorizationEpoch: revision, profileId: reference, deadline, state: executionState });
@@ -52,6 +93,8 @@ export const admission = z.strictObject({ invocationRef: reference, attemptRef: 
 export type Profile = z.infer<typeof profile>;
 export type Account = z.infer<typeof account>;
 export type Operation = z.infer<typeof operation>;
+export type OAuthBegin = z.infer<typeof oauthBegin>;
+export type OAuthBeginResponse = z.infer<typeof oauthBeginResponse>;
 export type Execution = z.infer<typeof execution>;
 export type RequestStatus = z.infer<typeof requestStatus>;
 export type SafeError = z.infer<typeof safeError>;
