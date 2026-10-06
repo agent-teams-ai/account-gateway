@@ -68,6 +68,7 @@ async function sourceHTTP(oauth: boolean) {
   const consumer = { consumerId, managementCredential: 'source-native-management', executionCredential: 'source-native-execution',
     cleanupCredential: 'source-native-cleanup', callbackCredential: 'source-native-callback' };
   const accounts = new Map<string, AccountStatus>(), operations = new Map<string, OperationStatus>();
+  const preparationIntents = new Map<string, string>();
   const journals = new Map<string, CandidateJournal>(), mappings = new Map<string, CandidateMapping>();
   const executions = new Map<string, SavedExecution>(), requests = new Map<string, RequestStatus>(), proofs = new Map<string, NativeDispatchProof>();
   const custody = new IntentSecrets(randomBytes(32), randomBytes(32));
@@ -98,6 +99,11 @@ async function sourceHTTP(oauth: boolean) {
     },
     async unknownCandidate(c, id) { const op = await kernel.operation(c, id); op.state = 'unknown'; return op; },
     async prepare(c, approval) {
+      const key = scopeKey(c, approval.operationId), old = operations.get(key);
+      if (old) {
+        if (preparationIntents.get(key) !== approval.intentDigest) throw new KernelError('conflict');
+        return old;
+      }
       const account = await kernel.account(c, approval.permittedAccounts[0]);
       const mapping = [...mappings.values()].find(m => m.consumerId === c.consumerId && m.accountRef === account.accountRef);
       if (!mapping || account.state !== 'active') return missing();
@@ -109,7 +115,8 @@ async function sourceHTTP(oauth: boolean) {
         expiresAt: deadline, limits: { ...approval.limits } } };
       executions.set(scopeKey(c, executionRef), saved);
       const op: OperationStatus = { operationRef: approval.operationId, executionRef, accountRef: account.accountRef, deadline, epoch: account.epoch, state: 'applied' };
-      operations.set(scopeKey(c, approval.operationId), op); return op;
+      preparationIntents.set(key, approval.intentDigest);
+      operations.set(key, op); return op;
     },
     savedExecution: async (c, id) => executions.get(scopeKey(c, id)) ?? missing(),
     currentWorkerLease: async () => new Date(Date.now() + 30_000).toISOString(),
@@ -128,7 +135,13 @@ async function sourceHTTP(oauth: boolean) {
     acknowledgeTransportClosed: async () => {},
     execution: async (c, id) => { const s = await kernel.savedExecution(c, id); return { executionRef: id,
       accountRef: s.admission.accountRef, epoch: s.admission.authorizationEpoch, state: s.state, deadline: s.admission.expiresAt }; },
-    currentCleanupLease: missing, rejectBeforeDispatch: missing, fence: missing, close: missing,
+    async close(c, operationId, executionRef) {
+      const saved = await kernel.savedExecution(c, executionRef);
+      executions.set(scopeKey(c, executionRef), { ...saved, state: 'closed', dispatchAllowed: false });
+      const op: OperationStatus = { operationRef: operationId, executionRef, state: 'applied' };
+      operations.set(scopeKey(c, operationId), op); return op;
+    },
+    currentCleanupLease: missing, rejectBeforeDispatch: missing, fence: missing,
     restore: missing, claimCleanup: missing, cleanupTransports: missing, settleCleanup: missing,
   };
   const store: ManagementStore = {
@@ -249,7 +262,7 @@ async function sourceHTTP(oauth: boolean) {
     fetch(facadeOrigin + path, { method: body === undefined ? 'GET' : 'POST', headers: { authorization: 'Bearer ' + token,
       'content-type': 'application/json', accept: path.includes('/requests') ? 'text/event-stream' : 'application/json',
       ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  return { context, consumer, control, authority, cfg, kernel, store, journals, mappings, accounts, operations,
+  return { context, consumer, control, authority, cfg, kernel, store, journals, mappings, accounts, operations, executions, requests,
     publicCall, callback, seen, forwarded, profile, secondProfile, begins: () => begins,
     owner: (value: string | undefined) => { bodyOwner = value; },
     descriptor: (value: unknown, mode: typeof descriptorMode = 'normal') => { descriptorReply = value; descriptorMode = mode; },
@@ -448,6 +461,117 @@ test('source HTTP: strict fixed POST descriptor readback keeps custody pending a
     const mismatched = await f.publicCall('/v1/operations/' + secondId); assert.equal(mismatched.status, 200);
     assert.equal((await mismatched.json() as { state: string }).state, 'unknown');
     assert.equal(await f.store.mapping(f.context, second.generation), undefined);
+  } finally { await f.close(); }
+});
+
+test('source HTTP: same fenced original remints only scoped readback and close, never dispatch', async () => {
+  const f = await sourceHTTP(false);
+  try {
+    const creationId = randomUUID();
+    const created = await f.publicCall('/v1/accounts', { operationId: creationId, ownerRef: 'owner-one',
+      profileId: f.secondProfile.profile, displayName: 'Fenced fixture', credential: { kind: 'api_key', value: 'fixture-write-only' } });
+    assert.equal(created.status, 200);
+    const accountRef = f.journals.get(f.scopeKey(f.context, creationId))!.accountRef;
+    const input = { operationId: randomUUID(), invocationRef: 'source-fenced-original', attemptRef: 'attempt', accountRefs: [accountRef],
+      profileId: f.secondProfile.profile, subjectRef: 'source-subject', policyRevision: 1, bindingRevision: 1,
+      limits: f.secondProfile.limits, deadline: new Date(Date.now() + 10_000).toISOString() };
+    const mint = () => f.publicCall('/internal/v1/run-access', input, 'source-public-run');
+    const first = await mint(); assert.equal(first.status, 200);
+    type Access = { operation: { operationRef: string; result: { executionRef: string; state: string } };
+      bearer: string; admission: Record<string, unknown> };
+    const run = await first.json() as Access, ref = run.operation.result.executionRef;
+    const executionKey = f.scopeKey(f.context, ref), original = await f.kernel.savedExecution(f.context, ref);
+    const requestId = randomUUID(), requestKey = f.scopeKey(f.context, ref + ':' + requestId);
+    // Committed accepted effect after fencing/occupancy closure; SQL closure is
+    // independently qualified elsewhere. This source fixture makes no native call.
+    f.requests.set(requestKey, { requestRef: requestId, effect: 'effect_unknown' });
+    const fenced: SavedExecution = { ...original, state: 'fenced', dispatchAllowed: false };
+    f.executions.set(executionKey, fenced);
+    const nativeCalls = f.seen.length, forwarded = f.forwarded.length;
+    const denyDispatch = async (bearer: string, admission: Record<string, unknown>) => {
+      for (const id of [requestId, randomUUID()]) {
+        const response = await f.publicCall('/v1/executions/' + ref + '/requests', {
+          model: f.secondProfile.model, stream: true, store: false, service_tier: 'default', input: 'fixture' }, bearer,
+        { 'x-gateway-admission': JSON.stringify(admission), 'x-gateway-request-id': id });
+        assert.equal(response.status, 403);
+        assert.equal((await response.json() as { effect: string }).effect, 'not_dispatched');
+        assert.equal(f.seen.length, nativeCalls); assert.equal(f.forwarded.length, forwarded);
+      }
+      assert.deepEqual(f.requests.get(requestKey), { requestRef: requestId, effect: 'effect_unknown' });
+      assert.equal(f.requests.size, 1);
+    };
+    await denyDispatch(run.bearer, run.admission);
+    const retained = await mint(); assert.equal(retained.status, 200, 'same fenced original must retain scoped access');
+    assert.equal((await retained.json() as Access).bearer, run.bearer);
+    // Lose the issued execution mapping while keeping current configured policy.
+    f.control.bearers.replace(f.cfg.bearers);
+    f.kernel.issuer = async () => { throw new Error('same original must retain its persisted issuer'); };
+    const remint = await mint(); assert.equal(remint.status, 200, 'same fenced original must receive scoped access');
+    const scoped = await remint.json() as Access;
+    assert.equal(scoped.operation.operationRef, input.operationId);
+    assert.deepEqual(scoped.operation.result, { kind: 'execution', executionRef: ref, accountRef,
+      authorizationEpoch: original.admission.authorizationEpoch, deadline: input.deadline, state: 'fenced' });
+    assert.deepEqual(scoped.admission, run.admission); assert.notEqual(scoped.bearer, run.bearer);
+    const grant = f.control.bearers.resolve(scoped.bearer);
+    assert.ok(grant && grant.role === 'execution');
+    assert.equal(grant.saved.generation, original.generation);
+    assert.deepEqual(grant.saved.admission, original.admission);
+    const repeated = await mint(); assert.equal(repeated.status, 200);
+    assert.equal((await repeated.json() as Access).bearer, scoped.bearer);
+    for (const path of ['/v1/executions/' + ref, '/v1/operations/' + input.operationId]) {
+      const read = await f.publicCall(path, undefined, scoped.bearer);
+      assert.equal(read.status, 200);
+      const dto = await read.json() as { state: string; result?: { state: string } };
+      assert.equal(dto.result?.state ?? dto.state, 'fenced');
+    }
+    const status = await f.publicCall('/v1/executions/' + ref + '/requests/' + requestId, undefined, scoped.bearer,
+      { accept: 'application/json' });
+    assert.equal(status.status, 200);
+    assert.equal((await status.json() as { effect: string }).effect, 'effect_unknown');
+    const foreign = await f.publicCall('/v1/executions/' + randomUUID(), undefined, scoped.bearer);
+    assert.equal(foreign.status, 403);
+    const foreignOperation = await f.publicCall('/v1/operations/' + creationId, undefined, scoped.bearer);
+    assert.equal(foreignOperation.status, 403);
+    await denyDispatch(scoped.bearer, scoped.admission);
+    const changed = await f.publicCall('/internal/v1/run-access', { ...input, invocationRef: 'changed-intent' }, 'source-public-run');
+    assert.equal(changed.status, 409);
+    const prepare = f.kernel.prepare;
+    // Simulate inconsistent persisted readback across the two server reads.
+    for (const conflicting of [
+      { ...fenced, generation: randomUUID() },
+      { ...fenced, admission: { ...fenced.admission, issuerEpoch: randomUUID() } },
+      { ...fenced, admission: { ...fenced.admission, authorizationEpoch: fenced.admission.authorizationEpoch + 1 } },
+    ]) {
+      f.control.bearers.replace(f.cfg.bearers);
+      f.kernel.prepare = async (...args) => { const op = await prepare(...args); f.executions.set(executionKey, conflicting); return op; };
+      assert.equal((await mint()).status, 403);
+      f.executions.set(executionKey, fenced);
+    }
+    // Even an applied prepare cannot supply the exception without the original lookup.
+    const operation = f.kernel.operation;
+    f.kernel.operation = async (context, id) => { if (id === input.operationId) throw new KernelError('unknown'); return operation(context, id); };
+    f.kernel.issuer = async () => original.admission.issuerEpoch;
+    f.kernel.prepare = prepare;
+    assert.equal((await mint()).status, 403);
+    f.kernel.operation = operation;
+    // Current owner authorization and captured grant replacement still deny issuance.
+    const account = f.accounts.get(f.scopeKey(f.context, accountRef))!;
+    account.ownerRef = 'foreign-owner'; assert.equal((await mint()).status, 403); account.ownerRef = 'owner-one';
+    f.kernel.prepare = async (...args) => { const op = await prepare(...args); f.control.bearers.replace(f.cfg.bearers); return op; };
+    assert.equal((await mint()).status, 403);
+    f.kernel.prepare = prepare;
+    f.executions.set(executionKey, { ...fenced, admission: { ...fenced.admission, expiresAt: new Date(0).toISOString() } });
+    assert.equal((await mint()).status, 403, 'original expiry still denies remint');
+    f.executions.set(executionKey, fenced);
+    const finalAccess = await mint(); assert.equal(finalAccess.status, 200);
+    const final = await finalAccess.json() as Access;
+    const closeId = randomUUID(), close = await f.publicCall('/v1/executions/' + ref + '/close',
+      { operationId: closeId, reason: 'cancelled' }, final.bearer);
+    assert.equal(close.status, 200); assert.deepEqual(await close.json(), { operationRef: closeId, state: 'applied' });
+    assert.equal((await f.kernel.savedExecution(f.context, ref)).state, 'closed');
+    assert.equal((await mint()).status, 403, 'closed original is not a fenced issuance exception');
+    await denyDispatch(final.bearer, final.admission);
+    assert.equal(f.executions.size, 1); assert.equal(f.seen.length, nativeCalls);
   } finally { await f.close(); }
 });
 

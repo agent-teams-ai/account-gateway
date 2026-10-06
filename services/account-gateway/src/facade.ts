@@ -115,10 +115,13 @@ export class FacadeBearers {
   }
   // Synchronous CAS after SQL read: identical issuance retains its token and
   // original saved tuple. No neighboring grant is replaced or evicted.
-  upsertExecution(control: RunControlGrant, input: SavedExecution): string {
+  upsertExecution(control: RunControlGrant, input: SavedExecution, original?: SavedExecution): string {
     if (control.role !== 'run-control' || !this.current(control)) throw new KernelError('denied');
     const saved = savedCopy(input);
-    if (!saved.dispatchAllowed || saved.state !== 'open' || Date.parse(saved.admission.expiresAt) <= Date.now()) throw new KernelError('denied');
+    // Only the route's persisted original lookup, followed by prepare's exact
+    // intent check, can authorize fenced readback. POST still checks dispatch.
+    const fencedOriginal = saved.state === 'fenced' && original !== undefined && sameSaved(original, saved);
+    if (((!saved.dispatchAllowed || saved.state !== 'open') && !fencedOriginal) || Date.parse(saved.admission.expiresAt) <= Date.now()) throw new KernelError('denied');
     const old = this.#entries.find(row => row.issuedBy === control && row.grant.role === 'execution' &&
       row.grant.consumerId === control.consumerId && row.grant.saved.admission.executionRef === saved.admission.executionRef);
     if (old) {
@@ -429,7 +432,7 @@ export function createFacade(options: FacadeOptions): Server {
         if (op.state !== 'applied' || !op.executionRef) throw new KernelError('unavailable');
         const saved = savedCopy(await kernel.savedExecution(context, op.executionRef));
         requireCurrent(grant);
-        const bearer = bearers.upsertExecution(grant, saved);
+        const bearer = bearers.upsertExecution(grant, saved, original);
         const { executionRef: _execution, issuerEpoch: _issuer, ...projection } = saved.admission;
         const result: RunAccess = { operation: c.preparationOperation.parse({ operationRef: op.operationRef, state: 'applied',
           result: { kind: 'execution', executionRef: saved.admission.executionRef, accountRef: saved.admission.accountRef,
