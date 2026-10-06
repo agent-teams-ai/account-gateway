@@ -4,7 +4,7 @@ import { strictJSON, validateResponses } from '../src/facade-ingress.ts';
 import { KernelError } from '../src/domain.ts';
 import type { AccountStatus, DurableKernel, ExecutionRead, NativeDispatchProof, OperationStatus, RequestStatus, SavedExecution } from '../src/domain.ts';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { createServer } from 'node:http';
+import { createServer, request } from 'node:http';
 import type { Server } from 'node:http';
 import { createFacade } from '../src/facade.ts';
 import { IntentSecrets } from '../src/management-store.ts';
@@ -254,9 +254,90 @@ async function sourceHTTP(oauth: boolean) {
     owner: (value: string | undefined) => { bodyOwner = value; },
     descriptor: (value: unknown, mode: typeof descriptorMode = 'normal') => { descriptorReply = value; descriptorMode = mode; },
     close: closeServers,
-    origin, callbackOrigin, nativeRows, scopeKey };
+    origin, callbackOrigin, facade, facadeOrigin, nativeRows, scopeKey };
   } catch (error) { await closeServers(); throw error; }
 }
+
+test('source HTTP: current management fences monotonically for its exact subject while prepare stays pinned', async () => {
+  const f = await sourceHTTP(false);
+  try {
+    const initial = f.cfg.bearers.find(b => b.role === 'management');
+    assert.ok(initial && initial.role === 'management');
+    const accountRef = randomUUID();
+    f.accounts.set(f.scopeKey(f.context, accountRef), { accountRef, ownerRef: 'owner-one',
+      profile: initial.preparation.profileId, displayName: 'GX fixture', state: 'active', revision: 1, epoch: 1 });
+    const gx = { ...initial, ownerRefs: ['owner-one'], preparation: { ...initial.preparation,
+      accountRefs: [accountRef], subjectRef: 'source-subject-GX', policyRevision: 2 } };
+    // X and Y share the canonical account owner but have distinct binding subjects.
+    const gy = { ...gx, token: 'source-public-management-Y', preparation: { ...gx.preparation, subjectRef: 'source-subject-Y' } };
+    const entries = [gx, gy, ...f.cfg.bearers.filter(b => b.role === 'run-control')];
+    f.control.bearers.replace(entries);
+    // Controlled kernel records only facade authorization; it certifies no SQL fence/closure behavior.
+    const calls: Parameters<DurableKernel['fence']>[] = [];
+    f.kernel.fence = async (...args) => {
+      calls.push(args); return { operationRef: args[1], state: 'applied' };
+    };
+    let prepares = 0;
+    f.kernel.prepare = async () => { prepares++; throw new KernelError('denied'); };
+    const input = { operationId: randomUUID(), subjectRef: gx.preparation.subjectRef, revision: 3 };
+    const applied = await f.publicCall('/v1/policy-fences', input, gx.token);
+    assert.deepEqual({ status: applied.status, calls: calls.length }, { status: 200, calls: 1 });
+    assert.deepEqual(await applied.json(), { operationRef: input.operationId, state: 'applied' });
+    assert.deepEqual(calls, [[f.context, input.operationId, gx.preparation.subjectRef, 3]]);
+    const denied = async (body: typeof input, token = gx.token) => {
+      const response = await f.publicCall('/v1/policy-fences', body, token);
+      assert.equal(response.status, 403);
+      const error = await response.json() as { code: string; effect: string };
+      assert.equal(error.code, 'forbidden'); assert.equal(error.effect, 'not_dispatched');
+      assert.equal(calls.length, 1);
+    };
+    await denied({ ...input, operationId: randomUUID(), subjectRef: gy.preparation.subjectRef });
+    await denied({ ...input, operationId: randomUUID(), revision: 1 });
+    await denied({ ...input, operationId: randomUUID() }, gy.token);
+    await denied({ ...input, operationId: randomUUID() }, 'source-public-run');
+    const prepare = await f.publicCall('/v1/executions', { operationId: randomUUID(),
+      invocationRef: 'source-invocation-GX', attemptRef: 'attempt', accountRefs: [accountRef],
+      profileId: gx.preparation.profileId, subjectRef: gx.preparation.subjectRef, policyRevision: 3,
+      bindingRevision: gx.preparation.bindingRevision, limits: gx.preparation.limits,
+      deadline: new Date(Date.now() + 10_000).toISOString() }, gx.token);
+    assert.equal(prepare.status, 403);
+    assert.equal((await prepare.json() as { effect: string }).effect, 'not_dispatched');
+    assert.equal(prepares, 0); assert.equal(calls.length, 1);
+    // Send headers alone so the real handler captures GX and awaits its body.
+    // Replacing even the same token retires that captured immutable capability.
+    const captured = new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => { f.facade.off('request', onRequest); reject(error); };
+      const onRequest = () => { f.facade.off('error', onError); resolve(); };
+      f.facade.once('request', onRequest); f.facade.once('error', onError);
+    });
+    let stale: ReturnType<typeof request> | undefined;
+    const staleResponse = new Promise<number>((resolve, reject) => {
+      stale = request(f.facadeOrigin + '/v1/policy-fences', { method: 'POST', headers: {
+        authorization: 'Bearer ' + gx.token, 'content-type': 'application/json', accept: 'application/json',
+        'transfer-encoding': 'chunked' } }, res => { res.resume(); resolve(res.statusCode!); });
+      stale.on('error', reject); stale.flushHeaders();
+    });
+    try {
+      await captured;
+      f.control.bearers.replace(entries);
+      stale!.end(JSON.stringify({ ...input, operationId: randomUUID() }));
+      assert.equal(await staleResponse, 403); assert.equal(calls.length, 1);
+    } finally { stale?.destroy(); }
+    const replacement = { ...gx, token: 'source-public-management-replaced' };
+    f.control.bearers.replace([replacement, gy]);
+    const retired = await f.publicCall('/v1/policy-fences', { ...input, operationId: randomUUID() }, gx.token);
+    assert.equal(retired.status, 401);
+    assert.equal((await retired.json() as { effect: string }).effect, 'not_dispatched');
+    assert.equal(calls.length, 1);
+    const currentInput = { ...input, operationId: randomUUID() };
+    const current = await f.publicCall('/v1/policy-fences', currentInput, replacement.token);
+    assert.equal(current.status, 200);
+    assert.deepEqual(await current.json(), { operationRef: currentInput.operationId, state: 'applied' });
+    assert.deepEqual(calls, [[f.context, input.operationId, gx.preparation.subjectRef, 3],
+      [f.context, currentInput.operationId, gx.preparation.subjectRef, 3]]);
+    assert.equal(f.seen.length, 0); assert.equal(f.forwarded.length, 0);
+  } finally { await f.close(); }
+});
 
 test('source HTTP: owner lookup resolves two original pending journals, revocation and foreign selectors deny', async () => {
   const f = await sourceHTTP(true);
