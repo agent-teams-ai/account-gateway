@@ -167,7 +167,7 @@ async function sourceHTTP(oauth: boolean) {
         if (path.endsWith('/descriptor')) {
           if (descriptorMode === 'redirect') { res.writeHead(307, { location: '/escaped' }); res.end(); return; }
           if (descriptorMode === 'overflow') { res.end(Buffer.alloc(65_537)); return; }
-          if (descriptorMode === 'headers') { for (let i = 0; i < 65; i++) res.setHeader('x-fixture-' + i, 'a'); res.end('{}'); return; }
+          if (descriptorMode === 'headers') { for (let i = 0; i < 65; i++) res.setHeader('x-fixture-' + i, 'a'); }
           if (descriptorMode === 'utf8') { res.end(Buffer.from([0xff])); return; }
           if (descriptorMode === 'timeout') return;
           reply(descriptorReply ?? { operation: tuple.operation, account_ref: tuple.account_ref, state: 'staged', qualification: 'pending' }); return;
@@ -338,7 +338,8 @@ test('source HTTP: strict fixed POST descriptor readback keeps custody pending a
       f.descriptor(value); await assert.rejects(client.describe(j), e => e instanceof NativeFailure && e.code === 'invalid_readback');
     }
     for (const mode of ['redirect','overflow','headers','utf8','timeout'] as const) {
-      f.descriptor(undefined, mode); await assert.rejects(client.describe(j), e => e instanceof NativeFailure);
+      f.descriptor(undefined, mode); await assert.rejects(client.describe(j), e => e instanceof NativeFailure &&
+        (mode !== 'headers' || (e.code === 'bounded' && e.classification === 'uncertain')), mode);
     }
     assert.equal(f.seen.some(s => s.path.includes('/escaped')), false);
     f.descriptor(undefined);
