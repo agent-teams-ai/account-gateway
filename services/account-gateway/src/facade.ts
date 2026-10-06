@@ -95,13 +95,18 @@ export class FacadeBearers {
         entry.ownerRefs.forEach(value => parse(c.reference, value));
         p.accountRefs.forEach(uuid); parse(c.reference, p.subjectRef); parse(c.reference, p.profileId);
         parse(c.revision, p.policyRevision); parse(c.revision, p.bindingRevision);
-        if (entry.profileIds !== undefined) {
-          if (!Array.isArray(entry.profileIds) || !entry.profileIds.length || entry.profileIds.length > 128 ||
-              new Set(entry.profileIds).size !== entry.profileIds.length) throw new KernelError('invalid');
-          for (const id of entry.profileIds) { parse(c.reference, id); identifier(id, 64); }
+        const suppliedProfileIds = entry.profileIds;
+        let profileIds: readonly string[] | undefined;
+        if (suppliedProfileIds !== undefined) {
+          if (!Array.isArray(suppliedProfileIds)) throw new KernelError('invalid');
+          const length = suppliedProfileIds.length;
+          if (length > 128) throw new KernelError('invalid');
+          profileIds = Array.from({ length }, (_, i) => suppliedProfileIds[i]);
+          if (!profileIds.length || new Set(profileIds).size !== profileIds.length) throw new KernelError('invalid');
+          for (const id of profileIds) { parse(c.reference, id); identifier(id, 64); }
         }
         grant = Object.freeze({ role: 'management', consumerId: entry.consumerId,
-          ...(entry.profileIds === undefined ? {} : { profileIds: Object.freeze([...entry.profileIds]) }),
+          ...(profileIds === undefined ? {} : { profileIds: Object.freeze(profileIds) }),
           ownerRefs: Object.freeze([...entry.ownerRefs]), preparation: Object.freeze({ ...p,
             accountRefs: Object.freeze([...p.accountRefs]), limits: Object.freeze(parse(c.limits, p.limits)) }) });
       }

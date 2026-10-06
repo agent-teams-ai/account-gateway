@@ -172,7 +172,9 @@ test('source catalog: singleton compatibility and finite simultaneous per-profil
   const grant = { token: 'source-management-catalog', role: 'management' as const, consumerId: 'source-consumer', ownerRefs: ['owner'],
     preparation: { accountRefs: [], subjectRef: 'subject', policyRevision: 1, bindingRevision: 1,
       profileId: secondProfile.profile, limits: secondProfile.limits, maxRunMs: 1000 } };
-  assert.equal(captureServiceBearers([grant], grant.consumerId, profiles).length, 1);
+  const broadCaptured = captureServiceBearers([grant], grant.consumerId, profiles);
+  assert.equal(broadCaptured.length, 1);
+  assert.equal(Object.hasOwn(broadCaptured[0], 'profileIds'), false, 'canonical capture preserves absent broad authority');
   const denied = (work: () => unknown) => assert.throws(work, e => e instanceof ServiceError && e.code === 'config_denied');
   const legacy = new FacadeBearers([grant]).resolve(grant.token);
   assert.ok(legacy && legacy.role === 'management'); assert.equal(Object.hasOwn(legacy, 'profileIds'), false);
@@ -198,6 +200,29 @@ test('source catalog: singleton compatibility and finite simultaneous per-profil
   assert.equal(mapping.current(captured), false);
   const replaced = mapping.resolve(grant.token); assert.ok(replaced && replaced.role === 'management');
   assert.deepEqual(replaced.profileIds, [secondProfile.profile]);
+  let profileReads = 0;
+  const accessorGrant = { ...grant, get profileIds() {
+    return ++profileReads <= 7 ? [secondProfile.profile] : undefined;
+  } };
+  const accessorCaptured = new FacadeBearers([accessorGrant]).resolve(grant.token);
+  assert.ok(accessorCaptured && accessorCaptured.role === 'management');
+  assert.deepEqual(accessorCaptured.profileIds, [secondProfile.profile], 'constructor cannot widen the supplied OpenRouter restriction');
+  assert.equal(profileReads, 1, 'optional restriction is read once');
+  assert.ok(Object.isFrozen(accessorCaptured.profileIds));
+  const externalIds: string[] = [secondProfile.profile];
+  let externalProfileIds: string[] | undefined = externalIds;
+  let canonicalProfileReads = 0;
+  const callerBearer = { ...grant, get profileIds() { canonicalProfileReads++; return externalProfileIds; } };
+  const serviceCaptured = captureServiceBearers([callerBearer], grant.consumerId, profiles);
+  assert.equal(canonicalProfileReads, 1, 'canonical capture reads the caller restriction once');
+  externalIds[0] = profile.profile;
+  externalProfileIds = undefined;
+  assert.notEqual(serviceCaptured[0], callerBearer, 'canonical capture owns bearer data');
+  assert.deepEqual(serviceCaptured[0].profileIds, [secondProfile.profile]);
+  assert.ok(Object.isFrozen(serviceCaptured[0].profileIds));
+  const serviceResolved = new FacadeBearers(serviceCaptured).resolve(grant.token);
+  assert.ok(serviceResolved && serviceResolved.role === 'management');
+  assert.deepEqual(serviceResolved.profileIds, [secondProfile.profile], 'later caller getter state cannot widen canonical authority');
   for (const patch of [{ profile: profile.profile }, { profile: 'openrouter-alias' }, { baseURL: profile.baseURL },
     { model: profile.model }, { endpoint: secondProfile.baseURL }, { providerTokenUpperBound: 49 },
     { limits: { ...limits, concurrency: 5 } }]) {

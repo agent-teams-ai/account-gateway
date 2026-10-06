@@ -127,16 +127,25 @@ export function captureServiceProfiles(input: Pick<ServiceConfig, 'profile' | 's
 }
 export function captureServiceBearers(value: unknown, consumerId: string, profiles: readonly ServiceProfile[]): ServiceConfig['bearers'] {
   try {
-    if (!Array.isArray(value) || !value.length) return deny();
+    if (!Array.isArray(value) || !value.length || value.length > 128) return deny();
     const bearers = value as (ManagementBearer | RunControlBearer)[];
     for (const b of bearers) {
-      if (b.consumerId !== consumerId || !['management','run-control'].includes(b.role)) deny();
       if (b.role === 'management') {
         object(b, ['token','role','consumerId','ownerRefs','preparation'], ['profileIds']);
         object(b.preparation, ['accountRefs','subjectRef','policyRevision','bindingRevision','profileId','limits','maxRunMs']);
-        if (b.profileIds !== undefined && (!Array.isArray(b.profileIds) ||
-            b.profileIds.some(id => !profiles.some(p => p.profile === id)))) deny();
       } else object(b, ['token','role','consumerId','ownerRefs','profileIds','limits','maxRunMs']);
+    }
+    const mapping = new FacadeBearers(bearers);
+    const captured = bearers.map(b => {
+      const token = b.token;
+      const grant = mapping.resolve(token);
+      if (!grant || grant.role === 'execution') return deny();
+      return { token, ...grant };
+    });
+    for (const b of captured) {
+      if (b.consumerId !== consumerId) deny();
+      if (b.role === 'management' && b.profileIds !== undefined &&
+          b.profileIds.some(id => !profiles.some(p => p.profile === id))) deny();
       const ids = b.role === 'management' ? [b.preparation.profileId] : b.profileIds;
       if (!Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length) deny();
       const grant = b.role === 'management' ? b.preparation : b;
@@ -148,8 +157,7 @@ export function captureServiceBearers(value: unknown, consumerId: string, profil
       }
       integer(grant.maxRunMs, defaults.maxRunMs);
     }
-    new FacadeBearers(bearers);
-    return freeze(bearers);
+    return freeze(captured);
   } catch { return deny(); }
 }
 // Sole entry: synchronous capture/validation before the first startup await.
