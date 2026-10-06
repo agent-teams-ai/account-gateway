@@ -14,6 +14,46 @@ import { startService } from '../src/service.ts';
 import type { Service } from '../src/service.ts';
 import { strictJSON } from '../src/facade-ingress.ts';
 import { object } from '../src/native-wire.ts';
+import { captureOAuthEnrollmentConfig, captureServiceProfiles, captureServiceBearers, openRouterProfile, ServiceError } from '../src/service-config.ts';
+
+test('source catalog: singleton compatibility and finite simultaneous per-profile grants', () => {
+  const limits = { requests: 4, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 100 };
+  const profile = { profile: 'openai-responses-apikey-v1', baseURL: 'https://api.xiaomimimo.com/v1', model: 'mimo-v2-flash',
+    qualificationRef: 'source-mimo', limits, providerTokenUpperBound: 1000 };
+  const secondProfile = { ...openRouterProfile, qualificationRef: 'source-openrouter', providerTokenUpperBound: 2000,
+    limits: { ...limits, requests: 2, concurrency: 1, requestBytes: 2048, outputBytes: 4096, tokens: 50 } };
+  const singleton = captureServiceProfiles({ profile });
+  assert.deepEqual(singleton, [profile]);
+  const profiles = captureServiceProfiles({ profile, secondProfile });
+  assert.deepEqual(profiles, [profile, secondProfile]);
+  assert.ok(Object.isFrozen(profiles[1].limits));
+  const grant = { token: 'source-management-catalog', role: 'management' as const, consumerId: 'source-consumer', ownerRefs: ['owner'],
+    preparation: { accountRefs: [], subjectRef: 'subject', policyRevision: 1, bindingRevision: 1,
+      profileId: secondProfile.profile, limits: secondProfile.limits, maxRunMs: 1000 } };
+  assert.equal(captureServiceBearers([grant], grant.consumerId, profiles).length, 1);
+  const denied = (work: () => unknown) => assert.throws(work, e => e instanceof ServiceError && e.code === 'config_denied');
+  for (const patch of [{ profile: profile.profile }, { profile: 'openrouter-alias' }, { baseURL: profile.baseURL },
+    { model: profile.model }, { endpoint: secondProfile.baseURL }, { providerTokenUpperBound: 49 },
+    { limits: { ...limits, concurrency: 5 } }]) {
+    denied(() => captureServiceProfiles({ profile, secondProfile: { ...secondProfile, ...patch } }));
+  }
+  denied(() => captureServiceBearers([{ ...grant, preparation: { ...grant.preparation, limits } }], grant.consumerId, profiles));
+  const run = { token: 'source-run-catalog', role: 'run-control' as const, consumerId: grant.consumerId,
+    ownerRefs: ['owner'], profileIds: profiles.map(p => p.profile), limits: secondProfile.limits, maxRunMs: 1000 };
+  assert.equal(captureServiceBearers([run], run.consumerId, profiles).length, 1);
+  denied(() => captureServiceBearers([{ ...run, limits }], run.consumerId, profiles));
+  denied(() => captureServiceBearers([{ ...run, profileIds: ['unconfigured'] }], run.consumerId, profiles));
+  denied(() => captureServiceBearers([{ ...run, profileIds: [profile.profile, profile.profile] }], run.consumerId, profiles));
+  // Legacy opt-in capture stays valid, but startup needs its separate receipt
+  // and all five limits; a singleton qualification is never substituted.
+  const oauthEnrollment = captureOAuthEnrollmentConfig({ enabled: true, profile: 'openai-codex-oauth-responses-v1', modelScope: ['gpt-6.1-sol'] });
+  denied(() => captureServiceProfiles({ profile, oauthEnrollment }));
+  const catalog = captureServiceProfiles({ profile, secondProfile, oauthEnrollment: { ...oauthEnrollment,
+    qualificationRef: 'source-codex', limits: secondProfile.limits, providerTokenUpperBound: 1000 } });
+  assert.equal(catalog[2].profile, 'openai-codex-oauth-responses-v1');
+  assert.equal(catalog[2].baseURL, 'https://chatgpt.com/backend-api/codex');
+  assert.equal(catalog[2].qualificationRef, 'source-codex');
+});
 
 // Fixture-owned input projection. Actual startService validates production
 // configuration; this test independently checks the disposable designation.

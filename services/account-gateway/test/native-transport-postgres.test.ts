@@ -381,7 +381,8 @@ test('synthetic TCP/SQL: the complete association rejects each tuple/cap, nanose
       { expiresAt: admission.expiresAt.replace(/\.(\d{3})Z$/, (_, ms: string) => '.' + ms + '000001Z') }];
     for (const key of Object.keys(limits) as (keyof typeof limits)[]) variants.push({ limits: { ...limits, [key]: limits[key] + 1 } });
     for (const variant of variants) assert.equal((await f.call('admit', { ...tuple, admission: { ...admission, ...variant } })).status, 403);
-    for (const descriptorPatch of [{ account_id: descriptor.account_id + 1 }, { generation: randomUUID() }, { created_at: '2026-10-03T04:05:06.123456788Z' }])
+    for (const descriptorPatch of [{ account_id: descriptor.account_id + 1 }, { generation: randomUUID() }, { created_at: '2026-10-03T04:05:06.123456788Z' },
+      { profile: 'openrouter-openai-responses-apikey-v1' }, { base_url: 'https://openrouter.ai/api/v1' }, { model: 'openai/gpt-5.4-mini' }])
       assert.equal((await f.call('admit', { ...tuple, descriptor: { ...descriptor, ...descriptorPatch } })).status, 403);
     assert.equal((await f.call('admit', { ...tuple, native: { ...p.native, requestNonce: randomUUID() } })).status, 403);
     assert.equal(f.stats().permits, 1); assert.equal(f.stats().entries, 1);

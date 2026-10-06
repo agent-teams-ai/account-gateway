@@ -3,18 +3,77 @@ import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import pg from 'pg';
-import { uuid } from './domain.ts';
+import { KernelError, uuid } from './domain.ts';
 import { PostgresKernel } from './postgres.ts';
 import { IntentSecrets, PostgresManagementStore } from './management-store.ts';
 import { AccountManagement, exactCandidate, sameCandidate } from './management.ts';
-import { NativeManagementClient } from './native-client.ts';
+import type { CandidateJournal, CandidateNative, IntentCustody, ManagementStore, OAuthScope } from './management.ts';
+import type { DurableKernel, ExecutionRead } from './domain.ts';
+import { codexOAuthProfile } from './management.ts';
+import { NativeManagementClient, NativeOAuthEnrollmentClient } from './native-client.ts';
 import { NativeAuthority } from './native-authority.ts';
 import { NativeHTTPTransport } from './native-transport.ts';
 import { createFacade, FacadeBearers, cancelFacadeTransport } from './facade.ts';
 import type { FacadeOptions } from './facade.ts';
 import { strictJSON } from './facade-ingress.ts';
 import { object } from './native-wire.ts';
-import { loadServiceConfig, keyBytes, ServiceError } from './service-config.ts';
+import { captureServiceBearers, captureServiceProfiles, loadServiceConfig, keyBytes, ServiceError } from './service-config.ts';
+import type { ServiceConfig } from './service-config.ts';
+
+// Trusted composition only: AccountManagement reconstructs OAuthScope from its
+// committed original journal. Each call binds a fresh fixed-owner client; no
+// owner cache, caller factory, callback URL or bearer transfer is introduced.
+export function composeServiceControl(cfg: Pick<ServiceConfig, 'native' | 'consumer' | 'profile' | 'secondProfile' | 'oauthEnrollment' | 'bearers'>,
+  kernel: DurableKernel & ExecutionRead, store: ManagementStore, custody: IntentCustody, worker: string) {
+  const profiles = captureServiceProfiles(cfg);
+  const consumerId = cfg.consumer.consumerId;
+  const bearers = new FacadeBearers(captureServiceBearers(cfg.bearers, consumerId, profiles));
+  const control = { origin: cfg.native.origin, consumerId,
+    controlCredential: cfg.consumer.managementCredential };
+  const client = new NativeManagementClient(control);
+  const checkProfile = (j: CandidateJournal) => {
+    const p = profiles.find(p => p.profile === j.profile.profile);
+    if (!p || j.consumerId !== consumerId || j.profile.model !== p.model ||
+        j.profile.baseURL !== p.baseURL || j.profile.qualificationRef !== p.qualificationRef) throw new KernelError('denied');
+  };
+  const native: CandidateNative = {
+    create(j, name, key) { checkProfile(j); return client.create(j, name, key); },
+    read(j) { checkProfile(j); return client.read(j); },
+    setState(j, state) { checkProfile(j); return client.setState(j, state); },
+    erase(j) { checkProfile(j); return client.erase(j); },
+  };
+  const oauthProfile = profiles.find(p => p.profile === codexOAuthProfile.profile);
+  const forScope = (scope: OAuthScope) => new NativeOAuthEnrollmentClient({ ...control, ownerRef: scope.ownerRef });
+  const management = new AccountManagement({ kernel, store, custody, native, worker,
+    profiles: profiles.filter(p => p.profile !== codexOAuthProfile.profile),
+    ...(oauthProfile ? { oauth: { profile: oauthProfile, native: {
+      begin: (scope: OAuthScope) => forScope(scope).begin(scope),
+      read: (scope: OAuthScope) => forScope(scope).read(scope),
+    }, descriptor: { describe: (scope: OAuthScope) => forScope(scope).describe(scope) } } } : {}),
+    proof: { async verify(j, d) {
+      const p = profiles.find(p => p.profile === j.profile.profile);
+      const rows = await native.read(j);
+      return !!p && rows.length === 1 && rows[0].state === 'inactive' && exactCandidate(j, d) &&
+        exactCandidate(j, rows[0]) && sameCandidate(d, rows[0]) && j.profile.model === p.model &&
+        j.profile.baseURL === p.baseURL && j.profile.qualificationRef === p.qualificationRef;
+    } } });
+  const catalog: FacadeOptions['profiles'] = Object.freeze(profiles.map(p => ({
+    dto: { profileId: p.profile, protocol: 'openai-responses' as const, modelIds: [p.model],
+      authKinds: [p.profile === codexOAuthProfile.profile ? 'oauth' as const : 'api_key' as const] },
+    maxOutputTokens: p.limits.tokens, limits: p.limits,
+  })));
+  return Object.freeze({ profiles, bearers, management, catalog });
+}
+export function composeServiceNative(cfg: Pick<ServiceConfig, 'native' | 'consumer' | 'oauthEnrollment'>,
+  control: ReturnType<typeof composeServiceControl>, kernel: DurableKernel & ExecutionRead, store: ManagementStore,
+  enrollment: NonNullable<FacadeOptions['enrollment']>) {
+  const authority = new NativeAuthority({ kernel, store, ...(cfg.oauthEnrollment ? { oauthOwners: { store, bearers: control.bearers } } : {}),
+    profileLimits: control.profiles.map(p => ({ profile: p.profile, limits: p.limits })), config: { origin: cfg.native.origin,
+      enrollment: { ...enrollment, qualificationRef: control.profiles[0].qualificationRef }, consumers: [cfg.consumer],
+      profiles: control.profiles.map(p => ({ ...p, requestBytes: p.limits.requestBytes, outputBytes: p.limits.outputBytes,
+        tokens: p.limits.tokens })), timeoutMs: 5000, closureWaitMs: 1000, maxPending: 128 } });
+  return Object.freeze({ authority, transport: new NativeHTTPTransport(authority) });
+}
 
 export interface ProcessBinding {
   readonly originRef: string; readonly bootId: string; readonly incarnation: string;
@@ -64,28 +123,14 @@ async function close(s: Server | undefined): Promise<void> {
 // original protected Go parent. No recovery spawn, inference replay or PID lookup.
 export async function startService(configFile: string, signal?: AbortSignal): Promise<Service> {
   const cfg = loadServiceConfig(configFile); // Fully frozen before any await.
-  // Source checkpoint: future protected descriptor + OAuth dispatch adapter is
-  // unavailable/unqualified. Opt-in fails before PG, listener or native launch.
-  // Do not install the proposed F3 wire client, alias an API-key qualification
-  // receipt, or activate OAuth in the normal catalog from this source alone.
-  if (cfg.oauthEnrollment) throw new ServiceError('startup_denied');
   const pool = new pg.Pool({ connectionString: cfg.kernelDSN, max: 8, connectionTimeoutMillis: 5000,
     query_timeout: 5000, statement_timeout: 5000, idle_in_transaction_session_timeout: 5000 });
   pool.on('error', () => fail());
   const kernel = new PostgresKernel(pool, undefined, cfg.durableFacts), worker = randomUUID(), ctx = Object.freeze({ consumerId: cfg.consumer.consumerId });
   const custody = new IntentSecrets(keyBytes(cfg.keys.intentAEAD), keyBytes(cfg.keys.intentHMAC));
   const store = new PostgresManagementStore(pool, custody);
-  const bearers = new FacadeBearers(cfg.bearers), p = cfg.profile;
-  const native = new NativeManagementClient({ origin: cfg.native.origin, consumerId: ctx.consumerId,
-    controlCredential: cfg.consumer.managementCredential });
-  const management = new AccountManagement({ kernel, store, custody, native, worker, profiles: [p], proof: {
-    async verify(j, d) {
-      const rows = await native.read(j);
-      return rows.length === 1 && rows[0].state === 'inactive' && exactCandidate(j, d) &&
-        exactCandidate(j, rows[0]) && sameCandidate(d, rows[0]) && j.profile.profile === p.profile &&
-        j.profile.model === p.model && j.profile.baseURL === p.baseURL && j.profile.qualificationRef === p.qualificationRef;
-    },
-  } });
+  const control = composeServiceControl(cfg, kernel, store, custody, worker);
+  const { profiles, bearers, management, catalog } = control;
   let handler: Server | undefined, facade: Server | undefined;
   let original: ProcessBinding | undefined, ready = false, invalid = false, stopping = false;
   let terminal: 'retired' | 'pending' | undefined, retirement: Retirement | undefined;
@@ -215,18 +260,14 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     startupActive();
     const binding = original!;
     const enrollment = Object.freeze({ originRef: binding.originRef, engineIncarnation: binding.incarnation, worker });
-    const authority = new NativeAuthority({ kernel, store, config: { origin: cfg.native.origin,
-      enrollment: { ...enrollment, qualificationRef: p.qualificationRef }, consumers: [cfg.consumer],
-      profiles: [{ ...p, requestBytes: p.limits.requestBytes, outputBytes: p.limits.outputBytes,
-        tokens: p.limits.tokens }], timeoutMs: 5000, closureWaitMs: 1000, maxPending: 128 } });
+    const { authority, transport } = composeServiceNative(cfg, control, kernel, store, enrollment);
     handler = authority.createServer(); install();
     await waitFor(() => ready, 10_000);
     startupActive();
     await kernel.heartbeat(ctx, worker);
     startupActive();
-    options = { kernel, management, store, bearers, enrollment, transport: new NativeHTTPTransport(authority),
-      profiles: [{ dto: { profileId: p.profile, protocol: 'openai-responses', modelIds: [p.model], authKinds: ['api_key'] },
-        maxOutputTokens: p.limits.tokens }], intentHmacKey: keyBytes(cfg.keys.facadeHMAC), ingressBytes: Math.max(1024, p.limits.requestBytes),
+    options = { kernel, management, store, bearers, enrollment, transport,
+      profiles: catalog, intentHmacKey: keyBytes(cfg.keys.facadeHMAC), ingressBytes: Math.max(1024, ...profiles.map(p => p.limits.requestBytes)),
       bufferBytes: 65_536 };
     facade = createFacade(options); facade.on('error', fail);
     await listen(facade, cfg.facadeOrigin);
