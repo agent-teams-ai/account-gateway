@@ -8,8 +8,13 @@ concurrency:
 permissions:
   contents: read
 jobs:
-  kernel:
+  kernel_runtime:
+    name: kernel (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['24.21.0', '26.10.0']
     services:
       postgres:
         image: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
@@ -23,6 +28,7 @@ jobs:
           --health-cmd "pg_isready -U postgres -d ag_kernel_test_ci"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
+      NPM_CONFIG_ENGINE_STRICT: 'true'
       AG_KERNEL_TEST_ALLOW: disposable_pg17_10
       AG_KERNEL_DISPOSABLE_DB: ag_kernel_test_ci
       AG_KERNEL_TEST_DSN: postgresql://postgres@127.0.0.1:5432/ag_kernel_test_ci
@@ -36,13 +42,20 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24.21.0
+          node-version: ${{ matrix.node }}
       - run: npm install --prefix "$RUNNER_TEMP/gateway-pnpm" --ignore-scripts pnpm@11.28.2
+      - name: Verify pinned runtime and strict engine configuration
+        run: |
+          test "$(node --version)" = "v${{ matrix.node }}"
+          test "$(npm config get engine-strict)" = true
+          test "$(node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" config get engine-strict)" = true
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" install --frozen-lockfile
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run build
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run typecheck
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run test:domain
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run test:management
+      - name: Focused retirement readback and source catalog checks
+        run: node --test --test-name-pattern='retirement readback|source catalog' services/account-gateway/test/service-runtime.test.ts
       - name: Prepare separate management database and pinned dump/restore clients
         run: |
           docker exec "${{ job.services.postgres.id }}" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ag_kernel_test_management_ci'
@@ -79,3 +92,12 @@ jobs:
         run: |
           docker exec "${{ job.services.postgres.id }}" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ag_kernel_test_run_access_ci'
           node --test services/account-gateway/test/run-access-postgres.test.ts
+  kernel:
+    needs: kernel_runtime
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both Node runtime lanes
+        env:
+          LANE_RESULT: ${{ needs.kernel_runtime.result }}
+        run: test "$LANE_RESULT" = success
