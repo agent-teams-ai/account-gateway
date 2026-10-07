@@ -347,7 +347,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     });
     child.stdout!.once('end', () => { if (buffer.length || !terminal) fail(); });
     child.stdout!.on('error', fail); child.stderr!.on('error', fail);
-    await waitFor(() => original !== undefined, 5000);
+    await waitFor(() => original !== undefined, 10_000);
     startupActive();
     const binding = original!;
     const enrollment = Object.freeze({ originRef: binding.originRef, engineIncarnation: binding.incarnation, worker });
