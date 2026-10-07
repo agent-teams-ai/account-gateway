@@ -636,6 +636,15 @@ export class PostgresKernel implements DurableKernel {
   async heartbeat(context: TrustedContext, worker: string): Promise<void> {
     uuid(worker);
     return this.transaction(context, async tx => {
+      // Only expired enrollment with no accepted work may release a prepaid
+      // slot. Excluding this UUID preserves the expired-lease renewal denial.
+      await tx.db.query(`DELETE FROM ag_kernel.workers w WHERE w.consumer=$1 AND w.worker<>$2
+        AND w.lease_until<=clock_timestamp()
+        AND NOT EXISTS (SELECT 1 FROM ag_kernel.candidates c WHERE c.consumer=w.consumer AND c.worker=w.worker)
+        AND NOT EXISTS (SELECT 1 FROM ag_kernel.requests r WHERE r.consumer=w.consumer AND r.worker=w.worker)
+        AND NOT EXISTS (SELECT 1 FROM ag_kernel.cleanup j WHERE j.consumer=w.consumer AND j.worker=w.worker)
+        AND NOT EXISTS (SELECT 1 FROM ag_management.candidate_journal j WHERE j.consumer=w.consumer AND j.worker=w.worker)`,
+      [tx.consumer, worker]);
       const r = await tx.db.query(`INSERT INTO workers(consumer,worker,lease_until)
         VALUES ($1,$2,clock_timestamp()+$3*interval '1 millisecond') ON CONFLICT (consumer,worker)
         DO UPDATE SET lease_until=excluded.lease_until WHERE workers.lease_until>clock_timestamp() RETURNING worker`,

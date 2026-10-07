@@ -112,7 +112,10 @@ export interface Bounds {
 }
 // Aggregate facts include prepaid, single-use closure/fence/disable slots and
 // bounded worker/issuer recovery slots. These are conservative implementation
-// defaults, not measured D-final capacity qualifications. No fact is evicted.
+// defaults, not measured D-final capacity qualifications. Accepted authority and
+// effect facts are never evicted or refunded. Expired workers without any durable
+// work reference may release a prepaid slot and later enroll again; the incoming
+// expired UUID cannot renew itself. Referenced workers and issuer history persist.
 export interface DurableFactBounds {
   maxServiceFacts: number; maxConsumerFacts: number; maxAccountFacts: number;
   workerSlots: number; issuerSlots: number;
