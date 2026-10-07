@@ -50,7 +50,8 @@ async function stop(server: ReturnType<typeof createServer>): Promise<void> { se
 
 // Explicit synthetic native peer, not Go/provider evidence. Real management
 // HTTP -> encrypted custody/mapping SQL and real kernel claims are exercised.
-async function fixture(mode: 'normal' | 'lost_ack' | 'overflow' | 'held' | 'missing' = 'normal', controlProfiles = false) {
+async function fixture(mode: 'normal' | 'lost_ack' | 'overflow' | 'held' | 'missing' = 'normal', controlProfiles = false,
+  lifetime: { readonly streamDurationMs?: number; readonly deadlineMs?: number } = {}) {
   const context = { consumerId: 'facade-' + randomUUID() }, kernel = new PostgresKernel(pool);
   const custody = new IntentSecrets(randomBytes(32), randomBytes(32)), store = new PostgresManagementStore(pool, custody);
   const worker = randomUUID(), incarnation = randomUUID(), managementToken = 'fixture-management-' + randomUUID(), executionToken = 'fixture-execution-' + randomUUID();
@@ -101,6 +102,15 @@ async function fixture(mode: 'normal' | 'lost_ack' | 'overflow' | 'held' | 'miss
     return { kind: 'stream', async cancel() { cancelled++; }, body: (async function* () {
       if (mode === 'overflow') { yield Buffer.from('data: prefix\n\n'); await delay(25); yield new Uint8Array(limits.outputBytes + 1); return; }
       yield Buffer.from('data: synthetic-fixture\n\n');
+      if (lifetime.streamDurationMs !== undefined) {
+        const finishAt = performance.now() + lifetime.streamDurationMs;
+        while (performance.now() < finishAt) {
+          try { await delay(250, undefined, { signal: input.signal }); }
+          catch (error) { if (input.signal.aborted) return; throw error; }
+          if (input.signal.aborted) return;
+          yield Buffer.from('data: synthetic-progress\n\n');
+        }
+      }
       if (mode === 'held') {
         await new Promise<void>(resolve => { if (input.signal.aborted) resolve(); else input.signal.addEventListener('abort', () => resolve(), { once: true }); }); return;
       }
@@ -123,7 +133,7 @@ async function fixture(mode: 'normal' | 'lost_ack' | 'overflow' | 'held' | 'miss
   const accountRef = created.result.accountRef;
   managementGrant = { ...managementGrant, preparation: { ...managementGrant.preparation, accountRefs: [accountRef] } }; bearers.replace([managementGrant]);
   const preparedInput: c.Prepare = { operationId: randomUUID(), invocationRef: 'invocation-' + randomUUID(), attemptRef: 'attempt-fixture', accountRefs: [accountRef],
-    subjectRef: 'binding-fixture', policyRevision: 2, bindingRevision: 3, profileId: profile.profile, limits, deadline: new Date(Date.now() + 45_000).toISOString() };
+    subjectRef: 'binding-fixture', policyRevision: 2, bindingRevision: 3, profileId: profile.profile, limits, deadline: new Date(Date.now() + (lifetime.deadlineMs ?? 45_000)).toISOString() };
   const prepared = await client.prepare(preparedInput);
   assert.ok(prepared.state === 'applied' && prepared.result?.kind === 'execution');
   const executionRef = prepared.result.executionRef, saved = await kernel.savedExecution(context, executionRef);
@@ -323,6 +333,54 @@ test('output byte cap and stream cancellation classify unknown and retain occupi
       assert.ok(f.stats().cancelled > 0);
     } finally { await f.stop(); }
   }
+});
+// The first scenario fails when the HTTP arrival timer cuts off a progressing
+// admitted stream. The companion fails if switching budgets loses saved expiry
+// or treats cancellation as proof of native closure/replay permission.
+test('progressing admitted HTTP stream completes beyond the ingress budget before saved expiry', { timeout: 20_000 }, async () => {
+  const f = await fixture('normal', false, { streamDurationMs: 6500, deadlineMs: 20_000 }); try {
+    const request = f.request(), startedAt = Date.now();
+    const result = await f.execution.request(f.executionRef, request);
+    assert.equal(result.kind, 'stream');
+    if (result.kind !== 'stream') throw new Error('expected synthetic stream');
+    const reader = result.body.getReader(); let lastProgressAt = startedAt, bytes = 0;
+    for (;;) {
+      const part = await reader.read(); if (part.done) break;
+      lastProgressAt = Date.now(); bytes += part.value.byteLength;
+    }
+    assert.ok(lastProgressAt - startedAt > 5500, 'real HTTP chunks must progress beyond the 5000ms ingress budget');
+    assert.ok(lastProgressAt < Date.parse(f.saved.admission.expiresAt));
+    assert.ok(bytes > Buffer.byteLength('data: synthetic-fixture\n\n'));
+    assert.equal((await f.execution.status(f.executionRef, request.requestId)).effect, 'completed');
+    assert.equal(f.stats().calls, 1); assert.equal(f.stats().entries, 1); assert.equal(f.stats().cancelled, 0);
+    assert.equal((await pool.query('SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2', [f.context.consumerId, f.executionRef])).rows[0].request_count, 1);
+  } finally { await f.stop(); }
+});
+test('progressing admitted HTTP stream still expires and retains unknown native occupancy', { timeout: 25_000 }, async () => {
+  const f = await fixture('normal', false, { streamDurationMs: 20_000, deadlineMs: 8500 }); try {
+    const request = f.request(), startedAt = Date.now();
+    const result = await f.execution.request(f.executionRef, request);
+    assert.equal(result.kind, 'stream');
+    if (result.kind !== 'stream') throw new Error('expected synthetic stream');
+    const reader = result.body.getReader(); let lastProgressAt = startedAt;
+    await assert.rejects(async () => {
+      for (;;) {
+        const part = await reader.read(); if (part.done) return;
+        lastProgressAt = Date.now();
+      }
+    });
+    assert.ok(lastProgressAt - startedAt > 5500, 'saved expiry must allow progress beyond the ingress budget');
+    const deadlineAt = Date.parse(f.saved.admission.expiresAt);
+    assert.ok(lastProgressAt >= deadlineAt - 1000, 'real HTTP progress must continue until near saved expiry');
+    assert.ok(Date.now() >= deadlineAt - 100, 'progress cannot cancel the saved deadline');
+    for (let tries = 0; tries < 100 && (await f.kernel.request(f.context, f.executionRef, request.requestId)).effect !== 'effect_unknown'; tries++) await delay(10);
+    assert.equal((await f.kernel.request(f.context, f.executionRef, request.requestId)).effect, 'effect_unknown');
+    const persisted = (await pool.query('SELECT r.transport_occupied,e.request_count,e.state FROM ag_kernel.requests r JOIN ag_kernel.executions e ON e.consumer=r.consumer AND e.ref=r.execution_ref WHERE r.consumer=$1 AND r.id=$2', [f.context.consumerId, request.requestId])).rows[0];
+    assert.equal(persisted.transport_occupied, true); assert.equal(persisted.request_count, 1); assert.equal(persisted.state, 'fenced');
+    assert.ok(f.stats().cancelled > 0);
+    await assert.rejects(f.execution.request(f.executionRef, f.request()), denied('not_dispatched'));
+    assert.equal(f.stats().calls, 1); assert.equal(f.stats().entries, 1);
+  } finally { await f.stop(); }
 });
 test('execution close is scoped, idempotent acknowledgement without a wrong result variant', async () => {
   const f = await fixture(); try {

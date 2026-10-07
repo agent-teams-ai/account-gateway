@@ -394,9 +394,9 @@ export function createFacade(options: FacadeOptions): Server {
   const server = createServer({ maxHeaderSize: 16_384, headersTimeout: Math.min(timeoutMs, 10_000), requestTimeout: timeoutMs,
     keepAliveTimeout: 1000, connectionsCheckingInterval: 1000 }, (req, res) => {
     const controller = new AbortController();
-    const timer = setTimeout(() => { controller.abort(); res.destroy(); }, timeoutMs);
+    const ingressTimer = setTimeout(() => { controller.abort(); res.destroy(); }, timeoutMs);
     const disconnected = () => { if (!res.writableFinished) controller.abort(); };
-    res.once('close', disconnected); res.once('finish', () => clearTimeout(timer)); res.once('close', () => clearTimeout(timer));
+    res.once('close', disconnected); res.once('finish', () => clearTimeout(ingressTimer)); res.once('close', () => clearTimeout(ingressTimer));
     req.setTimeout(timeoutMs, () => { controller.abort(); req.destroy(); }); res.setTimeout(timeoutMs, () => { controller.abort(); res.destroy(); });
     let enteredTransport = false, uncertain = false;
     let transportScope: { context: TrustedContext; ref: string; id: string } | undefined;
@@ -535,7 +535,12 @@ export function createFacade(options: FacadeOptions): Server {
         validateResponses(raw, profile.dto.modelIds, profile.maxOutputTokens);
         requireCurrent(grant);
         if (!transport || !enrollment) throw new KernelError('unavailable');
-        const abortAt = setTimeout(() => controller.abort(), Math.max(1, Date.parse(saved.admission.expiresAt) - Date.now()));
+        const remainingMs = Date.parse(saved.admission.expiresAt) - Date.now();
+        if (controller.signal.aborted || remainingMs <= 0) throw new KernelError('denied');
+        const abortAt = setTimeout(() => controller.abort(), remainingMs);
+        // Validated execution streams use their saved absolute deadline. The
+        // ingress budget and socket inactivity bounds have distinct roles.
+        clearTimeout(ingressTimer);
         const nativeCallback = callback(context, grant, saved, identity.requestRef!, controller.signal);
         transportScope = { context, ref, id: identity.requestRef! };
         enteredTransport = true; uncertain = true;
