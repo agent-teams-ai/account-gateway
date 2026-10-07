@@ -168,7 +168,7 @@ export async function post(cfg: Configuration, credential: string, path: string,
       maxHeaderSize: 16_384, signal, headers: { authorization: 'Bearer ' + credential,
         'content-type': 'application/json', accept: 'application/json', 'content-length': body.byteLength } });
     const timer = setTimeout(() => req.destroy(new KernelError('unavailable')), duration);
-    req.setTimeout(cfg.timeoutMs, () => req.destroy(new KernelError('unavailable')));
+    req.setTimeout(duration, () => req.destroy(new KernelError('unavailable')));
     req.once('error', () => { clearTimeout(timer); reject(new KernelError('unavailable')); });
     req.once('response', response => {
       response.on('error', () => undefined);
