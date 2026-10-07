@@ -1601,18 +1601,107 @@ test('D-final populated SQL003/004 upgrade prepays fresh recovery authority at f
   assert.equal(await occupancy(ctx, h.account), 0);
   assert.equal((await kernel.request(ctx, h.execution, 'history-unknown')).effect, 'effect_unknown');
   assert.deepEqual(await kernel.requestProof(ctx, h.execution, 'history-unknown'), proof);
-  await assert.rejects(worker(ctx, kernel), isCode('denied'));
+  const nextWorker = await worker(ctx, kernel);
   await assert.rejects(kernel.restore(ctx, freshIssuer, randomUUID()), isCode('denied'));
   const workers = (await admin.query('SELECT worker FROM ag_kernel.workers WHERE consumer=$1', [ctx.consumerId])).rows;
-  assert.deepEqual(workers.map(row => row.worker).sort(), [...h.workers, freshWorker].sort());
+  assert.deepEqual(workers.map(row => row.worker).sort(), [h.workers[0], freshWorker, nextWorker].sort());
   const issuers = (await admin.query('SELECT issuer FROM ag_kernel.issuer_epochs WHERE consumer=$1', [ctx.consumerId])).rows;
   assert.deepEqual(issuers.map(row => row.issuer).sort(), [...h.issuers, freshIssuer].sort());
   assert.equal(accountUsed, 12); // Account, candidate, execution, operation and request prepayments.
-  assert.equal(used, 1 + 17 + 33 + accountUsed + 2); // Includes BOTH fresh permanent slots.
+  assert.equal(used, 1 + 17 + 33 + accountUsed + 2); // Prepaid recovery slots remain charged after orphan reclaim.
   assert.equal(await count('SELECT fact_used AS n FROM ag_kernel.consumers WHERE consumer=$1', [ctx.consumerId]), used);
   assert.equal(await count('SELECT fact_used AS n FROM ag_kernel.accounts WHERE consumer=$1 AND ref=$2',
     [ctx.consumerId, h.account]), accountUsed);
   assert.equal(await budget(), serviceUsed, 'recovery and exact cleanup neither charge again nor refund facts');
+});
+
+// Red when expired enrollment permanently exhausts prepaid worker slots, or
+// reclaim forgets any reference, revives this expired UUID or refunds facts.
+test('D-final heartbeat reclaims only expired orphan workers across repeated finite-slot reuse', async () => {
+  const ctx = context(), foreign = context();
+  const facts = { ...factDefaults, workerSlots: 8, issuerSlots: 4 };
+  const kernel = new PostgresKernel(poolA, { ...defaults, workerLeaseMs: 300_000 }, facts);
+  await kernel.issuer(ctx);
+  const account = await connected(ctx);
+  const candidateWorker = (await admin.query(`SELECT worker FROM ag_kernel.candidates
+    WHERE consumer=$1 AND account_ref=$2`, [ctx.consumerId, account.accountRef])).rows[0].worker as string;
+  const requestWorker = await worker(ctx, kernel), cleanupWorker = await worker(ctx, kernel);
+  const journalWorker = await worker(ctx, kernel), live = await worker(ctx, kernel);
+  const incoming = await worker(ctx, kernel), orphans = [await worker(ctx, kernel), await worker(ctx, kernel)];
+  const execution = await prepared(ctx, account.accountRef!, {}, kernel);
+  const claimed = await kernel.claim(ctx, execution.result.executionRef!, 'held-unknown', requestWorker,
+    execution.admission, reservation());
+  assert.ok(claimed.dispatch);
+  await kernel.effect(ctx, execution.result.executionRef!, 'held-unknown', requestWorker, 'effect_unknown');
+
+  const pending = await staged(ctx), permit = await kernel.startCandidate(ctx, pending.operationRef, journalWorker);
+  assert.ok(permit);
+  await admin.query(`INSERT INTO ag_management.candidate_journal(consumer,operation_id,account_ref,
+    owner_ref,purpose,generation,worker,profile,base_url,model,qualification_ref)
+    VALUES ($1,$2,$3,'workspace-fixture','create',$4,$5,'mimo-test','https://native.invalid','mimo-test','sandbox-worker-reclaim')`,
+  [ctx.consumerId, pending.operationRef, pending.accountRef, permit.candidate, journalWorker]);
+  await kernel.unknownCandidate(ctx, pending.operationRef, journalWorker);
+  // Legal terminal fixtures isolate the independent journal and cleanup FKs;
+  // the journal's immutable worker remains after the candidate owner is absent.
+  await admin.query('UPDATE ag_kernel.candidates SET worker=NULL WHERE consumer=$1 AND generation=$2',
+    [ctx.consumerId, permit.candidate]);
+  await admin.query(`UPDATE ag_kernel.cleanup SET state='done',worker=$3,token=$4
+    WHERE consumer=$1 AND generation=$2`, [ctx.consumerId, permit.candidate, cleanupWorker, randomUUID()]);
+  await kernel.heartbeat(foreign, incoming);
+  const referenced = [candidateWorker, requestWorker, cleanupWorker, journalWorker];
+  await admin.query(`UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second'
+    WHERE (consumer=$1 AND worker=ANY($2::uuid[])) OR (consumer=$3 AND worker=$4)`,
+  [ctx.consumerId, [...referenced, incoming, ...orphans], foreign.consumerId, incoming]);
+
+  const rows = async () => Promise.all([
+    ['ag_kernel.accounts', 'ref'], ['ag_kernel.operations', 'id'], ['ag_kernel.candidates', 'generation'],
+    ['ag_kernel.executions', 'ref'], ['ag_kernel.requests', 'execution_ref,id'],
+    ['ag_kernel.cleanup', 'ref'], ['ag_management.candidate_journal', 'generation'],
+  ].map(async ([table, order]) => (await admin.query(`SELECT * FROM ${table} WHERE consumer=$1 ORDER BY ${order}`,
+    [ctx.consumerId])).rows));
+  const counters = async () => (await admin.query(`SELECT c.fact_used,c.worker_slots,c.issuer_slots,b.used AS service_used
+    FROM ag_kernel.consumers c CROSS JOIN ag_kernel.fact_budget b WHERE c.consumer=$1`, [ctx.consumerId])).rows[0];
+  const beforeRows = await rows(), beforeCounters = await counters();
+  const incomingLease = (await admin.query('SELECT lease_until FROM ag_kernel.workers WHERE consumer=$1 AND worker=$2',
+    [ctx.consumerId, incoming])).rows[0].lease_until;
+  await assert.rejects(kernel.heartbeat(ctx, incoming), isCode('denied'));
+  assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.workers WHERE consumer=$1', [ctx.consumerId]), facts.workerSlots);
+  assert.deepEqual((await admin.query('SELECT lease_until FROM ag_kernel.workers WHERE consumer=$1 AND worker=$2',
+    [ctx.consumerId, incoming])).rows[0].lease_until, incomingLease);
+
+  let fresh = '';
+  for (let n = 0; n < facts.workerSlots * 2; n++) {
+    // Re-enroll a previously reclaimed orphan once; no accepted work used it.
+    fresh = n === 1 ? orphans[0] : randomUUID();
+    await kernel.heartbeat(ctx, fresh); // Old code denies here at its full eight slots.
+    await kernel.heartbeat(ctx, live);
+    const actual = (await admin.query('SELECT worker FROM ag_kernel.workers WHERE consumer=$1', [ctx.consumerId])).rows;
+    assert.deepEqual(actual.map(row => row.worker).sort(), [...referenced, live, fresh].sort());
+    assert.deepEqual(await rows(), beforeRows, 'all accepted authority and unknown/terminal effects survive reclaim');
+    assert.deepEqual(await counters(), beforeCounters, 'worker slot reuse neither refunds nor charges facts');
+    assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.workers WHERE consumer=$1 AND worker=$2',
+      [foreign.consumerId, incoming]), 1, 'reclaim is consumer-scoped');
+    if (n + 1 < facts.workerSlots * 2) await admin.query(`UPDATE ag_kernel.workers
+      SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND worker=$2`, [ctx.consumerId, fresh]);
+  }
+  await admin.query(`UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second'
+    WHERE consumer=$1 AND worker=$2`, [ctx.consumerId, fresh]);
+  const available = await count(`SELECT c.worker_slots-(SELECT count(*) FROM ag_kernel.workers w WHERE w.consumer=c.consumer)
+    +(SELECT count(*) FROM ag_kernel.workers w WHERE w.consumer=c.consumer AND w.worker=$2 AND w.lease_until<=clock_timestamp()) AS n
+    FROM ag_kernel.consumers c WHERE c.consumer=$1`, [ctx.consumerId, fresh]);
+  assert.equal(available, 3, 'fixture has two vacant slots and one expired unreferenced enrollment');
+  const peer = new PostgresKernel(poolB, { ...defaults, workerLeaseMs: 300_000 }, facts);
+  const raced = await Promise.allSettled([kernel, peer, kernel, peer].map(k => k.heartbeat(ctx, randomUUID())));
+  assert.equal(raced.filter(r => r.status === 'fulfilled').length, available);
+  const denied = raced.filter(r => r.status === 'rejected');
+  assert.equal(denied.length, 1); assert.ok(denied[0]?.status === 'rejected' && isCode('denied')(denied[0].reason));
+  const finalWorkers = (await admin.query('SELECT worker FROM ag_kernel.workers WHERE consumer=$1', [ctx.consumerId])).rows;
+  assert.equal(finalWorkers.length, facts.workerSlots);
+  assert.deepEqual(finalWorkers.filter(row => [...referenced, live].includes(row.worker)).map(row => row.worker).sort(), [...referenced, live].sort());
+  assert.deepEqual(await counters(), beforeCounters); assert.deepEqual(await rows(), beforeRows);
+  for (const expired of referenced) await assert.rejects(kernel.heartbeat(ctx, expired), isCode('denied'));
+  assert.deepEqual(await kernel.requestProof(ctx, execution.result.executionRef!, 'held-unknown'), claimed.dispatch.closure);
+  assert.equal((await kernel.request(ctx, execution.result.executionRef!, 'held-unknown')).effect, 'effect_unknown');
 });
 
 // Regression: replaying one spent native nonce on a different request/execution
