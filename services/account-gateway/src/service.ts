@@ -7,10 +7,11 @@ import { KernelError, uuid } from './domain.ts';
 import { PostgresKernel } from './postgres.ts';
 import { IntentSecrets, PostgresManagementStore } from './management-store.ts';
 import { AccountManagement, exactCandidate, sameCandidate } from './management.ts';
-import type { CandidateJournal, CandidateNative, IntentCustody, ManagementStore, OAuthScope } from './management.ts';
+import type { CandidateJournal, CandidateNative, IntentCustody, ManagementStore, OAuthScope,
+  OAuthCleanupAuthority, OAuthCleanupAction } from './management.ts';
 import type { DurableKernel, ExecutionRead } from './domain.ts';
 import { codexOAuthProfile } from './management.ts';
-import { NativeManagementClient, NativeOAuthEnrollmentClient } from './native-client.ts';
+import { NativeManagementClient, NativeOAuthEnrollmentClient, NativeOAuthLifecycleClient } from './native-client.ts';
 import { NativeAuthority } from './native-authority.ts';
 import { NativeHTTPTransport } from './native-transport.ts';
 import { createFacade, FacadeBearers, cancelFacadeTransport } from './facade.ts';
@@ -33,7 +34,7 @@ export function composeServiceControl(cfg: Pick<ServiceConfig, 'native' | 'consu
   const client = new NativeManagementClient(control);
   const checkProfile = (j: CandidateJournal) => {
     const p = profiles.find(p => p.profile === j.profile.profile);
-    if (!p || j.consumerId !== consumerId || j.profile.model !== p.model ||
+    if (!p || p.profile === codexOAuthProfile.profile || j.consumerId !== consumerId || j.profile.model !== p.model ||
         j.profile.baseURL !== p.baseURL || j.profile.qualificationRef !== p.qualificationRef) throw new KernelError('denied');
   };
   const native: CandidateNative = {
@@ -49,7 +50,9 @@ export function composeServiceControl(cfg: Pick<ServiceConfig, 'native' | 'consu
     ...(oauthProfile ? { oauth: { profile: oauthProfile, native: {
       begin: (scope: OAuthScope) => forScope(scope).begin(scope),
       read: (scope: OAuthScope) => forScope(scope).read(scope),
-    }, descriptor: { describe: (scope: OAuthScope) => forScope(scope).describe(scope) } },
+    }, descriptor: { describe: (scope: OAuthScope) => forScope(scope).describe(scope) },
+      lifecycle: { cleanup: (scope: OAuthScope, authority: OAuthCleanupAuthority, action: OAuthCleanupAction) => new NativeOAuthLifecycleClient({ ...control,
+        controlCredential: cfg.consumer.cleanupCredential, ownerRef: scope.ownerRef }).cleanup(scope, authority, action) } },
       refresh: { refresh: (scope: OAuthScope) => forScope(scope).refresh(scope) } } : {}),
     proof: { async verify(j, d) {
       const p = profiles.find(p => p.profile === j.profile.profile);
@@ -69,7 +72,8 @@ export function composeServiceNative(cfg: Pick<ServiceConfig, 'native' | 'consum
   control: ReturnType<typeof composeServiceControl>, kernel: DurableKernel & ExecutionRead, store: ManagementStore,
   enrollment: NonNullable<FacadeOptions['enrollment']>) {
   const authority = new NativeAuthority({ kernel, store, ...(cfg.oauthEnrollment ? {
-    oauthOwners: { store, bearers: control.bearers }, oauthRefreshOwners: { store, bearers: control.bearers } } : {}),
+    oauthOwners: { store, bearers: control.bearers }, oauthRefreshOwners: { store, bearers: control.bearers },
+    oauthCleanupOwners: { store } } : {}),
     profileLimits: control.profiles.map(p => ({ profile: p.profile, limits: p.limits })), config: { origin: cfg.native.origin,
       enrollment: { ...enrollment, qualificationRef: control.profiles[0].qualificationRef }, consumers: [cfg.consumer],
       profiles: control.profiles.map(p => ({ ...p, requestBytes: p.limits.requestBytes, outputBytes: p.limits.outputBytes,

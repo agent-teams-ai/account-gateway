@@ -709,8 +709,11 @@ export class PostgresKernel implements DurableKernel {
         ON c.consumer=j.consumer AND c.generation=j.generation WHERE j.consumer=$1
         AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.consumer=j.consumer
           AND a.active_generation=j.generation AND a.state='active')
+        AND NOT EXISTS (SELECT 1 FROM requests r JOIN executions e
+          ON e.consumer=r.consumer AND e.ref=r.execution_ref
+          WHERE r.consumer=j.consumer AND e.generation=j.generation AND r.transport_occupied)
         AND (j.state='pending' OR (j.state='claimed' AND j.lease_until<=clock_timestamp()))
-        ORDER BY j.ref LIMIT 1 FOR UPDATE OF j SKIP LOCKED`, [tx.consumer]);
+        ORDER BY j.lease_until NULLS FIRST,j.ref LIMIT 1 FOR UPDATE OF j SKIP LOCKED`, [tx.consumer]);
       const j = r.rows[0];
       if (!j) return undefined;
       const token = randomUUID();

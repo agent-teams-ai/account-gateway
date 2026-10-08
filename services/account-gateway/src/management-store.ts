@@ -4,7 +4,7 @@ import { KernelError, identifier, uuid } from './domain.ts';
 import type { TrustedContext } from './domain.ts';
 import { captureContext, codexOAuthProfile, exactCandidate, physicalCandidate } from './management.ts';
 import type { AcceptedIntent, CandidateJournal, CandidateMapping, CandidateScope, IntentCustody,
-  ManagedProfile, ManagementStore, OAuthSelectors } from './management.ts';
+  ManagedProfile, ManagementStore, OAuthSelectors, OAuthCleanupAuthority, OAuthCleanupAction, OAuthCleanupScope } from './management.ts';
 
 export interface IntentEnvelope { readonly nonce: Buffer; readonly ciphertext: Buffer; readonly tag: Buffer }
 function scopeCopy(s: CandidateScope): CandidateScope {
@@ -279,6 +279,52 @@ export class PostgresManagementStore implements ManagementStore {
             AND a.active_generation=j.generation AND a.state='active')`,
       [ctx.consumerId,cleanupRef,worker,token,generation,identity,profile]);
       return r.rowCount === 1;
+    });
+  }
+  async oauthCleanup(context: TrustedContext, worker: string, input: OAuthCleanupAuthority,
+    action: OAuthCleanupAction, source: ManagedProfile, selectors?: OAuthSelectors): Promise<OAuthCleanupScope | undefined> {
+    const ctx = captureContext(context), p = refreshProfile(source);
+    const authority = Object.freeze({ cleanupRef: input.cleanupRef, cleanupToken: input.cleanupToken });
+    const s = selectors && Object.freeze({ consumerId: selectors.consumerId, operationId: selectors.operationId,
+      accountRef: selectors.accountRef, generation: selectors.generation });
+    uuid(worker); uuid(authority.cleanupRef); uuid(authority.cleanupToken);
+    if (!['read','erase'].includes(action)) throw new KernelError('invalid');
+    if (s) {
+      identifier(s.operationId); uuid(s.accountRef); uuid(s.generation);
+      if (s.consumerId !== ctx.consumerId) throw new KernelError('denied');
+    }
+    return this.tx(ctx.consumerId, async db => {
+      const r = (await db.query<JournalRow & Partial<MappingRow> & { native_identity: string | null; lease_expires_at: string }>(`
+        SELECT j.*,m.native_physical_identity,m.native_id,m.native_created_at,c.native_identity,
+          to_char(l.lease_until AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS lease_expires_at
+        FROM ag_kernel.cleanup l JOIN ag_kernel.candidates c ON c.consumer=l.consumer AND c.generation=l.generation
+        JOIN ag_management.candidate_journal j ON j.consumer=c.consumer AND j.generation=c.generation
+          AND j.operation_id=c.operation_id AND j.account_ref=c.account_ref AND j.profile=c.profile AND j.worker=c.worker
+        JOIN ag_kernel.accounts a ON a.consumer=j.consumer AND a.ref=j.account_ref AND a.owner_ref=j.owner_ref AND a.profile=j.profile
+        JOIN ag_kernel.operations o ON o.consumer=j.consumer AND o.id=j.operation_id AND o.account_ref=j.account_ref
+        LEFT JOIN ag_management.physical_mappings m ON m.consumer=j.consumer AND m.generation=j.generation
+        WHERE l.consumer=$1 AND l.ref=$2 AND l.worker=$3 AND l.token=$4 AND l.state='claimed'
+          AND l.lease_until>clock_timestamp() AND j.profile=$5 AND j.base_url=$6 AND j.model=$7 AND j.qualification_ref=$8
+          AND j.purpose IN ('create','reconnect') AND o.intent->>'kind'=j.purpose
+          AND c.state IN ('ready','quarantined') AND o.state IN ('applied','unknown')
+          AND ((j.purpose='create' AND o.intent->>'owner'=j.owner_ref AND o.intent->>'profile'=j.profile)
+            OR (j.purpose='reconnect' AND o.intent->>'target'=j.account_ref::text))
+          AND NOT (a.state='active' AND a.active_generation=j.generation)
+          AND EXISTS (SELECT 1 FROM ag_kernel.workers w WHERE w.consumer=l.consumer AND w.worker=$3 AND w.lease_until>clock_timestamp())
+          AND ($9::text IS NULL OR j.operation_id=$9 AND j.account_ref=$10 AND j.generation=$11)
+          AND ($12::boolean=false OR NOT EXISTS (SELECT 1 FROM ag_kernel.requests r
+            JOIN ag_kernel.executions e ON e.consumer=r.consumer AND e.ref=r.execution_ref
+            WHERE r.consumer=l.consumer AND e.generation=l.generation AND r.transport_occupied))`,
+      [ctx.consumerId, authority.cleanupRef, worker, authority.cleanupToken, p.profile, p.baseURL, p.model, p.qualificationRef,
+        s?.operationId ?? null, s?.accountRef ?? null, s?.generation ?? null, action === 'erase'])).rows[0];
+      if (!r) return undefined;
+      const journal = journalRow(r);
+      // A saved mapping is not erasure authority until the kernel bound the
+      // exact proof. Read can recover that gap without deleting a discovered row.
+      if (r.native_identity && (r.native_identity !== journal.generation || !r.native_physical_identity)) throw new KernelError('conflict');
+      const native = r.native_physical_identity ? mappingRow(r as MappingRow).descriptor : undefined;
+      return Object.freeze({ journal, leaseExpiresAt: r.lease_expires_at,
+        ...(native && r.native_identity ? { native } : {}) });
     });
   }
   async expire(context: TrustedContext): Promise<readonly CandidateJournal[]> {
