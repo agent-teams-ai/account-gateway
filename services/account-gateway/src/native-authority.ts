@@ -25,7 +25,8 @@ export interface AuthorityOptions { readonly config: BridgeConfig; readonly kern
   readonly oauthOwners?: { readonly store: Pick<ManagementStore, 'readJournal'>;
     readonly bearers: Pick<FacadeBearers, 'authorizesOwner'> };
   readonly oauthRefreshOwners?: { readonly store: Pick<ManagementStore, 'activeOAuthRefresh'>;
-    readonly bearers: Pick<FacadeBearers, 'authorizesOwner'> } }
+    readonly bearers: Pick<FacadeBearers, 'authorizesOwner'> };
+  readonly oauthCleanupOwners?: { readonly store: Pick<ManagementStore, 'oauthCleanup'> } }
 const hash = (s: string) => createHash('sha256').update(s).digest();
 const key = (ctx: TrustedContext, ref: string, id: string) => JSON.stringify([ctx.consumerId, ref, id]);
 
@@ -37,6 +38,7 @@ export class NativeAuthority {
   readonly #store: Pick<ManagementStore, 'mapping'>;
   readonly #owners: AuthorityOptions['oauthOwners'];
   readonly #refreshOwners: AuthorityOptions['oauthRefreshOwners'];
+  readonly #cleanupOwners: AuthorityOptions['oauthCleanupOwners'];
   readonly #limits = new Map<string, Readonly<ApprovedLimits>>();
   readonly #pending = new Map<string, Association>();
   readonly #callers: readonly { hash: Buffer; consumerId: string }[];
@@ -62,6 +64,7 @@ export class NativeAuthority {
     }
     this.kernel = options.kernel; this.#store = options.store; this.#owners = options.oauthOwners;
     this.#refreshOwners = options.oauthRefreshOwners;
+    this.#cleanupOwners = options.oauthCleanupOwners;
     this.#callers = this.configuration.consumers.map(c => ({ hash: hash(c.callbackCredential), consumerId: c.consumerId }));
   }
   consumer(ctx: TrustedContext) {
@@ -173,6 +176,27 @@ export class NativeAuthority {
     if (!this.#refreshOwners.bearers.authorizesOwner(ctx, j.ownerRef, j.profile.profile)) return denied();
     return { ok: true, ownerRef: j.ownerRef };
   }
+  async #cleanupOwner(ctx: TrustedContext, value: unknown): Promise<unknown> {
+    const r = object(value, ['consumerId','operationId','accountRef','generation','cleanupRef','cleanupToken','action']);
+    if (!this.#cleanupOwners?.store.oauthCleanup || r.consumerId !== ctx.consumerId ||
+        (r.action !== 'read' && r.action !== 'erase')) return denied();
+    identifier(r.operationId); uuid(r.accountRef); uuid(r.generation); uuid(r.cleanupRef); uuid(r.cleanupToken);
+    const p = this.configuration.profiles.find(p => p.profile === codexOAuthProfile.profile);
+    if (!p || p.baseURL !== codexOAuthProfile.baseURL || p.model !== codexOAuthProfile.model) return denied();
+    const owned = await this.#cleanupOwners.store.oauthCleanup(ctx, this.configuration.enrollment.worker,
+      { cleanupRef: r.cleanupRef, cleanupToken: r.cleanupToken }, r.action, p,
+      { consumerId: ctx.consumerId, operationId: r.operationId, accountRef: r.accountRef, generation: r.generation });
+    if (!owned || owned.journal.consumerId !== ctx.consumerId || owned.journal.operationId !== r.operationId ||
+        owned.journal.accountRef !== r.accountRef || owned.journal.generation !== r.generation ||
+        owned.journal.profile.profile !== p.profile || owned.journal.profile.baseURL !== p.baseURL ||
+        owned.journal.profile.model !== p.model || owned.journal.profile.qualificationRef !== p.qualificationRef ||
+        instant(owned.leaseExpiresAt) <= now()) return denied();
+    identifier(owned.journal.ownerRef);
+    const native = owned.native && physicalCandidate(owned.native);
+    if (native && !exactCandidate(owned.journal, native)) return denied();
+    return { ok: true, ownerRef: owned.journal.ownerRef, leaseExpiresAt: owned.leaseExpiresAt,
+      ...(native ? { native: descriptor(native) } : {}) };
+  }
   async persisted(ctx: TrustedContext, p: NativeDispatchProof): Promise<void> {
     this.consumer(ctx);
     const e = this.configuration.enrollment;
@@ -240,7 +264,7 @@ export class NativeAuthority {
       res.once('close', () => clearTimeout(timer)); res.once('finish', () => clearTimeout(timer));
       const send = (status: number, body: unknown) => { if (!res.destroyed) { res.writeHead(status, { 'content-type': 'application/json', connection: 'close' }); res.end(JSON.stringify(body)); } };
       void (async () => {
-        if (req.method !== 'POST' || !req.url || !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-refresh-authority)$/.test(req.url) ||
+        if (req.method !== 'POST' || !req.url || !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-refresh-authority|oauth-cleanup-authority)$/.test(req.url) ||
             req.rawHeaders.length > 64 || singleton(req, 'content-type') !== 'application/json' ||
             req.rawHeaders.some((h, i) => i % 2 === 0 && ['content-encoding','transfer-encoding'].includes(h.toLowerCase()))) return denied();
         const authorization = singleton(req, 'authorization');
@@ -249,9 +273,11 @@ export class NativeAuthority {
         if (!caller) return denied();
         const ownerLookup = req.url.endsWith('/oauth-owner-authority');
         const refreshLookup = req.url.endsWith('/oauth-refresh-authority');
-        const ctx = Object.freeze({ consumerId: caller.consumerId }), body = await jsonBody(req, ownerLookup || refreshLookup ? Math.min(1024, cfg.controlBytes) : cfg.controlBytes);
+        const cleanupLookup = req.url.endsWith('/oauth-cleanup-authority');
+        const ctx = Object.freeze({ consumerId: caller.consumerId }), body = await jsonBody(req, ownerLookup || refreshLookup || cleanupLookup ? Math.min(1024, cfg.controlBytes) : cfg.controlBytes);
         if (ownerLookup) { send(200, await this.#owner(ctx, body)); return; }
         if (refreshLookup) { send(200, await this.#refreshOwner(ctx, body)); return; }
+        if (cleanupLookup) { send(200, await this.#cleanupOwner(ctx, body)); return; }
         if (req.url.endsWith('/enrollment')) {
           const r = object(body, ['originRef','engineIncarnation','qualificationRef']), e = cfg.enrollment;
           if (r.originRef !== e.originRef || r.engineIncarnation !== e.engineIncarnation || r.qualificationRef !== e.qualificationRef) return denied();

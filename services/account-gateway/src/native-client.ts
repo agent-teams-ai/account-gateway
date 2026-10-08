@@ -7,6 +7,7 @@ import type { CandidateJournal, CandidateMapping, CandidateNative, NativeReadbac
 import type { OAuthScope, OAuthEnrollmentNative, OAuthReadback, OAuthBeginReadback } from './management.ts';
 import type { OAuthDescriptor, OAuthDescriptorBoundary } from './management.ts';
 import type { OAuthRefreshNative, OAuthRefreshReadback } from './management.ts';
+import type { OAuthLifecycleNative, OAuthCleanupAuthority, OAuthCleanupAction, OAuthCleanupReadback } from './management.ts';
 
 export type NativeFailureCode = 'unavailable' | 'deadline' | 'bounded' | 'redirect' | 'invalid_readback' | 'denied';
 export class NativeFailure extends Error {
@@ -93,6 +94,15 @@ function readback(bytes: Buffer): NativeReadback {
 function wireDescriptor(d: PhysicalCandidate): object {
   return { account_id: d.nativeId,generation: d.generation,created_at: d.createdAt,
     profile: d.profile,base_url: d.baseURL,model: d.model };
+}
+function oauthPhysical(value: unknown, generation: string): PhysicalCandidate {
+  const d = object(value, ['account_id','generation','created_at','profile','base_url','model']);
+  const native = physicalCandidate({ nativeId: d.account_id as number, generation: d.generation as string,
+    nativePhysicalIdentity: d.generation as string, createdAt: d.created_at as string,
+    profile: d.profile as string, baseURL: d.base_url as string, model: d.model as string });
+  if (native.generation !== generation || native.profile !== codexOAuthProfile.profile ||
+      native.baseURL !== codexOAuthProfile.baseURL || native.model !== codexOAuthProfile.model) throw new NativeFailure('invalid_readback');
+  return native;
 }
 export interface NativeManagementOptions {
   readonly origin: string; readonly consumerId: string; readonly controlCredential: string;
@@ -294,15 +304,35 @@ export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OA
       if (r.state === 'staged' && r.qualification === 'pending' && !Object.hasOwn(r, 'native')) {
         return Object.freeze({ ...logical, state: 'staged', qualification: 'pending' });
       }
-      if (r.state !== 'qualified' || r.qualification !== 'qualified') throw new NativeFailure('invalid_readback');
-      const d = object(r.native, ['account_id','generation','created_at','profile','base_url','model']);
-      const native = physicalCandidate({ nativeId: d.account_id as number, generation: d.generation as string,
-        nativePhysicalIdentity: d.generation as string, createdAt: d.created_at as string,
-        profile: d.profile as string, baseURL: d.base_url as string, model: d.model as string });
-      if (native.generation !== scope.generation || native.nativePhysicalIdentity !== scope.generation ||
-          native.profile !== codexOAuthProfile.profile || native.baseURL !== codexOAuthProfile.baseURL ||
-          native.model !== codexOAuthProfile.model) throw new NativeFailure('invalid_readback');
-      return Object.freeze({ ...logical, state: 'qualified', qualification: 'qualified', native });
+      if (r.state !== 'staged' || r.qualification !== 'controlled-source-v1') throw new NativeFailure('invalid_readback');
+      const native = oauthPhysical(r.native, scope.generation);
+      return Object.freeze({ ...logical, state: 'qualified', qualification: 'controlled-source-v1', native });
+    } catch { throw new NativeFailure('invalid_readback'); }
+  }
+}
+
+// Purpose-bound cleanup credential is composed separately from connect/control.
+export class NativeOAuthLifecycleClient extends NativeControlHTTP implements OAuthLifecycleNative {
+  readonly #owner: string;
+  constructor(options: NativeManagementOptions & { readonly ownerRef: string }) {
+    super(options); identifier(options.ownerRef); this.#owner = options.ownerRef;
+  }
+  async cleanup(input: OAuthScope, authority: OAuthCleanupAuthority, action: OAuthCleanupAction): Promise<OAuthCleanupReadback> {
+    const scope = Object.freeze({ consumerId: input.consumerId, operationId: input.operationId,
+      ownerRef: input.ownerRef, accountRef: input.accountRef, generation: input.generation });
+    const cleanupRef = authority.cleanupRef, cleanupToken = authority.cleanupToken;
+    this.scope(scope); identifier(scope.operationId); uuid(cleanupRef); uuid(cleanupToken);
+    if (scope.ownerRef !== this.#owner || !['read','erase'].includes(action)) throw new NativeFailure('denied');
+    const bytes = await this.call('POST', '/private/native/v1/oauth/connect/cleanup', {
+      operation: scope.operationId, owner_ref: scope.ownerRef, account_ref: scope.accountRef,
+      generation: scope.generation, action, cleanup_ref: cleanupRef, cleanup_token: cleanupToken });
+    try {
+      const r = object(decode(bytes), ['operation','account_ref','credentials_erased','closure'], ['native']);
+      if (r.operation !== scope.operationId || r.account_ref !== scope.accountRef || typeof r.credentials_erased !== 'boolean' ||
+          !['pending','closed','unknown'].includes(r.closure as string) || r.closure === 'closed' && !r.credentials_erased) throw new NativeFailure('invalid_readback');
+      const native = Object.hasOwn(r, 'native') ? oauthPhysical(r.native, scope.generation) : undefined;
+      return Object.freeze({ operationId: scope.operationId, accountRef: scope.accountRef,
+        credentialsErased: r.credentials_erased, closure: r.closure as OAuthCleanupReadback['closure'], ...(native ? { native } : {}) });
     } catch { throw new NativeFailure('invalid_readback'); }
   }
 }

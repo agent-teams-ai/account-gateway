@@ -456,7 +456,7 @@ test('source HTTP: strict fixed POST descriptor readback keeps custody pending a
     const j = f.journals.get(f.scopeKey(f.context, operationId))!;
     const native = { account_id: 1, generation: j.generation, created_at: '2026-10-06T01:02:03.123456789Z',
       profile: codexOAuthProfile.profile, base_url: codexOAuthProfile.baseURL, model: codexOAuthProfile.model };
-    const reply = { operation: operationId, account_ref: j.accountRef, state: 'qualified', qualification: 'qualified', native };
+    const reply = { operation: operationId, account_ref: j.accountRef, state: 'staged', qualification: 'controlled-source-v1', native };
     const client = new NativeOAuthEnrollmentClient({ origin: f.origin, consumerId: j.consumerId,
       controlCredential: f.consumer.managementCredential, ownerRef: j.ownerRef, deadlineMs: 75 });
     f.descriptor(reply); const d = await client.describe(j); assert.equal(d.state, 'qualified');
@@ -479,23 +479,24 @@ test('source HTTP: strict fixed POST descriptor readback keeps custody pending a
     const before = f.seen.length;
     assert.equal((await f.publicCall('/v1/operations/' + operationId + '?owner=owner-two')).status, 400);
     assert.equal(f.seen.length, before);
-    // Separate protected descriptor and exact inert route evidence are both
-    // required before the existing mapping/activation/kernel ACK sequence.
+    // Protected source proof promotes only kernel state; no generic route read
+    // or physical OAuth activation belongs to this account lifecycle.
     f.descriptor(reply); f.nativeRows.set(j.generation, { descriptor: native, state: 'inactive' });
     const qualified = await f.publicCall('/v1/operations/' + operationId); assert.equal(qualified.status, 200);
     assert.equal((await qualified.json() as { state: string }).state, 'applied');
     assert.equal((await f.kernel.account(f.context, j.accountRef)).state, 'active');
     assert.equal((await f.store.mapping(f.context, j.generation))?.descriptor.createdAt, native.created_at);
+    assert.equal(f.nativeRows.get(j.generation)?.state, 'inactive');
+    assert.equal(f.seen.some(s => s.path.includes('/candidates')), false);
     const secondId = randomUUID();
     f.descriptor(undefined);
     assert.equal((await f.publicCall('/v1/accounts/oauth/begin', { operationId: secondId, ownerRef: 'owner-two',
       profileId: codexOAuthProfile.profile, displayName: 'Fixture' })).status, 202);
     const second = f.journals.get(f.scopeKey(f.context, secondId))!;
     const secondNative = { ...native, account_id: 2, generation: second.generation };
-    f.descriptor({ ...reply, operation: secondId, account_ref: second.accountRef, native: secondNative });
-    f.nativeRows.set(second.generation, { descriptor: { ...secondNative, created_at: '2026-10-06T01:02:03.123456788Z' }, state: 'inactive' });
+    f.descriptor({ ...reply, operation: secondId, account_ref: second.accountRef, native: { ...secondNative, generation: randomUUID() } });
     const mismatched = await f.publicCall('/v1/operations/' + secondId); assert.equal(mismatched.status, 200);
-    assert.equal((await mismatched.json() as { state: string }).state, 'unknown');
+    assert.equal((await mismatched.json() as { state: string }).state, 'pending');
     assert.equal(await f.store.mapping(f.context, second.generation), undefined);
   } finally { await f.close(); }
 });

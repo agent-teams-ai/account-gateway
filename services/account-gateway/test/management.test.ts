@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { isAbsolute, join } from 'node:path';
 import { IntentSecrets } from '../src/management-store.ts';
-import { NativeFailure, NativeManagementClient } from '../src/native-client.ts';
-import { physicalCandidate } from '../src/management.ts';
-import type { CandidateJournal, CandidateScope, PhysicalCandidate } from '../src/management.ts';
+import { NativeFailure, NativeManagementClient, NativeOAuthEnrollmentClient, NativeOAuthLifecycleClient } from '../src/native-client.ts';
+import { physicalCandidate, codexOAuthProfile } from '../src/management.ts';
+import type { CandidateJournal, CandidateScope, PhysicalCandidate, OAuthScope } from '../src/management.ts';
 import { KernelError } from '../src/domain.ts';
 
 const scope = (): CandidateScope => ({ consumerId: 'synthetic-consumer', operationId: 'operation-fixture',
@@ -33,6 +35,107 @@ async function local(handler: (req: IncomingMessage,res: ServerResponse) => void
 const client = (origin: string, options: { deadlineMs?: number; bodyBytes?: number } = {}): NativeManagementClient =>
   new NativeManagementClient({ origin, consumerId: 'synthetic-consumer', controlCredential: 'synthetic-control', ...options });
 const code = (expected: string) => (e: unknown): boolean => e instanceof NativeFailure && e.code === expected && e.classification === 'uncertain';
+
+// RED on the former TS adapter with actual Go handler first and cached success
+// bodies. Root produces these using the native signed-custody/account-check test.
+const joinedFixture = process.env.AG_OAUTH_JOINED_DESCRIPTOR_FIXTURE_DIR;
+test('joined Go protected descriptor first and cached success reaches TS consumer', { skip: !joinedFixture }, async () => {
+  assert.ok(joinedFixture && isAbsolute(joinedFixture));
+  const scope = JSON.parse(await readFile(join(joinedFixture, 'scope.json'), 'utf8')) as OAuthScope;
+  const expected = JSON.parse(await readFile(join(joinedFixture, 'expected.json'), 'utf8')) as {
+    account_id: number; generation: string; created_at: string; profile: string; base_url: string; model: string };
+  // Independent accepted fixture birth, not computed from the response/parser.
+  assert.equal(expected.account_id, 42); assert.equal(expected.created_at, '2026-10-08T12:34:56.123456Z');
+  assert.equal(expected.profile, codexOAuthProfile.profile); assert.equal(expected.base_url, codexOAuthProfile.baseURL);
+  assert.equal(expected.model, codexOAuthProfile.model); assert.equal(expected.generation, scope.generation);
+  let response = await readFile(join(joinedFixture, 'first.json'));
+  const server = await local((req, res) => {
+    assert.equal(req.method, 'POST'); assert.equal(req.url, '/private/native/v1/oauth/connect/descriptor');
+    req.resume(); req.on('end', () => res.end(response));
+  });
+  try {
+    const client = new NativeOAuthEnrollmentClient({ origin: server.origin, consumerId: scope.consumerId,
+      ownerRef: scope.ownerRef, controlCredential: 'joined-fixture-control' });
+    for (const file of ['first.json', 'cached.json']) {
+      response = await readFile(join(joinedFixture, file));
+      assert.deepEqual(await client.describe(scope), { operationId: scope.operationId, accountRef: scope.accountRef,
+        state: 'qualified', qualification: 'controlled-source-v1', native: { nativeId: expected.account_id,
+          generation: scope.generation, nativePhysicalIdentity: scope.generation, createdAt: expected.created_at,
+          profile: codexOAuthProfile.profile, baseURL: codexOAuthProfile.baseURL, model: codexOAuthProfile.model } });
+    }
+  } finally { await server.close(); }
+});
+
+// Regression: the genuine staged/source-qualified tuple was rejected, while
+// fabricated qualified/qualified or substituted birth could gain admission.
+test('OAuth descriptor HTTP accepts native provenance and denies other finite tuples', async () => {
+  const j = { ...journal(), profile: { ...codexOAuthProfile, qualificationRef: 'fixture-only' } }, d = descriptor(j);
+  const native = { account_id: d.nativeId, generation: d.generation, created_at: d.createdAt,
+    profile: d.profile, base_url: d.baseURL, model: d.model };
+  const success = { operation: j.operationId, account_ref: j.accountRef, state: 'staged', qualification: 'controlled-source-v1', native };
+  let response = JSON.stringify(success);
+  const server = await local((req, res) => {
+    assert.equal(req.url, '/private/native/v1/oauth/connect/descriptor');
+    assert.equal(req.headers.authorization, 'Bearer synthetic-control');
+    req.resume(); req.on('end', () => res.end(response));
+  });
+  try {
+    const oauth = new NativeOAuthEnrollmentClient({ origin: server.origin, consumerId: j.consumerId,
+      ownerRef: j.ownerRef, controlCredential: 'synthetic-control' });
+    assert.deepEqual(await oauth.describe(j), { operationId: j.operationId, accountRef: j.accountRef,
+      state: 'qualified', qualification: 'controlled-source-v1', native: d });
+    const { native: _native, ...pending } = { ...success, qualification: 'pending' };
+    response = JSON.stringify(pending);
+    assert.deepEqual(await oauth.describe(j), { operationId: j.operationId, accountRef: j.accountRef, state: 'staged', qualification: 'pending' });
+    for (const invalid of [{ ...success, qualification: 'pending' }, { ...success, state: 'qualified', qualification: 'qualified' },
+      { ...success, qualification: 'arbitrary' }, { ...success, operation: 'foreign' }, { ...success, account_ref: randomUUID() },
+      ...[{ generation: randomUUID() }, { profile: 'other' }, { base_url: 'https://fixture.invalid' }, { model: 'other' }]
+        .map(change => ({ ...success, native: { ...native, ...change } }))]) {
+      response = JSON.stringify(invalid); await assert.rejects(oauth.describe(j), code('invalid_readback'));
+    }
+    response = JSON.stringify(success).replace('"account_id":734', '"account_id":9007199254740993');
+    await assert.rejects(oauth.describe(j), code('invalid_readback'));
+    response = JSON.stringify(success).replace('"qualification":', '"qualification":"controlled-source-v1","qualifica\\u0074ion":');
+    await assert.rejects(oauth.describe(j), code('invalid_readback'));
+  } finally { await server.close(); }
+});
+
+// Regression: credential erasure was treated as transport/effect closure, or
+// cleanup sent native IDs/private enrollment operations instead of scoped claims.
+test('OAuth cleanup HTTP preserves erased-but-unknown and validates closed receipts', async () => {
+  const j = { ...journal(), profile: { ...codexOAuthProfile, qualificationRef: 'fixture-only' } }, d = descriptor(j);
+  const authority = { cleanupRef: randomUUID(), cleanupToken: randomUUID() };
+  const native = { account_id: d.nativeId, generation: d.generation, created_at: d.createdAt,
+    profile: d.profile, base_url: d.baseURL, model: d.model };
+  const receipt = { operation: j.operationId, account_ref: j.accountRef, credentials_erased: true, closure: 'unknown', native };
+  let response = JSON.stringify(receipt);
+  const server = await local((req, res) => {
+    assert.equal(req.url, '/private/native/v1/oauth/connect/cleanup'); assert.equal(req.method, 'POST');
+    assert.equal(req.headers.authorization, 'Bearer synthetic-cleanup');
+    const chunks: Buffer[] = []; req.on('data', chunk => chunks.push(chunk as Buffer));
+    req.on('end', () => {
+      assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString()), { operation: j.operationId,
+        owner_ref: j.ownerRef, account_ref: j.accountRef, generation: j.generation,
+        action: 'erase', cleanup_ref: authority.cleanupRef, cleanup_token: authority.cleanupToken });
+      res.end(response);
+    });
+  });
+  try {
+    const client = new NativeOAuthLifecycleClient({ origin: server.origin, consumerId: j.consumerId,
+      ownerRef: j.ownerRef, controlCredential: 'synthetic-cleanup' });
+    assert.deepEqual(await client.cleanup(j, authority, 'erase'), { operationId: j.operationId, accountRef: j.accountRef,
+      credentialsErased: true, closure: 'unknown', native: d });
+    const { native: _native, ...unbound } = { ...receipt, closure: 'closed' };
+    response = JSON.stringify(unbound);
+    assert.deepEqual(await client.cleanup(j, authority, 'erase'), { operationId: j.operationId, accountRef: j.accountRef,
+      credentialsErased: true, closure: 'closed' });
+    for (const invalid of [{ ...receipt, credentials_erased: false, closure: 'closed' }, { ...receipt, closure: 'completed' },
+      { ...receipt, generation: j.generation }, { ...receipt, account_ref: randomUUID() },
+      { ...receipt, native: { ...native, generation: randomUUID() } }]) {
+      response = JSON.stringify(invalid); await assert.rejects(client.cleanup(j, authority, 'erase'), code('invalid_readback'));
+    }
+  } finally { await server.close(); }
+});
 
 // Regression: rebinding ciphertext to another scope or altering GCM bytes must never disclose a key.
 test('transient AEAD binds every scope primitive and rejects tamper and server key rotation', () => {

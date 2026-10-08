@@ -58,19 +58,34 @@ export interface OAuthRefreshNative {
   // Native alone owns due time, credential version and durable attempt identity.
   refresh(scope: OAuthScope): Promise<OAuthRefreshReadback>;
 }
+export interface OAuthCleanupAuthority {
+  readonly cleanupRef: string; readonly cleanupToken: string;
+}
+export type OAuthCleanupAction = 'read' | 'erase';
+export interface OAuthCleanupReadback {
+  readonly operationId: string; readonly accountRef: string;
+  readonly credentialsErased: boolean; readonly closure: 'pending' | 'closed' | 'unknown';
+  readonly native?: PhysicalCandidate;
+}
+export interface OAuthLifecycleNative {
+  cleanup(scope: OAuthScope, authority: OAuthCleanupAuthority, action: OAuthCleanupAction): Promise<OAuthCleanupReadback>;
+}
+export interface OAuthCleanupScope {
+  readonly journal: CandidateJournal; readonly leaseExpiresAt: string; readonly native?: PhysicalCandidate;
+}
 export type OAuthSelectors = Pick<OAuthScope, 'consumerId' | 'operationId' | 'accountRef' | 'generation'>;
 export type OAuthDescriptor = {
   readonly operationId: string; readonly accountRef: string;
 } & ({ readonly state: 'staged'; readonly qualification: 'pending' } |
-  { readonly state: 'qualified'; readonly qualification: 'qualified'; readonly native: PhysicalCandidate });
+  { readonly state: 'qualified'; readonly qualification: 'controlled-source-v1'; readonly native: PhysicalCandidate });
 export interface OAuthDescriptorBoundary {
-  // Future protected native accounts/check/profile result. Constructor injection
-  // is for source fixtures; no production HTTP descriptor adapter exists yet.
+  // Exact protected inert physical birth and native source qualification.
   describe(scope: OAuthScope): Promise<OAuthDescriptor>;
 }
 export interface OAuthEnrollmentOptions {
   readonly profile: ManagedProfile; readonly native: OAuthEnrollmentNative;
   readonly descriptor?: OAuthDescriptorBoundary;
+  readonly lifecycle?: OAuthLifecycleNative;
 }
 export interface OAuthBeginInput {
   readonly operationId: string; readonly ownerRef: string;
@@ -114,6 +129,8 @@ export interface ManagementStore {
     after?: string): Promise<CandidateMapping | undefined>;
   activeOAuthRefresh?(context: TrustedContext, worker: string, selectors: OAuthSelectors,
     profile: ManagedProfile): Promise<CandidateMapping | undefined>;
+  oauthCleanup?(context: TrustedContext, worker: string, authority: OAuthCleanupAuthority,
+    action: OAuthCleanupAction, profile: ManagedProfile, selectors?: OAuthSelectors): Promise<OAuthCleanupScope | undefined>;
 }
 export type CreateInput = Pick<AccountIntent, 'operationId' | 'ownerRef' | 'profile' | 'displayName'> & { apiKey: string };
 export type ReconnectInput = Pick<AccountIntent, 'operationId' | 'accountRef' | 'expectedRevision'> & { apiKey: string };
@@ -180,7 +197,7 @@ export class AccountManagement {
     if (!options.profiles.length || options.profiles.length > 128) throw new KernelError('invalid');
     const profiles = new Map<string, ManagedProfile>();
     const oauth = options.oauth && Object.freeze({ profile: Object.freeze({ ...options.oauth.profile }),
-      native: options.oauth.native, descriptor: options.oauth.descriptor });
+      native: options.oauth.native, descriptor: options.oauth.descriptor, lifecycle: options.oauth.lifecycle });
     if (oauth && (oauth.profile.profile !== codexOAuthProfile.profile ||
         oauth.profile.baseURL !== codexOAuthProfile.baseURL || oauth.profile.model !== codexOAuthProfile.model)) throw new KernelError('invalid');
     for (const source of [...options.profiles, ...(oauth ? [oauth.profile] : [])]) {
@@ -302,28 +319,32 @@ export class AccountManagement {
       }
       // Legitimate user interaction is waiting, not missing/unknown evidence.
       if (result.state === 'prepared' || result.state === 'entered') return current;
-      // Completed custody (outcome "staged") is NOT route evidence.
-      // An unavailable future descriptor adapter preserves truthful pending.
+      // Completed custody (outcome "staged") still needs protected route proof.
+      // An unavailable descriptor boundary preserves truthful pending.
       if (!this.oauth.descriptor) return current;
       let source: OAuthDescriptor;
       try { source = await this.oauth.descriptor.describe(scope); }
-      catch { return current; } // Missing future endpoint is not a connect failure.
+      catch { return current; } // Unavailable route proof is not a connect failure.
       if (source.operationId !== journal.operationId || source.accountRef !== journal.accountRef) throw new KernelError('conflict');
       if (source.state === 'staged' && source.qualification === 'pending') {
         if ('native' in source) throw new KernelError('conflict');
         return current;
       }
-      if (source.state !== 'qualified' || source.qualification !== 'qualified') throw new KernelError('conflict');
+      if (source.state !== 'qualified' || source.qualification !== 'controlled-source-v1') throw new KernelError('conflict');
       const descriptor = physicalCandidate(source.native);
       if (!exactCandidate(journal, descriptor)) throw new KernelError('conflict');
+      await this.store.saveMapping(Object.freeze({ ...journal, descriptor }));
       // Qualification can outlive the original worker lease. Observe durable
-      // loss again before entering the existing physical promotion sequence.
+      // loss again before the logical account ACK. Native remains inert.
       await this.kernel.reconcile(ctx);
       const qualifiedOperation = await this.kernel.operation(ctx, journal.operationId);
-      if (qualifiedOperation.state !== 'pending') return qualifiedOperation;
-      // A trusted descriptor pins the entire physical birth. Existing candidate
-      // read/inert proof, mapping, activation readback and kernel ACK still apply.
-      return await this.readback(ctx, journal, this.worker, true, descriptor);
+      if (qualifiedOperation.state === 'applied' || qualifiedOperation.state === 'rejected') return qualifiedOperation;
+      // The native descriptor is the inert physical proof. The kernel decides
+      // promotion versus quarantine atomically, including a late disable/lease.
+      try {
+        return await this.kernel.acknowledgeCandidate(ctx, journal.operationId, journal.worker,
+          { generation: descriptor.generation, nativePhysicalIdentity: descriptor.nativePhysicalIdentity, profile: descriptor.profile });
+      } catch { return this.kernel.operation(ctx, journal.operationId); } // Lost ACK reads the same operation.
     } catch {
       return this.kernel.unknownCandidate(ctx, journal.operationId, journal.worker);
     }
@@ -495,6 +516,11 @@ export class AccountManagement {
     }
     let succeeded = false;
     try {
+      if (claim.scope.profile === codexOAuthProfile.profile) {
+        succeeded = await this.cleanupOAuth(ctx, claim.cleanupRef, claim.token, claim.scope.generation);
+        await this.kernel.settleCleanup(ctx, claim.cleanupRef, this.worker, claim.token, succeeded);
+        return succeeded ? 'erased' : 'quarantined';
+      }
       const mapping = await this.store.mapping(ctx, claim.scope.generation);
       const proof = claim.scope.descriptor;
       if (!mapping || !proof || claim.scope.profile !== mapping.profile.profile || proof.generation !== mapping.generation || proof.profile !== mapping.profile.profile ||
@@ -513,5 +539,45 @@ export class AccountManagement {
     } catch { /* Missing/stale/ambiguous mapping never authorizes guessed erase. */ }
     await this.kernel.settleCleanup(ctx, claim.cleanupRef, this.worker, claim.token, succeeded);
     return succeeded ? 'erased' : 'quarantined';
+  }
+  private async cleanupOAuth(ctx: TrustedContext, cleanupRef: string, cleanupToken: string,
+    generation: string): Promise<boolean> {
+    if (!this.oauth?.lifecycle || !this.store.oauthCleanup) return false;
+    const authority = Object.freeze({ cleanupRef, cleanupToken });
+    const owned = await this.store.oauthCleanup(ctx, this.worker, authority, 'read', this.oauth.profile);
+    if (!owned || owned.journal.generation !== generation) throw new KernelError('denied');
+    const journal = owned.journal, scope = oauthScope(journal);
+    if (journal.consumerId !== ctx.consumerId || !['create','reconnect'].includes(journal.purpose) ||
+        journal.profile.profile !== this.oauth.profile.profile || journal.profile.baseURL !== this.oauth.profile.baseURL ||
+        journal.profile.model !== this.oauth.profile.model || journal.profile.qualificationRef !== this.oauth.profile.qualificationRef) throw new KernelError('conflict');
+    const validate = (r: OAuthCleanupReadback): PhysicalCandidate | undefined => {
+      if (r.operationId !== scope.operationId || r.accountRef !== scope.accountRef ||
+          typeof r.credentialsErased !== 'boolean' || !['pending','closed','unknown'].includes(r.closure) ||
+          r.closure === 'closed' && !r.credentialsErased) throw new KernelError('conflict');
+      const d = r.native === undefined ? undefined : physicalCandidate(r.native);
+      if (d && !exactCandidate(journal, d) || owned.native && (!d || !sameCandidate(owned.native, d))) throw new KernelError('conflict');
+      return d;
+    };
+    let result = await this.oauth.lifecycle.cleanup(scope, authority, 'read');
+    const descriptor = validate(result);
+    if (descriptor) {
+      await this.store.saveMapping(Object.freeze({ ...journal, descriptor }));
+      // Late custody proof only binds the original quarantined cleanup identity.
+      // Current cleanup ownership does not revive the enrollment writer.
+      await this.kernel.acknowledgeCandidate(ctx, journal.operationId, this.worker,
+        { generation: descriptor.generation, nativePhysicalIdentity: descriptor.nativePhysicalIdentity, profile: descriptor.profile });
+    }
+    const fresh = await this.store.oauthCleanup(ctx, this.worker, authority, 'erase', this.oauth.profile, scope);
+    if (!fresh || (descriptor && (!fresh.native || !sameCandidate(descriptor, fresh.native)))) throw new KernelError('denied');
+    if (!result.credentialsErased) {
+      try { result = await this.oauth.lifecycle.cleanup(scope, authority, 'erase'); }
+      catch { result = await this.oauth.lifecycle.cleanup(scope, authority, 'read'); } // One erase, bounded same-scope recovery.
+      const erased = validate(result);
+      if (descriptor && (!erased || !sameCandidate(descriptor, erased)) ||
+          !descriptor && erased) return false; // Newly discovered birth needs its own proof phase.
+    }
+    // Final committed claim read precedes kernel settlement; no HTTP awaits follow.
+    if (!await this.store.oauthCleanup(ctx, this.worker, authority, 'erase', this.oauth.profile, scope)) return false;
+    return result.credentialsErased && result.closure === 'closed';
   }
 }
