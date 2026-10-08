@@ -18,6 +18,7 @@ import { createFacade, FacadeBearers, cancelFacadeTransport } from './facade.ts'
 import type { FacadeOptions } from './facade.ts';
 import { strictJSON } from './facade-ingress.ts';
 import { object } from './native-wire.ts';
+import { nativeResponseDiagnostics } from './native-response-diagnostics.ts';
 import { captureServiceBearers, captureServiceProfiles, loadServiceConfig, keyBytes, ServiceError } from './service-config.ts';
 import type { ServiceConfig } from './service-config.ts';
 
@@ -319,7 +320,12 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
       if (!stopping) { invalid = true; void stop(); }
     });
     let diagnostics = 0, metadata = 0, buffer = Buffer.alloc(0), sequence = 0;
-    child.stderr!.on('data', (b: Buffer) => { diagnostics += b.length; if (diagnostics > 65_536) fail(); });
+    const forwardDiagnostics = nativeResponseDiagnostics(record => { process.stderr.write(record); });
+    child.stderr!.on('data', (b: Buffer) => {
+      diagnostics += b.length;
+      if (diagnostics > 65_536) { fail(); return; }
+      forwardDiagnostics(b);
+    });
     child.stdout!.on('data', (b: Buffer) => {
       try {
         metadata += b.length; if (metadata > 16_384) throw new ServiceError('runtime_denied');
