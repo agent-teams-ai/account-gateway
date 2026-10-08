@@ -141,6 +141,7 @@ async function fixture(options: FixtureOptions = {}) {
   let connectState: OAuthReadback['state'] = 'prepared';
   let descriptorMode: DescriptorMode = options.descriptor ?? 'absent';
   let descriptorPatch: Partial<PhysicalCandidate> = {}, descriptorIdentity: Partial<Pick<OAuthDescriptor, 'operationId' | 'accountRef'>> = {};
+  let descriptorWirePatch: Readonly<Record<string, unknown>> = {};
   let replyPatch: Record<string, unknown> = {}, beginPatch: Record<string, unknown> = {};
   let responseURL = authorizationURL(), fixtureFailure: unknown;
   let callbackOrigin = '';
@@ -219,7 +220,7 @@ async function fixture(options: FixtureOptions = {}) {
         assert.deepEqual(submitted, nativeIntents.get(submitted.operation));
         const row = rows.get(submitted.generation); assert.ok(row);
         const d = { account_id: row.nativeId, generation: row.generation, created_at: row.createdAt,
-          profile: row.profile, base_url: row.baseURL, model: row.model };
+          profile: row.profile, base_url: row.baseURL, model: row.model, ...descriptorWirePatch };
         // Producer wire retains native provenance and physical staged state.
         res.end(JSON.stringify({ operation: submitted.operation, account_ref: submitted.account_ref,
           state: 'staged', qualification: descriptorMode === 'qualified' ? 'controlled-source-v1' : 'pending',
@@ -259,8 +260,8 @@ async function fixture(options: FixtureOptions = {}) {
   const native = new NativeManagementClient({ origin: nativeOrigin, consumerId: context.consumerId, controlCredential: control });
   const oauth = new NativeOAuthEnrollmentClient({ origin: nativeOrigin, consumerId: context.consumerId,
     ownerRef: owner, controlCredential: control });
-  // This single injected future protected boundary reads the SAME fixture rows.
-  // It is not a second native client, SDK DTO, implemented endpoint or qualification.
+  // Actual protected HTTP client owns wire decoding. Explicit consumer-port
+  // substitutions below separately exercise the management scope invariants.
   const descriptor: OAuthDescriptorBoundary = { async describe(s) {
     const captured = Object.freeze({ ...s }); descriptorScopes.push(captured);
     assert.equal(s.consumerId, context.consumerId);
@@ -313,6 +314,7 @@ async function fixture(options: FixtureOptions = {}) {
     descriptor(value: DescriptorMode, patch: Partial<PhysicalCandidate> = {}, identity: typeof descriptorIdentity = {}) {
       descriptorMode = value; descriptorPatch = patch; descriptorIdentity = identity;
     },
+    descriptorWire(patch: Readonly<Record<string, unknown>>) { descriptorWirePatch = patch; },
     replies(patch: Record<string, unknown>, begin = false) { if (begin) beginPatch = patch; else replyPatch = patch; },
     url(value: string) { responseURL = value; },
     holdDescriptor() {
@@ -343,10 +345,13 @@ async function assertPinned(f: Fixture, j: CandidateJournal): Promise<void> {
   for (const s of f.descriptorScopes) assert.deepEqual(s, scope(j));
   assert.equal(f.stats().begins, 1); await f.assertHealthy();
 }
-async function assertInert(f: Fixture, j: CandidateJournal, expected: 'pending' | 'unknown' = 'pending'): Promise<void> {
+async function assertInert(f: Fixture, j: CandidateJournal, expected: 'pending' | 'unknown' = 'pending',
+  original?: PhysicalCandidate): Promise<void> {
   assert.equal((await f.kernel.operation(f.context, j.operationId)).state, expected);
   assert.equal((await f.kernel.account(f.context, j.accountRef)).state, expected === 'pending' ? 'staging' : 'quarantined');
-  assert.equal(await f.store.mapping(f.context, j.generation), undefined);
+  const mapping = await f.store.mapping(f.context, j.generation);
+  if (original) { assert.ok(mapping); assert.deepEqual(mapping.descriptor, original); }
+  else assert.equal(mapping, undefined);
   assert.equal(f.rows.get(j.generation)?.state, 'inactive'); assert.equal(f.stats().activations, 0);
   const saved = (await pool.query(`SELECT c.state,c.generation,a.active_generation FROM ag_kernel.candidates c
     JOIN ag_kernel.accounts a ON a.consumer=c.consumer AND a.ref=c.account_ref
@@ -487,9 +492,9 @@ test('F cleanup authority rereads an expired claim after the consumer lock wait'
   } finally { await gate.query('ROLLBACK'); gate.release(); await pending?.catch(() => undefined); await f.close(); }
 });
 
-// RED if lower-ref generation cleanup starves its execution closure, or nullable
-// native proof is mistaken for transport absence at the saved execution generation.
-test('F cleanup selection lets occupied execution close before generation erasure', async () => {
+// RED if current generation claim alone authorizes OAuth erasure while its exact
+// execution is occupied, or pending generation prevents that execution cleanup.
+test('F cleanup authority waits for exact occupied execution closure before erasure', async () => {
   const f = await fixture({ descriptor: 'qualified' });
   try {
     const j = await activeOAuth(f);
@@ -507,31 +512,34 @@ test('F cleanup selection lets occupied execution close before generation erasur
     await f.management().disable(f.context, { operationId: randomUUID(), accountRef: j.accountRef, expectedRevision: account.revision });
     await pool.query(`UPDATE ag_kernel.cleanup SET ref=CASE WHEN generation IS NOT NULL
       THEN '00000000-0000-4000-8000-000000000001'::uuid ELSE 'ffffffff-ffff-4fff-8fff-ffffffffffff'::uuid END WHERE consumer=$1`, [f.context.consumerId]);
-    // A retained current claim still cannot erase once transport is occupied.
-    const cleanupToken = randomUUID(), cleanupRef = '00000000-0000-4000-8000-000000000001';
-    await pool.query(`UPDATE ag_kernel.cleanup SET state='claimed',worker=$2,token=$3,
-      lease_until=clock_timestamp()+interval '10 seconds' WHERE consumer=$1 AND ref=$4`, [f.context.consumerId, f.worker, cleanupToken, cleanupRef]);
-    const authority = { ...selectors(j), cleanupRef, cleanupToken, action: 'read' };
+    const pending = await f.kernel.claimCleanup(f.context, f.worker); assert.ok(pending?.scope.kind === 'generation');
+    assert.equal(pending.scope.generation, j.generation);
+    const authority = { ...selectors(j), cleanupRef: pending.cleanupRef, cleanupToken: pending.token, action: 'read' };
     assert.equal((await f.callback('oauth-cleanup-authority', authority)).status, 200);
     assert.equal((await f.callback('oauth-cleanup-authority', { ...authority, action: 'erase' })).status, 403);
-    await pool.query("UPDATE ag_kernel.cleanup SET state='pending' WHERE consumer=$1 AND ref=$2", [f.context.consumerId, cleanupRef]);
+    assert.equal(await f.management().cleanupClaim(f.context, pending), 'quarantined');
+    assert.deepEqual(f.cleanupRequests.map(r => r.action), ['read'], 'current claimed scope permits read, zero native erase');
+    const held = (await pool.query(`SELECT r.transport_occupied,r.effect,l.state AS cleanup_state FROM ag_kernel.requests r
+      JOIN ag_kernel.executions e ON e.consumer=r.consumer AND e.ref=r.execution_ref
+      JOIN ag_kernel.cleanup l ON l.consumer=e.consumer AND l.generation=e.generation
+      WHERE r.consumer=$1 AND r.execution_ref=$2 AND r.id='occupied'`, [f.context.consumerId, prepared.executionRef])).rows[0];
+    assert.deepEqual(held, { transport_occupied: true, effect: 'effect_unknown', cleanup_state: 'pending' });
     const execution = await f.kernel.claimCleanup(f.context, f.worker); assert.ok(execution?.scope.kind === 'execution');
     assert.equal(execution.scope.executionRef, prepared.executionRef);
-    assert.equal(await f.kernel.claimCleanup(f.context, f.worker), undefined, 'generation stays unclaimed while transport occupied');
-    assert.equal(f.cleanupRequests.length, 0);
     await f.kernel.acknowledgeTransportClosed(f.context, f.worker, claimed.dispatch.closure,
       { cleanupRef: execution.cleanupRef, token: execution.token });
     await f.kernel.settleCleanup(f.context, execution.cleanupRef, f.worker, execution.token, true);
     const generation = await f.kernel.claimCleanup(f.context, f.worker); assert.ok(generation?.scope.kind === 'generation');
     assert.equal(generation.scope.generation, j.generation);
     assert.equal(await f.management().cleanupClaim(f.context, generation), 'erased');
+    assert.equal(f.cleanupRequests.filter(r => r.action === 'erase').length, 1);
     assert.equal((await f.kernel.request(f.context, prepared.executionRef, 'occupied')).effect, 'effect_unknown');
     await f.assertHealthy();
   } finally { await f.close(); }
 });
 
 // RED if missing native fields on a retained legacy request imply no transport.
-test('F cleanup selection preserves legacy unknown occupancy with no native proof', async () => {
+test('F cleanup authority preserves legacy unknown occupancy with no native proof', async () => {
   const f = await fixture({ descriptor: 'qualified' });
   try {
     const j = await activeOAuth(f);
@@ -544,11 +552,18 @@ test('F cleanup selection preserves legacy unknown occupancy with no native proo
       VALUES ($1,$2,'legacy-unknown','effect_unknown',$3)`, [f.context.consumerId, prepared.executionRef, f.worker]);
     const account = await f.kernel.account(f.context, j.accountRef);
     await f.management().disable(f.context, { operationId: randomUUID(), accountRef: j.accountRef, expectedRevision: account.revision });
+    await pool.query(`UPDATE ag_kernel.cleanup SET ref=CASE WHEN generation IS NOT NULL
+      THEN '00000000-0000-4000-8000-000000000001'::uuid ELSE 'ffffffff-ffff-4fff-8fff-ffffffffffff'::uuid END WHERE consumer=$1`, [f.context.consumerId]);
+    const pending = await f.kernel.claimCleanup(f.context, f.worker); assert.ok(pending?.scope.kind === 'generation');
+    assert.equal(pending.scope.generation, j.generation);
+    assert.equal(await f.management().cleanupClaim(f.context, pending), 'quarantined');
+    assert.deepEqual(f.cleanupRequests.map(r => r.action), ['read'], 'NULL native proof does not permit OAuth erase');
     const execution = await f.kernel.claimCleanup(f.context, f.worker); assert.ok(execution?.scope.kind === 'execution');
     assert.equal(execution.scope.transports.length, 1);
     assert.equal(execution.scope.transports[0].token, undefined); assert.equal(execution.scope.transports[0].native, undefined);
-    assert.equal(await f.kernel.claimCleanup(f.context, f.worker), undefined);
-    assert.equal(f.cleanupRequests.length, 0);
+    const held = (await pool.query(`SELECT transport_occupied,native_origin_ref,descriptor_generation FROM ag_kernel.requests
+      WHERE consumer=$1 AND execution_ref=$2 AND id='legacy-unknown'`, [f.context.consumerId, prepared.executionRef])).rows[0];
+    assert.deepEqual(held, { transport_occupied: true, native_origin_ref: null, descriptor_generation: null });
     assert.equal((await f.kernel.request(f.context, prepared.executionRef, 'legacy-unknown')).effect, 'effect_unknown');
   } finally { await f.close(); }
 });
@@ -888,18 +903,20 @@ test('F source: disable wins final native ACK atomically without erasing effecte
 });
 
 // Regression: a profile/model/origin/birth/account substitution still saves a
-// mapping or calls setState(active). Precision mismatches must compare text.
-test('F source: every protected descriptor substitution denies before mapping or activation', async t => {
+// mapping or admits a different birth. Well-formed ID/birth changes must compare
+// against the original durable mapping, including every timestamp digit.
+test('F source: descriptor substitution cannot change scope or replace a pinned birth', async t => {
   const variants: { name: string; physical?: Partial<PhysicalCandidate>;
-    identity?: Partial<Pick<OAuthDescriptor, 'operationId' | 'accountRef'>> }[] = [
+    identity?: Partial<Pick<OAuthDescriptor, 'operationId' | 'accountRef'>>;
+    wire?: Readonly<Record<string, unknown>> }[] = [
     { name: 'profile', physical: { profile: apiProfile.profile } },
     { name: 'model alias', physical: { model: 'gpt-6.1' } },
     { name: 'provider base', physical: { baseURL: 'https://fixture.invalid/v1' } },
     { name: 'generation', physical: { generation: randomUUID() } },
     { name: 'physical generation', physical: { nativePhysicalIdentity: randomUUID() } },
-    { name: 'numeric identity', physical: { nativeId: 1 } },
-    { name: 'nanosecond birth', physical: { createdAt: '2026-10-03T04:05:06.123456788+00:00' } },
-    { name: 'truncated birth', physical: { createdAt: '2026-10-03T04:05:06.123+00:00' } },
+    { name: 'numeric identity', wire: { account_id: 1 } },
+    { name: 'nanosecond birth', wire: { created_at: '2026-10-03T04:05:06.123456788+00:00' } },
+    { name: 'truncated birth', wire: { created_at: '2026-10-03T04:05:06.123+00:00' } },
     { name: 'operation', identity: { operationId: randomUUID() } },
     { name: 'account', identity: { accountRef: randomUUID() } },
   ];
@@ -907,11 +924,22 @@ test('F source: every protected descriptor substitution denies before mapping or
     const f = await fixture({ descriptor: 'qualified' }), command = input();
     try {
       await f.client().beginOAuth(sdkInput(command)); const j = await journal(f, command);
-      f.descriptor('qualified', variant.physical, variant.identity); f.state('completed');
+      f.state('completed');
+      let original: PhysicalCandidate | undefined;
+      if (variant.wire) {
+        // Real recoverable boundary: exact birth saved before the final kernel
+        // ACK. A subsequent native HTTP response cannot replace that birth.
+        const read = await f.oauth.describe(scope(j)); assert.ok(read.state === 'qualified');
+        original = read.native; assert.equal(original.createdAt, birth);
+        assert.equal(original.nativeId, f.rows.get(j.generation)?.nativeId);
+        await f.store.saveMapping({ ...j, descriptor: original });
+        f.descriptorWire(variant.wire);
+      }
+      f.descriptor('qualified', variant.physical, variant.identity);
       const result = await f.client().readOAuth(command.operationId);
       assert.equal(result.state, 'unknown');
       assert.ok(result.state === 'unknown' && result.error?.effect === 'effect_unknown');
-      await assertInert(f, j, 'unknown');
+      await assertInert(f, j, 'unknown', original);
       assert.equal((await f.client().beginOAuth(sdkInput(command))).operation.state, 'unknown');
       await assertPinned(f, j);
       assert.equal((await pool.query('SELECT count(*)::int AS n FROM ag_kernel.cleanup WHERE consumer=$1 AND generation=$2',
