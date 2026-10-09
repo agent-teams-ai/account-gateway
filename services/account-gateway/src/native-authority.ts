@@ -299,9 +299,12 @@ export class NativeAuthority {
             if (route === 'closure-ack') {
               const closed = receipt(r.receipt, ctx.consumerId, p);
               if (!physicallyClosed(closed)) return denied();
-              const c = r.cleanup === undefined ? undefined : await this.delegated(ctx, p, r.cleanup);
+              const c = r.cleanup === undefined ? undefined : cleanup(r.cleanup);
+              if (c && c.worker !== cfg.enrollment.worker) return denied();
+              // Closure authorization is atomic and durable, including an exact
+              // duplicate after owner closure. Dispatch still uses delegated().
               await this.kernel.acknowledgeTransportClosed(ctx, c?.worker ?? p.worker, p,
-                c && { cleanupRef: c.cleanupRef, token: c.token });
+                c && { cleanupRef: c.cleanupRef, token: c.token, leaseExpiresAt: c.leaseExpiresAt });
               const a = this.#pending.get(key(ctx, p.executionRef, p.requestRef));
               // A real SQL ACK may precede the admit callback's post-claim lease
               // await. Match the latched reservation, not proof attachment time.

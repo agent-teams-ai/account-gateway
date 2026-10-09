@@ -94,7 +94,11 @@ export interface TransportClosure {
 export interface NativeDispatchProof extends TransportClosure {
   token: string; native: NativeBinding;
 }
-export interface CleanupAuthority { cleanupRef: string; token: string }
+export interface CleanupAuthority {
+  cleanupRef: string; token: string;
+  // Required on delegated wire ACKs; trusted physical retirement has no wire lease.
+  leaseExpiresAt?: string;
+}
 export type ClaimResult =
   | { status: RequestStatus; dispatch?: never }
   | { status: RequestStatus; dispatch: { descriptor: NativeDescriptor; executionRef: string; requestRef: string;
