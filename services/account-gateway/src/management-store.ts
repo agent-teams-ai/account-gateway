@@ -1,5 +1,7 @@
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
+import { sharedCheckout } from './service-admission.ts';
+import type { Checkout } from './service-admission.ts';
 import { KernelError, identifier, uuid } from './domain.ts';
 import type { TrustedContext } from './domain.ts';
 import { captureContext, codexOAuthProfile, exactCandidate, physicalCandidate } from './management.ts';
@@ -108,7 +110,7 @@ function refreshProfile(source: ManagedProfile): ManagedProfile {
 }
 
 export class PostgresManagementStore implements ManagementStore {
-  private readonly pool: Pool;
+  private readonly checkout: Checkout;
   private readonly secrets: IntentSecrets;
   private readonly ttlMs: number;
   private readonly maxIntents: number;
@@ -117,13 +119,13 @@ export class PostgresManagementStore implements ManagementStore {
     const ttlMs = options.ttlMs ?? 60_000, maxIntents = options.maxIntents ?? 256, batch = options.batch ?? 100;
     if (!Number.isInteger(ttlMs) || ttlMs < 1 || ttlMs > 300_000 || !Number.isInteger(maxIntents) ||
         maxIntents < 1 || maxIntents > 4096 || !Number.isInteger(batch) || batch < 1 || batch > 1000) throw new KernelError('invalid');
-    this.pool = pool; this.secrets = secrets; this.ttlMs = ttlMs; this.maxIntents = maxIntents; this.batch = batch;
+    this.checkout = sharedCheckout(pool); this.secrets = secrets; this.ttlMs = ttlMs; this.maxIntents = maxIntents; this.batch = batch;
   }
   private async tx<T>(consumer: string, action: (db: PoolClient) => Promise<T>): Promise<T> {
     identifier(consumer);
     let db: PoolClient | undefined;
     try {
-      db = await this.pool.connect(); await db.query('BEGIN');
+      db = await this.checkout(); await db.query('BEGIN');
       // Reuse the kernel consumer serialization lock; no management permit/authority.
       const existing = await db.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE', [consumer]);
       if (!existing.rowCount) throw new KernelError('unknown');

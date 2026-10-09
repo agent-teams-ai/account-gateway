@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import pg from 'pg';
+import { ServiceAdmission, facadeControlRoute, inServiceLane } from './service-admission.ts';
 import { KernelError, uuid } from './domain.ts';
 import { PostgresKernel } from './postgres.ts';
 import { IntentSecrets, PostgresManagementStore } from './management-store.ts';
@@ -208,6 +209,7 @@ async function close(s: Server | undefined): Promise<void> {
 // Each call is one foreground deployable unit, one configured consumer and one
 // original protected Go parent. No recovery spawn, inference replay or PID lookup.
 export async function startService(configFile: string, signal?: AbortSignal): Promise<Service> {
+  const admission = new ServiceAdmission();
   const cfg = loadServiceConfig(configFile); // Fully frozen before any await.
   const pool = new pg.Pool({ connectionString: cfg.kernelDSN, max: 8, connectionTimeoutMillis: 5000,
     query_timeout: 5000, statement_timeout: 5000, idle_in_transaction_session_timeout: 5000 });
@@ -218,7 +220,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   const control = composeServiceControl(cfg, kernel, store, custody, worker);
   const { profiles, bearers, management, catalog } = control;
   const readRetirement = composeServiceRetirementReadback(cfg.native), readbackAbort = new AbortController();
-  let handler: Server | undefined, facade: Server | undefined;
+  let handler: Server | undefined, facade: Server | undefined, controlFacade: Server | undefined;
   let original: ProcessBinding | undefined, ready = false, invalid = false, stopping = false;
   let terminal: 'retired' | 'pending' | undefined, retirement: Retirement | undefined;
   let child: ReturnType<typeof spawn> | undefined, options: FacadeOptions | undefined;
@@ -258,10 +260,17 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   }
   const callback = createServer({ maxHeaderSize: 16_384, headersTimeout: 5000, requestTimeout: 5000,
     keepAliveTimeout: 1000, connectionsCheckingInterval: 100 }, (req, res) => {
-    // Go's first enrollment can arrive before stdout's actual starting binding.
-    // Hold only this bounded listener; never ACK a synthetic authority.
     const timer = setTimeout(() => { res.destroy(); req.destroy(); }, 5000);
     res.once('close', () => clearTimeout(timer));
+    if (facadeControlRoute(req.method, req.url)) {
+      if (!controlFacade || stopping || invalid) { res.writeHead(503); res.end(); return; }
+      controlFacade.emit('request', req, res); return;
+    }
+    if (req.method !== 'POST' || !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-refresh-authority|oauth-cleanup-authority)$/.test(req.url ?? '')) {
+      res.writeHead(403); res.end(); return;
+    }
+    // Go's first enrollment can arrive before stdout's actual starting binding.
+    // Hold only this bounded listener; never ACK a synthetic authority.
     const dispatch = () => {
       if (res.destroyed || res.writableEnded) return;
       if (!handler || stopping || invalid) { res.writeHead(503); res.end(); return; }
@@ -280,15 +289,15 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   function stop(): Promise<'retired' | 'pending'> {
     if (stopWork) return stopWork;
     if (stopping) return stopped;
-    stopping = true; readbackAbort.abort(); denyAdmission(); install(); pulse(); wakeSleep?.();
+    stopping = true; const handlersSettled = admission.stop(); readbackAbort.abort(); denyAdmission(); install(); pulse(); wakeSleep?.();
     // Signal only the original ChildProcess handle. The protected Go parent
     // alone decides exact-engine retirement and retains launcher disk evidence.
     if (child && !exited) {
       try { if (!child.kill('SIGTERM')) invalid = true; } catch { invalid = true; }
     }
     stopWork = (async () => {
-      await Promise.all([close(facade), close(callback), close(handler)]);
-      await bounded(Promise.all([maintenance, inFlightTick]), 6500).catch(() => { invalid = true; });
+      await Promise.all([close(facade), close(callback), close(handler), close(controlFacade)]);
+      await bounded(Promise.all([maintenance, inFlightTick, handlersSettled]), 6500).catch(() => { invalid = true; });
       if (child) await bounded(exit, 12_000).catch(() => { invalid = true; });
       await bounded(pool.end(), 6000).catch(() => { invalid = true; });
       signal?.removeEventListener('abort', onAbort);
@@ -362,18 +371,23 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     const binding = original!;
     const enrollment = Object.freeze({ originRef: binding.originRef, engineIncarnation: binding.incarnation, worker });
     const { authority, transport } = composeServiceNative(cfg, control, kernel, store, enrollment);
-    handler = authority.createServer(); install();
+    handler = authority.createServer((_req, res, work) => {
+      const release = admission.reserve('control');
+      if (!release) { res.writeHead(503); res.end(); return; }
+      void inServiceLane('control', work).finally(release).catch(() => { res.destroy(); });
+    }); install();
     startupStage = 'ready';
     await waitFor(() => ready, 10_000);
     startupActive();
     startupStage = 'heartbeat';
-    await kernel.heartbeat(ctx, worker);
+    await inServiceLane('control', () => kernel.heartbeat(ctx, worker));
     startupActive();
-    options = { kernel, management, store, bearers, enrollment, transport,
+    options = { admission, kernel, management, store, bearers, enrollment, transport,
       profiles: catalog, intentHmacKey: keyBytes(cfg.keys.facadeHMAC), ingressBytes: Math.max(1024, ...profiles.map(p => p.limits.requestBytes)),
       bufferBytes: 65_536 };
     startupStage = 'facade-listen';
     facade = createFacade(options); facade.on('error', fail);
+    controlFacade = createFacade({ ...options, controlOnly: true }); controlFacade.on('error', fail);
     await listen(facade, cfg.facadeOrigin);
     startupActive();
     async function tick(): Promise<void> {
@@ -409,7 +423,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     }
     maintenance = (async () => {
       while (!stopping) {
-        inFlightTick = tick();
+        inFlightTick = inServiceLane('control', tick);
         await bounded(inFlightTick, 15_000);
         if (!stopping) await new Promise<void>(resolve => {
           const timer = setTimeout(() => { wakeSleep = undefined; resolve(); }, 1000);
@@ -429,7 +443,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     try {
       await stop();
       // A listen already in flight at cancellation can finish after stop's snapshot.
-      await Promise.all([close(facade), close(callback), close(handler)]);
+      await Promise.all([close(facade), close(callback), close(handler), close(controlFacade)]);
     } finally { throw denied; }
   }
 }

@@ -1,4 +1,6 @@
 import { createServer } from 'node:http';
+import { ServiceCapacityError, facadeControlRoute, inServiceLane } from './service-admission.ts';
+import type { ServiceAdmission } from './service-admission.ts';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { once } from 'node:events';
@@ -198,6 +200,8 @@ export interface NativeTransport {
   cancel?(context: TrustedContext, proof: NativeDispatchProof, cleanup: CleanupAuthority): Promise<void>;
 }
 export interface FacadeOptions {
+  readonly admission?: ServiceAdmission;
+  readonly controlOnly?: boolean;
   readonly kernel: DurableKernel & ExecutionRead;
   readonly management: AccountManagement;
   readonly store: Pick<ManagementStore, 'mapping'>;
@@ -282,6 +286,7 @@ export async function cancelFacadeTransport(options: FacadeOptions, context: Tru
 }
 
 export function createFacade(options: FacadeOptions): Server {
+  const admission = options.admission, controlOnly = options.controlOnly === true;
   const kernel = options.kernel, management = options.management, store = options.store, bearers = options.bearers;
   const ingressBytes = options.ingressBytes ?? 1_048_576, timeoutMs = options.timeoutMs ?? 30_000, bufferBytes = options.bufferBytes ?? 65_536;
   if (!Number.isSafeInteger(ingressBytes) || ingressBytes < 1024 || ingressBytes > 16_777_216 ||
@@ -341,7 +346,7 @@ export function createFacade(options: FacadeOptions): Server {
           proof.native.originRef !== peer.originRef || proof.native.engineIncarnation !== peer.engineIncarnation || proof.native.generation !== saved.generation) throw new KernelError('denied');
       return proof;
     };
-    return Object.freeze({
+    const callbacks: NativeCallback = Object.freeze({
       async admit(requestNonce: string): Promise<NativePermit> {
         uuid(requestNonce); requireCurrent(grant);
         if (signal.aborted) throw new KernelError('denied');
@@ -390,9 +395,32 @@ export function createFacade(options: FacadeOptions): Server {
       rejectBeforeDispatch: (proof: NativeDispatchProof, entered: false) => kernel.rejectBeforeDispatch(context, peer.worker, validProof(proof), entered),
       closed: (proof: NativeDispatchProof, cleanup?: CleanupAuthority) => kernel.acknowledgeTransportClosed(context, peer.worker, validProof(proof), cleanup),
     });
+    return Object.freeze({
+      admit: (nonce: string) => inServiceLane('control', () => callbacks.admit(nonce)),
+      effect: (proof: NativeDispatchProof, next: 'response_started' | 'completed' | 'effect_unknown') => inServiceLane('control', () => callbacks.effect(proof, next)),
+      rejectBeforeDispatch: (proof: NativeDispatchProof, entered: false) => inServiceLane('control', () => callbacks.rejectBeforeDispatch(proof, entered)),
+      closed: (proof: NativeDispatchProof, cleanup?: CleanupAuthority) => inServiceLane('control', () => callbacks.closed(proof, cleanup)),
+    });
   }
   const server = createServer({ maxHeaderSize: 16_384, headersTimeout: Math.min(timeoutMs, 10_000), requestTimeout: timeoutMs,
     keepAliveTimeout: 1000, connectionsCheckingInterval: 1000 }, (req, res) => {
+    if (controlOnly && !facadeControlRoute(req.method, req.url)) {
+      send(res, c.safeError, safe('invalid_request', 'not_dispatched'), 400); return;
+    }
+    const selected = controlOnly ? 'control' : 'data';
+    const release = admission?.reserve(selected);
+    if (admission && !release) {
+      res.shouldKeepAlive = false;
+      let deniedIdentity: { requestRef?: string } = {};
+      if (req.method === 'POST' && /^\/v1\/executions\/[A-Za-z0-9_-]+\/requests$/.test(req.url ?? ''))
+        try { deniedIdentity = { requestRef: parse(c.reference, singleton(req, 'x-gateway-request-id')) }; } catch { /* no unvalidated identity */ }
+      send(res, c.safeError, safe('admission_limited', 'not_dispatched', deniedIdentity), 503); return;
+    }
+    const retained = new Set<Promise<void>>();
+    const retain = (work: Promise<void>) => {
+      const settled = work.catch(() => undefined);
+      retained.add(settled); void settled.then(() => retained.delete(settled)); return settled;
+    };
     const controller = new AbortController();
     const ingressTimer = setTimeout(() => { controller.abort(); res.destroy(); }, timeoutMs);
     const disconnected = () => { if (!res.writableFinished) controller.abort(); };
@@ -402,12 +430,13 @@ export function createFacade(options: FacadeOptions): Server {
     let transportScope: { context: TrustedContext; ref: string; id: string } | undefined;
     const markUnknown = async (): Promise<void> => {
       if (transportScope && enrollment && enteredTransport) {
-        await kernel.effect(transportScope.context, transportScope.ref, transportScope.id, enrollment.worker, 'effect_unknown').catch(() => undefined);
+        await inServiceLane('control', () => kernel.effect(transportScope!.context, transportScope!.ref, transportScope!.id, enrollment.worker, 'effect_unknown')).catch(() => undefined);
       }
     };
-    controller.signal.addEventListener('abort', () => { void markUnknown(); }, { once: true });
+    const onAbort = () => { retain(markUnknown()); };
+    controller.signal.addEventListener('abort', onAbort, { once: true });
     let identity: { operationRef?: string; requestRef?: string } = {};
-    void (async () => {
+    void inServiceLane(selected, () => (async () => {
       if (req.rawHeaders.length > 64) { res.shouldKeepAlive = false; send(res, c.safeError, safe('invalid_request', 'not_dispatched'), 400); return; }
       let authorization: string | undefined;
       try { authorization = singleton(req, 'authorization'); } catch { send(res, c.safeError, safe('unauthenticated', 'not_dispatched'), 401); return; }
@@ -548,7 +577,8 @@ export function createFacade(options: FacadeOptions): Server {
           const result = await transport.request({ context, saved, requestId: identity.requestRef!, body: raw, signal: controller.signal, callback: nativeCallback });
           if (result.kind === 'status') { send(res, c.requestStatus, requestDTO(await kernel.request(context, ref, identity.requestRef!)), 202); return; }
           let finished = false;
-          const cancel = () => { void result.cancel().catch(() => undefined); };
+          let cancellation: Promise<void> | undefined;
+          const cancel = () => cancellation ??= retain(inServiceLane('control', () => result.cancel()));
           controller.signal.addEventListener('abort', cancel, { once: true });
           try {
             // Streaming data requires actual persisted callback claim, never an
@@ -568,7 +598,7 @@ export function createFacade(options: FacadeOptions): Server {
             finished = true; res.end();
           } finally {
             controller.signal.removeEventListener('abort', cancel);
-            if (!finished) { controller.abort(); await result.cancel().catch(() => undefined); }
+            if (!finished) { controller.abort(); await cancel(); }
           }
         } finally { clearTimeout(abortAt); }
         return;
@@ -687,12 +717,16 @@ export function createFacade(options: FacadeOptions): Server {
       await markUnknown();
       if (res.headersSent || res.destroyed) { controller.abort(); res.destroy(); return; }
       const code = error instanceof KernelError ? error.code : 'unavailable';
-      const dtoCode: c.SafeError['code'] = code === 'invalid' ? 'invalid_request' : code === 'denied' ? 'forbidden' : code === 'conflict' ? 'conflict' : code === 'unknown' ? 'not_found' : 'upstream_failure';
+      const dtoCode: c.SafeError['code'] = error instanceof ServiceCapacityError && !enteredTransport && !uncertain ? 'admission_limited' : code === 'invalid' ? 'invalid_request' : code === 'denied' ? 'forbidden' : code === 'conflict' ? 'conflict' : code === 'unknown' ? 'not_found' : 'upstream_failure';
       // No absence readback or transport exception is a non-entry receipt.
       res.shouldKeepAlive = false;
       send(res, c.safeError, safe(dtoCode, enteredTransport || uncertain ? 'effect_unknown' : 'not_dispatched', identity),
         code === 'denied' ? 403 : code === 'invalid' ? 400 : code === 'conflict' ? 409 : code === 'unknown' ? 404 : 503);
-    });
+    }).finally(async () => {
+      clearTimeout(ingressTimer);
+      res.removeListener('close', disconnected); controller.signal.removeEventListener('abort', onAbort);
+      while (retained.size) await Promise.all([...retained]);
+    })).finally(() => release?.()).catch(() => undefined);
   });
   // Inspect the entire byte-bounded raw header set before applying the count
   // limit; Node's truncation must never hide a second Authorization field.
