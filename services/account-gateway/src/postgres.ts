@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import {
-  KernelError, boundedConfig, boundedFacts, approvedLimits, defaults, factDefaults, identifier, integer, revision as authorityRevision, uuid,
+  KernelError, boundedConfig, boundedFacts, approvedLimits, defaults, factDefaults, identifier, integer, revision as authorityRevision, uuid, instant,
 } from './domain.ts';
 import type {
   TrustedContext, DurableKernel, Bounds, DurableFactBounds, AccountIntent, AccountStatus, OperationStatus,
@@ -11,7 +11,6 @@ import type {
 import { compactSafePayloads } from './retention.ts';
 import { sharedCheckout } from './service-admission.ts';
 import type { Checkout } from './service-admission.ts';
-import { instant } from './native-wire.ts';
 
 type Row = Record<string, any>;
 type Tx = { db: PoolClient; consumer: string; issuer: string };

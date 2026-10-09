@@ -3,33 +3,18 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { IncomingMessage } from 'node:http';
-import { KernelError, identifier, uuid, approvedLimits, defaults } from './domain.ts';
+import { KernelError, identifier, uuid, approvedLimits, defaults, instant } from './domain.ts';
 import type { NativeDispatchProof, PrivateAdmission, SavedExecution } from './domain.ts';
 import type { PhysicalCandidate } from './management.ts';
 import { strictJSON } from './facade-ingress.ts';
 
+export { instant };
 export const denied = (): never => { throw new KernelError('denied'); };
 export function object(value: unknown, keys: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return denied();
   const row = value as Record<string, unknown>;
   if (Object.keys(row).some(k => !keys.includes(k) && !optional.includes(k)) || keys.some(k => !Object.hasOwn(row, k))) return denied();
   return row;
-}
-// Compare nanoseconds, including offsets and differently marshalled fractions.
-// Date is used only for the whole second, never to round fractional authority.
-export function instant(value: unknown): bigint {
-  if (typeof value !== 'string' || value.length > 64) return denied();
-  const match = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?(Z|[+-]\d\d:\d\d)$/.exec(value);
-  if (!match || value.startsWith('0000-')) return denied();
-  const date = new Date(match[1] + 'Z');
-  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 19) !== match[1]) return denied();
-  let offset = 0;
-  if (match[3] !== 'Z') {
-    const h = Number(match[3].slice(1, 3)), m = Number(match[3].slice(4));
-    if (h > 23 || m > 59) return denied();
-    offset = (h * 60 + m) * (match[3][0] === '+' ? 1 : -1);
-  }
-  return BigInt(date.getTime() - offset * 60_000) * 1_000_000n + BigInt((match[2] ?? '').padEnd(9, '0'));
 }
 export const now = () => BigInt(Date.now()) * 1_000_000n;
 export function admission(value: unknown): PrivateAdmission {
