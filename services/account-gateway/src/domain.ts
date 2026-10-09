@@ -8,6 +8,22 @@ export class KernelError extends Error {
   readonly code: 'invalid' | 'unknown' | 'conflict' | 'denied' | 'unavailable';
   constructor(code: KernelError['code']) { super(code); this.code = code; }
 }
+// Compare nanoseconds, including offsets and differently marshalled fractions.
+// Date is used only for the whole second, never to round fractional authority.
+export function instant(value: unknown): bigint {
+  if (typeof value !== 'string' || value.length > 64) throw new KernelError('denied');
+  const match = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?(Z|[+-]\d\d:\d\d)$/.exec(value);
+  if (!match || value.startsWith('0000-')) throw new KernelError('denied');
+  const date = new Date(match[1] + 'Z');
+  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 19) !== match[1]) throw new KernelError('denied');
+  let offset = 0;
+  if (match[3] !== 'Z') {
+    const h = Number(match[3].slice(1, 3)), m = Number(match[3].slice(4));
+    if (h > 23 || m > 59) throw new KernelError('denied');
+    offset = (h * 60 + m) * (match[3][0] === '+' ? 1 : -1);
+  }
+  return BigInt(date.getTime() - offset * 60_000) * 1_000_000n + BigInt((match[2] ?? '').padEnd(9, '0'));
+}
 export interface AccountIntent {
   operationId: string;
   kind: 'create' | 'reconnect' | 'rename' | 'disable';
@@ -94,7 +110,11 @@ export interface TransportClosure {
 export interface NativeDispatchProof extends TransportClosure {
   token: string; native: NativeBinding;
 }
-export interface CleanupAuthority { cleanupRef: string; token: string }
+export interface CleanupAuthority {
+  cleanupRef: string; token: string;
+  // Required on delegated wire ACKs; trusted physical retirement has no wire lease.
+  leaseExpiresAt?: string;
+}
 export type ClaimResult =
   | { status: RequestStatus; dispatch?: never }
   | { status: RequestStatus; dispatch: { descriptor: NativeDescriptor; executionRef: string; requestRef: string;

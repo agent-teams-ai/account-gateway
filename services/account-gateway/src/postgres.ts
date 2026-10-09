@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import {
-  KernelError, boundedConfig, boundedFacts, approvedLimits, defaults, factDefaults, identifier, integer, revision as authorityRevision, uuid,
+  KernelError, boundedConfig, boundedFacts, approvedLimits, defaults, factDefaults, identifier, integer, revision as authorityRevision, uuid, instant,
 } from './domain.ts';
 import type {
   TrustedContext, DurableKernel, Bounds, DurableFactBounds, AccountIntent, AccountStatus, OperationStatus,
@@ -586,10 +586,14 @@ export class PostgresKernel implements DurableKernel {
   async acknowledgeTransportClosed(context: TrustedContext, worker: string, proof: TransportClosure,
     cleanup?: CleanupAuthority): Promise<void> {
     proof = captureClosure(proof);
-    cleanup = cleanup === undefined ? undefined : { cleanupRef: cleanup.cleanupRef, token: cleanup.token };
+    cleanup = cleanup === undefined ? undefined : { cleanupRef: cleanup.cleanupRef, token: cleanup.token,
+      leaseExpiresAt: cleanup.leaseExpiresAt };
     uuid(worker); validateNativeClosure(proof);
     if (cleanup) { uuid(cleanup.cleanupRef); uuid(cleanup.token); }
     else if (worker !== proof.worker) throw new KernelError('denied');
+    // Preserve nanoseconds through the write; timestamptz/Date coercion would
+    // round a forged +1ns extension into the genuine stored microsecond lease.
+    const declaredLease = cleanup?.leaseExpiresAt === undefined ? null : instant(cleanup.leaseExpiresAt).toString();
     return this.transaction(context, async tx => {
       // Exact immutable request/owner/token match. A cleanup delegate additionally
       // needs its exact leased execution scope at the write; generation erasure
@@ -599,11 +603,12 @@ export class PostgresKernel implements DurableKernel {
         AND r.native_origin_ref=$9 AND r.engine_incarnation=$10 AND r.request_nonce=$11 AND r.descriptor_generation=$12
         AND ($6::uuid IS NULL OR EXISTS (SELECT 1 FROM cleanup j WHERE j.consumer=r.consumer
           AND j.ref=$6 AND j.execution_ref=r.execution_ref AND j.worker=$7 AND j.token=$8
+          AND ($13::numeric IS NULL OR extract(epoch FROM j.lease_until)*1000000000=$13::numeric)
           AND ((j.state='claimed' AND j.lease_until>clock_timestamp())
             OR (j.state='done' AND NOT r.transport_occupied)))) RETURNING r.id`,
       [tx.consumer, proof.executionRef, proof.requestRef, proof.worker, proof.token,
         cleanup?.cleanupRef ?? null, worker, cleanup?.token ?? null, proof.native!.originRef,
-        proof.native!.engineIncarnation, proof.native!.requestNonce, proof.native!.generation]);
+        proof.native!.engineIncarnation, proof.native!.requestNonce, proof.native!.generation, declaredLease]);
       if (!closed.rowCount) throw new KernelError('denied');
       // Closure is independent of accepted effect. If owner loss has not yet been
       // observed, classify this exact request before committing the release.

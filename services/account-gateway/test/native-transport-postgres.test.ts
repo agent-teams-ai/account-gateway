@@ -371,11 +371,114 @@ test('synthetic TCP/SQL: expired original owner may ACK immutable completed proo
     assert.equal((await f.call('dispatch-proof', { consumerId: f.context.consumerId, proof: p, leaseExpiresAt: new Date(Date.now() + 100).toISOString() })).status, 403);
     const ack = await f.call('closure-ack', { consumerId: f.context.consumerId, proof: p, receipt: native });
     assert.equal(ack.status, 200); assert.deepEqual(await ack.json(), { ok: true });
+    assert.equal((await f.call('closure-ack', { consumerId: f.context.consumerId, proof: p, receipt: native })).status, 200);
+    assert.equal(await f.occupied(r.requestId), false);
+    assert.deepEqual(await f.kernel.requestProof(f.context, p.executionRef, p.requestRef), p);
     for (const changed of [{ ...p, token: randomUUID() }, { ...p, worker: randomUUID() },
       { ...p, native: { ...p.native, engineIncarnation: randomUUID() } }])
       assert.equal((await f.call('owner-closure-authority', { consumerId: f.context.consumerId, proof: changed })).status, 403);
     assert.equal((await f.call('owner-closure-authority', { consumerId: 'foreign-consumer', proof: p })).status, 403);
     assert.equal((await f.kernel.request(f.context, p.executionRef, p.requestRef)).effect, 'completed');
+  } finally { await f.stop(); }
+});
+test('synthetic TCP/SQL: owner closure before delegated ACK preserves exact claimed and done retries', { timeout: 30_000 }, async () => {
+  const f = await fixture('held'); try {
+    const requestId = randomUUID(), pending = f.request(requestId);
+    void pending.catch(() => undefined);
+    await waitFor(f.entered);
+    const p = await f.kernel.requestProof(f.context, f.saved.admission.executionRef, requestId); assert.ok(p);
+    assert.equal(await f.occupied(requestId), true);
+    await f.kernel.close(f.context, randomUUID(), p.executionRef);
+    const job = await f.kernel.claimCleanup(f.context, f.worker); assert.ok(job && job.scope.kind === 'execution');
+    assert.equal(job.scope.executionRef, p.executionRef);
+    assert.deepEqual(job.scope.transports, [p]);
+    const leaseExpiresAt = await f.kernel.currentCleanupLease(f.context, job.cleanupRef, f.worker, job.token);
+    const c = { cleanupRef: job.cleanupRef, worker: f.worker, token: job.token, leaseExpiresAt };
+    assert.equal((await f.call('cleanup-authority', { consumerId: f.context.consumerId, proof: p, cleanup: c })).status, 200);
+    const openReceipt = structuredClone(f.records.get(requestId)); assert.ok(openReceipt);
+    // Let the existing peer finish the held body and the real owner transport
+    // complete its authenticated ACK before sending the delegated duplicate.
+    f.releaseHeld(); assert.equal((await pending).failed, false);
+    const receipt = f.records.get(requestId); assert.ok(receipt?.acknowledged);
+    assert.equal(f.stats().ackCalls, 1); assert.equal(await f.occupied(requestId), false);
+    const status = await f.kernel.request(f.context, p.executionRef, requestId);
+    assert.equal(status.effect, 'completed');
+
+    const other = await f.kernel.prepare(f.context, { operationId: randomUUID(), intentDigest: 'other-ack-scope',
+      invocationRef: randomUUID(), attemptRef: 'other-attempt', permittedAccounts: [f.saved.admission.accountRef],
+      profile: profile.profile, policySubject: 'binding-fixture', policyRevision: 2, bindingRevision: 3,
+      issuerEpoch: f.saved.admission.issuerEpoch, deadline: new Date(Date.now() + 10_000), limits });
+    assert.ok(other.executionRef); await f.kernel.close(f.context, randomUUID(), other.executionRef);
+    const otherJob = await f.kernel.claimCleanup(f.context, f.worker); assert.ok(otherJob && otherJob.scope.kind === 'execution');
+    assert.equal(otherJob.scope.executionRef, other.executionRef);
+    const otherLease = { cleanupRef: otherJob.cleanupRef, worker: f.worker, token: otherJob.token,
+      leaseExpiresAt: await f.kernel.currentCleanupLease(f.context, otherJob.cleanupRef, f.worker, otherJob.token) };
+    assert.match(leaseExpiresAt, /\.\d{6}Z$/);
+    const equivalent = leaseExpiresAt.replace(/Z$/, '000+00:00');
+    const offset = new Date(new Date(leaseExpiresAt.slice(0, 19) + 'Z').getTime() + 3_600_000)
+      .toISOString().slice(0, 19) + leaseExpiresAt.slice(19, -1) + '000+01:00';
+    const extension = leaseExpiresAt.replace(/Z$/, '001Z'); // Exactly +1ns, below PostgreSQL precision.
+    const { leaseExpiresAt: _lease, ...missingLease } = c;
+    const ack = async (cleanup: unknown, expected: number, closed: unknown = receipt, original: unknown = p,
+      consumerId = f.context.consumerId, token = credentials.callbackCredential) => {
+      const response = await f.call('closure-ack', { consumerId, proof: original, receipt: closed, cleanup }, token);
+      assert.equal(response.status, expected); assert.deepEqual(await response.json(), expected === 200 ? { ok: true } : { code: 'denied' });
+    };
+    for (const state of ['claimed','done'] as const) {
+      if (state === 'done') await f.kernel.settleCleanup(f.context, job.cleanupRef, f.worker, job.token, true);
+      assert.equal((await pool.query('SELECT state FROM ag_kernel.cleanup WHERE consumer=$1 AND ref=$2',
+        [f.context.consumerId, job.cleanupRef])).rows[0].state, state);
+      await ack(c, 200); await ack(c, 200);
+      await ack({ ...c, leaseExpiresAt: equivalent }, 200); await ack({ ...c, leaseExpiresAt: offset }, 200);
+      for (const changed of [missingLease, { ...c, leaseExpiresAt: null }, { ...c, leaseExpiresAt: 'forged' },
+        { ...c, leaseExpiresAt: extension }, { ...c, token: randomUUID() }, { ...c, worker: randomUUID() },
+        { ...c, cleanupRef: randomUUID() }, otherLease]) await ack(changed, 403);
+      await ack(c, 403, openReceipt);
+      await ack(c, 403, { ...receipt, lifetime: { ...receipt.lifetime, closeFailed: true } });
+      await ack(c, 403, { ...receipt, proof: { ...p, token: randomUUID() } });
+      for (const changed of [{ ...p, executionRef: other.executionRef }, { ...p, requestRef: 'foreign-request' },
+        { ...p, worker: randomUUID() }, { ...p, token: randomUUID() },
+        { ...p, native: { ...p.native, requestNonce: randomUUID() } }]) await ack(c, 403, receipt, changed);
+      await ack(c, 403, receipt, p, 'foreign-consumer');
+      await ack(c, 403, receipt, p, f.context.consumerId, credentials.cleanupCredential);
+      // A closure retry never grants read/dispatch authority for an unoccupied
+      // transport, even while this exact cleanup lease is still claimed/live.
+      assert.equal((await f.call('cleanup-authority', { consumerId: f.context.consumerId, proof: p, cleanup: c })).status, 403);
+      assert.equal((await f.call('dispatch-proof', { consumerId: f.context.consumerId, proof: p, leaseExpiresAt })).status, 403);
+      assert.equal(await f.occupied(requestId), false);
+      assert.deepEqual(await f.kernel.requestProof(f.context, p.executionRef, requestId), p);
+      assert.deepEqual(await f.kernel.request(f.context, p.executionRef, requestId), status);
+      assert.equal((await pool.query('SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
+        [f.context.consumerId, p.executionRef])).rows[0].request_count, 1);
+    }
+    // Done readback is harmless after lease expiry only with its exact instant.
+    const expired = (await pool.query(`UPDATE ag_kernel.cleanup SET lease_until=clock_timestamp()-interval '1 second'
+      WHERE consumer=$1 AND ref=$2 RETURNING to_char(lease_until AT TIME ZONE 'UTC',
+        'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS expires`, [f.context.consumerId, job.cleanupRef])).rows[0].expires as string;
+    await ack({ ...c, leaseExpiresAt: expired }, 200); await ack(c, 403);
+    assert.equal(await f.occupied(requestId), false);
+    assert.deepEqual(await f.kernel.requestProof(f.context, p.executionRef, requestId), p);
+    assert.deepEqual(await f.kernel.request(f.context, p.executionRef, requestId), status);
+    assert.deepEqual(f.stats(), { posts: 1, entries: 1, permits: 1, ackCalls: 1 });
+  } finally { await f.stop(); }
+});
+test('synthetic TCP/SQL: an expired claimed lease denies an exact delegated duplicate with genuine closed receipt', async () => {
+  const f = await fixture(); try {
+    const r = await f.request(); assert.equal(r.failed, false);
+    const receipt = f.records.get(r.requestId); assert.ok(receipt?.proof && receipt.acknowledged);
+    const p = receipt.proof;
+    await f.kernel.close(f.context, randomUUID(), p.executionRef);
+    const job = await f.kernel.claimCleanup(f.context, f.worker); assert.ok(job && job.scope.kind === 'execution');
+    assert.equal(job.scope.executionRef, p.executionRef);
+    const expired = (await pool.query(`UPDATE ag_kernel.cleanup SET lease_until=clock_timestamp()-interval '1 second'
+      WHERE consumer=$1 AND ref=$2 RETURNING to_char(lease_until AT TIME ZONE 'UTC',
+        'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS expires`, [f.context.consumerId, job.cleanupRef])).rows[0].expires as string;
+    const cleanup = { cleanupRef: job.cleanupRef, worker: f.worker, token: job.token, leaseExpiresAt: expired };
+    assert.equal((await f.call('closure-ack', { consumerId: f.context.consumerId, proof: p, receipt, cleanup })).status, 403);
+    assert.equal((await f.call('cleanup-authority', { consumerId: f.context.consumerId, proof: p, cleanup })).status, 403);
+    assert.equal(await f.occupied(r.requestId), false);
+    assert.deepEqual(await f.kernel.requestProof(f.context, p.executionRef, r.requestId), p);
+    assert.equal((await f.kernel.request(f.context, p.executionRef, r.requestId)).effect, 'completed');
   } finally { await f.stop(); }
 });
 test('synthetic TCP/SQL: delegate needs the actual current cleanup row/token/execution scope; no guessed expiry', async () => {
