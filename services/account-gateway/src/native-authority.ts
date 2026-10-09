@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import type { Server } from 'node:http';
+import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { approvedLimits, defaults, identifier, uuid } from './domain.ts';
 import type { ApprovedLimits, DurableKernel, ExecutionRead, NativeDispatchProof, SavedExecution, TrustedContext } from './domain.ts';
@@ -256,14 +256,15 @@ export class NativeAuthority {
     return { consumerId: ctx.consumerId, admission: a.saved.admission, status: permit.claim.status,
       dispatch: d, nativeDescriptor: a.descriptor, leaseExpiresAt: permit.permitExpiresAt };
   }
-  createServer(): Server {
+  createServer(admit?: (req: IncomingMessage, res: ServerResponse, work: () => Promise<void>) => void): Server {
     const cfg = this.configuration;
     const server = createServer({ maxHeaderSize: 16_384, headersTimeout: cfg.timeoutMs, requestTimeout: cfg.timeoutMs,
       keepAliveTimeout: 1000, connectionsCheckingInterval: 100 }, (req, res) => {
+      const work = () => {
       const timer = setTimeout(() => { req.destroy(); res.destroy(); }, cfg.timeoutMs);
       res.once('close', () => clearTimeout(timer)); res.once('finish', () => clearTimeout(timer));
       const send = (status: number, body: unknown) => { if (!res.destroyed) { res.writeHead(status, { 'content-type': 'application/json', connection: 'close' }); res.end(JSON.stringify(body)); } };
-      void (async () => {
+      return (async () => {
         if (req.method !== 'POST' || !req.url || !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-refresh-authority|oauth-cleanup-authority)$/.test(req.url) ||
             req.rawHeaders.length > 64 || singleton(req, 'content-type') !== 'application/json' ||
             req.rawHeaders.some((h, i) => i % 2 === 0 && ['content-encoding','transfer-encoding'].includes(h.toLowerCase()))) return denied();
@@ -310,7 +311,9 @@ export class NativeAuthority {
           }
         }
         send(200, { ok: true });
-      })().catch(() => send(403, { code: 'denied' }));
+      })().catch(() => send(403, { code: 'denied' })).finally(() => clearTimeout(timer));
+      };
+      if (admit) admit(req, res, work); else void work();
     });
     // Trusted composition may choose a port, never a public bind address.
     server.maxConnections = cfg.maxPending; server.maxRequestsPerSocket = 1;

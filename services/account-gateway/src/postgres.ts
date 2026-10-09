@@ -9,6 +9,8 @@ import type {
   PrivateAdmission, ApprovedLimits, AccountPageQuery, AccountPage, ClaimResult, RequestStatus, Effect, CleanupClaim, TransportClosure, CleanupAuthority, NativeReservation, NativeDispatchProof, NativeBinding,
 } from './domain.ts';
 import { compactSafePayloads } from './retention.ts';
+import { sharedCheckout } from './service-admission.ts';
+import type { Checkout } from './service-admission.ts';
 
 type Row = Record<string, any>;
 type Tx = { db: PoolClient; consumer: string; issuer: string };
@@ -71,11 +73,11 @@ const dispatchProof = (r: Row): NativeDispatchProof => ({
 // account routes and execution claims. No native calls occur inside transactions.
 // This intentionally trades per-consumer throughput for a small auditable kernel.
 export class PostgresKernel implements DurableKernel {
-  private readonly pool: Pool;
+  private readonly checkout: Checkout;
   private readonly bounds: Readonly<Bounds>;
   private readonly facts: Readonly<DurableFactBounds>;
   constructor(pool: Pool, bounds: Bounds = defaults, facts: DurableFactBounds = factDefaults) {
-    this.pool = pool;
+    this.checkout = sharedCheckout(pool);
     this.bounds = boundedConfig(bounds);
     this.facts = boundedFacts(facts);
   }
@@ -86,7 +88,7 @@ export class PostgresKernel implements DurableKernel {
     let clientFailed = false;
     const onClientError = (): void => { clientFailed = true; };
     try {
-      db = await this.pool.connect();
+      db = await this.checkout();
       // Pool error handlers cover idle clients; this transaction owns the
       // borrowed client's fatal error event until release installs that handler.
       db.on('error', onClientError);

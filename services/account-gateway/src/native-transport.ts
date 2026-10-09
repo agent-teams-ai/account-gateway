@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { KernelError } from './domain.ts';
+import { inServiceLane } from './service-admission.ts';
 import type { CleanupAuthority, NativeDispatchProof, TrustedContext } from './domain.ts';
 import type { NativeTransport } from './facade.ts';
 import type { NativeAuthority } from './native-authority.ts';
@@ -96,12 +97,21 @@ export class NativeHTTPTransport implements NativeTransport {
     }
     a.outboundStarted = true;
     let hop: Awaited<ReturnType<typeof post>> | undefined;
-    let finished = false, cancellation: Promise<void> | undefined;
-    const uncertain = async () => { if (!finished) await this.#unknown(a); };
+    let finished = false, cancellation: Promise<void> | undefined, responseUnknown: Promise<void> | undefined;
+    const uncertain = () => inServiceLane('control', async () => { if (!finished) await this.#unknown(a); });
+    const onResponseAbort = () => { responseUnknown ??= uncertain().catch(() => undefined); };
+    const detach = () => {
+      a.signal.removeEventListener('abort', onAbort);
+      hop?.response.removeListener('aborted', onResponseAbort);
+    };
+    const settleRetained = async () => {
+      detach();
+      await Promise.all([cancellation?.catch(() => undefined), responseUnknown]);
+    };
     const cancel = (): Promise<void> => {
       if (finished) return Promise.resolve();
       if (cancellation) return cancellation;
-      cancellation = (async () => {
+      cancellation = inServiceLane('control', async () => {
         hop?.abort();
         await uncertain();
         const p = await this.#recover(a);
@@ -109,7 +119,7 @@ export class NativeHTTPTransport implements NativeTransport {
           const r = await this.#control(a.context, p, 'cancel-owner');
           await this.#settle(a, r, true);
         }
-      })();
+      }).finally(async () => { detach(); await responseUnknown; });
       return cancellation;
     };
     const onAbort = () => { void cancel().catch(() => undefined); };
@@ -118,7 +128,7 @@ export class NativeHTTPTransport implements NativeTransport {
       const duration = Math.min(cfg.maxStreamMs, Math.max(1, Number((instant(a.saved.admission.expiresAt) - now()) / 1_000_000n)));
       hop = await post(cfg, authority.consumer(a.context).executionCredential, path, envelope, a.signal, duration);
       const response = hop.response;
-      response.once('aborted', () => { void uncertain().catch(() => undefined); });
+      response.once('aborted', onResponseAbort);
       if (response.statusCode === 202 && singleton(response, 'content-type') === 'application/json') {
         // An early/lost-admit-ACK receipt is not physical closure. Drain only
         // bounded JSON, then read the sealed reservation with the original SQL
@@ -129,8 +139,8 @@ export class NativeHTTPTransport implements NativeTransport {
           // A status-only admission has no dispatch proof. Verify actual SQL
           // readback; an uncertain first claim is conservatively fenced.
           await authority.reclaimDenied(a);
-        } else await this.#settle(a);
-        finished = true; hop.abort(); a.signal.removeEventListener('abort', onAbort); return { kind: 'status' };
+        } else await inServiceLane('control', () => this.#settle(a));
+        finished = true; hop.abort(); await settleRetained(); return { kind: 'status' };
       }
       if (response.statusCode !== 200 || singleton(response, 'content-type')?.split(';')[0] !== 'text/event-stream' ||
           singleton(response, 'x-gateway-request-ref') !== a.requestId ||
@@ -151,19 +161,21 @@ export class NativeHTTPTransport implements NativeTransport {
             yield b; // Pull-based Node iteration preserves backpressure.
           }
           if (!response.complete || a.signal.aborted || cancellation) return denied();
-          await transport.#settle(a);
+          await inServiceLane('control', () => transport.#settle(a));
           finished = true;
         } catch {
           await uncertain().catch(() => undefined);
           throw new KernelError('unavailable');
         } finally {
-          active.abort(); a.signal.removeEventListener('abort', onAbort);
+          active.abort();
           if (!finished) await cancel().catch(() => undefined);
+          await settleRetained();
         }
       })() };
     } catch {
       hop?.abort(); a.signal.removeEventListener('abort', onAbort);
       await uncertain().catch(() => undefined);
+      await settleRetained();
       throw new KernelError('unavailable');
     }
   }
