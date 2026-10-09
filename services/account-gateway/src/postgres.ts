@@ -83,8 +83,13 @@ export class PostgresKernel implements DurableKernel {
     const consumer = context.consumerId;
     identifier(consumer);
     let db: PoolClient | undefined;
+    let clientFailed = false;
+    const onClientError = (): void => { clientFailed = true; };
     try {
       db = await this.pool.connect();
+      // Pool error handlers cover idle clients; this transaction owns the
+      // borrowed client's fatal error event until release installs that handler.
+      db.on('error', onClientError);
       await db.query('BEGIN');
       await db.query('SET LOCAL search_path = ag_kernel, pg_catalog');
       // Global final-slot accounting has one explicit lock order: budget, then
@@ -99,15 +104,23 @@ export class PostgresKernel implements DurableKernel {
         WHERE consumer=$1`, [consumer, this.facts.maxConsumerFacts, this.facts.maxAccountFacts]);
       await db.query('INSERT INTO issuer_epochs(consumer,issuer) VALUES ($1,$2) ON CONFLICT DO NOTHING', [consumer, r.rows[0].issuer]);
       const result = await body({ db, consumer, issuer: r.rows[0].issuer });
+      if (clientFailed) throw new KernelError('unavailable');
       await db.query('COMMIT');
+      if (clientFailed) throw new KernelError('unavailable');
       return result;
     } catch (error) {
-      if (db) await db.query('ROLLBACK').catch(() => undefined);
+      if (db && !clientFailed) await db.query('ROLLBACK').catch(() => undefined);
+      if (clientFailed) throw new KernelError('unavailable');
       if (error instanceof KernelError) throw error;
       if (typeof error === 'object' && error !== null && 'code' in error && error.code === '54000') throw new KernelError('denied');
       // Never export vendor exception bodies, query parameters or connection data.
       throw new KernelError('unavailable');
-    } finally { db?.release(); }
+    } finally {
+      if (db) {
+        try { db.release(clientFailed); }
+        finally { db.removeListener('error', onClientError); }
+      }
+    }
   }
   private async one(tx: Tx, sql: string, values: readonly unknown[]): Promise<Row> {
     const r = await tx.db.query(sql, [...values]);
