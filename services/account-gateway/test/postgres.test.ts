@@ -176,22 +176,22 @@ const isCode = (code: string) => (e: unknown): boolean => e instanceof KernelErr
 async function worker(ctx: TrustedContext, kernel = a): Promise<string> {
   const id = randomUUID(); await kernel.heartbeat(ctx, id); return id;
 }
-async function staged(ctx: TrustedContext, overrides: Partial<AccountIntent> = {}): Promise<OperationStatus> {
-  return a.beginAccount(ctx, { operationId: op(), kind: 'create', intentDigest: digest(),
+async function staged(ctx: TrustedContext, overrides: Partial<AccountIntent> = {}, kernel = a): Promise<OperationStatus> {
+  return kernel.beginAccount(ctx, { operationId: op(), kind: 'create', intentDigest: digest(),
     ownerRef: 'workspace-fixture', profile: 'mimo-test', displayName: 'Disposable connection', ...overrides });
 }
-async function connected(ctx: TrustedContext): Promise<OperationStatus> {
-  const s = await staged(ctx); const w = await worker(ctx);
-  const c = await a.startCandidate(ctx, s.operationRef, w); assert.ok(c);
-  return a.acknowledgeCandidate(ctx, s.operationRef, w, {
+async function connected(ctx: TrustedContext, kernel = a): Promise<OperationStatus> {
+  const s = await staged(ctx, {}, kernel); const w = await worker(ctx, kernel);
+  const c = await kernel.startCandidate(ctx, s.operationRef, w); assert.ok(c);
+  return kernel.acknowledgeCandidate(ctx, s.operationRef, w, {
     generation: c.candidate, nativePhysicalIdentity: randomUUID(), profile: c.profile,
   });
 }
-async function approval(ctx: TrustedContext, accountRef: string, override: Partial<ApprovedPreparation> = {}): Promise<ApprovedPreparation> {
+async function approval(ctx: TrustedContext, accountRef: string, override: Partial<ApprovedPreparation> = {}, kernel = a): Promise<ApprovedPreparation> {
   const now = (await admin.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
   return { operationId: op(), intentDigest: digest(), invocationRef: op(), attemptRef: 'attempt-a',
     permittedAccounts: [accountRef], profile: 'mimo-test', policySubject: 'binding-fixture', policyRevision: 1, bindingRevision: 0,
-    issuerEpoch: await a.issuer(ctx), deadline: new Date(now.getTime() + 60_000),
+    issuerEpoch: await kernel.issuer(ctx), deadline: new Date(now.getTime() + 60_000),
     limits: { requests: 4, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 5000 }, ...override };
 }
 function admissionFor(input: ApprovedPreparation, result: OperationStatus, accountRef: string): PrivateAdmission {
@@ -201,7 +201,7 @@ function admissionFor(input: ApprovedPreparation, result: OperationStatus, accou
     bindingRevision: input.bindingRevision, limits: { ...input.limits }, expiresAt: input.deadline.toISOString() };
 }
 async function prepared(ctx: TrustedContext, accountRef: string, override: Partial<ApprovedPreparation> = {}, kernel = a) {
-  const input = await approval(ctx, accountRef, override);
+  const input = await approval(ctx, accountRef, override, kernel);
   const result = await kernel.prepare(ctx, input); assert.ok(result.executionRef); assert.ok(result.epoch);
   return { input, result, admission: admissionFor(input, result, accountRef) };
 }
@@ -256,6 +256,59 @@ async function count(sql: string, values: unknown[]) {
 }
 
 // Spare concurrency must not admit a fresh ID before maintenance observes owner loss.
+test('worker slot growth prepays retained identities without rewriting accepted history', async () => {
+  const ctx = context();
+  const facts = { ...factDefaults, workerSlots: 2, issuerSlots: 3, maxConsumerFacts: 96, maxAccountFacts: 96 };
+  const small = new PostgresKernel(poolA, defaults, facts);
+  const stagedAccount = await small.beginAccount(ctx, { operationId: op(), kind: 'create', intentDigest: digest(),
+    ownerRef: 'workspace-fixture', profile: 'mimo-test', displayName: 'Retained slot account' });
+  const candidateWorker = await worker(ctx, small);
+  const candidate = await small.startCandidate(ctx, stagedAccount.operationRef, candidateWorker); assert.ok(candidate);
+  const account = await small.acknowledgeCandidate(ctx, stagedAccount.operationRef, candidateWorker, {
+    generation: candidate.candidate, nativePhysicalIdentity: randomUUID(), profile: candidate.profile,
+  });
+  const requestWorker = await worker(ctx, small);
+  const now = (await admin.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
+  const input: ApprovedPreparation = { operationId: op(), intentDigest: digest(), invocationRef: op(), attemptRef: 'attempt-a',
+    permittedAccounts: [account.accountRef!], profile: 'mimo-test', policySubject: 'binding-fixture', policyRevision: 1,
+    bindingRevision: 0, issuerEpoch: await small.issuer(ctx), deadline: new Date(now.getTime() + 60_000),
+    limits: { requests: 4, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 5000 } };
+  const execution = await small.prepare(ctx, input);
+  const claim = await small.claim(ctx, execution.executionRef!, 'retained-unknown', requestWorker,
+    admissionFor(input, execution, account.accountRef!), reservation()); assert.ok(claim.dispatch);
+  await small.effect(ctx, execution.executionRef!, 'retained-unknown', requestWorker, 'effect_unknown');
+  // Both expired owners remain referenced by normal candidate/request history.
+  await admin.query("UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1", [ctx.consumerId]);
+  const snapshot = async () => {
+    const rows = (await admin.query(`SELECT c.worker_slots,c.fact_used,c.fact_limit,c.account_fact_limit,b.used,b.capacity,
+      (SELECT fact_used FROM ag_kernel.accounts WHERE consumer=c.consumer AND ref=$2) AS account_used
+      FROM ag_kernel.consumers c CROSS JOIN ag_kernel.fact_budget b WHERE c.consumer=$1`, [ctx.consumerId, account.accountRef])).rows[0];
+    const history: Record<string, string[]> = {};
+    for (const table of ['accounts', 'operations', 'candidates', 'executions', 'requests', 'cleanup']) {
+      history[table] = (await admin.query(`SELECT row_to_json(t)::text AS row FROM ag_kernel.${table} t WHERE consumer=$1`,
+        [ctx.consumerId])).rows.map(row => row.row as string).sort();
+    }
+    return { ...rows, history };
+  };
+  const before = await snapshot();
+  const grown = new PostgresKernel(poolB, defaults, { ...facts, workerSlots: 3 });
+  const replacement = await worker(ctx, grown);
+  const afterGrowth = await snapshot();
+  assert.equal(afterGrowth.worker_slots, 3);
+  assert.equal(Number(afterGrowth.fact_used), Number(before.fact_used) + 1);
+  assert.equal(Number(afterGrowth.used), Number(before.used) + 1);
+  assert.equal(afterGrowth.account_used, before.account_used);
+  assert.deepEqual(afterGrowth.history, before.history);
+  assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.workers WHERE consumer=$1', [ctx.consumerId]), 3);
+  await grown.issuer(ctx); await grown.heartbeat(ctx, replacement); await small.issuer(ctx);
+  assert.deepEqual(await snapshot(), afterGrowth, 'same or lower desired capacity never charges twice or refunds history');
+  const saturated = new PostgresKernel(poolB, defaults, { ...facts, workerSlots: 4,
+    maxServiceFacts: Number(afterGrowth.used) + 1,
+    maxConsumerFacts: Number(afterGrowth.fact_used), maxAccountFacts: Number(afterGrowth.fact_used) });
+  await assert.rejects(saturated.issuer(ctx), isCode('denied'));
+  assert.deepEqual(await snapshot(), afterGrowth, 'denied growth rolls back both quota tightening and slot update');
+});
+
 test('F1 claim fences expired in-flight ownership before spare-concurrency admission', async () => {
   const bounds = { ...defaults, maxConcurrent: 2, maintenanceBatch: 1 };
   const kernel = new PostgresKernel(poolA, bounds);
@@ -1622,7 +1675,7 @@ test('D-final heartbeat reclaims only expired orphan workers across repeated fin
   const facts = { ...factDefaults, workerSlots: 8, issuerSlots: 4 };
   const kernel = new PostgresKernel(poolA, { ...defaults, workerLeaseMs: 300_000 }, facts);
   await kernel.issuer(ctx);
-  const account = await connected(ctx);
+  const account = await connected(ctx, kernel);
   const candidateWorker = (await admin.query(`SELECT worker FROM ag_kernel.candidates
     WHERE consumer=$1 AND account_ref=$2`, [ctx.consumerId, account.accountRef])).rows[0].worker as string;
   const requestWorker = await worker(ctx, kernel), cleanupWorker = await worker(ctx, kernel);
@@ -1634,7 +1687,7 @@ test('D-final heartbeat reclaims only expired orphan workers across repeated fin
   assert.ok(claimed.dispatch);
   await kernel.effect(ctx, execution.result.executionRef!, 'held-unknown', requestWorker, 'effect_unknown');
 
-  const pending = await staged(ctx), permit = await kernel.startCandidate(ctx, pending.operationRef, journalWorker);
+  const pending = await staged(ctx, {}, kernel), permit = await kernel.startCandidate(ctx, pending.operationRef, journalWorker);
   assert.ok(permit);
   await admin.query(`INSERT INTO ag_management.candidate_journal(consumer,operation_id,account_ref,
     owner_ref,purpose,generation,worker,profile,base_url,model,qualification_ref)
@@ -1766,11 +1819,11 @@ test('D-final final consumer fact slot is atomic and safety headroom is bounded'
   const facts = { ...factDefaults, maxConsumerFacts: 28, maxAccountFacts: 28, workerSlots: 4, issuerSlots: 4 };
   const x = new PostgresKernel(poolA, defaults, facts), y = new PostgresKernel(poolB, defaults, facts);
   await x.issuer(ctx); // Provision bounded recovery slots before ordinary helpers.
-  const account = await connected(ctx), owner = await worker(ctx, x);
+  const account = await connected(ctx, x), owner = await worker(ctx, x);
   const original = await prepared(ctx, account.accountRef!, {}, x);
   const first = await x.claim(ctx, original.result.executionRef!, 'spent-at-cap', owner, original.admission, reservation());
   assert.ok(first.dispatch);
-  const intents = await Promise.all([approval(ctx, account.accountRef!), approval(ctx, account.accountRef!)]);
+  const intents = await Promise.all([approval(ctx, account.accountRef!, {}, x), approval(ctx, account.accountRef!, {}, x)]);
   const results = await Promise.allSettled([x.prepare(ctx, intents[0]), y.prepare(ctx, intents[1])]);
   assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
   const denied = results.find(r => r.status === 'rejected');
@@ -1779,7 +1832,7 @@ test('D-final final consumer fact slot is atomic and safety headroom is bounded'
   assert.equal(Number(await budget()), 28);
   const rows = await count('SELECT count(*) AS n FROM ag_kernel.operations WHERE consumer=$1', [ctx.consumerId]);
   for (let n = 0; n < 3; n++) {
-    await assert.rejects(y.prepare(ctx, await approval(ctx, account.accountRef!)), isCode('denied'));
+    await assert.rejects(y.prepare(ctx, await approval(ctx, account.accountRef!, {}, x)), isCode('denied'));
     await assert.rejects(x.claim(ctx, original.result.executionRef!, 'new-denial-' + n, owner, original.admission, reservation()), isCode('denied'));
   }
   assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.operations WHERE consumer=$1', [ctx.consumerId]), rows);
