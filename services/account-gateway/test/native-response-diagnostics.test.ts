@@ -124,3 +124,36 @@ test('native response diagnostics drops oversized and unfinished chunked lines',
   f.feed(Buffer.from('\n' + valid + '\n' + valid));
   assert.deepEqual(f.records, [valid + '\n']);
 });
+
+// Red if the private decoder drops the new native read reason or accepts it
+// outside sse_read, where it would misrepresent a deadline or another failure.
+test('native response diagnostics retains chunked closed SSE read reasons and legacy records', () => {
+  const f = sink();
+  const legacy = '{"event":"gateway_native_response_failure","phase":"sse_read","http_status":200}';
+  const expected = [legacy + '\n'];
+  f.feed(Buffer.from(legacy + '\n'));
+  for (const reason of ['idle_expired', 'other']) {
+    const canonical = legacy.replace('}', ',"read_error_reason":"' + reason + '"}');
+    const reordered = '{"read_error_reason":"' + reason + '","http_status":200,"phase":"sse_read","event":"gateway_native_response_failure"}';
+    for (const byte of Buffer.from(reordered + '\n')) f.feed(Buffer.from([byte]));
+    expected.push(canonical + '\n');
+  }
+  assert.deepEqual(f.records, expected);
+});
+
+test('native response diagnostics rejects malformed or misplaced SSE read reasons and resumes', () => {
+  const f = sink();
+  const record = '{"event":"gateway_native_response_failure","phase":"sse_read","http_status":200,"read_error_reason":"idle_expired"}';
+  const unsafe = [
+    ...['"unknown"', '"idle_expired_SECRET_SENTINEL"', 'null', '1', 'true', '{}', '[]'].map(value =>
+      record.replace('"idle_expired"', value)),
+    ...['deadline', 'body_read', 'sse_frame_limit', 'transport'].map(phase => record.replace('sse_read', phase)),
+    record.replace('}', ',"read_error_reason":"other"}'),
+    record.replace('}', ',"\\u0072ead_error_reason":"other"}'),
+    record.replace('}', ',"body":"SECRET_SENTINEL"}'),
+    record.replace('read_error_reason', 'Read_Error_Reason'),
+  ];
+  for (const line of unsafe) f.feed(Buffer.from(line + '\n'));
+  f.feed(Buffer.from(record + '\n' + valid + '\n'));
+  assert.deepEqual(f.records, [record + '\n', valid + '\n']);
+});
