@@ -19,6 +19,23 @@ test('native response diagnostics forwards chunked records once in canonical for
   assert.deepEqual(f.records, [valid + '\n', '{"event":"gateway_native_response_failure","phase":"transport"}\n', categorized + '\n']);
 });
 
+// Native non-JSON failure diagnostics must survive arbitrary pipe chunking
+// without admitting private payload fields or extending the category vocabulary.
+test('native response diagnostics retains finite error body categories and rejects private extensions', () => {
+  const f = sink();
+  const categories = ['empty_error_body', 'sse_error_body', 'html_error_body', 'unhandled_error_encoding'];
+  const expected: string[] = [];
+  for (const category of categories) {
+    const record = '{"event":"gateway_native_response_failure","phase":"http_status","http_status":400,"provider_error_category":"' + category + '"}';
+    for (const byte of Buffer.from(record + '\n')) f.feed(Buffer.from([byte]));
+    expected.push(record + '\n');
+    f.feed(Buffer.from(record.replace('}', ',"body":"SECRET_SENTINEL"}') + '\n'));
+    f.feed(Buffer.from(record.replace('}', ',"provider_error_category":"unknown"}') + '\n'));
+  }
+  f.feed(Buffer.from(categorized.replace('responses_lite_required', 'sse_error_body_SECRET_SENTINEL') + '\n'));
+  assert.deepEqual(f.records, expected);
+});
+
 // Red if arbitrary native stderr, secret fields, ambiguous JSON or unsupported
 // phases cross the operator log boundary, even beside a legitimate record.
 test('native response diagnostics discards unsafe records and resumes at newline', () => {
