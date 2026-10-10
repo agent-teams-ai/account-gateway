@@ -13,6 +13,18 @@ const providerErrorCategories = new Set([
   'responses_lite_required', 'unsupported_parameter', 'invalid_request', 'unknown',
 ]);
 
+const providerErrorShapes = new Set([
+  'root_error_object', 'response_error_object', 'flat_error_object',
+  'non_object', 'unrecognized_object', 'ambiguous',
+]);
+const providerErrorParameters = new Set([
+  'service_tier', 'max_output_tokens', 'parallel_tool_calls', 'context_management',
+  'tools', 'input', 'reasoning', 'model', 'store', 'instructions', 'stream', 'text',
+  'tool_choice', 'truncation', 'previous_response_id', 'prompt_cache_key',
+  'prompt_cache_retention', 'include', 'metadata', 'background', 'temperature',
+  'top_p', 'missing', 'other',
+]);
+
 // Private native stderr contract only. Reconstruct accepted fields so provider
 // bodies, arbitrary native logger output and malformed records never escape.
 export function nativeResponseDiagnostics(write: (record: string) => void): (chunk: Buffer) => void {
@@ -20,15 +32,22 @@ export function nativeResponseDiagnostics(write: (record: string) => void): (chu
   const accept = (line: Buffer) => {
     let record: string;
     try {
-      const row = object(strictJSON(line, true), ['event', 'phase'], ['http_status', 'provider_error_category']);
+      const row = object(strictJSON(line, true), ['event', 'phase'],
+        ['http_status', 'provider_error_category', 'provider_error_shape', 'provider_error_parameter']);
       if (row.event !== 'gateway_native_response_failure' || typeof row.phase !== 'string' || !phases.has(row.phase)) return;
       const status = row.http_status;
       if (Object.hasOwn(row, 'http_status') && (!Number.isSafeInteger(status) || (status as number) < 100 || (status as number) > 599)) return;
       const category = row.provider_error_category;
       if (Object.hasOwn(row, 'provider_error_category') && (typeof category !== 'string' || !providerErrorCategories.has(category))) return;
+      const shape = row.provider_error_shape;
+      if (Object.hasOwn(row, 'provider_error_shape') && (typeof shape !== 'string' || !providerErrorShapes.has(shape))) return;
+      const parameter = row.provider_error_parameter;
+      if (Object.hasOwn(row, 'provider_error_parameter') && (typeof parameter !== 'string' || !providerErrorParameters.has(parameter))) return;
       record = JSON.stringify({ event: 'gateway_native_response_failure', phase: row.phase,
         ...(status === undefined ? {} : { http_status: status }),
-        ...(category === undefined ? {} : { provider_error_category: category }) }) + '\n';
+        ...(category === undefined ? {} : { provider_error_category: category }),
+        ...(shape === undefined ? {} : { provider_error_shape: shape }),
+        ...(parameter === undefined ? {} : { provider_error_parameter: parameter }) }) + '\n';
     } catch { return; }
     write(record);
   };

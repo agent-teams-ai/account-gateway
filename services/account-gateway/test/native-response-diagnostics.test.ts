@@ -36,6 +36,57 @@ test('native response diagnostics retains finite error body categories and rejec
   assert.deepEqual(f.records, expected);
 });
 
+// The private projection must retain closed structural facts without changing
+// the semantic category or revealing provider event names and parameter paths.
+test('native response diagnostics retains optional finite error shapes and parameter families', () => {
+  const f = sink();
+  const expected: string[] = [];
+  const shapes = ['root_error_object', 'response_error_object', 'flat_error_object',
+    'non_object', 'unrecognized_object', 'ambiguous'];
+  for (const shape of shapes) {
+    const record = categorized.replace('responses_lite_required', 'unknown')
+      .replace('}', ',"provider_error_shape":"' + shape + '"}');
+    for (const byte of Buffer.from(record + '\n')) f.feed(Buffer.from([byte]));
+    expected.push(record + '\n');
+  }
+  const parameters = ['service_tier', 'max_output_tokens', 'parallel_tool_calls', 'context_management',
+    'tools', 'input', 'reasoning', 'model', 'store', 'instructions', 'stream', 'text',
+    'tool_choice', 'truncation', 'previous_response_id', 'prompt_cache_key', 'prompt_cache_retention',
+    'include', 'metadata', 'background', 'temperature', 'top_p', 'missing', 'other'];
+  for (const parameter of parameters) {
+    const suffix = ',"provider_error_shape":"response_error_object","provider_error_parameter":"' + parameter + '"}';
+    const record = categorized.replace('}', suffix);
+    const reordered = '{"provider_error_parameter":"' + parameter + '","provider_error_shape":"response_error_object",'
+      + categorized.slice(1);
+    for (const byte of Buffer.from(reordered + '\n')) f.feed(Buffer.from([byte]));
+    expected.push(record + '\n');
+  }
+  f.feed(Buffer.from(valid + '\n' + categorized + '\n'));
+  expected.push(valid + '\n', categorized + '\n');
+  assert.deepEqual(f.records, expected);
+});
+
+test('native response diagnostics drops private or ambiguous structural projections and resumes', () => {
+  const f = sink();
+  const projected = categorized.replace('}', ',"provider_error_shape":"root_error_object","provider_error_parameter":"tools"}');
+  const unsafe = [
+    ...['provider_error_shape', 'provider_error_parameter'].flatMap(key =>
+      ['"SECRET_SENTINEL"', 'null', '1', 'true', '{}', '[]'].map(value =>
+        categorized.replace('}', ',"' + key + '":' + value + '}'))),
+    projected.replace('root_error_object', 'root_error_object_SECRET_SENTINEL'),
+    projected.replace('"tools"', '"tools[0].SECRET_SENTINEL"'),
+    projected.replace('}', ',"provider_error_shape":"flat_error_object"}'),
+    projected.replace('}', ',"provider_error_parameter":"other"}'),
+    projected.replace('}', ',"\\u0070rovider_error_shape":"flat_error_object"}'),
+    projected.replace('}', ',"\\u0070rovider_error_parameter":"other"}'),
+    ...['body', 'message', 'event_name', 'parameter_path', 'Provider_Error_Shape', 'Provider_Error_Parameter'].map(key =>
+      projected.replace('}', ',"' + key + '":"SECRET_SENTINEL"}')),
+  ];
+  for (const line of unsafe) f.feed(Buffer.from(line + '\n'));
+  f.feed(Buffer.from(projected + '\n'));
+  assert.deepEqual(f.records, [projected + '\n']);
+});
+
 // Red if arbitrary native stderr, secret fields, ambiguous JSON or unsupported
 // phases cross the operator log boundary, even beside a legitimate record.
 test('native response diagnostics discards unsafe records and resumes at newline', () => {
