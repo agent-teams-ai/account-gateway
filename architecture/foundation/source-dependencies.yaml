@@ -106,4 +106,4 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/test/service-runtime.test.ts]
     entrypoints: [services/account-gateway/test/service-runtime.test.ts]
-    allow: {boundaries: [foreground-service-entry, private-facade, native-transport-http, contracts, http, kernel-postgres, native-management], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs', 'node:path', 'node:https', 'node:timers/promises', 'node:child_process', 'node:url', 'node:util'], runtimeReferences: []}
+    allow: {boundaries: [kernel-domain, foreground-service-entry, private-facade, native-transport-http, contracts, http, kernel-postgres, native-management], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs', 'node:path', 'node:https', 'node:timers/promises', 'node:child_process', 'node:url', 'node:util'], runtimeReferences: []}
