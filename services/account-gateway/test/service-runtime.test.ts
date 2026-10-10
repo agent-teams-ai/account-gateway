@@ -851,3 +851,19 @@ test('production service entry: startup rollback, SAME OPEN, abrupt held-stream 
       }
     }
   });
+
+test('runtime failure diagnostic exposes only the fixed callsite and safe code', async () => {
+  const { runtimeFailureDiagnostic } = await import('../src/service.ts');
+  const privateError = Object.assign(new Error('PRIVATE_MESSAGE_SENTINEL'), { code: 'ETIMEDOUT', privateBody: 'PRIVATE_BODY_SENTINEL' });
+  assert.deepEqual(runtimeFailureDiagnostic('maintenance_failed', privateError), { event: 'gateway_service_runtime_failure', cause: 'maintenance_failed', code: 'ETIMEDOUT' });
+  assert.deepEqual(runtimeFailureDiagnostic('pool_error', { code: 'PRIVATE_CODE_SENTINEL' }), { event: 'gateway_service_runtime_failure', cause: 'pool_error', code: 'UNKNOWN' });
+  assert.equal(JSON.stringify(runtimeFailureDiagnostic('child_exit', privateError)).includes('PRIVATE_'), false);
+});
+
+test('closed stderr cannot interrupt runtime failure reporting', async () => {
+  const at = process.execArgv.indexOf('--import'); assert.ok(at >= 0 && process.execArgv[at + 1]);
+  const serviceURL = new URL('../src/service.ts', import.meta.url).href;
+  const script = `import {closeSync} from 'node:fs'; import {writeRuntimeFailureDiagnostic} from ${JSON.stringify(serviceURL)}; closeSync(2); writeRuntimeFailureDiagnostic('maintenance_failed', new Error('PRIVATE_SENTINEL')); process.stdout.write('AFTER_DIAGNOSTIC');`;
+  const result = await promisify(execFile)(process.execPath, ['--import', process.execArgv[at + 1]!, '--input-type=module', '-e', script], { timeout: 10000, maxBuffer: 4096 });
+  assert.equal(result.stdout, 'AFTER_DIAGNOSTIC'); assert.equal(result.stderr, '');
+});
