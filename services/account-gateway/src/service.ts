@@ -210,14 +210,16 @@ async function close(s: Server | undefined): Promise<void> {
 // Each call is one foreground deployable unit, one configured consumer and one
 // original protected Go parent. No recovery spawn, inference replay or PID lookup.
 type RuntimeFailureCause = 'pool_error' | 'callback_error' | 'child_error' | 'child_exit' | 'diagnostic_limit' | 'child_pending' | 'metadata_invalid' | 'stdout_incomplete' | 'stdout_error' | 'stderr_error' | 'facade_error' | 'control_error' | 'maintenance_failed' | 'runtime_invalidated';
-export function runtimeFailureDiagnostic(cause: RuntimeFailureCause, error?: unknown) {
+type MaintenancePhase = 'heartbeat' | 'reconcile' | 'cleanup_claim' | 'cleanup_generation' | 'cleanup_transport' | 'cleanup_settlement' | 'oauth_refresh';
+export function runtimeFailureDiagnostic(cause: RuntimeFailureCause, error?: unknown, maintenancePhase?: MaintenancePhase) {
   const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
-  return { event: 'gateway_service_runtime_failure', cause,
-    code: typeof code === 'string' && ['ETIMEDOUT','ECONNRESET','ECONNREFUSED','57014','runtime_denied','quota_denied'].includes(code) ? code : 'UNKNOWN' };
+  const phase = cause === 'maintenance_failed' && ['heartbeat','reconcile','cleanup_claim','cleanup_generation','cleanup_transport','cleanup_settlement','oauth_refresh'].includes(maintenancePhase ?? '') ? maintenancePhase : undefined;
+  return { event: 'gateway_service_runtime_failure', cause, ...(phase ? { maintenancePhase: phase } : {}),
+    code: error instanceof KernelError && typeof code === 'string' && ['invalid','unknown','conflict','denied','unavailable'].includes(code) ? `kernel_${code}` : typeof code === 'string' && ['ETIMEDOUT','ECONNRESET','ECONNREFUSED','57014','runtime_denied','quota_denied'].includes(code) ? code : 'UNKNOWN' };
 }
 
-export function writeRuntimeFailureDiagnostic(cause: RuntimeFailureCause, error?: unknown): void {
-  try { writeSync(2, JSON.stringify(runtimeFailureDiagnostic(cause, error)) + '\n'); } catch { /* Diagnostics never prevent closure. */ }
+export function writeRuntimeFailureDiagnostic(cause: RuntimeFailureCause, error?: unknown, maintenancePhase?: MaintenancePhase): void {
+  try { writeSync(2, JSON.stringify(runtimeFailureDiagnostic(cause, error, maintenancePhase)) + '\n'); } catch { /* Diagnostics never prevent closure. */ }
 }
 
 export async function startService(configFile: string, signal?: AbortSignal): Promise<Service> {
@@ -263,6 +265,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   const stopped = new Promise<'retired' | 'pending'>(resolve => { finish = resolve; });
   let stopWork: Promise<'retired' | 'pending'> | undefined;
   let maintenance: Promise<void> = Promise.resolve();
+  let maintenancePhase: MaintenancePhase = 'heartbeat';
   let inFlightTick: Promise<void> = Promise.resolve(), enrollmentWaiters = 0;
   let wakeSleep: (() => void) | undefined;
   function denyAdmission() { bearers.replace([]); facade?.closeAllConnections(); }
@@ -270,7 +273,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     const report = !stopping && startupStage === undefined;
     if (!stopping && error !== undefined) retainStartupFailure(error);
     invalid = true; denyAdmission(); pulse(); void stop();
-    if (report) writeRuntimeFailureDiagnostic(cause, error);
+    if (report) writeRuntimeFailureDiagnostic(cause, error, cause === 'maintenance_failed' ? maintenancePhase : undefined);
   }
   const callback = createServer({ maxHeaderSize: 16_384, headersTimeout: 5000, requestTimeout: 5000,
     keepAliveTimeout: 1000, connectionsCheckingInterval: 100 }, (req, res) => {
@@ -405,14 +408,21 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     await listen(facade, cfg.facadeOrigin);
     startupActive();
     async function tick(): Promise<void> {
+        maintenancePhase = 'heartbeat';
         await kernel.heartbeat(ctx, worker);
         if (stopping) return;
+        maintenancePhase = 'reconcile';
         await management.reconcile(ctx);
         if (stopping) return;
+        maintenancePhase = 'cleanup_claim';
         const claim = await kernel.claimCleanup(ctx, worker);
         if (stopping) return; // An acquired lease remains outstanding until expiry.
-        if (claim?.scope.kind === 'generation') await management.cleanupClaim(ctx, claim);
+        if (claim?.scope.kind === 'generation') {
+          maintenancePhase = 'cleanup_generation';
+          await management.cleanupClaim(ctx, claim);
+        }
         else if (claim) {
+          maintenancePhase = 'cleanup_transport';
           let closed = true;
           if (claim.scope.transports.length > 2) closed = false;
           for (const t of claim.scope.transports.slice(0, 2)) {
@@ -430,9 +440,11 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
             catch { closed = false; }
           }
           if (stopping) return;
+          maintenancePhase = 'cleanup_settlement';
           await kernel.settleCleanup(ctx, claim.cleanupRef, worker, claim.token, closed);
         }
         if (stopping) return;
+        maintenancePhase = 'oauth_refresh';
         await management.refreshOAuth(ctx, claim !== undefined, readbackAbort.signal);
     }
     maintenance = (async () => {

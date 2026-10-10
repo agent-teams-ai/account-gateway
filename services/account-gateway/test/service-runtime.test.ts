@@ -21,6 +21,7 @@ import { object } from '../src/native-wire.ts';
 import { captureOAuthEnrollmentConfig, captureServiceProfiles, captureServiceBearers, openRouterProfile, ServiceError } from '../src/service-config.ts';
 import { AccountManagement } from '../src/management.ts';
 import { PostgresKernel } from '../src/postgres.ts';
+import { KernelError } from '../src/domain.ts';
 import { FacadeBearers } from '../src/facade.ts';
 
 // Keep the production restart scenario executable against the exact old base:
@@ -858,6 +859,17 @@ test('runtime failure diagnostic exposes only the fixed callsite and safe code',
   assert.deepEqual(runtimeFailureDiagnostic('maintenance_failed', privateError), { event: 'gateway_service_runtime_failure', cause: 'maintenance_failed', code: 'ETIMEDOUT' });
   assert.deepEqual(runtimeFailureDiagnostic('pool_error', { code: 'PRIVATE_CODE_SENTINEL' }), { event: 'gateway_service_runtime_failure', cause: 'pool_error', code: 'UNKNOWN' });
   assert.equal(JSON.stringify(runtimeFailureDiagnostic('child_exit', privateError)).includes('PRIVATE_'), false);
+  assert.deepEqual(runtimeFailureDiagnostic('maintenance_failed', privateError, 'heartbeat'), { event: 'gateway_service_runtime_failure', cause: 'maintenance_failed', maintenancePhase: 'heartbeat', code: 'ETIMEDOUT' });
+  assert.deepEqual(runtimeFailureDiagnostic('maintenance_failed', new KernelError('denied'), 'reconcile'), { event: 'gateway_service_runtime_failure', cause: 'maintenance_failed', maintenancePhase: 'reconcile', code: 'kernel_denied' });
+  assert.equal('maintenancePhase' in runtimeFailureDiagnostic('child_exit', privateError, 'heartbeat'), false);
+  assert.equal('maintenancePhase' in runtimeFailureDiagnostic('maintenance_failed', privateError, 'PRIVATE_PHASE' as never), false);
+  let codeReads = 0;
+  const dynamicError = new KernelError('denied');
+  Object.defineProperty(dynamicError, 'code', { get: () => ++codeReads <= 2 ? 'denied' : 'PRIVATE_CODE_SENTINEL' });
+  assert.deepEqual(runtimeFailureDiagnostic('maintenance_failed', dynamicError, 'heartbeat'), { event: 'gateway_service_runtime_failure', cause: 'maintenance_failed', maintenancePhase: 'heartbeat', code: 'kernel_denied' });
+  assert.equal(codeReads, 1, 'untrusted error code is captured only once');
+
+
 });
 
 test('closed stderr cannot interrupt runtime failure reporting', async () => {
