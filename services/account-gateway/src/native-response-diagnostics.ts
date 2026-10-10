@@ -5,7 +5,8 @@ const phases = new Set(['transport', 'invalid_response', 'http_status', 'body_re
   'invalid_final', 'invalid_content_type', 'sse_frame_limit', 'sse_invalid_frame', 'sse_invalid_event',
   'sse_provider_failure', 'sse_incomplete', 'sse_read', 'deadline', 'downstream_write', 'downstream_flush']);
 
-const readErrorReasons = new Set(['idle_expired', 'other']);
+const readErrorReasons = new Set(['idle_expired', 'context_canceled', 'context_deadline',
+  'unexpected_eof', 'body_after_close', 'connection_closed', 'transport_timeout', 'compression_error', 'other']);
 
 const providerErrorCategories = new Set([
   'empty_error_body', 'sse_error_body', 'html_error_body', 'unhandled_error_encoding',

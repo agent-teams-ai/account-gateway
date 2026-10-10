@@ -132,7 +132,8 @@ test('native response diagnostics retains chunked closed SSE read reasons and le
   const legacy = '{"event":"gateway_native_response_failure","phase":"sse_read","http_status":200}';
   const expected = [legacy + '\n'];
   f.feed(Buffer.from(legacy + '\n'));
-  for (const reason of ['idle_expired', 'other']) {
+  for (const reason of ['idle_expired', 'context_canceled', 'context_deadline', 'unexpected_eof',
+    'body_after_close', 'connection_closed', 'transport_timeout', 'compression_error', 'other']) {
     const canonical = legacy.replace('}', ',"read_error_reason":"' + reason + '"}');
     const reordered = '{"read_error_reason":"' + reason + '","http_status":200,"phase":"sse_read","event":"gateway_native_response_failure"}';
     for (const byte of Buffer.from(reordered + '\n')) f.feed(Buffer.from([byte]));
@@ -147,7 +148,7 @@ test('native response diagnostics rejects malformed or misplaced SSE read reason
   const unsafe = [
     ...['"unknown"', '"idle_expired_SECRET_SENTINEL"', 'null', '1', 'true', '{}', '[]'].map(value =>
       record.replace('"idle_expired"', value)),
-    ...['deadline', 'body_read', 'sse_frame_limit', 'transport'].map(phase => record.replace('sse_read', phase)),
+    ...['deadline', 'body_read', 'body_limit', 'sse_frame_limit', 'transport'].map(phase => record.replace('sse_read', phase)),
     record.replace('}', ',"read_error_reason":"other"}'),
     record.replace('}', ',"\\u0072ead_error_reason":"other"}'),
     record.replace('}', ',"body":"SECRET_SENTINEL"}'),
