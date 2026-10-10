@@ -176,22 +176,22 @@ const isCode = (code: string) => (e: unknown): boolean => e instanceof KernelErr
 async function worker(ctx: TrustedContext, kernel = a): Promise<string> {
   const id = randomUUID(); await kernel.heartbeat(ctx, id); return id;
 }
-async function staged(ctx: TrustedContext, overrides: Partial<AccountIntent> = {}): Promise<OperationStatus> {
-  return a.beginAccount(ctx, { operationId: op(), kind: 'create', intentDigest: digest(),
+async function staged(ctx: TrustedContext, overrides: Partial<AccountIntent> = {}, kernel = a): Promise<OperationStatus> {
+  return kernel.beginAccount(ctx, { operationId: op(), kind: 'create', intentDigest: digest(),
     ownerRef: 'workspace-fixture', profile: 'mimo-test', displayName: 'Disposable connection', ...overrides });
 }
-async function connected(ctx: TrustedContext): Promise<OperationStatus> {
-  const s = await staged(ctx); const w = await worker(ctx);
-  const c = await a.startCandidate(ctx, s.operationRef, w); assert.ok(c);
-  return a.acknowledgeCandidate(ctx, s.operationRef, w, {
+async function connected(ctx: TrustedContext, kernel = a): Promise<OperationStatus> {
+  const s = await staged(ctx, {}, kernel); const w = await worker(ctx, kernel);
+  const c = await kernel.startCandidate(ctx, s.operationRef, w); assert.ok(c);
+  return kernel.acknowledgeCandidate(ctx, s.operationRef, w, {
     generation: c.candidate, nativePhysicalIdentity: randomUUID(), profile: c.profile,
   });
 }
-async function approval(ctx: TrustedContext, accountRef: string, override: Partial<ApprovedPreparation> = {}): Promise<ApprovedPreparation> {
+async function approval(ctx: TrustedContext, accountRef: string, override: Partial<ApprovedPreparation> = {}, kernel = a): Promise<ApprovedPreparation> {
   const now = (await admin.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
   return { operationId: op(), intentDigest: digest(), invocationRef: op(), attemptRef: 'attempt-a',
     permittedAccounts: [accountRef], profile: 'mimo-test', policySubject: 'binding-fixture', policyRevision: 1, bindingRevision: 0,
-    issuerEpoch: await a.issuer(ctx), deadline: new Date(now.getTime() + 60_000),
+    issuerEpoch: await kernel.issuer(ctx), deadline: new Date(now.getTime() + 60_000),
     limits: { requests: 4, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 5000 }, ...override };
 }
 function admissionFor(input: ApprovedPreparation, result: OperationStatus, accountRef: string): PrivateAdmission {
@@ -201,7 +201,7 @@ function admissionFor(input: ApprovedPreparation, result: OperationStatus, accou
     bindingRevision: input.bindingRevision, limits: { ...input.limits }, expiresAt: input.deadline.toISOString() };
 }
 async function prepared(ctx: TrustedContext, accountRef: string, override: Partial<ApprovedPreparation> = {}, kernel = a) {
-  const input = await approval(ctx, accountRef, override);
+  const input = await approval(ctx, accountRef, override, kernel);
   const result = await kernel.prepare(ctx, input); assert.ok(result.executionRef); assert.ok(result.epoch);
   return { input, result, admission: admissionFor(input, result, accountRef) };
 }
@@ -1674,7 +1674,7 @@ test('D-final heartbeat reclaims only expired orphan workers across repeated fin
   const facts = { ...factDefaults, workerSlots: 8, issuerSlots: 4 };
   const kernel = new PostgresKernel(poolA, { ...defaults, workerLeaseMs: 300_000 }, facts);
   await kernel.issuer(ctx);
-  const account = await connected(ctx);
+  const account = await connected(ctx, kernel);
   const candidateWorker = (await admin.query(`SELECT worker FROM ag_kernel.candidates
     WHERE consumer=$1 AND account_ref=$2`, [ctx.consumerId, account.accountRef])).rows[0].worker as string;
   const requestWorker = await worker(ctx, kernel), cleanupWorker = await worker(ctx, kernel);
@@ -1686,7 +1686,7 @@ test('D-final heartbeat reclaims only expired orphan workers across repeated fin
   assert.ok(claimed.dispatch);
   await kernel.effect(ctx, execution.result.executionRef!, 'held-unknown', requestWorker, 'effect_unknown');
 
-  const pending = await staged(ctx), permit = await kernel.startCandidate(ctx, pending.operationRef, journalWorker);
+  const pending = await staged(ctx, {}, kernel), permit = await kernel.startCandidate(ctx, pending.operationRef, journalWorker);
   assert.ok(permit);
   await admin.query(`INSERT INTO ag_management.candidate_journal(consumer,operation_id,account_ref,
     owner_ref,purpose,generation,worker,profile,base_url,model,qualification_ref)
@@ -1818,11 +1818,11 @@ test('D-final final consumer fact slot is atomic and safety headroom is bounded'
   const facts = { ...factDefaults, maxConsumerFacts: 28, maxAccountFacts: 28, workerSlots: 4, issuerSlots: 4 };
   const x = new PostgresKernel(poolA, defaults, facts), y = new PostgresKernel(poolB, defaults, facts);
   await x.issuer(ctx); // Provision bounded recovery slots before ordinary helpers.
-  const account = await connected(ctx), owner = await worker(ctx, x);
+  const account = await connected(ctx, x), owner = await worker(ctx, x);
   const original = await prepared(ctx, account.accountRef!, {}, x);
   const first = await x.claim(ctx, original.result.executionRef!, 'spent-at-cap', owner, original.admission, reservation());
   assert.ok(first.dispatch);
-  const intents = await Promise.all([approval(ctx, account.accountRef!), approval(ctx, account.accountRef!)]);
+  const intents = await Promise.all([approval(ctx, account.accountRef!, {}, x), approval(ctx, account.accountRef!, {}, x)]);
   const results = await Promise.allSettled([x.prepare(ctx, intents[0]), y.prepare(ctx, intents[1])]);
   assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
   const denied = results.find(r => r.status === 'rejected');
@@ -1831,7 +1831,7 @@ test('D-final final consumer fact slot is atomic and safety headroom is bounded'
   assert.equal(Number(await budget()), 28);
   const rows = await count('SELECT count(*) AS n FROM ag_kernel.operations WHERE consumer=$1', [ctx.consumerId]);
   for (let n = 0; n < 3; n++) {
-    await assert.rejects(y.prepare(ctx, await approval(ctx, account.accountRef!)), isCode('denied'));
+    await assert.rejects(y.prepare(ctx, await approval(ctx, account.accountRef!, {}, x)), isCode('denied'));
     await assert.rejects(x.claim(ctx, original.result.executionRef!, 'new-denial-' + n, owner, original.admission, reservation()), isCode('denied'));
   }
   assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.operations WHERE consumer=$1', [ctx.consumerId]), rows);
