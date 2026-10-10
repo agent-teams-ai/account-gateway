@@ -280,7 +280,7 @@ test('worker slot growth prepays retained identities without rewriting accepted 
   // Both expired owners remain referenced by normal candidate/request history.
   await admin.query("UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1", [ctx.consumerId]);
   const snapshot = async () => {
-    const rows = (await admin.query(`SELECT c.worker_slots,c.fact_used,b.used,
+    const rows = (await admin.query(`SELECT c.worker_slots,c.fact_used,c.fact_limit,c.account_fact_limit,b.used,b.capacity,
       (SELECT fact_used FROM ag_kernel.accounts WHERE consumer=c.consumer AND ref=$2) AS account_used
       FROM ag_kernel.consumers c CROSS JOIN ag_kernel.fact_budget b WHERE c.consumer=$1`, [ctx.consumerId, account.accountRef])).rows[0];
     const history: Record<string, string[]> = {};
@@ -303,6 +303,7 @@ test('worker slot growth prepays retained identities without rewriting accepted 
   await grown.issuer(ctx); await grown.heartbeat(ctx, replacement); await small.issuer(ctx);
   assert.deepEqual(await snapshot(), afterGrowth, 'same or lower desired capacity never charges twice or refunds history');
   const saturated = new PostgresKernel(poolB, defaults, { ...facts, workerSlots: 4,
+    maxServiceFacts: Number(afterGrowth.used) + 1,
     maxConsumerFacts: Number(afterGrowth.fact_used), maxAccountFacts: Number(afterGrowth.fact_used) });
   await assert.rejects(saturated.issuer(ctx), isCode('denied'));
   assert.deepEqual(await snapshot(), afterGrowth, 'denied growth rolls back both quota tightening and slot update');
