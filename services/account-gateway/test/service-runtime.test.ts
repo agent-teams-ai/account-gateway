@@ -863,6 +863,12 @@ test('runtime failure diagnostic exposes only the fixed callsite and safe code',
   assert.deepEqual(runtimeFailureDiagnostic('maintenance_failed', new KernelError('denied'), 'reconcile'), { event: 'gateway_service_runtime_failure', cause: 'maintenance_failed', maintenancePhase: 'reconcile', code: 'kernel_denied' });
   assert.equal('maintenancePhase' in runtimeFailureDiagnostic('child_exit', privateError, 'heartbeat'), false);
   assert.equal('maintenancePhase' in runtimeFailureDiagnostic('maintenance_failed', privateError, 'PRIVATE_PHASE' as never), false);
+  let codeReads = 0;
+  const dynamicError = new KernelError('denied');
+  Object.defineProperty(dynamicError, 'code', { get: () => ++codeReads <= 2 ? 'denied' : 'PRIVATE_CODE_SENTINEL' });
+  assert.deepEqual(runtimeFailureDiagnostic('maintenance_failed', dynamicError, 'heartbeat'), { event: 'gateway_service_runtime_failure', cause: 'maintenance_failed', maintenancePhase: 'heartbeat', code: 'kernel_denied' });
+  assert.equal(codeReads, 1, 'untrusted error code is captured only once');
+
 
 });
 

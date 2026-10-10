@@ -215,7 +215,7 @@ export function runtimeFailureDiagnostic(cause: RuntimeFailureCause, error?: unk
   const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
   const phase = cause === 'maintenance_failed' && ['heartbeat','reconcile','cleanup_claim','cleanup_generation','cleanup_transport','cleanup_settlement','oauth_refresh'].includes(maintenancePhase ?? '') ? maintenancePhase : undefined;
   return { event: 'gateway_service_runtime_failure', cause, ...(phase ? { maintenancePhase: phase } : {}),
-    code: error instanceof KernelError && ['invalid','unknown','conflict','denied','unavailable'].includes(error.code) ? `kernel_${error.code}` : typeof code === 'string' && ['ETIMEDOUT','ECONNRESET','ECONNREFUSED','57014','runtime_denied','quota_denied'].includes(code) ? code : 'UNKNOWN' };
+    code: error instanceof KernelError && typeof code === 'string' && ['invalid','unknown','conflict','denied','unavailable'].includes(code) ? `kernel_${code}` : typeof code === 'string' && ['ETIMEDOUT','ECONNRESET','ECONNREFUSED','57014','runtime_denied','quota_denied'].includes(code) ? code : 'UNKNOWN' };
 }
 
 export function writeRuntimeFailureDiagnostic(cause: RuntimeFailureCause, error?: unknown, maintenancePhase?: MaintenancePhase): void {
