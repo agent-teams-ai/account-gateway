@@ -6,6 +6,7 @@ const phases = new Set(['transport', 'invalid_response', 'http_status', 'body_re
   'sse_provider_failure', 'sse_incomplete', 'sse_read', 'deadline', 'downstream_write', 'downstream_flush']);
 
 const providerErrorCategories = new Set([
+  'empty_error_body', 'sse_error_body', 'html_error_body', 'unhandled_error_encoding',
   'body_read_failed', 'body_limit', 'invalid_error_json', 'code_mode_rejected',
   'authentication_rejected', 'model_rejected', 'parameter_service_tier',
   'parameter_max_output_tokens', 'parameter_parallel_tool_calls', 'parameter_context_management',
