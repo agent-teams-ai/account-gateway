@@ -101,9 +101,18 @@ export class PostgresKernel implements DurableKernel {
       await db.query(`INSERT INTO consumers(consumer,fact_limit,account_fact_limit,worker_slots,issuer_slots)
         VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
       [consumer, this.facts.maxConsumerFacts, this.facts.maxAccountFacts, this.facts.workerSlots, this.facts.issuerSlots]);
-      const r = await db.query('SELECT issuer FROM consumers WHERE consumer=$1 FOR UPDATE', [consumer]);
+      const r = await db.query('SELECT issuer,worker_slots FROM consumers WHERE consumer=$1 FOR UPDATE', [consumer]);
       await db.query(`UPDATE consumers SET fact_limit=least(fact_limit,$2),account_fact_limit=least(account_fact_limit,$3)
         WHERE consumer=$1`, [consumer, this.facts.maxConsumerFacts, this.facts.maxAccountFacts]);
+      // Worker slots prepay durable identities, including expired owners retained
+      // by accepted history. Grow only after charging the same locked budget;
+      // retries and smaller configurations never refund or erase those facts.
+      const additionalWorkerSlots = this.facts.workerSlots - Number(r.rows[0].worker_slots);
+      if (additionalWorkerSlots > 0) {
+        const charged = await db.query('SELECT charge_facts($1,NULL,$2) AS charged', [consumer, additionalWorkerSlots]);
+        if (charged.rows[0]?.charged !== true) throw new KernelError('denied');
+        await db.query('UPDATE consumers SET worker_slots=$2 WHERE consumer=$1', [consumer, this.facts.workerSlots]);
+      }
       await db.query('INSERT INTO issuer_epochs(consumer,issuer) VALUES ($1,$2) ON CONFLICT DO NOTHING', [consumer, r.rows[0].issuer]);
       const result = await body({ db, consumer, issuer: r.rows[0].issuer });
       if (clientFailed) throw new KernelError('unavailable');

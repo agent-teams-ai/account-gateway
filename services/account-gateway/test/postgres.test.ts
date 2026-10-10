@@ -256,6 +256,58 @@ async function count(sql: string, values: unknown[]) {
 }
 
 // Spare concurrency must not admit a fresh ID before maintenance observes owner loss.
+test('worker slot growth prepays retained identities without rewriting accepted history', async () => {
+  const ctx = context();
+  const facts = { ...factDefaults, workerSlots: 2, issuerSlots: 3, maxConsumerFacts: 96, maxAccountFacts: 96 };
+  const small = new PostgresKernel(poolA, defaults, facts);
+  const stagedAccount = await small.beginAccount(ctx, { operationId: op(), kind: 'create', intentDigest: digest(),
+    ownerRef: 'workspace-fixture', profile: 'mimo-test', displayName: 'Retained slot account' });
+  const candidateWorker = await worker(ctx, small);
+  const candidate = await small.startCandidate(ctx, stagedAccount.operationRef, candidateWorker); assert.ok(candidate);
+  const account = await small.acknowledgeCandidate(ctx, stagedAccount.operationRef, candidateWorker, {
+    generation: candidate.candidate, nativePhysicalIdentity: randomUUID(), profile: candidate.profile,
+  });
+  const requestWorker = await worker(ctx, small);
+  const now = (await admin.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
+  const input: ApprovedPreparation = { operationId: op(), intentDigest: digest(), invocationRef: op(), attemptRef: 'attempt-a',
+    permittedAccounts: [account.accountRef!], profile: 'mimo-test', policySubject: 'binding-fixture', policyRevision: 1,
+    bindingRevision: 0, issuerEpoch: await small.issuer(ctx), deadline: new Date(now.getTime() + 60_000),
+    limits: { requests: 4, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 5000 } };
+  const execution = await small.prepare(ctx, input);
+  const claim = await small.claim(ctx, execution.executionRef!, 'retained-unknown', requestWorker,
+    admissionFor(input, execution, account.accountRef!), reservation()); assert.ok(claim.dispatch);
+  await small.effect(ctx, execution.executionRef!, 'retained-unknown', requestWorker, 'effect_unknown');
+  // Both expired owners remain referenced by normal candidate/request history.
+  await admin.query("UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1", [ctx.consumerId]);
+  const snapshot = async () => {
+    const rows = (await admin.query(`SELECT c.worker_slots,c.fact_used,b.used,
+      (SELECT fact_used FROM ag_kernel.accounts WHERE consumer=c.consumer AND ref=$2) AS account_used
+      FROM ag_kernel.consumers c CROSS JOIN ag_kernel.fact_budget b WHERE c.consumer=$1`, [ctx.consumerId, account.accountRef])).rows[0];
+    const history: Record<string, string[]> = {};
+    for (const table of ['accounts', 'operations', 'candidates', 'executions', 'requests', 'cleanup']) {
+      history[table] = (await admin.query(`SELECT row_to_json(t)::text AS row FROM ag_kernel.${table} t WHERE consumer=$1`,
+        [ctx.consumerId])).rows.map(row => row.row as string).sort();
+    }
+    return { ...rows, history };
+  };
+  const before = await snapshot();
+  const grown = new PostgresKernel(poolB, defaults, { ...facts, workerSlots: 3 });
+  const replacement = await worker(ctx, grown);
+  const afterGrowth = await snapshot();
+  assert.equal(afterGrowth.worker_slots, 3);
+  assert.equal(Number(afterGrowth.fact_used), Number(before.fact_used) + 1);
+  assert.equal(Number(afterGrowth.used), Number(before.used) + 1);
+  assert.equal(afterGrowth.account_used, before.account_used);
+  assert.deepEqual(afterGrowth.history, before.history);
+  assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.workers WHERE consumer=$1', [ctx.consumerId]), 3);
+  await grown.issuer(ctx); await grown.heartbeat(ctx, replacement); await small.issuer(ctx);
+  assert.deepEqual(await snapshot(), afterGrowth, 'same or lower desired capacity never charges twice or refunds history');
+  const saturated = new PostgresKernel(poolB, defaults, { ...facts, workerSlots: 4,
+    maxConsumerFacts: Number(afterGrowth.fact_used), maxAccountFacts: Number(afterGrowth.fact_used) });
+  await assert.rejects(saturated.issuer(ctx), isCode('denied'));
+  assert.deepEqual(await snapshot(), afterGrowth, 'denied growth rolls back both quota tightening and slot update');
+});
+
 test('F1 claim fences expired in-flight ownership before spare-concurrency admission', async () => {
   const bounds = { ...defaults, maxConcurrent: 2, maintenanceBatch: 1 };
   const kernel = new PostgresKernel(poolA, bounds);
