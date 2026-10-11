@@ -1,10 +1,11 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { KernelError, identifier, uuid } from './domain.ts';
+import { secretSubmission } from '@agent-teams/account-gateway/http';
 import { oauthAuthorizationURL } from '@agent-teams/account-gateway/contracts';
 import { codexOAuthProfile, exactCandidate, physicalCandidate } from './management.ts';
 import type { CandidateJournal, CandidateMapping, CandidateNative, NativeReadback, PhysicalCandidate } from './management.ts';
-import type { OAuthScope, OAuthEnrollmentNative, OAuthReadback, OAuthBeginReadback } from './management.ts';
+import type { OAuthScope, OAuthEnrollmentNative, OAuthReadback, OAuthBeginReadback, OAuthCallback } from './management.ts';
 import type { OAuthDescriptor, OAuthDescriptorBoundary } from './management.ts';
 import type { OAuthRefreshNative, OAuthRefreshReadback } from './management.ts';
 import type { OAuthLifecycleNative, OAuthCleanupAuthority, OAuthCleanupAction, OAuthCleanupReadback } from './management.ts';
@@ -142,7 +143,7 @@ class NativeControlHTTP {
     let body: Buffer | undefined;
     try {
       body = value === undefined ? undefined : Buffer.from(JSON.stringify(value));
-      if (body && body.length > 16_384) throw new NativeFailure('bounded');
+      if (body && body.length > (path === '/private/native/v1/oauth/connect/complete' ? 32_768 : 16_384)) throw new NativeFailure('bounded');
     } catch { throw new NativeFailure('bounded'); }
     return new Promise<Buffer>((resolve, reject) => {
       let finished = false;
@@ -247,7 +248,8 @@ export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OA
   }
   private wire(scope: OAuthScope): object {
     // Exact native input; no client, redirect, endpoint, profile, display name,
-    // raw code, PKCE verifier or credential is accepted from the consumer.
+    // PKCE verifier or credential is accepted from the consumer. Completion
+    // adds only the separately validated callback state/code to this tuple.
     return { operation: scope.operationId, owner_ref: scope.ownerRef,
       account_ref: scope.accountRef, generation: scope.generation };
   }
@@ -275,6 +277,14 @@ export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OA
   async begin(input: OAuthScope): Promise<OAuthBeginReadback> {
     const scope = this.capture(input);
     return this.ack(await this.call('POST', '/private/native/v1/oauth/connect', this.wire(scope)), scope, true);
+  }
+  async complete(input: OAuthScope, callback: OAuthCallback): Promise<OAuthReadback> {
+    const scope = this.capture(input), state = callback.state, code = callback.code;
+    if (!secretSubmission.oauthCallbackState.safeParse(state).success ||
+        !secretSubmission.oauthCallbackCode.safeParse(code).success) throw new NativeFailure('bounded');
+    const result = this.ack(await this.call('POST', '/private/native/v1/oauth/connect/complete',
+      { ...this.wire(scope), state, code }), scope, false);
+    return Object.freeze({ operationId: result.operationId, accountRef: result.accountRef, state: result.state });
   }
   async read(input: OAuthScope): Promise<OAuthReadback> {
     const scope = this.capture(input);

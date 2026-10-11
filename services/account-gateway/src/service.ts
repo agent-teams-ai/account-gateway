@@ -9,7 +9,7 @@ import { KernelError, uuid } from './domain.ts';
 import { PostgresKernel } from './postgres.ts';
 import { IntentSecrets, PostgresManagementStore } from './management-store.ts';
 import { AccountManagement, exactCandidate, sameCandidate } from './management.ts';
-import type { CandidateJournal, CandidateNative, IntentCustody, ManagementStore, OAuthScope,
+import type { CandidateJournal, CandidateNative, IntentCustody, ManagementStore, OAuthScope, OAuthCallback,
   OAuthCleanupAuthority, OAuthCleanupAction } from './management.ts';
 import type { DurableKernel, ExecutionRead } from './domain.ts';
 import { codexOAuthProfile } from './management.ts';
@@ -53,6 +53,7 @@ export function composeServiceControl(cfg: Pick<ServiceConfig, 'native' | 'consu
     ...(oauthProfile ? { oauth: { profile: oauthProfile, native: {
       begin: (scope: OAuthScope) => forScope(scope).begin(scope),
       read: (scope: OAuthScope) => forScope(scope).read(scope),
+      complete: (scope: OAuthScope, callback: OAuthCallback) => forScope(scope).complete(scope, callback),
     }, descriptor: { describe: (scope: OAuthScope) => forScope(scope).describe(scope) },
       lifecycle: { cleanup: (scope: OAuthScope, authority: OAuthCleanupAuthority, action: OAuthCleanupAction) => new NativeOAuthLifecycleClient({ ...control,
         controlCredential: cfg.consumer.cleanupCredential, ownerRef: scope.ownerRef }).cleanup(scope, authority, action) } },

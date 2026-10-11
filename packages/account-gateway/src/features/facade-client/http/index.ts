@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import * as c from '../contracts/index.js';
 
-import { connect, reconnect, nativeRequest } from './ingress.js';
+import { connect, reconnect, nativeRequest, oauthComplete } from './ingress.js';
+import type { OAuthComplete } from './ingress.js';
 export * as secretSubmission from './ingress.js';
 const config = z.strictObject({ role: z.enum(['management', 'execution', 'consumer-control']), origin: z.string().url(), token: z.string().min(1).max(16384),
   responseBytes: z.number().int().min(1024).max(1048576).default(65536), timeoutMs: z.number().int().min(1).max(3600000).default(30000),
@@ -160,6 +161,12 @@ function accountClient(settings: ManagementConfig | ConsumerControlConfig, role:
     beginOAuth: (input: c.OAuthBegin, options?: CallOptions): Promise<c.OAuthBeginResponse> => {
       const captured = valid(c.oauthBegin, input);
       return json('/v1/accounts/oauth/begin', c.oauthBeginResponse, 'POST', captured, options,
+        { operationRef: captured.operationId });
+    },
+    // Sensitive POST only. Lost completion ACKs require ordinary readback.
+    completeOAuth: (input: OAuthComplete, options?: CallOptions): Promise<c.Operation> => {
+      const captured = valid(oauthComplete, input);
+      return json('/v1/accounts/oauth/complete', c.accountOperation, 'POST', captured, options,
         { operationRef: captured.operationId });
     },
     readOAuth: (operationId: string, options?: CallOptions): Promise<c.Operation> =>
