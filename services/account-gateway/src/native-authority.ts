@@ -22,9 +22,9 @@ export interface Association {
 export interface AuthorityOptions { readonly config: BridgeConfig; readonly kernel: DurableKernel & ExecutionRead;
   readonly store: Pick<ManagementStore, 'mapping'>;
   readonly profileLimits?: readonly { readonly profile: string; readonly limits: Readonly<ApprovedLimits> }[];
-  readonly oauthOwners?: { readonly store: Pick<ManagementStore, 'readJournal'>;
+  readonly oauthOwners?: { readonly store: Pick<ManagementStore, 'readJournal' | 'pendingOAuthRefresh'>;
     readonly bearers: Pick<FacadeBearers, 'authorizesOwner'> };
-  readonly oauthRefreshOwners?: { readonly store: Pick<ManagementStore, 'activeOAuthRefresh'>;
+  readonly oauthRefreshOwners?: { readonly store: Pick<ManagementStore, 'activeOAuthRefresh' | 'pendingOAuthRefresh'>;
     readonly bearers: Pick<FacadeBearers, 'authorizesOwner'> };
   readonly oauthCleanupOwners?: { readonly store: Pick<ManagementStore, 'oauthCleanup'> } }
 const hash = (s: string) => createHash('sha256').update(s).digest();
@@ -146,7 +146,12 @@ export class NativeAuthority {
     const account = await this.kernel.account(ctx, j.accountRef);
     if (op.operationRef !== j.operationId || op.accountRef !== j.accountRef || !['pending','applied'].includes(op.state) ||
         account.accountRef !== j.accountRef || account.ownerRef !== j.ownerRef || account.profile !== j.profile.profile ||
-        !['staging','active'].includes(account.state)) return denied();
+        !['staging','active','quarantined'].includes(account.state)) return denied();
+    if (op.state === 'pending') {
+      const pending = await this.#owners.store.pendingOAuthRefresh?.(ctx, this.configuration.enrollment.worker,
+        { consumerId: ctx.consumerId, operationId: j.operationId, accountRef: j.accountRef, generation: j.generation }, p);
+      if (!pending || pending.ownerRef !== j.ownerRef || pending.worker !== j.worker || pending.purpose !== j.purpose) return denied();
+    }
     const mapping = await this.#store.mapping(ctx, j.generation);
     if (mapping && (mapping.consumerId !== ctx.consumerId || mapping.operationId !== j.operationId ||
         mapping.accountRef !== j.accountRef || mapping.ownerRef !== j.ownerRef || mapping.generation !== j.generation ||
@@ -159,18 +164,22 @@ export class NativeAuthority {
   }
   async #refreshOwner(ctx: TrustedContext, value: unknown): Promise<{ ok: true; ownerRef: string }> {
     const r = object(value, ['consumerId','operationId','accountRef','generation']);
-    if (!this.#refreshOwners?.store.activeOAuthRefresh || r.consumerId !== ctx.consumerId) return denied();
+    if (!this.#refreshOwners || r.consumerId !== ctx.consumerId) return denied();
     identifier(r.operationId); uuid(r.accountRef); uuid(r.generation);
     const p = this.configuration.profiles.find(p => p.profile === codexOAuthProfile.profile);
     if (!p || p.baseURL !== codexOAuthProfile.baseURL || p.model !== codexOAuthProfile.model) return denied();
-    // One committed read binds journal, active generation, immutable physical
-    // mapping and current worker lease. Connect's staging owner path is separate.
-    const j = await this.#refreshOwners.store.activeOAuthRefresh(ctx, this.configuration.enrollment.worker,
-      { consumerId: ctx.consumerId, operationId: r.operationId, accountRef: r.accountRef, generation: r.generation }, p);
+    const selectors = { consumerId: ctx.consumerId, operationId: r.operationId,
+      accountRef: r.accountRef, generation: r.generation };
+    const active = await this.#refreshOwners.store.activeOAuthRefresh?.(ctx,
+      this.configuration.enrollment.worker, selectors, p);
+    const j = active ?? await this.#refreshOwners.store.pendingOAuthRefresh?.(ctx,
+      this.configuration.enrollment.worker, selectors, p);
     if (!j || j.consumerId !== ctx.consumerId || j.operationId !== r.operationId ||
         j.accountRef !== r.accountRef || j.generation !== r.generation || !['create','reconnect'].includes(j.purpose) ||
         j.profile.profile !== p.profile || j.profile.baseURL !== p.baseURL || j.profile.model !== p.model ||
-        j.profile.qualificationRef !== p.qualificationRef || !exactCandidate(j, physicalCandidate(j.descriptor))) return denied();
+        j.profile.qualificationRef !== p.qualificationRef) return denied();
+    if (active ? !exactCandidate(active, physicalCandidate(active.descriptor)) :
+        !['create','reconnect'].includes(j.purpose) || j.worker !== this.configuration.enrollment.worker) return denied();
     identifier(j.ownerRef);
     // Final synchronous lookup observes replacement during the SQL await.
     if (!this.#refreshOwners.bearers.authorizesOwner(ctx, j.ownerRef, j.profile.profile)) return denied();

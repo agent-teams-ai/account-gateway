@@ -100,6 +100,28 @@ const activeOAuthMapping = `SELECT j.*,m.native_physical_identity,m.native_id,m.
     AND j.purpose IN ('create','reconnect') AND o.state='applied' AND o.intent->>'kind'=j.purpose
     AND EXISTS (SELECT 1 FROM ag_kernel.workers w WHERE w.consumer=a.consumer AND w.worker=$2
       AND w.lease_until>clock_timestamp())`;
+// Staging recovery is bound to the ORIGINAL creator, not a replacement service.
+// No physical mapping grants authority; native additionally checks completed
+// enrollment/MAC before the existing F2 fence can enter a refresh.
+const pendingOAuthJournal = `SELECT j.* FROM ag_kernel.accounts a
+  JOIN ag_kernel.candidates c ON c.consumer=a.consumer AND c.account_ref=a.ref
+  JOIN ag_management.candidate_journal j ON j.consumer=c.consumer
+    AND j.generation=c.generation AND j.account_ref=a.ref AND j.operation_id=c.operation_id
+    AND j.owner_ref=a.owner_ref AND j.profile=c.profile AND j.worker=c.worker
+  JOIN ag_kernel.operations o ON o.consumer=j.consumer AND o.id=j.operation_id AND o.account_ref=a.ref
+  WHERE a.consumer=$1 AND a.profile=$3 AND c.state='creating' AND c.native_identity IS NULL
+    AND c.expected_epoch=a.epoch AND c.worker=$2 AND o.state='pending'
+    AND o.intent->>'kind'=j.purpose AND (
+      j.purpose='create' AND a.state='staging' AND a.active_generation IS NULL
+        AND c.old_generation IS NULL AND c.expected_revision<=a.revision
+        AND o.intent->>'owner'=j.owner_ref AND o.intent->>'profile'=j.profile
+      OR j.purpose='reconnect' AND a.state IN ('active','quarantined')
+        AND c.expected_revision=a.revision AND c.old_generation IS NOT DISTINCT FROM a.active_generation
+        AND o.intent->>'target'=a.ref::text AND (o.intent->>'expectedRevision')::integer=c.expected_revision)
+    AND j.profile=$3 AND j.base_url=$4 AND j.model=$5 AND j.qualification_ref=$6
+    AND EXISTS (SELECT 1 FROM ag_kernel.workers w WHERE w.consumer=a.consumer
+      AND w.worker=c.worker AND w.lease_until>clock_timestamp())
+    AND NOT EXISTS (SELECT 1 FROM ag_kernel.cleanup l WHERE l.consumer=c.consumer AND l.generation=c.generation)`;
 function refreshProfile(source: ManagedProfile): ManagedProfile {
   const p = Object.freeze({ profile: source.profile, baseURL: source.baseURL,
     model: source.model, qualificationRef: source.qualificationRef });
@@ -267,6 +289,21 @@ export class PostgresManagementStore implements ManagementStore {
         s.operationId, s.accountRef, s.generation])).rows[0];
       return row ? mappingRow(row) : undefined;
     });
+  }
+  async pendingOAuthRefresh(context: TrustedContext, worker: string, input: OAuthSelectors,
+    source: ManagedProfile): Promise<CandidateJournal | undefined> {
+    const ctx = captureContext(context), p = refreshProfile(source);
+    const s = Object.freeze({ consumerId: input.consumerId, operationId: input.operationId,
+      accountRef: input.accountRef, generation: input.generation });
+    uuid(worker); identifier(s.operationId); uuid(s.accountRef); uuid(s.generation);
+    if (s.consumerId !== ctx.consumerId) throw new KernelError('denied');
+    return this.tx(ctx.consumerId, async db => {
+      const row = (await db.query<JournalRow>(pendingOAuthJournal +
+        ' AND j.operation_id=$7 AND j.account_ref=$8 AND j.generation=$9 LIMIT 1',
+      [ctx.consumerId, worker, p.profile, p.baseURL, p.model, p.qualificationRef,
+        s.operationId, s.accountRef, s.generation])).rows[0];
+      return row ? journalRow(row) : undefined;
+    }); // Release consumer lock before native refresh and its authority callback.
   }
   async cleanupAllowed(context: TrustedContext, cleanupRef: string, worker: string, token: string,
     generation: string, identity: string, profile: string): Promise<boolean> {

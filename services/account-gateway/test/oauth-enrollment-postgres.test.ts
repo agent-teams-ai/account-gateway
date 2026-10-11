@@ -18,7 +18,7 @@ import type { TrustedContext } from '../src/domain.ts';
 import { PostgresKernel } from '../src/postgres.ts';
 import { AccountManagement, codexOAuthProfile, sameCandidate } from '../src/management.ts';
 import type { CandidateJournal, NativeReadback, OAuthBeginInput, OAuthDescriptor,
-  OAuthDescriptorBoundary, OAuthReadback, OAuthScope, PhysicalCandidate } from '../src/management.ts';
+  OAuthDescriptorBoundary, OAuthReadback, OAuthScope, OAuthSelectors, PhysicalCandidate } from '../src/management.ts';
 import { IntentSecrets, PostgresManagementStore } from '../src/management-store.ts';
 import { NativeManagementClient, NativeOAuthEnrollmentClient, NativeOAuthLifecycleClient, NativeFailure } from '../src/native-client.ts';
 import { createFacade, FacadeBearers } from '../src/facade.ts';
@@ -146,7 +146,7 @@ async function fixture(options: FixtureOptions = {}) {
   let responseURL = authorizationURL(), fixtureFailure: unknown;
   let callbackOrigin = '';
   const refreshRequests: ConnectWire[] = [];
-  const refreshModes = new Map<string, 'drop' | 'unknown' | 'idle'>();
+  const refreshModes = new Map<string, 'drop' | 'unknown' | 'idle' | 'prepared' | 'entered' | 'completed'>();
   const callbackToken = 'synthetic-refresh-callback';
   let refreshBarrier: { generation: string; entered: ReturnType<typeof Promise.withResolvers<void>>;
     released: ReturnType<typeof Promise.withResolvers<void>> } | undefined;
@@ -374,7 +374,7 @@ async function activeOAuth(f: Fixture): Promise<CandidateJournal> {
   assert.equal((await f.client().readOAuth(command.operationId)).state, 'applied');
   return journal(f, command);
 }
-function selectors(j: CandidateJournal): object {
+function selectors(j: CandidateJournal): OAuthSelectors {
   return { consumerId: j.consumerId, operationId: j.operationId, accountRef: j.accountRef, generation: j.generation };
 }
 
@@ -576,7 +576,7 @@ test('F refresh: committed real journal/HTTP selection advances past dropped ACK
   try {
     const journals = [await activeOAuth(f), await activeOAuth(f)].sort((a, b) => a.generation.localeCompare(b.generation));
     const [a, b] = journals;
-    const manager = f.manager();
+    const manager = f.manager(), recoveryRequests = [...f.refreshRequests];
     const accountBefore = await f.kernel.account(f.context, a.accountRef);
     const mappingBefore = await f.store.mapping(f.context, a.generation);
     const execution = await f.kernel.prepare(f.context, { operationId: randomUUID(), intentDigest: 'refresh-valid-use',
@@ -588,22 +588,22 @@ test('F refresh: committed real journal/HTTP selection advances past dropped ACK
     const operationsBefore = (await pool.query('SELECT count(*)::int AS n FROM ag_kernel.operations WHERE consumer=$1',
       [f.context.consumerId])).rows[0].n;
     assert.equal(await manager.refreshOAuth(f.context, true), 'idle');
-    assert.deepEqual(f.refreshRequests, [], 'an acquired cleanup claim suppresses even an eligible active refresh');
+    assert.deepEqual(f.refreshRequests, recoveryRequests, 'an acquired cleanup claim suppresses even an eligible active refresh');
     f.refreshModes.set(a.generation, 'drop');
     const hold = f.holdRefresh(a.generation), pending = manager.refreshOAuth(f.context);
     try {
       await Promise.race([hold.entered, delay(3500).then(() => { throw new Error('refresh never reached real HTTP callback'); })]);
       assert.equal(await manager.refreshOAuth(f.context), 'idle', 'held request cannot overlap another selection');
-      assert.deepEqual(f.refreshRequests, [wire(scope(a))]);
+      assert.deepEqual(f.refreshRequests, [...recoveryRequests, wire(scope(a))]);
     } finally { hold.release(); }
     assert.equal(await pending, 'deferred');
-    assert.deepEqual(f.refreshRequests, [wire(scope(a))], 'one HTTP, no immediate retry after dropped ACK');
+    assert.deepEqual(f.refreshRequests, [...recoveryRequests, wire(scope(a))], 'one HTTP, no immediate retry after dropped ACK');
     assert.equal(await manager.refreshOAuth(f.context), 'observed');
-    assert.deepEqual(f.refreshRequests, [wire(scope(a)), wire(scope(b))]);
+    assert.deepEqual(f.refreshRequests, [...recoveryRequests, wire(scope(a)), wire(scope(b))]);
     f.refreshModes.set(a.generation, 'unknown');
     assert.equal(await manager.refreshOAuth(f.context), 'deferred');
     assert.equal(await manager.refreshOAuth(f.context), 'observed');
-    assert.deepEqual(f.refreshRequests, [wire(scope(a)), wire(scope(b)), wire(scope(a)), wire(scope(b))]);
+    assert.deepEqual(f.refreshRequests, [...recoveryRequests, wire(scope(a)), wire(scope(b)), wire(scope(a)), wire(scope(b))]);
     // RED on 8261bb3: shutdown during selection still starts native HTTP after SQL unlocks.
     const gate = await pool.connect(), shutdown = new AbortController(), wait = new AbortController();
     const attemptsBefore = f.refreshRequests.length;
@@ -658,15 +658,17 @@ test('F refresh: committed real journal/HTTP selection advances past dropped ACK
   } finally { await f.close(); }
 });
 
-// RED if refresh reuses staging-capable connect authority, derives owner from
-// the body, or accepts the original physical mapping after reconnect promotion.
-test('F refresh authority: exact selectors require ACTIVE generation while connect retains staging', async () => {
+// RED if refresh derives owner from the body, accepts a replacement staging
+// worker, or accepts the original physical mapping after reconnect promotion.
+test('F refresh authority: exact active or original creating selectors retain ownership fences', async () => {
   const f = await fixture({ descriptor: 'qualified' });
   try {
     const command = input(); await f.client().beginOAuth(sdkInput(command));
     const old = await journal(f, command);
     assert.equal((await f.callback('oauth-owner-authority', selectors(old))).status, 200);
-    assert.equal((await f.callback('oauth-refresh-authority', selectors(old))).status, 403);
+    assert.equal((await f.callback('oauth-refresh-authority', selectors(old))).status, 200);
+    assert.equal(await f.store.pendingOAuthRefresh(f.context, randomUUID(), selectors(old), oauthProfile), undefined);
+    assert.equal(await f.store.mapping(f.context, old.generation), undefined, 'staging grant requires no fabricated mapping');
     f.state('completed'); assert.equal((await f.client().readOAuth(command.operationId)).state, 'applied');
     const accepted = await f.callback('oauth-refresh-authority', selectors(old));
     assert.equal(accepted.status, 200); assert.deepEqual(await accepted.json(), { ok: true, ownerRef: owner });
@@ -698,6 +700,143 @@ test('F refresh authority: exact selectors require ACTIVE generation while conne
       [f.context.consumerId, f.worker]);
     assert.equal((await f.callback('oauth-refresh-authority', selectors(replacement))).status, 403);
     assert.equal(await f.store.nextOAuthRefresh(f.context, f.worker, oauthProfile), undefined);
+  } finally { await f.close(); }
+});
+
+// The existing protected HTTP refresh peer calls the real authority callback.
+// Native owns due time and its one-use entry ledger; management never creates
+// a replacement candidate while recovering completed, unqualified custody.
+test('F pending refresh: completed original custody runs F2 before Descriptor and normal ACK', async () => {
+  const f = await fixture({ descriptor: 'pending' }), command = input();
+  try {
+    await f.client().beginOAuth(sdkInput(command)); const j = await journal(f, command);
+    assert.deepEqual(f.refreshRequests, [], 'waiting consent must not enter refresh');
+    f.state('completed');
+    for (const state of ['prepared', 'entered'] as const) {
+      f.refreshModes.set(j.generation, state);
+      assert.equal((await f.client().readOAuth(command.operationId)).state, 'pending');
+      assert.deepEqual(f.descriptorScopes, [], 'uncertain F2 cannot reach Descriptor');
+    }
+    f.refreshModes.set(j.generation, 'completed');
+    assert.equal((await f.client().readOAuth(command.operationId)).state, 'pending');
+    assert.equal(f.descriptorScopes.length, 1);
+    assert.equal(await f.store.mapping(f.context, j.generation), undefined);
+    f.descriptor('qualified');
+    const result = await f.client().readOAuth(command.operationId);
+    assert.equal(result.state, 'applied');
+    assert.equal((await f.kernel.account(f.context, j.accountRef)).state, 'active');
+    assert.equal(f.stats().begins, 1); assert.equal(f.refreshRequests.length, 4);
+    assert.deepEqual(f.refreshRequests, Array(4).fill(wire(scope(j))));
+    await f.assertHealthy();
+  } finally { await f.close(); }
+});
+
+test('F pending refresh: lost ACK defers, UNKNOWN is spent, original lease and owner remain required', async () => {
+  const f = await fixture({ descriptor: 'qualified' }), command = input();
+  try {
+    await f.client().beginOAuth(sdkInput(command)); const j = await journal(f, command);
+    f.state('completed'); f.refreshModes.set(j.generation, 'drop');
+    assert.equal((await f.client().readOAuth(command.operationId)).state, 'pending');
+    assert.equal(f.descriptorScopes.length, 0);
+    assert.equal(f.refreshRequests.length, 1, 'no automatic retry in a readback');
+    f.bearers.replace([]);
+    assert.equal((await f.callback('oauth-refresh-authority', selectors(j))).status, 403);
+    f.bearers.replace([f.grant()]);
+    assert.equal(await f.store.pendingOAuthRefresh(f.context, randomUUID(), selectors(j), oauthProfile), undefined);
+    for (const changed of [{ ...selectors(j), operationId: randomUUID() },
+      { ...selectors(j), accountRef: randomUUID() }, { ...selectors(j), generation: randomUUID() }]) {
+      assert.equal((await f.callback('oauth-refresh-authority', changed)).status, 403);
+    }
+    // Expiry is irreversible for a worker. Isolate that denial instead of
+    // attempting to revive the original worker used by the UNKNOWN assertions.
+    const expired = await fixture({ descriptor: 'pending' });
+    try {
+      const command = input(); await expired.client().beginOAuth(sdkInput(command));
+      const pending = await journal(expired, command);
+      assert.equal((await expired.callback('oauth-refresh-authority', selectors(pending))).status, 200);
+      await pool.query("UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND worker=$2",
+        [expired.context.consumerId, expired.worker]);
+      assert.equal((await expired.callback('oauth-refresh-authority', selectors(pending))).status, 403);
+      assert.equal(await expired.store.pendingOAuthRefresh(expired.context, expired.worker, selectors(pending), oauthProfile), undefined);
+      await expired.assertHealthy();
+    } finally { await expired.close(); }
+    f.refreshModes.set(j.generation, 'unknown');
+    assert.equal((await f.client().readOAuth(command.operationId)).state, 'unknown');
+    const count = f.refreshRequests.length;
+    assert.equal((await f.client().readOAuth(command.operationId)).state, 'unknown');
+    assert.equal(f.refreshRequests.length, count, 'spent original operation cannot refresh again');
+    assert.equal((await f.callback('oauth-refresh-authority', selectors(j))).status, 403);
+    assert.equal((await f.kernel.account(f.context, j.accountRef)).state, 'quarantined');
+    assert.equal(f.stats().begins, 1); assert.equal(f.descriptorScopes.length, 0);
+    await f.assertHealthy();
+  } finally { await f.close(); }
+});
+
+// A real reconnect route preserves the logical account and uses a fresh inert
+// birth. Existing kernel ACK owns epoch rotation, old-use fencing and cleanup.
+test('F OAuth reconnect: new verified birth promotes stable account and fences the old epoch once', async () => {
+  const f = await fixture({ descriptor: 'qualified' });
+  try {
+    const old = await activeOAuth(f), before = await f.kernel.account(f.context, old.accountRef);
+    const execution = await f.kernel.prepare(f.context, { operationId: randomUUID(), intentDigest: 'reconnect-old-use',
+      invocationRef: randomUUID(), attemptRef: 'one', permittedAccounts: [old.accountRef], profile: oauthProfile.profile,
+      policySubject: 'reconnect-binding', policyRevision: 1, bindingRevision: 1, issuerEpoch: await f.kernel.issuer(f.context),
+      deadline: new Date(Date.now() + 45_000), limits: bounds });
+    assert.ok(execution.executionRef);
+    f.state('prepared');
+    const command = { operationId: randomUUID(), expectedMetadataRevision: before.revision };
+    const begun = await f.client().beginOAuthReconnect(old.accountRef, command);
+    assert.equal(begun.operation.state, 'pending'); assert.ok(begun.authorizationURL);
+    const j = await f.store.readJournal(f.context, command.operationId); assert.ok(j);
+    assert.equal(j.purpose, 'reconnect'); assert.equal(j.accountRef, old.accountRef);
+    assert.notEqual(j.generation, old.generation);
+    assert.equal((await f.kernel.account(f.context, old.accountRef)).epoch, before.epoch);
+    assert.equal((await f.callback('oauth-owner-authority', selectors(j))).status, 200);
+    const duplicate = await f.client().beginOAuthReconnect(old.accountRef, command);
+    assert.equal(duplicate.authorizationURL, undefined, 'readback never reconstructs an authorization URL');
+    assert.equal(f.stats().begins, 2);
+    f.state('completed');
+    const applied = await f.client().readOAuth(command.operationId);
+    assert.equal(applied.state, 'applied');
+    const current = await f.kernel.account(f.context, old.accountRef);
+    assert.equal(current.accountRef, before.accountRef); assert.equal(current.ownerRef, before.ownerRef);
+    assert.equal(current.epoch, before.epoch + 1); assert.equal(current.revision, before.revision + 1);
+    assert.ok(await f.store.mapping(f.context, old.generation));
+    assert.ok(await f.store.mapping(f.context, j.generation));
+    assert.equal((await f.kernel.savedExecution(f.context, execution.executionRef)).state, 'fenced');
+    assert.equal((await pool.query('SELECT 1 FROM ag_kernel.cleanup WHERE consumer=$1 AND generation=$2',
+      [f.context.consumerId, old.generation])).rowCount, 1);
+    assert.equal((await f.callback('oauth-refresh-authority', selectors(old))).status, 403);
+    assert.equal((await f.callback('oauth-refresh-authority', selectors(j))).status, 200);
+    assert.equal((await f.client().readOAuth(command.operationId)).state, 'applied');
+    assert.equal((await f.kernel.account(f.context, old.accountRef)).epoch, current.epoch, 'lost ACK cannot promote twice');
+    await f.assertHealthy();
+  } finally { await f.close(); }
+});
+
+test('F OAuth reconnect: stored owner, metadata CAS and original creator fence native entry', async () => {
+  const f = await fixture({ descriptor: 'qualified' });
+  try {
+    const old = await activeOAuth(f), before = await f.kernel.account(f.context, old.accountRef);
+    const begins = f.stats().begins;
+    await assert.rejects(f.foreign().beginOAuthReconnect(old.accountRef,
+      { operationId: randomUUID(), expectedMetadataRevision: before.revision }), GatewayError);
+    await assert.rejects(f.client().beginOAuthReconnect(old.accountRef,
+      { operationId: randomUUID(), expectedMetadataRevision: before.revision + 1 }), GatewayError);
+    assert.equal(f.stats().begins, begins);
+    f.state('prepared');
+    const operationId = randomUUID();
+    await f.client().beginOAuthReconnect(old.accountRef, { operationId, expectedMetadataRevision: before.revision });
+    const j = await f.store.readJournal(f.context, operationId); assert.ok(j);
+    assert.equal(await f.store.pendingOAuthRefresh(f.context, randomUUID(), selectors(j), oauthProfile), undefined);
+    await f.management().rename(f.context, { operationId: randomUUID(), accountRef: old.accountRef,
+      expectedRevision: before.revision, displayName: 'New metadata fences reconnect' });
+    assert.equal((await f.callback('oauth-owner-authority', selectors(j))).status, 403);
+    const callback = { operationId, ownerRef: owner, state: 'b'.repeat(64), code: 'synthetic-reconnect-code' };
+    assert.equal((await f.management().completeOAuth(f.context, callback)).state, 'unknown');
+    assert.equal(f.stats().begins, begins + 1); assert.equal((await f.kernel.account(f.context, old.accountRef)).epoch, before.epoch);
+    assert.equal((await f.client().readOAuth(operationId)).state, 'unknown');
+    await f.assertHealthy();
   } finally { await f.close(); }
 });
 

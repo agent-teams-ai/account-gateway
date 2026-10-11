@@ -689,6 +689,20 @@ export function createFacade(options: FacadeOptions): Server {
             accountRef: ref, expectedRevision: input.expectedMetadataRevision }))); return;
         }
         if (method === 'POST' && accountMatch[2] === 'reconnect') {
+          const profile = profiles.get(account.profile);
+          if (profile?.dto.authKinds[0] === 'oauth') {
+            const input = parse(c.oauthReconnect, strictJSON(await body(req, Math.min(ingressBytes, 16_384)), true));
+            identity = { operationRef: input.operationId };
+            if (!management.supportsOAuthProfile(account.profile) ||
+                (grant.role === 'management' && grant.preparation.profileId !== account.profile)) throw new KernelError('denied');
+            requireCurrent(grant); uncertain = true;
+            const result = await management.beginOAuthReconnect(context, { operationId: input.operationId,
+              accountRef: ref, expectedRevision: input.expectedMetadataRevision });
+            requireCurrent(grant);
+            reply(c.oauthBeginResponse, { operation: await operationDTO(context, result.operation),
+              ...(result.authorizationURL === undefined ? {} : { authorizationURL: result.authorizationURL }) },
+              result.operation.state === 'pending' ? 202 : 200); return;
+          }
           if (profiles.get(account.profile)?.dto.authKinds[0] !== 'api_key') throw new KernelError('denied');
           const input = parse(secretSubmission.reconnect, strictJSON(await body(req, ingressBytes), true)); identity = { operationRef: input.operationId };
           if (input.credential.kind !== 'api_key') throw new KernelError('invalid');

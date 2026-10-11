@@ -30,6 +30,8 @@ export const operation = z.discriminatedUnion('state', [
   (v.error.effect !== 'rejected_before_dispatch' || v.state === 'rejected')
 ));
 export const accountOperation = operation.refine(v => v.state !== 'applied' || v.result?.kind === 'account');
+/** Reconnect selectors are browser-safe; account owner/profile come from the server. */
+export const oauthReconnect = z.strictObject({ operationId: reference, expectedMetadataRevision: revision });
 /** Enrollment carries no credential, callback, model or provider-origin input. */
 export const oauthBegin = z.strictObject({ operationId: reference, ownerRef: reference,
   profileId: reference, displayName: z.string().min(1).max(128) });
@@ -93,6 +95,7 @@ export const admission = z.strictObject({ invocationRef: reference, attemptRef: 
 export type Profile = z.infer<typeof profile>;
 export type Account = z.infer<typeof account>;
 export type Operation = z.infer<typeof operation>;
+export type OAuthReconnect = z.infer<typeof oauthReconnect>;
 export type OAuthBegin = z.infer<typeof oauthBegin>;
 export type OAuthBeginResponse = z.infer<typeof oauthBeginResponse>;
 export type Execution = z.infer<typeof execution>;
