@@ -11,6 +11,7 @@ export const reconnect = z.strictObject({ operationId: c.reference, expectedMeta
 // Additive PKCE enrollment uses the v1 authority, never the historical raw
 // OAuth credential DTO above. That DTO does not implement a login flow.
 export const oauthBegin = c.oauthBegin;
+export const oauthReconnect = c.oauthReconnect;
 /** Sensitive callback ingress. Never retain this URL in account/operation data. */
 export const oauthCallbackState = z.string().regex(/^[0-9a-f]{64}$/);
 export const oauthCallbackCode = z.string().min(1).max(4096).refine(value =>

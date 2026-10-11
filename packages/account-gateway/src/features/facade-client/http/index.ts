@@ -163,6 +163,12 @@ function accountClient(settings: ManagementConfig | ConsumerControlConfig, role:
       return json('/v1/accounts/oauth/begin', c.oauthBeginResponse, 'POST', captured, options,
         { operationRef: captured.operationId });
     },
+    // One fresh sensitive POST; duplicate/readback cannot rebuild a Begin URL.
+    beginOAuthReconnect: (accountRef: string, input: c.OAuthReconnect, options?: CallOptions): Promise<c.OAuthBeginResponse> => {
+      const captured = valid(c.oauthReconnect, input);
+      return json(`/v1/accounts/${id(accountRef)}/reconnect`, c.oauthBeginResponse, 'POST', captured, options,
+        { operationRef: captured.operationId });
+    },
     // Sensitive POST only. Lost completion ACKs require ordinary readback.
     completeOAuth: (input: OAuthComplete, options?: CallOptions): Promise<c.Operation> => {
       const captured = valid(oauthComplete, input);
