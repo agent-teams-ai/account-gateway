@@ -13,18 +13,20 @@ streaming and static public Core/Assembly construction. Credentials are confined
 to the server-only HTTP secretSubmission seam; safe contracts contain none.
 One facade-client feature owns behavior. Bootstrap README and AGENTS are retained.
 
-Canonical commands (Node 24.21.0; pnpm 11.28.2):
+Canonical commands (default Node 26.11.1; compatibility Node 24.21.0; pnpm 11.28.2).
+Run in a job-owned external scratch copy with engine-strict enabled and scratch
+caches/TMPDIR. Results recorded below retain their original runtime and scope.
 
 ```sh
-pnpm install --frozen-lockfile
+pnpm --config.engine-strict=true install --frozen-lockfile
 pnpm build
 pnpm test
 pnpm foundation
 pnpm check:topology
 node node_modules/@agent-teams/engineering-foundation/dist/cli.js assert-dev-only --consumer . --json
 pnpm docs:check
-pnpm --dir packages/account-gateway pack --pack-destination /tmp/gateway-archive
-scripts/qualify-consumers.sh /tmp/gateway-archive/agent-teams-account-gateway-0.1.0.tgz /tmp/gateway-consumers
+pnpm --dir packages/account-gateway pack --pack-destination "$GATEWAY_SCRATCH/gateway-archive"
+scripts/qualify-consumers.sh "$GATEWAY_SCRATCH/gateway-archive/agent-teams-account-gateway-0.1.0.tgz" "$GATEWAY_SCRATCH/gateway-consumers"
 ```
 
 Producer attempt 2 results:

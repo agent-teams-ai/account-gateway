@@ -162,7 +162,7 @@ function completed(bytes: Buffer, expected: string): void {
 
 test('controlled actual Go/Node/PG: management birth, two claims, positive closure, SAME OPEN concurrency1', { timeout: 45000 }, async () => {
   if (process.env.AG_ASSEMBLY_ALLOW !== 'disposable_root_pg17_10' || process.platform !== 'linux' ||
-      process.getuid?.() !== 0 || process.version !== 'v24.21.0') fail('NOT_RUN pinned disposable root Linux runner required');
+      process.getuid?.() !== 0 || !['v26.11.1', 'v24.21.0'].includes(process.version)) fail('NOT_RUN pinned disposable root Linux runner required');
   const kernelDSN = dsn('AG_ASSEMBLY_KERNEL_DSN', 'ag_kernel_test_assembly_');
   const nativeDSN = dsn('AG_ASSEMBLY_NATIVE_DSN', 'native_bootstrap_assembly_');
   for (const path of [image, installation + '/tls/ca.pem', installation + '/tls/server.pem', installation + '/tls/server-key.pem'])

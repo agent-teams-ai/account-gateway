@@ -11,7 +11,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ['24.21.0', '26.10.0']
+        # Active default first; Node 24 remains a required compatibility lane.
+        node: ['26.11.1', '24.21.0']
     env:
       NPM_CONFIG_ENGINE_STRICT: 'true'
     steps:

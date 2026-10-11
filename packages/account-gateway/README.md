@@ -1,7 +1,8 @@
 # @agent-teams/account-gateway
 
-Private facade v1 SDK. Requires Node 24.21 and server-owned gateway origin and
-role credential. This package does not qualify Sub2API or implement a backend.
+Private facade v1 SDK. Uses Node 26.11.1 by default, with Node 24.21.0 compatibility,
+and requires a server-owned gateway origin and role credential. This package
+does not qualify Sub2API or implement a backend.
 
 Import safe schemas/types from `/contracts`, server clients from `/http` and
 optional static construction from `/get-modular`. Browser resolution of the
