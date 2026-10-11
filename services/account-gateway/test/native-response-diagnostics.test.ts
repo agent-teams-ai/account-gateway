@@ -9,6 +9,36 @@ function sink() {
   return { records, feed: nativeResponseDiagnostics(record => { records.push(record); }) };
 }
 
+// OAuth entry is spent on failure; the private operator needs its finite phase,
+// while tokens, provider text and identity metadata must remain excluded.
+test('native diagnostics retains closed OAuth phases and rejects private or misplaced fields', () => {
+  const f = sink(), expected: string[] = [];
+  const phases = ['exchange_transport', 'exchange_http_status', 'exchange_body_read',
+    'exchange_body_limit', 'exchange_json_shape', 'exchange_token_fields', 'exchange_scopes',
+    'exchange_bundle', 'stage_metadata', 'stage_identity', 'stage_custody', 'stage_conflict', 'stage_repository'];
+  for (const phase of phases) {
+    const record = JSON.stringify({ event: 'gateway_native_oauth_connect_failure', phase,
+      ...(phase === 'exchange_http_status' ? { http_status: 401 } : {}) });
+    for (const byte of Buffer.from(record + '\n')) f.feed(Buffer.from([byte]));
+    expected.push(record + '\n');
+    for (const key of ['message', 'token', 'account_ref', 'url', 'provider_error_category']) {
+      f.feed(Buffer.from(record.replace('}', ',"' + key + '":"SECRET_SENTINEL"}') + '\n'));
+    }
+    f.feed(Buffer.from(record.replace('}', ',"phase":"stage_identity"}') + '\n'));
+  }
+  for (const record of [
+    '{"event":"gateway_native_oauth_connect_failure","phase":"unknown"}',
+    '{"event":"gateway_native_oauth_connect_failure","phase":"exchange_transport","http_status":200}',
+    '{"event":"gateway_native_oauth_connect_failure","phase":"exchange_http_status"}',
+    ...['99', '600', '401.0', '"401"', 'null'].map(status =>
+      '{"event":"gateway_native_oauth_connect_failure","phase":"exchange_http_status","http_status":' + status + '}'),
+    '{"event":"gateway_native_oauth_connect_failure","phase":"stage_identity","\\u0070hase":"stage_custody"}',
+  ]) f.feed(Buffer.from(record + '\n'));
+  f.feed(Buffer.from(valid + '\n'));
+  expected.push(valid + '\n');
+  assert.deepEqual(f.records, expected);
+});
+
 // Previously all native stderr records were discarded, hiding response failures.
 test('native response diagnostics forwards chunked records once in canonical form', () => {
   const f = sink();

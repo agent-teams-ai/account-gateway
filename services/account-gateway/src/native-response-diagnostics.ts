@@ -5,6 +5,10 @@ const phases = new Set(['transport', 'invalid_response', 'http_status', 'body_re
   'invalid_final', 'invalid_content_type', 'sse_frame_limit', 'sse_invalid_frame', 'sse_invalid_event',
   'sse_provider_failure', 'sse_incomplete', 'sse_read', 'deadline', 'downstream_write', 'downstream_flush']);
 
+const oauthPhases = new Set(['exchange_transport', 'exchange_http_status', 'exchange_body_read',
+  'exchange_body_limit', 'exchange_json_shape', 'exchange_token_fields', 'exchange_scopes',
+  'exchange_bundle', 'stage_metadata', 'stage_identity', 'stage_custody', 'stage_conflict', 'stage_repository']);
+
 const readErrorReasons = new Set(['idle_expired', 'context_canceled', 'context_deadline',
   'unexpected_eof', 'body_after_close', 'connection_closed', 'transport_timeout', 'compression_error', 'other']);
 
@@ -37,23 +41,34 @@ export function nativeResponseDiagnostics(write: (record: string) => void): (chu
     try {
       const row = object(strictJSON(line, true), ['event', 'phase'],
         ['http_status', 'provider_error_category', 'provider_error_shape', 'provider_error_parameter', 'read_error_reason']);
-      if (row.event !== 'gateway_native_response_failure' || typeof row.phase !== 'string' || !phases.has(row.phase)) return;
-      const status = row.http_status;
-      if (Object.hasOwn(row, 'http_status') && (!Number.isSafeInteger(status) || (status as number) < 100 || (status as number) > 599)) return;
-      const category = row.provider_error_category;
-      if (Object.hasOwn(row, 'provider_error_category') && (typeof category !== 'string' || !providerErrorCategories.has(category))) return;
-      const shape = row.provider_error_shape;
-      if (Object.hasOwn(row, 'provider_error_shape') && (typeof shape !== 'string' || !providerErrorShapes.has(shape))) return;
-      const parameter = row.provider_error_parameter;
-      if (Object.hasOwn(row, 'provider_error_parameter') && (typeof parameter !== 'string' || !providerErrorParameters.has(parameter))) return;
-      const readReason = row.read_error_reason;
-      if (Object.hasOwn(row, 'read_error_reason') && (row.phase !== 'sse_read' || typeof readReason !== 'string' || !readErrorReasons.has(readReason))) return;
-      record = JSON.stringify({ event: 'gateway_native_response_failure', phase: row.phase,
-        ...(status === undefined ? {} : { http_status: status }),
-        ...(category === undefined ? {} : { provider_error_category: category }),
-        ...(shape === undefined ? {} : { provider_error_shape: shape }),
-        ...(parameter === undefined ? {} : { provider_error_parameter: parameter }),
-        ...(readReason === undefined ? {} : { read_error_reason: readReason }) }) + '\n';
+      if (row.event === 'gateway_native_oauth_connect_failure') {
+        object(row, ['event', 'phase'], ['http_status']);
+        if (typeof row.phase !== 'string' || !oauthPhases.has(row.phase)) return;
+        const status = row.http_status;
+        if (row.phase === 'exchange_http_status') {
+          if (!Number.isSafeInteger(status) || (status as number) < 100 || (status as number) > 599) return;
+        } else if (Object.hasOwn(row, 'http_status')) return;
+        record = JSON.stringify({ event: 'gateway_native_oauth_connect_failure', phase: row.phase,
+          ...(status === undefined ? {} : { http_status: status }) }) + '\n';
+      } else {
+        if (row.event !== 'gateway_native_response_failure' || typeof row.phase !== 'string' || !phases.has(row.phase)) return;
+        const status = row.http_status;
+        if (Object.hasOwn(row, 'http_status') && (!Number.isSafeInteger(status) || (status as number) < 100 || (status as number) > 599)) return;
+        const category = row.provider_error_category;
+        if (Object.hasOwn(row, 'provider_error_category') && (typeof category !== 'string' || !providerErrorCategories.has(category))) return;
+        const shape = row.provider_error_shape;
+        if (Object.hasOwn(row, 'provider_error_shape') && (typeof shape !== 'string' || !providerErrorShapes.has(shape))) return;
+        const parameter = row.provider_error_parameter;
+        if (Object.hasOwn(row, 'provider_error_parameter') && (typeof parameter !== 'string' || !providerErrorParameters.has(parameter))) return;
+        const readReason = row.read_error_reason;
+        if (Object.hasOwn(row, 'read_error_reason') && (row.phase !== 'sse_read' || typeof readReason !== 'string' || !readErrorReasons.has(readReason))) return;
+        record = JSON.stringify({ event: 'gateway_native_response_failure', phase: row.phase,
+          ...(status === undefined ? {} : { http_status: status }),
+          ...(category === undefined ? {} : { provider_error_category: category }),
+          ...(shape === undefined ? {} : { provider_error_shape: shape }),
+          ...(parameter === undefined ? {} : { provider_error_parameter: parameter }),
+          ...(readReason === undefined ? {} : { read_error_reason: readReason }) }) + '\n';
+      }
     } catch { return; }
     write(record);
   };
