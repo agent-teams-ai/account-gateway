@@ -211,6 +211,16 @@ async function sourceHTTP(oauth: boolean) {
       journals.set(scopeKey(s, s.operationId), j); return j;
     },
     readJournal: async (c, id) => journals.get(scopeKey(c, id)),
+    async pendingOAuthRefresh(c, w, input, source) {
+      const j = journals.get(scopeKey(c, input.operationId)), a = accounts.get(scopeKey(c, input.accountRef)),
+        op = operations.get(scopeKey(c, input.operationId));
+      if (!j || !a || !op || w !== worker || j.worker !== worker || j.consumerId !== input.consumerId ||
+          j.accountRef !== input.accountRef || j.generation !== input.generation || j.ownerRef !== a.ownerRef ||
+          j.profile.profile !== source.profile || j.profile.baseURL !== source.baseURL ||
+          j.profile.model !== source.model || j.profile.qualificationRef !== source.qualificationRef ||
+          op.state !== 'pending' || a.state !== 'staging' || mappings.has(scopeKey(c, j.generation))) return undefined;
+      return j;
+    },
     credential: async s => staged.get(scopeKey(s, s.operationId)), eraseIntent: async s => { staged.delete(scopeKey(s, s.operationId)); },
     saveMapping: async m => { mappings.set(scopeKey(m, m.generation), m); },
     mapping: async (c, id) => mappings.get(scopeKey(c, id)), cleanupAllowed: async () => false, expire: async () => [],
@@ -229,6 +239,13 @@ async function sourceHTTP(oauth: boolean) {
       const tuple = chunks.length ? strictJSON(Buffer.concat(chunks)) as Record<string, unknown> : {};
       const path = req.url!; seen.push({ path: req.method + ' ' + path, tuple });
       const reply = (body: unknown, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
+      if (path === '/private/native/v1/oauth/refresh') {
+        assert.equal(req.method, 'POST'); assert.equal(req.headers.authorization, 'Bearer ' + consumer.managementCredential);
+        const grant = await callback('oauth-refresh-authority', { consumerId, operationId: tuple.operation,
+          accountRef: tuple.account_ref, generation: tuple.generation });
+        if (grant.status !== 200) { reply({ code: 'denied' }, 403); return; }
+        reply({ operation: tuple.operation, account_ref: tuple.account_ref, state: 'idle' }); return;
+      }
       if (path.startsWith('/private/native/v1/oauth/connect')) {
         assert.equal(req.method, 'POST'); assert.equal(req.headers.authorization, 'Bearer ' + consumer.managementCredential);
         assert.deepEqual(Object.keys(tuple).sort(), path.endsWith('/complete') ?
@@ -439,7 +456,9 @@ test('source HTTP: owner lookup resolves two original pending journals, revocati
       assert.deepEqual(await r.json(), { ok: true, ownerRef: j.ownerRef });
       const before = f.seen.length, read = await f.publicCall('/v1/operations/' + j.operationId); assert.equal(read.status, 200);
       assert.equal((await read.json() as { state: string }).state, 'pending');
-      assert.deepEqual(f.seen.slice(before).map(s => s.tuple), Array(2).fill({ operation: j.operationId, owner_ref: j.ownerRef,
+      assert.deepEqual(f.seen.slice(before).map(s => s.path), ['POST /private/native/v1/oauth/connect/read',
+        'POST /private/native/v1/oauth/refresh', 'POST /private/native/v1/oauth/connect/descriptor']);
+      assert.deepEqual(f.seen.slice(before).map(s => s.tuple), Array(3).fill({ operation: j.operationId, owner_ref: j.ownerRef,
         account_ref: j.accountRef, generation: j.generation }));
     }
     for (const patch of [{ consumerId: 'foreign' }, { operationId: randomUUID() }, { operationId: js[1].operationId },
