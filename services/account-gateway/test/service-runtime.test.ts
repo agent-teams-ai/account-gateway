@@ -559,9 +559,12 @@ test('production service entry: startup rollback, SAME OPEN, abrupt held-stream 
       void (async () => {
         const entry = ++calls; let size = 0; const chunks: Buffer[] = [];
         for await (const chunk of req) { const b = Buffer.from(chunk as Uint8Array); size += b.length; ensure(size <= 4096, 'upstream body bound'); chunks.push(b); }
-        const body = object(strictJSON(Buffer.concat(chunks)), ['model','input','stream','store','service_tier','max_output_tokens']);
+        // Internal admission keeps default; the MiMo provider wire omits it and
+        // adds the trusted Responses lite protocol header.
+        const body = object(strictJSON(Buffer.concat(chunks)), ['model','input','stream','store','max_output_tokens']);
         ensure(entry <= 4 && req.method === 'POST' && req.url === '/v1/responses' && req.headers.authorization === 'Bearer ' + dummy &&
-          body.model === cfg.profile.model && body.stream === true && body.store === false && body.service_tier === 'default' &&
+          req.headers['x-openai-internal-codex-responses-lite'] === 'true' && !Object.hasOwn(body, 'service_tier') &&
+          body.model === cfg.profile.model && body.stream === true && body.store === false &&
           body.max_output_tokens === 32 && Array.isArray(body.input) && body.input.length === 1, 'qualified native Responses');
         const input = object((body.input as unknown[])[0], ['role','content']);
         ensure(input.role === 'user' && input.content === 'service question ' + entry, 'request identity');
