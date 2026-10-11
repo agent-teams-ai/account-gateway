@@ -169,6 +169,13 @@ test('source catalog: singleton compatibility and finite simultaneous per-profil
   const profiles = captureServiceProfiles({ profile, secondProfile });
   assert.deepEqual(profiles, [profile, secondProfile]);
   assert.ok(Object.isFrozen(profiles[1].limits));
+  for (const model of ['openai/gpt-5.4-mini', 'openai/gpt-5.4-nano']) {
+    const selected = { ...secondProfile, model };
+    assert.deepEqual(captureServiceProfiles({ profile, secondProfile: selected }), [profile, selected]);
+  }
+  assert.equal(openRouterProfile.model, 'openai/gpt-5.4-mini');
+  assert.throws(() => captureServiceProfiles({ profile, secondProfile: { ...secondProfile, model: 'unapproved-model' } }),
+    e => e instanceof ServiceError && e.code === 'config_denied');
   const grant = { token: 'source-management-catalog', role: 'management' as const, consumerId: 'source-consumer', ownerRefs: ['owner'],
     preparation: { accountRefs: [], subjectRef: 'subject', policyRevision: 1, bindingRevision: 1,
       profileId: secondProfile.profile, limits: secondProfile.limits, maxRunMs: 1000 } };

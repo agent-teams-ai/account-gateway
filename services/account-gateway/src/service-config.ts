@@ -113,7 +113,8 @@ export function captureServiceProfiles(input: Pick<ServiceConfig, 'profile' | 's
     const profiles = [first];
     if (input.secondProfile !== undefined) {
       const p = captureProfile(input.secondProfile);
-      if (p.profile !== openRouterProfile.profile || p.baseURL !== openRouterProfile.baseURL || p.model !== openRouterProfile.model) return deny();
+      if (p.profile !== openRouterProfile.profile || p.baseURL !== openRouterProfile.baseURL ||
+          (p.model !== openRouterProfile.model && p.model !== 'openai/gpt-5.4-nano')) return deny();
       profiles.push(p);
     }
     if (input.oauthEnrollment !== undefined) {
