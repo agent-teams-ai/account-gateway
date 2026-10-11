@@ -643,6 +643,23 @@ export function createFacade(options: FacadeOptions): Server {
           ...(result.authorizationURL === undefined ? {} : { authorizationURL: result.authorizationURL }) },
           result.operation.state === 'pending' ? 202 : 200); return;
       }
+      if (path === '/v1/accounts/oauth/complete' && method === 'POST') {
+        const input = parse(secretSubmission.oauthComplete, strictJSON(await body(req, 32_768), true));
+        identity = { operationRef: input.operationId };
+        const original = await kernel.operation(context, input.operationId);
+        if (!original.accountRef || original.executionRef) throw new KernelError('denied');
+        const account = await management.account(context, original.accountRef), profile = profiles.get(account.profile);
+        if (account.ownerRef !== input.ownerRef || !permitsOwner(grant, account.ownerRef) ||
+            !permitsProfile(grant, account.profile) || (grant.role === 'management' && grant.preparation.profileId !== account.profile) ||
+            !profile || profile.dto.authKinds[0] !== 'oauth' || !management.supportsOAuthProfile(account.profile)) throw new KernelError('denied');
+        const callback = secretSubmission.parseOAuthCallbackURL(input.callbackURL);
+        if (!callback) throw new KernelError('invalid');
+        requireCurrent(grant); uncertain = true;
+        const operation = await management.completeOAuth(context, { operationId: input.operationId, ownerRef: input.ownerRef, ...callback });
+        const dto = await operationDTO(context, operation);
+        requireCurrent(grant);
+        reply(c.accountOperation, dto, operation.state === 'pending' ? 202 : 200); return;
+      }
       if (path === '/v1/accounts' && method === 'POST') {
         const input = parse(secretSubmission.connect, strictJSON(await body(req, ingressBytes), true)); identity = { operationRef: input.operationId };
         if (!permitsOwner(grant, input.ownerRef) || !permitsProfile(grant, input.profileId) ||

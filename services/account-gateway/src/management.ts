@@ -48,6 +48,7 @@ export interface OAuthBeginReadback extends OAuthReadback {
 export interface OAuthEnrollmentNative {
   begin(scope: OAuthScope): Promise<OAuthBeginReadback>;
   read(scope: OAuthScope): Promise<OAuthReadback>;
+  complete(scope: OAuthScope, callback: OAuthCallback): Promise<OAuthReadback>;
 }
 export interface OAuthRefreshReadback {
   readonly operationId: string; readonly accountRef: string;
@@ -87,6 +88,8 @@ export interface OAuthEnrollmentOptions {
   readonly descriptor?: OAuthDescriptorBoundary;
   readonly lifecycle?: OAuthLifecycleNative;
 }
+export interface OAuthCallback { readonly state: string; readonly code: string }
+export interface OAuthCompleteInput extends OAuthCallback { readonly operationId: string; readonly ownerRef: string }
 export interface OAuthBeginInput {
   readonly operationId: string; readonly ownerRef: string;
   readonly profile: string; readonly displayName: string;
@@ -292,6 +295,44 @@ export class AccountManagement {
     } catch {
       return Object.freeze({ operation: await this.kernel.unknownCandidate(ctx, intent.operationId, this.worker) });
     }
+  }
+  async completeOAuth(context: TrustedContext, input: OAuthCompleteInput): Promise<OperationStatus> {
+    const ctx = captureContext(context), operationId = input.operationId, ownerRef = input.ownerRef;
+    const callback = { state: input.state, code: input.code };
+    identifier(operationId); identifier(ownerRef);
+    if (typeof callback.state !== 'string' || typeof callback.code !== 'string') throw new KernelError('invalid');
+    const operation = await this.kernel.operation(ctx, operationId);
+    const journal = await this.store.readJournal(ctx, operationId);
+    if (!this.oauth || !journal || journal.consumerId !== ctx.consumerId || journal.operationId !== operationId ||
+        journal.ownerRef !== ownerRef || journal.purpose !== 'create' || operation.accountRef !== journal.accountRef ||
+        operation.executionRef || journal.profile.profile !== this.oauth.profile.profile ||
+        journal.profile.baseURL !== this.oauth.profile.baseURL || journal.profile.model !== this.oauth.profile.model ||
+        journal.profile.qualificationRef !== this.oauth.profile.qualificationRef) throw new KernelError('denied');
+    const account = await this.kernel.account(ctx, journal.accountRef);
+    if (account.ownerRef !== ownerRef || account.profile !== journal.profile.profile) throw new KernelError('denied');
+    // Reuse only this immutable create journal. Reconciliation can permanently
+    // spend its authority; completion never creates or takes over a candidate.
+    await this.kernel.reconcile(ctx);
+    const current = await this.kernel.operation(ctx, operationId);
+    if (current.state !== 'pending' || journal.worker !== this.worker || account.state !== 'staging') return current;
+    const scope = oauthScope(journal);
+    let read: OAuthReadback;
+    try { read = await this.oauth.native.read(scope); }
+    catch { return this.kernel.unknownCandidate(ctx, operationId, journal.worker); }
+    if (!exactOAuthReadback(scope, read)) return this.kernel.unknownCandidate(ctx, operationId, journal.worker);
+    // Entered/completed/expired/unknown native intents are readback only. Native
+    // rechecks the live owner grant and performs the sole EnterConnect CAS.
+    if (read.state !== 'prepared') return this.oauthReadback(ctx, journal, read);
+    const fresh = await this.kernel.operation(ctx, operationId);
+    if (fresh.accountRef !== journal.accountRef || fresh.executionRef) throw new KernelError('denied');
+    if (fresh.state !== 'pending') return fresh;
+    let completed: OAuthReadback;
+    try { completed = await this.oauth.native.complete(scope, callback); }
+    catch { return this.kernel.unknownCandidate(ctx, operationId, journal.worker); }
+    // A lost/invalid ACK burns Gateway authority too; a later prepared read
+    // cannot cause an automatic replay of the sensitive completion body.
+    if (!exactOAuthReadback(scope, completed) || completed.state === 'prepared') return this.kernel.unknownCandidate(ctx, operationId, journal.worker);
+    return this.oauthReadback(ctx, journal, completed);
   }
   private async oauthReadback(ctx: TrustedContext, journal: CandidateJournal,
     begin?: OAuthReadback): Promise<OperationStatus> {

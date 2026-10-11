@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createManagementClient, secretSubmission } from '@agent-teams/account-gateway/http';
 import { strictJSON, validateResponses } from '../src/facade-ingress.ts';
 import { KernelError } from '../src/domain.ts';
 import type { AccountStatus, DurableKernel, ExecutionRead, NativeDispatchProof, OperationStatus, RequestStatus, SavedExecution } from '../src/domain.ts';
@@ -53,6 +54,28 @@ test('SDK control numeric tokens cannot round into an accepted integer authority
   const raw = bytes(JSON.stringify({ ...valid, temperature: 0.25, input: [{ user_value: 1.5 }] }));
   validateResponses(raw, ['fixture-model'], 100);
   assert.equal((strictJSON(raw) as { temperature: number }).temperature, 0.25);
+});
+
+// RED if browser URL normalization admits aliases or silently changes code,
+// or if UTF-8 byte bounds are replaced by JavaScript character counts.
+test('OAuth callback ingress accepts genuine encoding and rejects aliases, malformed bytes and secret overflow', () => {
+  const state = 'a'.repeat(64), callback = (code: string, scope = '') =>
+    'http://localhost:1455/auth/callback?code=' + code + '&state=' + state + scope;
+  const accepted = callback('fixture%2Bcode%2F%C3%A9', '&scope=openid+profile');
+  assert.deepEqual(secretSubmission.parseOAuthCallbackURL(accepted), { code: 'fixture+code/é', state });
+  assert.equal(secretSubmission.oauthCallbackURL.safeParse(callback('x'.repeat(4096))).success, true);
+  assert.equal(secretSubmission.oauthCallbackURL.safeParse(callback('x', '&scope=' + 's'.repeat(1024))).success, true);
+  for (const value of [accepted.replace('localhost:', '127.0.0.1:'), accepted.replace('localhost:', 'owner@localhost:'),
+    accepted.replace('/auth/callback?', '/auth/%63allback?'), accepted.replace('/auth/callback?', '/auth/../auth/callback?'),
+    accepted + '#', accepted + '&code=second', accepted + '&scope=second', accepted.replace('code=', '%63ode='),
+    accepted.replace('code=', 'Code='), accepted + '&extra=1', callback(''), callback('%20x'), callback('x%20'),
+    callback('%00x'), callback('%C2%85x'), callback('%FF'), callback('%'), callback('x'.repeat(4097)),
+    callback('é'.repeat(2049)), callback('x', '&scope=' + 'é'.repeat(513)),
+    callback('x').replace(state, state.toUpperCase()), callback('x').replace(state, 'a'.repeat(63)),
+    callback('%C3%A9'.repeat(1400)), 'http://localhost:1455/auth/callback?']) {
+    assert.equal(secretSubmission.oauthCallbackURL.safeParse(value).success, false);
+  }
+  assert.equal(secretSubmission.oauthComplete.safeParse({ operationId: 'original', ownerRef: 'owner-one', callbackURL: accepted, accountRef: randomUUID() }).success, false);
 });
 
 // Source boundary fixtures have test-owned committed state and real HTTP hops.
@@ -195,7 +218,8 @@ async function sourceHTTP(oauth: boolean) {
   const nativeRows = new Map<string, { descriptor: Record<string, unknown>; state: string }>();
   const seen: { path: string; tuple: Record<string, unknown> }[] = [], forwarded: Record<string, unknown>[] = [];
   const receipts = new Map<string, Record<string, unknown>>();
-  let callbackOrigin = '', begins = 0, bodyOwner: string | undefined, descriptorReply: unknown;
+  let callbackOrigin = '', begins = 0, completions = 0, loseCompletion = false, bodyOwner: string | undefined, descriptorReply: unknown;
+  let connectState: 'prepared' | 'entered' | 'completed' | 'expired' | 'unknown' = 'completed';
   let descriptorMode: 'normal' | 'redirect' | 'overflow' | 'headers' | 'utf8' | 'timeout' = 'normal';
   const callback = async (route: string, body: unknown, token = consumer.callbackCredential) => fetch(callbackOrigin + '/private/native/v1/' + route,
     { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify(body), redirect: 'manual' });
@@ -207,7 +231,8 @@ async function sourceHTTP(oauth: boolean) {
       const reply = (body: unknown, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
       if (path.startsWith('/private/native/v1/oauth/connect')) {
         assert.equal(req.method, 'POST'); assert.equal(req.headers.authorization, 'Bearer ' + consumer.managementCredential);
-        assert.deepEqual(Object.keys(tuple).sort(), ['account_ref','generation','operation','owner_ref']);
+        assert.deepEqual(Object.keys(tuple).sort(), path.endsWith('/complete') ?
+          ['account_ref','code','generation','operation','owner_ref','state'] : ['account_ref','generation','operation','owner_ref']);
         const grant = await callback('oauth-owner-authority', { consumerId, operationId: tuple.operation,
           accountRef: tuple.account_ref, generation: tuple.generation });
         if (grant.status !== 200) { reply({ code: 'denied' }, 403); return; }
@@ -222,7 +247,13 @@ async function sourceHTTP(oauth: boolean) {
           reply(descriptorReply ?? { operation: tuple.operation, account_ref: tuple.account_ref, state: 'staged', qualification: 'pending' }); return;
         }
         if (path === '/private/native/v1/oauth/connect') begins++;
-        reply({ operation: tuple.operation, account_ref: tuple.account_ref, state: 'completed' }); return;
+        if (path.endsWith('/complete')) {
+          assert.equal(tuple.state, 'a'.repeat(64));
+          completions++;
+          if (loseCompletion) { req.socket.destroy(); return; }
+          connectState = 'completed';
+        }
+        reply({ operation: tuple.operation, account_ref: tuple.account_ref, state: connectState }); return;
       }
       if (path === '/private/native/v1/candidates' && req.method === 'POST') {
         const p = [profile, secondProfile].find(p => p.profile === tuple.profile)!;
@@ -300,6 +331,7 @@ async function sourceHTTP(oauth: boolean) {
       ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   return { context, consumer, control, authority, cfg, kernel, store, journals, mappings, accounts, operations, executions, requests, executionCleanup,
     publicCall, callback, seen, forwarded, profile, secondProfile, begins: () => begins,
+    completions: () => completions, connect: (state: typeof connectState, lose = false) => { connectState = state; loseCompletion = lose; },
     owner: (value: string | undefined) => { bodyOwner = value; },
     descriptor: (value: unknown, mode: typeof descriptorMode = 'normal') => { descriptorReply = value; descriptorMode = mode; },
     close: closeServers,
@@ -444,6 +476,59 @@ test('source HTTP: owner lookup resolves two original pending journals, revocati
     f.control.bearers.replace([]);
     assert.equal((await f.callback('oauth-owner-authority', lookup(js[0]))).status, 403);
     await assert.rejects(fixed.begin(js[0])); assert.equal(f.begins(), 2);
+  } finally { await f.close(); }
+});
+
+// RED if completion switches owner/journal, repeats a spent handoff, reflects
+// callback material, or replays after a lost ACK while native still reads prepared.
+test('source HTTP: sensitive SDK completion pins original owner and journal, then becomes readback only', async () => {
+  const f = await sourceHTTP(true);
+  try {
+    f.connect('prepared');
+    const sdk = createManagementClient({ role: 'management', origin: f.facadeOrigin, token: 'source-public-management' });
+    const operationId = randomUUID(), state = 'a'.repeat(64), code = 'fixture+code/é' + 'x'.repeat(4081);
+    const begun = await sdk.beginOAuth({ operationId, ownerRef: 'owner-one', profileId: codexOAuthProfile.profile, displayName: 'Fixture' });
+    const j = f.journals.get(f.scopeKey(f.context, operationId))!;
+    const callbackURL = 'http://localhost:1455/auth/callback?code=' + encodeURIComponent(code) + '&state=' + state + '&scope=openid+profile';
+    const input = { operationId, ownerRef: 'owner-one', callbackURL };
+    const denied = await f.publicCall('/v1/accounts/oauth/complete', { ...input, ownerRef: 'owner-two' });
+    assert.equal(denied.status, 403); assert.equal(f.completions(), 0);
+    const malformed = await f.publicCall('/v1/accounts/oauth/complete', { ...input, callbackURL: callbackURL + '&code=second' });
+    assert.equal(malformed.status, 400); assert.equal(f.completions(), 0);
+    // Public completion has its own bound even with a 4096-byte inference cap.
+    assert.equal(Buffer.byteLength(code), 4096); assert.ok(Buffer.byteLength(JSON.stringify(input)) > 4096);
+    const oversized = await fetch(f.facadeOrigin + '/v1/accounts/oauth/complete', { method: 'POST',
+      headers: { authorization: 'Bearer source-public-management', 'content-type': 'application/json' },
+      body: JSON.stringify(input) + ' '.repeat(32_768) });
+    assert.equal(oversized.status, 400); assert.equal(f.completions(), 0);
+    await oversized.body?.cancel();
+    const completed = await sdk.completeOAuth(input);
+    assert.deepEqual(completed, begun.operation); assert.equal(f.completions(), 1); assert.equal(f.begins(), 1);
+    assert.deepEqual(f.seen.find(s => s.path === 'POST /private/native/v1/oauth/connect/complete')?.tuple,
+      { operation: operationId, owner_ref: j.ownerRef, account_ref: j.accountRef, generation: j.generation, state, code });
+    assert.equal(JSON.stringify(completed).includes(code), false); assert.equal(JSON.stringify(completed).includes(state), false);
+    assert.deepEqual(await sdk.completeOAuth(input), completed); assert.equal(f.completions(), 1);
+    f.connect('entered'); assert.deepEqual(await sdk.completeOAuth(input), completed); assert.equal(f.completions(), 1);
+    f.operations.get(f.scopeKey(f.context, operationId))!.state = 'unknown';
+    const before = f.seen.length;
+    const unknown = await sdk.completeOAuth(input);
+    assert.equal(unknown.state, 'unknown'); assert.equal(f.seen.length, before); assert.equal(f.completions(), 1);
+    const another = randomUUID(); f.connect('prepared', true);
+    await sdk.beginOAuth({ operationId: another, ownerRef: 'owner-one', profileId: codexOAuthProfile.profile, displayName: 'Lost ACK fixture' });
+    const lost = await sdk.completeOAuth({ ...input, operationId: another });
+    assert.equal(lost.state, 'unknown'); assert.equal(f.completions(), 2);
+    f.connect('prepared');
+    const spentReads = f.seen.length;
+    const replay = await sdk.completeOAuth({ ...input, operationId: another });
+    assert.equal(replay.operationRef, lost.operationRef);
+    assert.equal(replay.state, 'unknown');
+    assert.ok(replay.state === 'unknown');
+    assert.equal(replay.error?.effect, 'effect_unknown');
+    assert.equal(f.seen.length, spentReads); assert.equal(f.completions(), 2);
+    assert.equal(JSON.stringify([lost, await malformed.json(), await denied.json()]).includes(state), false);
+    assert.equal(JSON.stringify([...f.journals.values(), ...f.operations.values()]).includes(callbackURL), false);
+    f.control.bearers.replace([]);
+    assert.equal((await f.publicCall('/v1/accounts/oauth/complete', input)).status, 401); assert.equal(f.completions(), 2);
   } finally { await f.close(); }
 });
 
