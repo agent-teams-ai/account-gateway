@@ -10,6 +10,14 @@
   xhigh effort. Return patches/evidence; the orchestrator commits after checking
   author and committer are iliya <iliyazelenkog@gmail.com>.
 - Preserve others' changes. Use conventional branch prefixes and commits.
+- Use Node 26.11.1 as the active default and retain the required Node 24.21.0
+  compatibility lanes. Existing engine ranges accept both; dependency versions
+  and historical qualification receipts remain unchanged.
+- Node 26 does not bundle Corepack. For hosted qualification, invoke the existing
+  `/opt/nodejs/node-v24.21.0-linux-x64/lib/node_modules/corepack/dist/corepack.js`
+  with the selected Node executable and the pinned pnpm 11.28.2. Use a job-owned
+  nested pnpm shim, external scratch for dependencies/builds/caches/TMPDIR, and
+  frozen installs with engine-strict; never install globally or waive engines.
 - Add tests for observable behavior or an independent security/lifecycle
   contract with a plausible regression; no source-string or mock-only assertions.
 - No independent SDK paid retry, hidden failover or replay after an ambiguous

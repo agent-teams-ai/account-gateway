@@ -14,7 +14,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ['24.21.0', '26.10.0']
+        # Active default first; Node 24 remains a required compatibility lane.
+        node: ['26.11.1', '24.21.0']
     services:
       postgres:
         image: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
