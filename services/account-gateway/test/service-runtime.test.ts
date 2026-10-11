@@ -526,7 +526,7 @@ test('production service entry: startup rollback, SAME OPEN, abrupt held-stream 
     // replacing either result or authority. RED if refresh moves before cleanup
     // or receives false after any acquired claim, including old-incarnation work.
     const claimCleanup = PostgresKernel.prototype.claimCleanup, refreshOAuth = AccountManagement.prototype.refreshOAuth;
-    let acquiredThisTick: boolean | undefined, skippedRefreshTicks = 0, tickViolation = false;
+    let acquiredThisTick = false, skippedRefreshTicks = 0, tickViolation = false;
     PostgresKernel.prototype.claimCleanup = async function (this: PostgresKernel, ...args: Parameters<typeof claimCleanup>) {
       const claim = await claimCleanup.apply(this, args);
       if (args[0].consumerId === cfg.consumer.consumerId) acquiredThisTick = claim !== undefined;
@@ -535,9 +535,9 @@ test('production service entry: startup rollback, SAME OPEN, abrupt held-stream 
     AccountManagement.prototype.refreshOAuth = async function (this: AccountManagement, ...args: Parameters<typeof refreshOAuth>) {
       const result = await refreshOAuth.apply(this, args);
       if (args[0].consumerId === cfg.consumer.consumerId) {
-        if (acquiredThisTick === undefined || (args[1] ?? false) !== acquiredThisTick) tickViolation = true;
+        if ((args[1] ?? false) !== acquiredThisTick) tickViolation = true;
         if (acquiredThisTick) { skippedRefreshTicks++; if (result !== 'idle') tickViolation = true; }
-        acquiredThisTick = undefined;
+        acquiredThisTick = false;
       }
       return result;
     };
