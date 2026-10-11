@@ -11,7 +11,7 @@ import { IntentSecrets, PostgresManagementStore } from './management-store.ts';
 import { AccountManagement, exactCandidate, sameCandidate } from './management.ts';
 import type { CandidateJournal, CandidateNative, IntentCustody, ManagementStore, OAuthScope, OAuthCallback,
   OAuthCleanupAuthority, OAuthCleanupAction } from './management.ts';
-import type { DurableKernel, ExecutionRead } from './domain.ts';
+import type { DurableKernel, ExecutionRead, TrustedContext } from './domain.ts';
 import { codexOAuthProfile } from './management.ts';
 import { NativeManagementClient, NativeOAuthEnrollmentClient, NativeOAuthLifecycleClient } from './native-client.ts';
 import { NativeAuthority } from './native-authority.ts';
@@ -23,6 +23,18 @@ import { object } from './native-wire.ts';
 import { nativeResponseDiagnostics } from './native-response-diagnostics.ts';
 import { captureServiceBearers, captureServiceProfiles, loadServiceConfig, keyBytes, ServiceError } from './service-config.ts';
 import type { ServiceConfig } from './service-config.ts';
+
+// Cleanup gets the first turn. An acquired claim yields the next serial tick
+// to OAuth maintenance so a retained, uncloseable generation cannot starve it.
+export function composeServiceCleanupClaim(kernel: Pick<DurableKernel, 'claimCleanup'>, ctx: TrustedContext, worker: string) {
+  let refreshTurn = false;
+  return async () => {
+    if (refreshTurn) { refreshTurn = false; return undefined; }
+    const claim = await kernel.claimCleanup(ctx, worker);
+    refreshTurn = claim !== undefined;
+    return claim;
+  };
+}
 
 // Trusted composition only: AccountManagement reconstructs OAuthScope from its
 // committed original journal. Each call binds a fresh fixed-owner client; no
@@ -408,6 +420,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     controlFacade = createFacade({ ...options, controlOnly: true }); controlFacade.on('error', error => fail(error, 'control_error'));
     await listen(facade, cfg.facadeOrigin);
     startupActive();
+    const claimCleanup = composeServiceCleanupClaim(kernel, ctx, worker);
     async function tick(): Promise<void> {
         maintenancePhase = 'heartbeat';
         await kernel.heartbeat(ctx, worker);
@@ -416,7 +429,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
         await management.reconcile(ctx);
         if (stopping) return;
         maintenancePhase = 'cleanup_claim';
-        const claim = await kernel.claimCleanup(ctx, worker);
+        const claim = await claimCleanup();
         if (stopping) return; // An acquired lease remains outstanding until expiry.
         if (claim?.scope.kind === 'generation') {
           maintenancePhase = 'cleanup_generation';

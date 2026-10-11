@@ -25,6 +25,7 @@ import { createFacade, FacadeBearers } from '../src/facade.ts';
 import type { ManagementBearer } from '../src/facade.ts';
 import { captureOAuthEnrollmentConfig, ServiceError } from '../src/service-config.ts';
 import { NativeAuthority } from '../src/native-authority.ts';
+import * as serviceComposition from '../src/service.ts';
 
 // Reuse management-postgres's disposable guard and migration procedure. Its
 // helper is private to that suite; exporting it would widen the ten owned paths.
@@ -571,6 +572,42 @@ test('F cleanup authority preserves legacy unknown occupancy with no native proo
 // RED if selection spans HTTP/callback with the consumer lock, if failed A is
 // retried in the same tick, or if cursor advancement waits for a successful ACK.
 // Native F2's durable no-second-entry proof belongs to its existing real PG case.
+test('F maintenance: retained pending cleanup cannot starve another active OAuth account', async () => {
+  const f = await fixture({ descriptor: 'qualified' });
+  try {
+    const retired = await activeOAuth(f), active = await activeOAuth(f), manager = f.manager();
+    const account = await f.kernel.account(f.context, retired.accountRef);
+    await manager.disable(f.context, { operationId: randomUUID(), accountRef: retired.accountRef, expectedRevision: account.revision });
+    f.cleanupMode('unknown');
+    const requestsBefore = f.refreshRequests.length;
+    // The old source uses its original direct claim: RED is starvation of real
+    // committed selection/HTTP, not an absent adapter import.
+    const source = serviceComposition as Partial<typeof serviceComposition>;
+    const claimCleanup = source.composeServiceCleanupClaim?.(f.kernel, f.context, f.worker) ??
+      (() => f.kernel.claimCleanup(f.context, f.worker));
+    let cleanupTicks = 0;
+    for (let tick = 0; tick < 4; tick++) {
+      await f.kernel.heartbeat(f.context, f.worker);
+      const claim = await claimCleanup();
+      if (claim) {
+        assert.equal(claim.scope.kind, 'generation');
+        assert.equal(await manager.cleanupClaim(f.context, claim), 'quarantined');
+        cleanupTicks++;
+      }
+      const result = await manager.refreshOAuth(f.context, claim !== undefined);
+      if (claim) assert.equal(result, 'idle', 'cleanup claim retains priority and suppresses same-tick refresh');
+    }
+    assert.equal(cleanupTicks, 2, 'cleanup remains serviced while uncertainty is retained');
+    assert.deepEqual(f.refreshRequests.slice(requestsBefore), [wire(scope(active)), wire(scope(active))],
+      'eligible other account gets bounded canonical refresh opportunities');
+    assert.equal((await pool.query('SELECT state FROM ag_kernel.cleanup WHERE consumer=$1 AND generation=$2',
+      [f.context.consumerId, retired.generation])).rows[0].state, 'pending');
+    assert.equal((await f.kernel.account(f.context, retired.accountRef)).state, 'disabled', 'normal disable state is retained');
+    assert.equal((await f.kernel.account(f.context, active.accountRef)).state, 'active');
+    await f.assertHealthy();
+  } finally { await f.close(); }
+});
+
 test('F refresh: committed real journal/HTTP selection advances past dropped ACK and unknown A to B', async () => {
   const f = await fixture({ descriptor: 'qualified' });
   try {
