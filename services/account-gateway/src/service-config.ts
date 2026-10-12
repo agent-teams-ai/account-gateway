@@ -33,7 +33,7 @@ export interface ServiceConfig {
 export interface OAuthEnrollmentConfig {
   readonly enabled: true;
   readonly profile: 'openai-codex-oauth-responses-v1';
-  readonly modelScope: readonly ['gpt-6.1-sol'];
+  readonly modelScope: readonly ['gpt-5.6-sol'];
   readonly qualificationRef?: string;
   readonly limits?: Readonly<ApprovedLimits>;
   readonly providerTokenUpperBound?: number;
@@ -87,7 +87,7 @@ export function captureOAuthEnrollmentConfig(value: unknown): OAuthEnrollmentCon
     const qualified = supplied.length ? captureProfile({ ...codexOAuthProfile, qualificationRef: r.qualificationRef,
       limits: r.limits, providerTokenUpperBound: r.providerTokenUpperBound }) : undefined;
     return Object.freeze({ enabled: true, profile: 'openai-codex-oauth-responses-v1',
-      modelScope: Object.freeze(['gpt-6.1-sol'] as const), ...(qualified ? {
+      modelScope: Object.freeze(['gpt-5.6-sol'] as const), ...(qualified ? {
         qualificationRef: qualified.qualificationRef, limits: qualified.limits,
         providerTokenUpperBound: qualified.providerTokenUpperBound } : {}) });
   } catch { return deny(); }

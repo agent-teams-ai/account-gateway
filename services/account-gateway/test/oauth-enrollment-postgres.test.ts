@@ -493,6 +493,36 @@ test('F cleanup authority rereads an expired claim after the consumer lock wait'
   } finally { await gate.query('ROLLBACK'); gate.release(); await pending?.catch(() => undefined); await f.close(); }
 });
 
+// A retained prior-model birth remains cleanup-only; an unknown model cannot authorize erase.
+test('F cleanup authority erases exact historical model and denies foreign model', async () => {
+  for (const model of ['gpt-6.1-sol', 'unapproved-model']) {
+    const f = await fixture({ descriptor: 'qualified' });
+    try {
+      const command = input();
+      const operation = await f.kernel.beginAccount(f.context, { kind: 'create', ...command, intentDigest: randomUUID() });
+      assert.ok(operation.accountRef);
+      const permit = await f.kernel.startCandidate(f.context, command.operationId, f.worker); assert.ok(permit);
+      // Seed the retained prior-version fixture through the canonical immutable journal/mapping APIs.
+      const j = await f.store.journal({ consumerId: f.context.consumerId, operationId: command.operationId,
+        accountRef: operation.accountRef, ownerRef: owner, purpose: 'create' }, permit.candidate, f.worker, { ...oauthProfile, model });
+      await f.oauth.begin(scope(j));
+      const row = f.rows.get(j.generation); assert.ok(row);
+      const descriptor = { ...row, model }; f.rows.set(j.generation, descriptor);
+      await f.store.saveMapping({ ...j, descriptor });
+      await f.kernel.acknowledgeCandidate(f.context, j.operationId, f.worker,
+        { generation: j.generation, nativePhysicalIdentity: j.generation, profile: j.profile.profile });
+      const account = await f.kernel.account(f.context, j.accountRef);
+      await f.management().disable(f.context, { operationId: randomUUID(), accountRef: j.accountRef, expectedRevision: account.revision });
+      const claim = await f.kernel.claimCleanup(f.context, f.worker); assert.ok(claim?.scope.kind === 'generation');
+      assert.equal(claim.scope.generation, j.generation);
+      assert.equal(await f.management().cleanupClaim(f.context, claim), model === 'gpt-6.1-sol' ? 'erased' : 'quarantined');
+      assert.equal(f.cleanupRequests.filter(r => r.action === 'erase').length, model === 'gpt-6.1-sol' ? 1 : 0);
+      assert.equal(f.erased.has(j.generation), model === 'gpt-6.1-sol');
+      await f.assertHealthy();
+    } finally { await f.close(); }
+  }
+});
+
 // RED if current generation claim alone authorizes OAuth erasure while its exact
 // execution is occupied, or pending generation prevents that execution cleanup.
 test('F cleanup authority waits for exact occupied execution closure before erasure', async () => {
@@ -1271,16 +1301,16 @@ test('F source: invalid authorization authorities and query fields lose URL and 
 test('F source: fixed opt-in catalog and strict PKCE ingress cannot enable raw OAuth or dispatch', async () => {
   const f = await fixture(), command = input();
   try {
-    const cfg = captureOAuthEnrollmentConfig({ enabled: true, profile: oauthProfile.profile, modelScope: ['gpt-6.1-sol'] });
-    assert.deepEqual(cfg.modelScope, ['gpt-6.1-sol']); assert.equal(Object.isFrozen(cfg.modelScope), true);
-    for (const extra of [{ modelScope: ['gpt-6.1'] }, { modelScope: ['gpt-6.1-sol', 'gpt-6.1'] },
+    const cfg = captureOAuthEnrollmentConfig({ enabled: true, profile: oauthProfile.profile, modelScope: ['gpt-5.6-sol'] });
+    assert.deepEqual(cfg.modelScope, ['gpt-5.6-sol']); assert.equal(Object.isFrozen(cfg.modelScope), true);
+    for (const extra of [{ modelScope: ['gpt-6.1-sol'] }, { modelScope: ['gpt-6.1'] }, { modelScope: ['gpt-5.6-sol', 'gpt-6.1'] },
       { baseURL: 'https://fixture.invalid' }, { enabled: false }, { modelScope: [] }]) {
       assert.throws(() => captureOAuthEnrollmentConfig({ ...cfg, ...extra }),
         (e: unknown) => e instanceof ServiceError && e.code === 'config_denied');
     }
     const catalog = await f.client().profiles();
     assert.deepEqual(catalog.profiles.find(p => p.profileId === oauthProfile.profile), {
-      profileId: oauthProfile.profile, protocol: 'openai-responses', modelIds: ['gpt-6.1-sol'], authKinds: ['oauth'],
+      profileId: oauthProfile.profile, protocol: 'openai-responses', modelIds: ['gpt-5.6-sol'], authKinds: ['oauth'],
     });
     for (const extra of [{ model: 'other' }, { callback: 'https://fixture.invalid' },
       { accessToken: 'synthetic' }, { verifier: 'synthetic' }, { origin: 'https://fixture.invalid' }]) {

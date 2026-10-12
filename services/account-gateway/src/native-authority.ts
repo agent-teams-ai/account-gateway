@@ -5,7 +5,7 @@ import { approvedLimits, defaults, identifier, uuid } from './domain.ts';
 import type { ApprovedLimits, DurableKernel, ExecutionRead, NativeDispatchProof, SavedExecution, TrustedContext } from './domain.ts';
 import type { FacadeBearers, NativeCallback, NativeTransport } from './facade.ts';
 import type { ManagementStore } from './management.ts';
-import { codexOAuthProfile, exactCandidate, physicalCandidate } from './management.ts';
+import { codexOAuthProfile, codexOAuthCleanupModels, exactCandidate, physicalCandidate } from './management.ts';
 import { validateResponses } from './facade-ingress.ts';
 import { admission, binding, cleanup, config, denied, descriptor, instant, jsonBody, now, object,
   physicallyClosed, proof, receipt, sameAdmission, sameDescriptor, sameProof, saved, singleton } from './native-wire.ts';
@@ -198,7 +198,7 @@ export class NativeAuthority {
     if (!owned || owned.journal.consumerId !== ctx.consumerId || owned.journal.operationId !== r.operationId ||
         owned.journal.accountRef !== r.accountRef || owned.journal.generation !== r.generation ||
         owned.journal.profile.profile !== p.profile || owned.journal.profile.baseURL !== p.baseURL ||
-        owned.journal.profile.model !== p.model || owned.journal.profile.qualificationRef !== p.qualificationRef ||
+        !codexOAuthCleanupModels.includes(owned.journal.profile.model) || owned.journal.profile.qualificationRef !== p.qualificationRef ||
         instant(owned.leaseExpiresAt) <= now()) return denied();
     identifier(owned.journal.ownerRef);
     const native = owned.native && physicalCandidate(owned.native);

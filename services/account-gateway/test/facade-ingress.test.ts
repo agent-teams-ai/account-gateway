@@ -331,7 +331,7 @@ async function sourceHTTP(oauth: boolean) {
       profileIds: [profile.profile, secondProfile.profile], limits: secondProfile.limits, maxRunMs: 20_000 }];
   const cfg = { native: { executable: '/unused', sha256: 'unused', bootstrapFile: '/unused', authorityDir: '/unused', origin, originRef: enrollment.originRef, uid: 1, gid: 1 },
     consumer, profile, secondProfile, bearers, ...(oauth ? { oauthEnrollment: { enabled: true as const,
-      profile: 'openai-codex-oauth-responses-v1' as const, modelScope: ['gpt-6.1-sol'] as const,
+      profile: 'openai-codex-oauth-responses-v1' as const, modelScope: ['gpt-5.6-sol'] as const,
       qualificationRef: 'source-codex', limits, providerTokenUpperBound: 1000 } } : {}) };
   const closeServers = async () => { for (const s of servers.reverse()) {
     s.closeAllConnections(); await new Promise<void>(resolve => s.close(() => resolve())); } };
