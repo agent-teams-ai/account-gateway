@@ -225,6 +225,37 @@ test('native response diagnostics rejects raw, malformed, duplicate or misplaced
   assert.deepEqual(f.records, [record + '\n', valid + '\n']);
 });
 
+// Missing-media body observations are finite diagnostics; every record still
+// describes a rejected response and must not leak the inspected body.
+test('native response diagnostics retains body shapes only for missing media and rejects private extensions', () => {
+  const f = sink(), expected: string[] = [];
+  const missing = '{"event":"gateway_native_response_failure","phase":"invalid_content_type","http_status":200,"upstream_media_category":"missing"}';
+  for (const shape of ['empty', 'json', 'sse', 'html', 'other']) {
+    const record = missing.replace('}', ',"upstream_body_shape":"' + shape + '"}');
+    for (const byte of Buffer.from(record + '\n')) f.feed(Buffer.from([byte]));
+    expected.push(record + '\n');
+  }
+  const jsonError = missing.replace(',"upstream_media_category":"missing"}', ',"provider_error_category":"authentication_rejected","provider_error_shape":"flat_error_object","provider_error_parameter":"missing","upstream_media_category":"missing","upstream_body_shape":"json"}');
+  f.feed(Buffer.from(jsonError + '\n'));
+  expected.push(jsonError + '\n');
+  const record = missing.replace('}', ',"upstream_body_shape":"other"}');
+  const unsafe = [
+    ...['"SECRET_SENTINEL"', 'null', '1', 'true', '{}', '[]'].map(value => record.replace('"upstream_body_shape":"other"', '"upstream_body_shape":' + value)),
+    record.replace('invalid_content_type', 'http_status'),
+    record.replace('gateway_native_response_failure', 'gateway_native_oauth_connect_failure'),
+    record.replace('gateway_native_response_failure', 'gateway_native_codex_request_shape'),
+    ...['json', 'html', 'sse', 'other'].map(media => record.replace('"upstream_media_category":"missing"', '"upstream_media_category":"' + media + '"')),
+    record.replace(',"upstream_media_category":"missing"', ''),
+    record.replace('}', ',"upstream_body_shape":"html"}'),
+    record.replace('}', ',"\\u0075pstream_body_shape":"html"}'),
+    ...['body', 'message', 'url', 'token'].map(key => record.replace('}', ',"' + key + '":"SECRET_SENTINEL"}')),
+  ];
+  for (const line of unsafe) f.feed(Buffer.from(line + '\n'));
+  f.feed(Buffer.from(missing + '\n' + valid + '\n'));
+  expected.push(missing + '\n', valid + '\n');
+  assert.deepEqual(f.records, expected);
+});
+
 // Matches the actual protected native HTTP400 emission, through pipe chunking.
 test('native private Codex request shape reaches operator sink with scalar facts only', () => {
   const f = sink();
