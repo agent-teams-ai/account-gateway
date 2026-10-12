@@ -256,6 +256,17 @@ test('native response diagnostics retains body shapes only for missing media and
   assert.deepEqual(f.records, expected);
 });
 
+test('native response diagnostics retains finite missing-media prefixes and rejects raw or misplaced values', () => {
+  const f = sink();
+  const compressed = '{"event":"gateway_native_response_failure","phase":"invalid_content_type","http_status":200,"upstream_media_category":"missing","upstream_body_prefix":"gzip_prefix"}';
+  const truncated = '{"event":"gateway_native_response_failure","phase":"invalid_content_type","http_status":200,"provider_error_category":"body_limit","upstream_media_category":"missing","upstream_body_shape":"other","upstream_body_prefix":"json_prefix"}';
+  for (const byte of Buffer.from(compressed + '\n' + truncated + '\n')) f.feed(Buffer.from([byte]));
+  f.feed(Buffer.from(compressed.replace('gzip_prefix', 'SECRET_SENTINEL') + '\n'));
+  f.feed(Buffer.from(compressed.replace('"upstream_media_category":"missing"', '"upstream_media_category":"json"') + '\n'));
+  f.feed(Buffer.from(valid + '\n'));
+  assert.deepEqual(f.records, [compressed + '\n', truncated + '\n', valid + '\n']);
+});
+
 // Matches the actual protected native HTTP400 emission, through pipe chunking.
 test('native private Codex request shape reaches operator sink with scalar facts only', () => {
   const f = sink();

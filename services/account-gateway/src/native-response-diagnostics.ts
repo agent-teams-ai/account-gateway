@@ -13,6 +13,7 @@ const readErrorReasons = new Set(['idle_expired', 'context_canceled', 'context_d
   'unexpected_eof', 'body_after_close', 'connection_closed', 'transport_timeout', 'compression_error', 'other']);
 const upstreamMediaCategories = new Set(['missing', 'json', 'html', 'sse', 'other']);
 const upstreamBodyShapes = new Set(['empty', 'json', 'sse', 'html', 'other']);
+const upstreamBodyPrefixes = new Set(['json_prefix', 'sse_prefix', 'html_prefix', 'gzip_prefix', 'zstd_prefix', 'binary', 'text', 'empty']);
 
 const providerErrorCategories = new Set([
   'empty_error_body', 'sse_error_body', 'html_error_body', 'unhandled_error_encoding',
@@ -47,7 +48,7 @@ export function nativeResponseDiagnostics(write: (record: string) => void): (chu
     let record: string;
     try {
       const row = object(strictJSON(line, true), ['event'],
-        ['phase', 'http_status', 'provider_error_category', 'provider_error_shape', 'provider_error_parameter', 'read_error_reason', 'upstream_media_category', 'upstream_body_shape', ...shapeFields, 'unsupported_fields_present']);
+        ['phase', 'http_status', 'provider_error_category', 'provider_error_shape', 'provider_error_parameter', 'read_error_reason', 'upstream_media_category', 'upstream_body_shape', 'upstream_body_prefix', ...shapeFields, 'unsupported_fields_present']);
       if (row.event === 'gateway_native_codex_request_shape') {
         object(row, ['event', ...shapeFields, 'unsupported_fields_present']);
         const fields = object(row.unsupported_fields_present, unsupportedCodexFields);
@@ -59,7 +60,7 @@ export function nativeResponseDiagnostics(write: (record: string) => void): (chu
           instructions_string: row.instructions_string, instructions_nonblank: row.instructions_nonblank,
           unsupported_fields_present: Object.fromEntries(unsupportedCodexFields.map(key => [key, fields[key]])) }) + '\n';
       } else {
-        object(row, ['event', 'phase'], ['http_status', 'provider_error_category', 'provider_error_shape', 'provider_error_parameter', 'read_error_reason', 'upstream_media_category', 'upstream_body_shape']);
+        object(row, ['event', 'phase'], ['http_status', 'provider_error_category', 'provider_error_shape', 'provider_error_parameter', 'read_error_reason', 'upstream_media_category', 'upstream_body_shape', 'upstream_body_prefix']);
         if (row.event === 'gateway_native_oauth_connect_failure') {
           object(row, ['event', 'phase'], ['http_status']);
           if (typeof row.phase !== 'string' || !oauthPhases.has(row.phase)) return;
@@ -85,6 +86,8 @@ export function nativeResponseDiagnostics(write: (record: string) => void): (chu
           if (Object.hasOwn(row, 'upstream_media_category') && (row.phase !== 'invalid_content_type' || typeof mediaCategory !== 'string' || !upstreamMediaCategories.has(mediaCategory))) return;
           const bodyShape = row.upstream_body_shape;
           if (Object.hasOwn(row, 'upstream_body_shape') && (row.phase !== 'invalid_content_type' || mediaCategory !== 'missing' || typeof bodyShape !== 'string' || !upstreamBodyShapes.has(bodyShape))) return;
+          const bodyPrefix = row.upstream_body_prefix;
+          if (Object.hasOwn(row, 'upstream_body_prefix') && (row.phase !== 'invalid_content_type' || mediaCategory !== 'missing' || typeof bodyPrefix !== 'string' || !upstreamBodyPrefixes.has(bodyPrefix))) return;
           record = JSON.stringify({ event: 'gateway_native_response_failure', phase: row.phase,
             ...(status === undefined ? {} : { http_status: status }),
             ...(category === undefined ? {} : { provider_error_category: category }),
@@ -92,7 +95,8 @@ export function nativeResponseDiagnostics(write: (record: string) => void): (chu
             ...(parameter === undefined ? {} : { provider_error_parameter: parameter }),
             ...(readReason === undefined ? {} : { read_error_reason: readReason }),
             ...(mediaCategory === undefined ? {} : { upstream_media_category: mediaCategory }),
-            ...(bodyShape === undefined ? {} : { upstream_body_shape: bodyShape }) }) + '\n';
+            ...(bodyShape === undefined ? {} : { upstream_body_shape: bodyShape }),
+            ...(bodyPrefix === undefined ? {} : { upstream_body_prefix: bodyPrefix }) }) + '\n';
         }
       }
     } catch { return; }
