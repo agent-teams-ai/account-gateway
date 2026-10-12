@@ -3,7 +3,7 @@ import { request as httpsRequest } from 'node:https';
 import { KernelError, identifier, uuid } from './domain.ts';
 import { secretSubmission } from '@agent-teams/account-gateway/http';
 import { oauthAuthorizationURL } from '@agent-teams/account-gateway/contracts';
-import { codexOAuthProfile, exactCandidate, physicalCandidate } from './management.ts';
+import { codexOAuthProfile, codexOAuthCleanupModels, exactCandidate, physicalCandidate } from './management.ts';
 import type { CandidateJournal, CandidateMapping, CandidateNative, NativeReadback, PhysicalCandidate } from './management.ts';
 import type { OAuthScope, OAuthEnrollmentNative, OAuthReadback, OAuthBeginReadback, OAuthCallback } from './management.ts';
 import type { OAuthDescriptor, OAuthDescriptorBoundary } from './management.ts';
@@ -96,13 +96,14 @@ function wireDescriptor(d: PhysicalCandidate): object {
   return { account_id: d.nativeId,generation: d.generation,created_at: d.createdAt,
     profile: d.profile,base_url: d.baseURL,model: d.model };
 }
-function oauthPhysical(value: unknown, generation: string): PhysicalCandidate {
+function oauthPhysical(value: unknown, generation: string, cleanupOnly = false): PhysicalCandidate {
   const d = object(value, ['account_id','generation','created_at','profile','base_url','model']);
   const native = physicalCandidate({ nativeId: d.account_id as number, generation: d.generation as string,
     nativePhysicalIdentity: d.generation as string, createdAt: d.created_at as string,
     profile: d.profile as string, baseURL: d.base_url as string, model: d.model as string });
   if (native.generation !== generation || native.profile !== codexOAuthProfile.profile ||
-      native.baseURL !== codexOAuthProfile.baseURL || native.model !== codexOAuthProfile.model) throw new NativeFailure('invalid_readback');
+      native.baseURL !== codexOAuthProfile.baseURL ||
+      (cleanupOnly ? !codexOAuthCleanupModels.includes(native.model) : native.model !== codexOAuthProfile.model)) throw new NativeFailure('invalid_readback');
   return native;
 }
 export interface NativeManagementOptions {
@@ -340,7 +341,7 @@ export class NativeOAuthLifecycleClient extends NativeControlHTTP implements OAu
       const r = object(decode(bytes), ['operation','account_ref','credentials_erased','closure'], ['native']);
       if (r.operation !== scope.operationId || r.account_ref !== scope.accountRef || typeof r.credentials_erased !== 'boolean' ||
           !['pending','closed','unknown'].includes(r.closure as string) || r.closure === 'closed' && !r.credentials_erased) throw new NativeFailure('invalid_readback');
-      const native = Object.hasOwn(r, 'native') ? oauthPhysical(r.native, scope.generation) : undefined;
+      const native = Object.hasOwn(r, 'native') ? oauthPhysical(r.native, scope.generation, true) : undefined;
       return Object.freeze({ operationId: scope.operationId, accountRef: scope.accountRef,
         credentialsErased: r.credentials_erased, closure: r.closure as OAuthCleanupReadback['closure'], ...(native ? { native } : {}) });
     } catch { throw new NativeFailure('invalid_readback'); }

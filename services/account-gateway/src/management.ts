@@ -31,7 +31,9 @@ export interface CandidateNative {
 // Consumer-owned protected enrollment ports. No SDK/vendor DTOs or token data.
 // Catalog evidence pins intent; it is never an account qualification receipt.
 export const codexOAuthProfile = Object.freeze({ profile: 'openai-codex-oauth-responses-v1',
-  baseURL: 'https://chatgpt.com/backend-api/codex', model: 'gpt-6.1-sol' });
+  baseURL: 'https://chatgpt.com/backend-api/codex', model: 'gpt-5.6-sol' });
+// Historical models authorize exact claimed-generation cleanup only.
+export const codexOAuthCleanupModels: readonly string[] = Object.freeze([codexOAuthProfile.model, 'gpt-6.1-sol']);
 export interface OAuthScope {
   readonly consumerId: string; readonly operationId: string; readonly ownerRef: string;
   readonly accountRef: string; readonly generation: string;
@@ -629,7 +631,7 @@ export class AccountManagement {
     const journal = owned.journal, scope = oauthScope(journal);
     if (journal.consumerId !== ctx.consumerId || !['create','reconnect'].includes(journal.purpose) ||
         journal.profile.profile !== this.oauth.profile.profile || journal.profile.baseURL !== this.oauth.profile.baseURL ||
-        journal.profile.model !== this.oauth.profile.model || journal.profile.qualificationRef !== this.oauth.profile.qualificationRef) throw new KernelError('conflict');
+        !codexOAuthCleanupModels.includes(journal.profile.model) || journal.profile.qualificationRef !== this.oauth.profile.qualificationRef) throw new KernelError('conflict');
     const validate = (r: OAuthCleanupReadback): PhysicalCandidate | undefined => {
       if (r.operationId !== scope.operationId || r.accountRef !== scope.accountRef ||
           typeof r.credentialsErased !== 'boolean' || !['pending','closed','unknown'].includes(r.closure) ||
