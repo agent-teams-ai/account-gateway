@@ -188,3 +188,26 @@ test('native response diagnostics rejects malformed or misplaced SSE read reason
   f.feed(Buffer.from(record + '\n' + valid + '\n'));
   assert.deepEqual(f.records, [record + '\n', valid + '\n']);
 });
+
+// Matches the actual protected native HTTP400 emission, through pipe chunking.
+test('native private Codex request shape reaches operator sink with scalar facts only', () => {
+  const f = sink();
+  const fields = ['max_output_tokens', 'max_completion_tokens', 'temperature', 'top_p',
+    'frequency_penalty', 'presence_penalty', 'chat_template_kwargs', 'user', 'metadata',
+    'prompt_cache_retention', 'safety_identifier', 'stream_options', 'truncation', 'stop_sequences'];
+  const row = { event: 'gateway_native_codex_request_shape', canonical_object: true,
+    instructions_present: false, instructions_string: false, instructions_nonblank: false,
+    unsupported_fields_present: Object.fromEntries(fields.map(key => [key, false])) };
+  const record = JSON.stringify(row);
+  for (const byte of Buffer.from(record + '\n')) f.feed(Buffer.from([byte]));
+  for (const key of ['body', 'message', 'token', 'account_ref', 'model']) {
+    f.feed(Buffer.from(JSON.stringify({ ...row, [key]: 'SECRET_SENTINEL' }) + '\n'));
+    f.feed(Buffer.from(JSON.stringify({ ...row, unsupported_fields_present: { ...row.unsupported_fields_present, [key]: 'SECRET_SENTINEL' } }) + '\n'));
+  }
+  f.feed(Buffer.from(JSON.stringify({ ...row, instructions_present: 'SECRET_SENTINEL' }) + '\n'));
+  f.feed(Buffer.from(JSON.stringify({ ...row, instructions_nonblank: true }) + '\n'));
+  f.feed(Buffer.from(record.replace('"canonical_object":true', '"canonical_object":true,"canonical_object":false') + '\n'));
+  f.feed(Buffer.from(record.replace('"metadata":false', '"metadata":false,"metadata":true') + '\n'));
+  f.feed(Buffer.from(valid + '\n'));
+  assert.deepEqual(f.records, [record + '\n', valid + '\n']);
+});
