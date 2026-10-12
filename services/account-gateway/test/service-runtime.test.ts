@@ -244,11 +244,13 @@ test('source catalog: singleton compatibility and finite simultaneous per-profil
   denied(() => captureServiceBearers([{ ...run, profileIds: [profile.profile, profile.profile] }], run.consumerId, profiles));
   // Legacy opt-in capture stays valid, but startup needs its separate receipt
   // and all five limits; a singleton qualification is never substituted.
-  const oauthEnrollment = captureOAuthEnrollmentConfig({ enabled: true, profile: 'openai-codex-oauth-responses-v1', modelScope: ['gpt-6.1-sol'] });
+  const oauthEnrollment = captureOAuthEnrollmentConfig({ enabled: true, profile: 'openai-codex-oauth-responses-v1', modelScope: ['gpt-5.6-sol'] });
   denied(() => captureServiceProfiles({ profile, oauthEnrollment }));
   const catalog = captureServiceProfiles({ profile, secondProfile, oauthEnrollment: { ...oauthEnrollment,
     qualificationRef: 'source-codex', limits: secondProfile.limits, providerTokenUpperBound: 1000 } });
   assert.equal(catalog[2].profile, 'openai-codex-oauth-responses-v1');
+  assert.equal(catalog[2].model, 'gpt-5.6-sol');
+  denied(() => captureOAuthEnrollmentConfig({ ...oauthEnrollment, modelScope: ['gpt-6.1-sol'] }));
   assert.equal(catalog[2].baseURL, 'https://chatgpt.com/backend-api/codex');
   assert.equal(catalog[2].qualificationRef, 'source-codex');
 });

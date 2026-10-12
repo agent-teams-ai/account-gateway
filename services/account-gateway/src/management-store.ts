@@ -4,7 +4,7 @@ import { sharedCheckout } from './service-admission.ts';
 import type { Checkout } from './service-admission.ts';
 import { KernelError, identifier, uuid } from './domain.ts';
 import type { TrustedContext } from './domain.ts';
-import { captureContext, codexOAuthProfile, exactCandidate, physicalCandidate } from './management.ts';
+import { captureContext, codexOAuthProfile, codexOAuthCleanupModels, exactCandidate, physicalCandidate } from './management.ts';
 import type { AcceptedIntent, CandidateJournal, CandidateMapping, CandidateScope, IntentCustody,
   ManagedProfile, ManagementStore, OAuthSelectors, OAuthCleanupAuthority, OAuthCleanupAction, OAuthCleanupScope } from './management.ts';
 
@@ -343,7 +343,7 @@ export class PostgresManagementStore implements ManagementStore {
         JOIN ag_kernel.operations o ON o.consumer=j.consumer AND o.id=j.operation_id AND o.account_ref=j.account_ref
         LEFT JOIN ag_management.physical_mappings m ON m.consumer=j.consumer AND m.generation=j.generation
         WHERE l.consumer=$1 AND l.ref=$2 AND l.worker=$3 AND l.token=$4 AND l.state='claimed'
-          AND l.lease_until>clock_timestamp() AND j.profile=$5 AND j.base_url=$6 AND j.model=$7 AND j.qualification_ref=$8
+          AND l.lease_until>clock_timestamp() AND j.profile=$5 AND j.base_url=$6 AND j.model=ANY($7::text[]) AND j.qualification_ref=$8
           AND j.purpose IN ('create','reconnect') AND o.intent->>'kind'=j.purpose
           AND c.state IN ('ready','quarantined') AND o.state IN ('applied','unknown')
           AND ((j.purpose='create' AND o.intent->>'owner'=j.owner_ref AND o.intent->>'profile'=j.profile)
@@ -354,7 +354,7 @@ export class PostgresManagementStore implements ManagementStore {
           AND ($12::boolean=false OR NOT EXISTS (SELECT 1 FROM ag_kernel.requests r
             JOIN ag_kernel.executions e ON e.consumer=r.consumer AND e.ref=r.execution_ref
             WHERE r.consumer=l.consumer AND e.generation=l.generation AND r.transport_occupied))`,
-      [ctx.consumerId, authority.cleanupRef, worker, authority.cleanupToken, p.profile, p.baseURL, p.model, p.qualificationRef,
+      [ctx.consumerId, authority.cleanupRef, worker, authority.cleanupToken, p.profile, p.baseURL, codexOAuthCleanupModels, p.qualificationRef,
         s?.operationId ?? null, s?.accountRef ?? null, s?.generation ?? null, action === 'erase'])).rows[0];
       if (!r) return undefined;
       const journal = journalRow(r);
