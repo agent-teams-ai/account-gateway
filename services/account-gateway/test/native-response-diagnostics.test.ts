@@ -189,6 +189,42 @@ test('native response diagnostics rejects malformed or misplaced SSE read reason
   assert.deepEqual(f.records, [record + '\n', valid + '\n']);
 });
 
+// Red if the real native media classification is lost at the private pipe
+// boundary, or existing records become dependent on the optional addition.
+test('native response diagnostics retains closed media categories through split bytes and legacy records', () => {
+  const f = sink();
+  const legacy = '{"event":"gateway_native_response_failure","phase":"invalid_content_type","http_status":200}';
+  const expected = [legacy + '\n'];
+  f.feed(Buffer.from(legacy + '\n'));
+  for (const category of ['missing', 'json', 'html', 'sse', 'other']) {
+    const record = legacy.replace('}', ',"upstream_media_category":"' + category + '"}');
+    const reordered = '{"upstream_media_category":"' + category + '","http_status":200,"phase":"invalid_content_type","event":"gateway_native_response_failure"}';
+    for (const byte of Buffer.from(reordered + '\n')) f.feed(Buffer.from([byte]));
+    expected.push(record + '\n');
+  }
+  const jsonError = legacy.replace('}', ',"provider_error_category":"model_rejected","provider_error_shape":"flat_error_object","provider_error_parameter":"model","upstream_media_category":"json"}');
+  for (const byte of Buffer.from(jsonError + '\n')) f.feed(Buffer.from([byte]));
+  expected.push(jsonError + '\n');
+  assert.deepEqual(f.records, expected);
+});
+
+test('native response diagnostics rejects raw, malformed, duplicate or misplaced media and resumes', () => {
+  const f = sink();
+  const record = '{"event":"gateway_native_response_failure","phase":"invalid_content_type","http_status":200,"upstream_media_category":"html"}';
+  const unsafe = [
+    ...['"text/html; SECRET_SENTINEL"', '"html_SECRET_SENTINEL"', '"unknown"', 'null', '1', 'true', '{}', '[]'].map(value => record.replace('"html"', value)),
+    ...['http_status', 'deadline', 'sse_read', 'transport', 'body_read'].map(phase => record.replace('invalid_content_type', phase)),
+    record.replace('gateway_native_response_failure', 'gateway_native_oauth_connect_failure'),
+    record.replace('gateway_native_response_failure', 'gateway_native_codex_request_shape'),
+    record.replace('}', ',"upstream_media_category":"other"}'),
+    record.replace('}', ',"\\u0075pstream_media_category":"other"}'),
+    ...['body', 'content_type', 'url', 'token'].map(key => record.replace('}', ',"' + key + '":"SECRET_SENTINEL"}')),
+  ];
+  for (const line of unsafe) f.feed(Buffer.from(line + '\n'));
+  f.feed(Buffer.from(record + '\n' + valid + '\n'));
+  assert.deepEqual(f.records, [record + '\n', valid + '\n']);
+});
+
 // Matches the actual protected native HTTP400 emission, through pipe chunking.
 test('native private Codex request shape reaches operator sink with scalar facts only', () => {
   const f = sink();
