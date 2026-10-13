@@ -701,9 +701,10 @@ test('restore durably cleans every exact generation and repeated restores do not
   assert.equal(await count('SELECT count(*)::integer n FROM ag_kernel.cleanup WHERE consumer=$1', [ctx.consumerId]), 5);
   assert.equal((await b.operation(ctx, reconnect.operationRef)).state, 'unknown');
   assert.equal((await b.operation(ctx, inert.operationRef)).state, 'unknown');
-  const seen = new Set<string>(); let executionSeen = false;
+  const seen = new Set<string>(), jobs: CleanupClaim[] = []; let executionSeen = false;
   for (let n = 0; n < 5; n++) {
     const job = await b.claimCleanup(ctx, w); assert.ok(job);
+    jobs.push(job);
     if (job.scope.kind === 'generation') {
       const scope = job.scope, row = expected.get(scope.generation); assert.ok(row);
       assert.equal(seen.has(scope.generation), false); seen.add(scope.generation);
@@ -712,11 +713,20 @@ test('restore durably cleans every exact generation and repeated restores do not
         generation: row.generation, nativePhysicalIdentity: row.native_identity, profile: row.profile,
       });
       else assert.equal(scope.descriptor, undefined, 'unknown physical identity must remain absent');
+      if (row.state === 'ready') {
+        await assert.rejects(b.settleCleanup(ctx, job.cleanupRef, w, job.token, true), isCode('conflict'));
+      }
     } else {
       assert.equal(executionSeen, false); executionSeen = true;
       assert.equal(job.scope.executionRef, e.result.executionRef);
     }
-    await acknowledgeCleanupPage(ctx, b, job, w);
+  }
+  // UUID claim order cannot permit credential retirement ahead of a completed
+  // request's still-held transport. Close the complete execution page first.
+  assert.equal(await occupancy(ctx, account.accountRef!), 1);
+  for (const job of jobs) await acknowledgeCleanupPage(ctx, b, job, w);
+  assert.equal(await occupancy(ctx, account.accountRef!), 0);
+  for (const job of jobs) {
     await b.settleCleanup(ctx, job.cleanupRef, w, job.token, true);
     await a.settleCleanup(ctx, job.cleanupRef, w, job.token, true);
   }
