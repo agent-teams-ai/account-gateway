@@ -12,7 +12,10 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { dirname, join } from 'node:path';
 import pg from 'pg';
+import { createManagementClient, GatewayError } from '@agent-teams/account-gateway/http';
 import { PostgresKernel } from '../src/postgres.ts';
+import { KernelError } from '../src/domain.ts';
+import type { CleanupClaim } from '../src/domain.ts';
 import { AccountManagement, exactCandidate, sameCandidate } from '../src/management.ts';
 import { IntentSecrets, PostgresManagementStore } from '../src/management-store.ts';
 import { NativeManagementClient } from '../src/native-client.ts';
@@ -132,7 +135,7 @@ async function migrateKernel(pool: pg.Pool, database: string): Promise<void> {
   assert.equal((await pool.query("SELECT 1 FROM pg_namespace WHERE nspname IN ('ag_kernel','ag_management')")).rowCount, 0);
   const directory = new URL('../migrations/', import.meta.url);
   const files = (await readdir(directory)).filter(f => /^\d{3}_.*\.sql$/.test(f)).sort();
-  assert.equal(files.length, 4, 'use the selected complete numbered kernel migration set');
+  assert.equal(files.length, 6, 'use the selected complete numbered kernel migration set');
   for (const file of files) await pool.query(await readFile(new URL(file, directory), 'utf8'));
 }
 
@@ -160,7 +163,7 @@ function completed(bytes: Buffer, expected: string): void {
     object(usage.output_tokens_details).reasoning_tokens === 0, 'actual native Responses must preserve complete usage');
 }
 
-test('controlled actual Go/Node/PG: management birth, two claims, positive closure, SAME OPEN concurrency1', { timeout: 45000 }, async () => {
+test('controlled actual Go/Node/PG: management birth, held retirement, positive closure, SAME OPEN concurrency1', { timeout: 45000 }, async () => {
   if (process.env.AG_ASSEMBLY_ALLOW !== 'disposable_root_pg17_10' || process.platform !== 'linux' ||
       process.getuid?.() !== 0 || !['v26.11.1', 'v24.21.0'].includes(process.version)) fail('NOT_RUN pinned disposable root Linux runner required');
   const kernelDSN = dsn('AG_ASSEMBLY_KERNEL_DSN', 'ag_kernel_test_assembly_');
@@ -178,6 +181,8 @@ test('controlled actual Go/Node/PG: management birth, two claims, positive closu
   let parent: ReturnType<typeof launch> | undefined, retired = false, upstreamCalls = 0, upstreamInvalid = false;
   let callbackHandler: Server | undefined, install: (() => void) | undefined;
   const installed = new Promise<void>(resolve => { install = resolve; });
+  let holdRetirementACK = false, releaseRetirementACK: (() => void) | undefined;
+  const retirementACK = new Promise<void>(resolve => { releaseRetirementACK = resolve; });
   const callbacks = { enrollment: 0, admit: 0, closureAck: 0 };
   try {
     await migrateKernel(kernelPool, new URL(kernelDSN).pathname.slice(1));
@@ -191,8 +196,9 @@ test('controlled actual Go/Node/PG: management birth, two claims, positive closu
         const chunks: Buffer[] = []; let size = 0;
         for await (const chunk of req) { const b = Buffer.from(chunk as Uint8Array); size += b.length; if (size > 4096) fail('upstream request bound'); chunks.push(b); }
         const body = object(JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown);
-        if (entry > 2 || req.method !== 'POST' || req.url !== '/v1/responses' || req.headers.authorization !== 'Bearer ' + dummyKey ||
-            body.model !== model || body.stream !== true || body.store !== false || body.service_tier !== 'default' ||
+        if (entry > 3 || req.method !== 'POST' || req.url !== '/v1/responses' || req.headers.authorization !== 'Bearer ' + dummyKey ||
+            body.model !== model || body.stream !== true || body.store !== false || Object.hasOwn(body, 'service_tier') ||
+            req.headers['x-openai-internal-codex-responses-lite'] !== 'true' ||
             body.max_output_tokens !== limits.tokens || Object.hasOwn(body, 'previous_response_id') ||
             !Array.isArray(body.input) || body.input.length !== 1 || object(body.input[0]).role !== 'user' ||
             object(body.input[0]).content !== 'assembly question ' + entry) fail('controlled native Responses request');
@@ -209,6 +215,8 @@ test('controlled actual Go/Node/PG: management birth, two claims, positive closu
           JSON.stringify({ type, sequence_number: sequence++, ...fields }) + '\n\n';
         const pending = { ...response, status: 'in_progress', output: [], usage: null };
         res.write(frame('response.created', { response: pending }));
+        // Keep the third real Go upstream stream open until client cancellation.
+        if (entry === 3) return;
         res.write(frame('response.in_progress', { response: pending }));
         res.write(frame('response.output_item.added', { output_index: 0, item: { ...item, status: 'in_progress', content: [] } }));
         res.write(frame('response.content_part.added', { item_id: itemId, output_index: 0, content_index: 0, part: { ...part, text: '' } }));
@@ -234,7 +242,11 @@ test('controlled actual Go/Node/PG: management birth, two claims, positive closu
       });
       // Go enrolls after G but before R. Wait for the ACTUAL Start binding,
       // then hand the untouched request to the production authority handler.
-      void bounded(installed, 'binding installation').then(() => {
+      void bounded(installed, 'binding installation').then(async () => {
+        // Model a delayed durable ACK using the actual native HTTP request.
+        // No receipt is invented; the original authority validates it afterward.
+        if (route === '/private/native/v1/closure-ack' && holdRetirementACK)
+          await bounded(retirementACK, 'retirement ACK release');
         if (!callbackHandler) return fail('authority installation');
         callbackHandler.emit('request', req, res);
       }).catch(() => { if (!res.headersSent) res.writeHead(503); res.end(); });
@@ -317,8 +329,9 @@ test('controlled actual Go/Node/PG: management birth, two claims, positive closu
     assert.ok(prepared.executionRef);
     const saved = await kernel.savedExecution(context, prepared.executionRef);
     const bearer = token();
+    const bearers = new FacadeBearers([{ role: 'execution', consumerId, token: bearer, saved }]);
     const facade = createFacade({ kernel, management, store, transport: new NativeHTTPTransport(authority), enrollment: authority.configuration.enrollment,
-      bearers: new FacadeBearers([{ role: 'execution', consumerId, token: bearer, saved }]),
+      bearers,
       profiles: [{ dto: { profileId, protocol: 'openai-responses', modelIds: [model], authKinds: ['api_key'] }, maxOutputTokens: 100 }],
       intentHmacKey: randomBytes(32), timeoutMs: 5000 });
     servers.push(facade); const origin = 'http://127.0.0.1:' + await listen(facade);
@@ -331,7 +344,8 @@ test('controlled actual Go/Node/PG: management birth, two claims, positive closu
           'x-gateway-request-id': requestId, 'x-gateway-admission': JSON.stringify(publicAdmission) },
         body: JSON.stringify({ model, stream: true, store: false, service_tier: 'default', max_output_tokens: 32,
           input: [{ role: 'user', content: 'assembly question ' + i }] }), signal: AbortSignal.timeout(5000) });
-      assert.equal(response.status, 200);
+      assert.equal(response.status, 200, 'controlled upstream calls=' + upstreamCalls +
+        ' invalid=' + upstreamInvalid + ' native admits=' + callbacks.admit);
       const bytes = Buffer.from(await bounded(response.arrayBuffer(), 'Responses stream'));
       assert.ok(bytes.length <= limits.outputBytes); completed(bytes, 'assembly completion ' + i);
       assert.equal(upstreamInvalid, false); assert.equal(upstreamCalls, i);
@@ -370,6 +384,85 @@ test('controlled actual Go/Node/PG: management birth, two claims, positive closu
       AND NOT EXISTS(SELECT 1 FROM public.account_groups g WHERE g.account_id=a.id)) AS safe FROM public.accounts a`, [dummyKey])).rows[0].safe === true,
       'actual native ciphertext and group-free inert scheduling survive both requests');
     assert.equal((await nativePool.query('SELECT count(*)::int AS n FROM public.accounts')).rows[0].n, 1);
+
+    // One accepted held stream exercises the actual erasure/closure boundary.
+    const heldPreparation = await kernel.prepare(context, { operationId: randomUUID(), intentDigest: token(), invocationRef: randomUUID(),
+      attemptRef: 'retirement-attempt', permittedAccounts: [account.accountRef], profile: profileId, policySubject: 'assembly-binding',
+      policyRevision: 2, bindingRevision: 3, issuerEpoch: await kernel.issuer(context), deadline: new Date(Date.now() + 30000), limits });
+    assert.ok(heldPreparation.executionRef);
+    const heldSaved = await kernel.savedExecution(context, heldPreparation.executionRef);
+    const heldBearer = token(), controlBearer = token(), foreignBearer = token();
+    const preparation = { accountRefs: [account.accountRef], subjectRef: 'assembly-binding', policyRevision: 2,
+      bindingRevision: 3, profileId, limits, maxRunMs: 30000 };
+    bearers.replace([{ role: 'execution', consumerId, token: bearer, saved },
+      { role: 'execution', consumerId, token: heldBearer, saved: heldSaved },
+      { role: 'management', consumerId, token: controlBearer, ownerRefs: [ownerRef], preparation },
+      { role: 'management', consumerId, token: foreignBearer, ownerRefs: ['foreign-fixture-owner'],
+        preparation: { ...preparation, subjectRef: 'foreign-fixture-binding' } }]);
+    const control = createManagementClient({ role: 'management', origin, token: controlBearer, timeoutMs: 5000 });
+    const foreign = createManagementClient({ role: 'management', origin, token: foreignBearer, timeoutMs: 5000 });
+    const { executionRef: _heldRef, issuerEpoch: _heldIssuer, ...heldAdmission } = heldSaved.admission;
+    const heldId = randomUUID(); holdRetirementACK = true;
+    const heldResponse = await fetch(origin + '/v1/executions/' + heldSaved.admission.executionRef + '/requests', { method: 'POST',
+      headers: { authorization: 'Bearer ' + heldBearer, 'content-type': 'application/json', accept: 'text/event-stream',
+        'x-gateway-request-id': heldId, 'x-gateway-admission': JSON.stringify(heldAdmission) },
+      body: JSON.stringify({ model, stream: true, store: false, service_tier: 'default', max_output_tokens: 32,
+        input: [{ role: 'user', content: 'assembly question 3' }] }), signal: AbortSignal.timeout(5000) });
+    assert.equal(heldResponse.status, 200); assert.ok(heldResponse.body);
+    const heldReader = heldResponse.body.getReader();
+    assert.ok((await bounded(heldReader.read(), 'held first frame')).value?.byteLength);
+    const fenceId = randomUUID();
+    assert.equal((await control.fence({ operationId: fenceId, subjectRef: 'assembly-binding', revision: 2 })).state, 'applied');
+    assert.equal((await control.policyClosure(fenceId)).state, 'pending');
+    await assert.rejects(foreign.policyClosure(fenceId), error => error instanceof GatewayError && error.diagnostic?.code === 'forbidden');
+    const disableId = randomUUID();
+    assert.equal((await control.disable(account.accountRef, { operationId: disableId, expectedMetadataRevision: account.revision })).state, 'applied');
+    const pendingRetirement = await control.retirement(account.accountRef, disableId);
+    assert.equal(pendingRetirement.state, 'pending'); assert.equal(pendingRetirement.counts.occupiedTransports, 1);
+    await assert.rejects(foreign.retirement(account.accountRef, disableId), error =>
+      error instanceof GatewayError && error.diagnostic?.code === 'forbidden');
+    let generationCleanup: CleanupClaim | undefined;
+    for (let i = 0; i < 3; i++) {
+      const job = await kernel.claimCleanup(context, worker);
+      if (job?.scope.kind === 'generation') generationCleanup = job;
+    }
+    assert.ok(generationCleanup);
+    await assert.rejects(kernel.settleCleanup(context, generationCleanup.cleanupRef, worker, generationCleanup.token, true), error =>
+      error instanceof KernelError && error.code === 'conflict');
+    assert.equal(await management.cleanupClaim(context, generationCleanup), 'quarantined');
+    assert.ok((await nativePool.query(`SELECT deleted_at IS NULL AND public.gateway_native_envelope_valid(credentials->'api_key') AS retained
+      FROM public.accounts WHERE extra->>'gateway_generation_v1'=$1`, [journal.generation])).rows[0].retained === true,
+      'real native credential remains before durable closure ACK');
+    await heldReader.cancel(); releaseRetirementACK!();
+    const heldProof = await kernel.requestProof(context, heldSaved.admission.executionRef, heldId); assert.ok(heldProof);
+    let closed = false;
+    for (let i = 0; i < 50 && !closed; i++) {
+      const response = await fetch(nativeOrigin + '/private/native/v1/transports/read-owner', { method: 'POST',
+        headers: { authorization: 'Bearer ' + credentials.executionCredential, 'content-type': 'application/json' },
+        body: JSON.stringify({ proof: heldProof }), signal: AbortSignal.timeout(5000) });
+      assert.equal(response.status, 202);
+      const actual = receipt(await response.json() as unknown, consumerId, heldProof);
+      closed = physicallyClosed(actual) && actual.acknowledged;
+      if (!closed) await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.equal(closed, true, 'actual native ContextDone/forward return/body close and ACK required');
+    const closedPolicy = await control.policyClosure(fenceId);
+    assert.equal(closedPolicy.state, 'completed'); assert.equal(closedPolicy.closed, true);
+    assert.equal(closedPolicy.counts.acknowledgedNativeTransports, 3); assert.equal(closedPolicy.counts.unknownEffects, 1);
+    const freshCleanup = await kernel.claimCleanup(context, worker); assert.ok(freshCleanup?.scope.kind === 'generation');
+    assert.equal(await management.cleanupClaim(context, freshCleanup), 'erased');
+    const retiredAccount = await control.retirement(account.accountRef, disableId);
+    assert.equal(retiredAccount.state, 'completed'); assert.equal(retiredAccount.inert, true);
+    assert.equal(retiredAccount.counts.acknowledgedNativeTransports, 3); assert.equal(retiredAccount.counts.unknownEffects, 1);
+    assert.equal(retiredAccount.counts.settledNativeErasureGenerations, 1);
+    assert.ok((await nativePool.query(`SELECT deleted_at IS NOT NULL AND NOT (credentials ? 'api_key') AS erased
+      FROM public.accounts WHERE extra->>'gateway_generation_v1'=$1`, [journal.generation])).rows[0].erased === true,
+      'normal native erase leaves exact inert birth');
+    const heldStatus = await kernel.request(context, heldSaved.admission.executionRef, heldId);
+    assert.equal(heldStatus.effect, 'effect_unknown');
+    assert.equal((await kernelPool.query('SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
+      [consumerId, heldSaved.admission.executionRef])).rows[0].request_count, 1);
+    assert.equal(upstreamCalls, 3); assert.equal(upstreamInvalid, false);
     parent.stop();
     const retirement = await parent.next('retired');
     const teardown = object(retirement.receipt);
@@ -383,6 +476,7 @@ test('controlled actual Go/Node/PG: management birth, two claims, positive closu
     if (error instanceof assert.AssertionError || error instanceof FixtureFailure) throw error;
     fail('controlled joint contract failed');
   } finally {
+    releaseRetirementACK?.();
     parent?.stop();
     if (parent && !retired) await bounded(parent.exited, 'failed fixture exit');
     for (const server of servers.reverse()) await stop(server);

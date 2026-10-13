@@ -1,9 +1,17 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Pool, PoolClient } from 'pg';
-import { ServiceAdmission, sharedCheckout, inServiceLane } from '../src/service-admission.ts';
+import { ServiceAdmission, sharedCheckout, inServiceLane, facadeControlRoute } from '../src/service-admission.ts';
 
 const flush = async () => { await Promise.resolve(); await Promise.resolve(); };
+test('control-only drain retains account retirement readback', () => {
+  assert.equal(facadeControlRoute('GET', '/v1/accounts/account-a/retirement/operation-a'), true);
+  assert.equal(facadeControlRoute('POST', '/v1/accounts/account-a/retirement/operation-a'), false);
+  assert.equal(facadeControlRoute('GET', '/v1/accounts/account-a/retirement/operation-a/extra'), false);
+  assert.equal(facadeControlRoute('GET', '/v1/policy-fences/operation-a/closure'), true);
+  assert.equal(facadeControlRoute('POST', '/v1/policy-fences/operation-a/closure'), false);
+});
+
 function client(released: (error?: Error | boolean) => void): PoolClient {
   return { release: released } as PoolClient;
 }

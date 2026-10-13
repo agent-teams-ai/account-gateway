@@ -39,6 +39,24 @@ export interface AccountStatus {
   accountRef: string; ownerRef: string; profile: string; displayName: string;
   state: AccountState; revision: number; epoch: number;
 }
+export type AccountRetirementState = 'pending' | 'completed' | 'rejected';
+export interface AccountRetirementCounts {
+  retainedGenerations: number; settledNativeErasureGenerations: number;
+  retainedExecutions: number; openExecutions: number; requests: number;
+  occupiedTransports: number; acknowledgedNativeTransports: number;
+  positiveKernelNonEntryRequests: number; unknownEffects: number;
+}
+export interface AccountRetirementReadback {
+  operationRef: string; account: AccountStatus; state: AccountRetirementState;
+  fence: { metadataRevision: number; authorizationEpoch: number };
+  counts: AccountRetirementCounts; inert: boolean;
+}
+export type PolicyUseClosureCounts = Pick<AccountRetirementCounts, 'retainedExecutions' | 'openExecutions' | 'requests' |
+  'occupiedTransports' | 'acknowledgedNativeTransports' | 'positiveKernelNonEntryRequests' | 'unknownEffects'>;
+export interface PolicyUseClosureReadback {
+  operationRef: string; policySubject: string; policyRevision: number;
+  state: 'pending' | 'completed'; counts: PolicyUseClosureCounts; closed: boolean;
+}
 export interface AccountPageQuery {
   ownerRef?: string; cursor?: string; limit?: number;
   // Internal authority filter: at most 100 owners; an empty set selects no rows.

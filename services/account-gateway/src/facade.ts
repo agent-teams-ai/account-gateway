@@ -28,12 +28,13 @@ export interface PreparationPolicy {
   readonly limits: ApprovedLimits;
   readonly maxRunMs: number;
 }
-export interface ManagementBearer {
+export type ManagementBearer = {
   readonly token: string; readonly role: 'management'; readonly consumerId: string;
-  readonly ownerRefs: readonly string[]; readonly preparation: PreparationPolicy;
+  readonly preparation: PreparationPolicy;
   // Absent retains management access to every configured profile.
   readonly profileIds?: readonly string[];
-}
+} & ({ readonly ownerRefs: readonly string[]; readonly ownerScope?: never } |
+  { readonly ownerScope: 'consumer'; readonly ownerRefs?: never });
 export interface ExecutionBearer {
   readonly token: string; readonly role: 'execution'; readonly consumerId: string;
   // Supplied only by trusted backend composition from the persisted prepare.
@@ -54,12 +55,16 @@ export interface RunAccess {
 }
 export type ConfiguredBearer = ManagementBearer | ExecutionBearer | RunControlBearer | ConsumerControlBearer;
 type RunControlGrant = Omit<RunControlBearer, 'token'> | Omit<ConsumerControlBearer, 'token'>;
-type AccountGrant = Omit<ManagementBearer, 'token'> | Omit<ConsumerControlBearer, 'token'>;
-type Grant = Omit<ManagementBearer, 'token'> | Omit<ExecutionBearer, 'token'> | RunControlGrant;
+type WithoutToken<T> = T extends unknown ? Omit<T, 'token'> : never;
+type AccountGrant = WithoutToken<ManagementBearer> | Omit<ConsumerControlBearer, 'token'>;
+type Grant = WithoutToken<ManagementBearer> | Omit<ExecutionBearer, 'token'> | RunControlGrant;
 const permitsProfile = (grant: AccountGrant, profileId: string): boolean =>
   grant.profileIds === undefined || grant.profileIds.includes(profileId);
 const permitsOwner = (grant: AccountGrant, ownerRef: string): boolean =>
-  grant.role === 'consumer-control' || grant.ownerRefs.includes(ownerRef);
+  grant.role === 'consumer-control' || grant.ownerScope === 'consumer' || grant.ownerRefs!.includes(ownerRef);
+const permitsOAuthProfile = (grant: AccountGrant, profileId: string): boolean =>
+  permitsProfile(grant, profileId) && (grant.role !== 'management' ||
+    grant.ownerScope === 'consumer' || grant.preparation.profileId === profileId);
 function savedCopy(s: SavedExecution): SavedExecution {
   const a = s.admission;
   const wire = parse(c.admission, { invocationRef: a.invocationRef, attemptRef: a.attemptRef, accountRef: a.accountRef,
@@ -111,10 +116,14 @@ export class FacadeBearers {
           limits: Object.freeze(parse(c.limits, entry.limits)), maxRunMs: entry.maxRunMs });
       } else {
         const p = entry.preparation;
-        if (role !== 'management' || !entry.ownerRefs.length || entry.ownerRefs.length > 100 ||
+        const ownerScope = entry.ownerScope, suppliedOwners = entry.ownerRefs;
+        if (role !== 'management' ||
+            (ownerScope === 'consumer' ? Object.hasOwn(entry, 'ownerRefs') :
+              ownerScope !== undefined || Object.hasOwn(entry, 'ownerScope') || !Array.isArray(suppliedOwners) || !suppliedOwners.length || suppliedOwners.length > 100) ||
             p.accountRefs.length > 16 || !Number.isSafeInteger(p.maxRunMs) ||
             p.maxRunMs < 1 || p.maxRunMs > 3_600_000 || p.limits.concurrency > p.limits.requests) throw new KernelError('invalid');
-        entry.ownerRefs.forEach(value => parse(c.reference, value));
+        const ownerRefs = ownerScope === 'consumer' ? undefined : Array.from(suppliedOwners!);
+        ownerRefs?.forEach(value => parse(c.reference, value));
         p.accountRefs.forEach(uuid); parse(c.reference, p.subjectRef); parse(c.reference, p.profileId);
         parse(c.revision, p.policyRevision); parse(c.revision, p.bindingRevision);
         const suppliedProfileIds = entry.profileIds;
@@ -129,7 +138,7 @@ export class FacadeBearers {
         }
         grant = Object.freeze({ role: 'management', consumerId,
           ...(profileIds === undefined ? {} : { profileIds: Object.freeze(profileIds) }),
-          ownerRefs: Object.freeze([...entry.ownerRefs]), preparation: Object.freeze({ ...p,
+          ...(ownerScope === 'consumer' ? { ownerScope } : { ownerRefs: Object.freeze(ownerRefs!) }), preparation: Object.freeze({ ...p,
             accountRefs: Object.freeze([...p.accountRefs]), limits: Object.freeze(parse(c.limits, p.limits)) }) });
       }
       next.push({ hash, grant });
@@ -148,7 +157,7 @@ export class FacadeBearers {
   authorizesOwner(context: TrustedContext, ownerRef: string, profileId: string): boolean {
     return this.#entries.some(({ grant }) => grant.consumerId === context.consumerId &&
       (grant.role === 'consumer-control' ? grant.profileIds.includes(profileId) :
-        grant.role === 'management' && grant.ownerRefs.includes(ownerRef) && grant.preparation.profileId === profileId));
+        grant.role === 'management' && permitsOwner(grant, ownerRef) && permitsOAuthProfile(grant, profileId)));
   }
   // Synchronous CAS after SQL read: identical issuance retains its token and
   // original saved tuple. No neighboring grant is replaced or evicted.
@@ -236,6 +245,10 @@ function requestDTO(r: RequestStatus): c.RequestStatus {
 function accountDTO(a: Awaited<ReturnType<AccountManagement['account']>>): c.Account {
   return c.account.parse({ accountRef: a.accountRef, ownerRef: a.ownerRef, profileId: a.profile,
     displayName: a.displayName, state: a.state, metadataRevision: a.revision, authorizationEpoch: a.epoch });
+}
+function retirementDTO(r: Awaited<ReturnType<AccountManagement['retirement']>>): c.AccountRetirement {
+  return c.accountRetirement.parse({ operationRef: r.operationRef, account: accountDTO(r.account), state: r.state,
+    fence: r.fence, counts: r.counts, inert: r.inert });
 }
 const executionState = (state: SavedExecution['state']): c.Execution['state'] => state === 'open' ? 'active' : state === 'closed' ? 'terminal' : 'fenced';
 function singleton(req: IncomingMessage, name: string, required = true): string | undefined {
@@ -518,7 +531,8 @@ export function createFacade(options: FacadeOptions): Server {
         if (grant.role === 'execution' && op.executionRef !== grant.saved.admission.executionRef) throw new KernelError('denied');
         if (grant.role === 'management' && op.accountRef) {
           const account = await management.account(context, op.accountRef);
-          if (!grant.ownerRefs.includes(account.ownerRef)) throw new KernelError('denied');
+          if (!permitsOwner(grant, account.ownerRef) ||
+              ((op.state === 'pending' || op.state === 'unknown') && !permitsProfile(grant, account.profile))) throw new KernelError('denied');
         }
         if (grant.role === 'consumer-control') {
           if (op.accountRef && !grant.profileIds.includes((await management.account(context, op.accountRef)).profile)) throw new KernelError('denied');
@@ -527,9 +541,10 @@ export function createFacade(options: FacadeOptions): Server {
         // Check the owner BEFORE touching protected native readback. Reconcile
         // only the original journal; the ordinary response has no capability.
         requireCurrent(grant);
-        if (grant.role === 'management' || grant.role === 'consumer-control') op = await management.operation(context, identity.operationRef!);
+        if ((grant.role === 'management' || grant.role === 'consumer-control') &&
+            (op.state === 'pending' || op.state === 'unknown')) op = await management.operation(context, identity.operationRef!);
         const dto = await operationDTO(context, op);
-        if (grant.role === 'consumer-control') requireCurrent(grant);
+        if (grant.role === 'management' || grant.role === 'consumer-control') requireCurrent(grant);
         send(res, c.operation, dto); return;
       }
       if (match) {
@@ -605,7 +620,7 @@ export function createFacade(options: FacadeOptions): Server {
       }
       if (grant.role !== 'management' && grant.role !== 'consumer-control') throw new KernelError('denied');
       const reply = <T>(schema: Pick<Schema<T>, 'parse'>, value: T, status = 200): void => {
-        if (grant.role === 'consumer-control') requireCurrent(grant);
+        requireCurrent(grant);
         send(res, schema, value, status);
       };
       if (path === '/v1/profiles' && method === 'GET') {
@@ -620,10 +635,11 @@ export function createFacade(options: FacadeOptions): Server {
         // Own data properties preserve unknown names such as __proto__ for the
         // SDK strict schema; ordinary assignment could silently erase them.
         const input = parse(c.listQuery, Object.fromEntries(query));
-        if (grant.role === 'consumer-control' && !input.ownerRef) throw new KernelError('denied');
+        const consumerOwnerScope = grant.role === 'management' && grant.ownerScope === 'consumer';
+        if ((grant.role === 'consumer-control' || consumerOwnerScope) && !input.ownerRef) throw new KernelError('denied');
         if (input.ownerRef && !permitsOwner(grant, input.ownerRef)) throw new KernelError('denied');
         const page = await management.accounts(context, { ...input,
-          allowedOwnerRefs: grant.role === 'management' ? grant.ownerRefs : [input.ownerRef!] });
+          allowedOwnerRefs: grant.role === 'management' && !consumerOwnerScope ? grant.ownerRefs! : [input.ownerRef!] });
         reply(c.accounts, { accounts: page.accounts.filter(a => permitsProfile(grant, a.profile)).map(accountDTO),
           ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) }); return;
       }
@@ -632,7 +648,7 @@ export function createFacade(options: FacadeOptions): Server {
         const input = Object.freeze({ ...parsed }); identity = { operationRef: input.operationId };
         const profile = profiles.get(input.profileId);
         if (!permitsOwner(grant, input.ownerRef) || !permitsProfile(grant, input.profileId) ||
-            (grant.role === 'management' && grant.preparation.profileId !== input.profileId) || !profile || profile.dto.authKinds[0] !== 'oauth' ||
+            !permitsOAuthProfile(grant, input.profileId) || !profile || profile.dto.authKinds[0] !== 'oauth' ||
             !management.supportsOAuthProfile(input.profileId)) throw new KernelError('denied');
         requireCurrent(grant); uncertain = true;
         const result = await management.beginOAuth(context, { operationId: input.operationId, ownerRef: input.ownerRef,
@@ -650,7 +666,7 @@ export function createFacade(options: FacadeOptions): Server {
         if (!original.accountRef || original.executionRef) throw new KernelError('denied');
         const account = await management.account(context, original.accountRef), profile = profiles.get(account.profile);
         if (account.ownerRef !== input.ownerRef || !permitsOwner(grant, account.ownerRef) ||
-            !permitsProfile(grant, account.profile) || (grant.role === 'management' && grant.preparation.profileId !== account.profile) ||
+            !permitsOAuthProfile(grant, account.profile) ||
             !profile || profile.dto.authKinds[0] !== 'oauth' || !management.supportsOAuthProfile(account.profile)) throw new KernelError('denied');
         const callback = secretSubmission.parseOAuthCallbackURL(input.callbackURL);
         if (!callback) throw new KernelError('invalid');
@@ -669,6 +685,18 @@ export function createFacade(options: FacadeOptions): Server {
         const op = await management.create(context, { operationId: input.operationId, ownerRef: input.ownerRef,
           profile: input.profileId, displayName: input.displayName, apiKey: input.credential.value });
         reply(c.accountOperation, await operationDTO(context, op), op.state === 'pending' ? 202 : 200); return;
+      }
+      const retirementMatch = /^\/v1\/accounts\/([A-Za-z0-9_-]+)\/retirement\/([A-Za-z0-9_-]+)$/.exec(path);
+      if (retirementMatch) {
+        if (method !== 'GET') throw new KernelError('invalid');
+        const ref = parse(c.reference, retirementMatch[1]);
+        identity = { operationRef: parse(c.reference, retirementMatch[2]) };
+        const account = await management.account(context, ref);
+        if (!permitsOwner(grant, account.ownerRef) || !permitsProfile(grant, account.profile)) throw new KernelError('denied');
+        requireCurrent(grant);
+        const readback = await management.retirement(context, ref, identity.operationRef!);
+        requireCurrent(grant);
+        reply(c.accountRetirement, retirementDTO(readback)); return;
       }
       const accountMatch = /^\/v1\/accounts\/([A-Za-z0-9_-]+)(?:\/(reconnect|disable))?$/.exec(path);
       if (accountMatch) {
@@ -694,7 +722,7 @@ export function createFacade(options: FacadeOptions): Server {
             const input = parse(c.oauthReconnect, strictJSON(await body(req, Math.min(ingressBytes, 16_384)), true));
             identity = { operationRef: input.operationId };
             if (!management.supportsOAuthProfile(account.profile) ||
-                (grant.role === 'management' && grant.preparation.profileId !== account.profile)) throw new KernelError('denied');
+                !permitsOAuthProfile(grant, account.profile)) throw new KernelError('denied');
             requireCurrent(grant); uncertain = true;
             const result = await management.beginOAuthReconnect(context, { operationId: input.operationId,
               accountRef: ref, expectedRevision: input.expectedMetadataRevision });
@@ -724,7 +752,7 @@ export function createFacade(options: FacadeOptions): Server {
             (Object.keys(p.limits) as (keyof ApprovedLimits)[]).some(key => input.limits[key] > p.limits[key])) throw new KernelError('denied');
         for (const ref of input.accountRefs) {
           const a = await management.account(context, ref);
-          if (!grant.ownerRefs.includes(a.ownerRef) || a.profile !== p.profileId) throw new KernelError('denied');
+          if (!permitsOwner(grant, a.ownerRef) || a.profile !== p.profileId) throw new KernelError('denied');
         }
         const issuer = await kernel.issuer(context); requireCurrent(grant);
         const tuple = ['account-gateway/facade-prepare/v1', context.consumerId, input.invocationRef, input.attemptRef,
@@ -742,6 +770,16 @@ export function createFacade(options: FacadeOptions): Server {
         if (grant.role === 'management' && (input.subjectRef !== grant.preparation.subjectRef || input.revision < grant.preparation.policyRevision)) throw new KernelError('denied');
         requireCurrent(grant); uncertain = true;
         reply(c.acknowledgementOperation, await operationDTO(context, await kernel.fence(context, input.operationId, input.subjectRef, input.revision))); return;
+      }
+      const policyClosureMatch = /^\/v1\/policy-fences\/([A-Za-z0-9_-]+)\/closure$/.exec(path);
+      if (policyClosureMatch && method === 'GET') {
+        identity = { operationRef: parse(c.reference, policyClosureMatch[1]) };
+        requireCurrent(grant);
+        const readback = await management.policyClosure(context, identity.operationRef!);
+        if (grant.role === 'management' && (readback.policySubject !== grant.preparation.subjectRef ||
+            readback.policyRevision < grant.preparation.policyRevision)) throw new KernelError('denied');
+        requireCurrent(grant);
+        reply(c.policyUseClosure, readback); return;
       }
       throw new KernelError('invalid');
     })().catch(async error => {

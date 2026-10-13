@@ -26,6 +26,69 @@ const json = (res, body, status = 200) => { res.writeHead(status, { 'content-typ
 const read = async req => { const chunks = []; for await (const chunk of req) chunks.push(chunk); return Buffer.concat(chunks); };
 const rejects = (promise, code, effect) => assert.rejects(promise, error => error instanceof sdk.GatewayError && error.code === code && error.effect === effect && !JSON.stringify({ message: error.message, ...error }).includes('private-sentinel'));
 
+test('retirement readback binds identity and rejects contradictory closure counts', async t => {
+  const complete = { operationRef: 'disable-a', account: { ...account, state: 'disabled', metadataRevision: 3, authorizationEpoch: 2 },
+    state: 'completed', fence: { metadataRevision: 3, authorizationEpoch: 2 }, inert: true,
+    counts: { retainedGenerations: 2, settledNativeErasureGenerations: 2, retainedExecutions: 2, openExecutions: 0,
+      requests: 3, occupiedTransports: 0, acknowledgedNativeTransports: 2, positiveKernelNonEntryRequests: 1, unknownEffects: 1 } };
+  let reply = complete, missing = false, calls = 0;
+  const { management: m, execution: e, origin } = await fixture(t, (req, res) => {
+    calls++; assert.equal(req.method, 'GET'); assert.equal(req.url, '/v1/accounts/account-a/retirement/disable-a');
+    json(res, missing ? safe() : reply, missing ? 404 : 200);
+  });
+  assert.equal('retirement' in e, false);
+  assert.deepEqual(await m.retirement('account-a', 'disable-a'), complete);
+  const control = sdk.createConsumerControlClient({ origin, role: 'consumer-control', token: 'fixture-control' });
+  assert.deepEqual(await control.retirement('account-a', 'disable-a'), complete);
+  reply = { ...complete, state: 'pending', inert: false, counts: { retainedGenerations: 1, settledNativeErasureGenerations: 0,
+    retainedExecutions: 1, openExecutions: 0, requests: 1, occupiedTransports: 1,
+    acknowledgedNativeTransports: 0, positiveKernelNonEntryRequests: 1, unknownEffects: 0 } };
+  assert.deepEqual(await m.retirement('account-a', 'disable-a'), reply, 'non-entry does not release occupancy before closure ACK');
+  for (const counts of [
+    { requests: 1, acknowledgedNativeTransports: 0, positiveKernelNonEntryRequests: 1, unknownEffects: 1 },
+    { retainedGenerations: 0, settledNativeErasureGenerations: 0 },
+    { settledNativeErasureGenerations: 1 },
+  ]) {
+    reply = { ...complete, counts: { ...complete.counts, ...counts } };
+    await rejects(m.retirement('account-a', 'disable-a'), 'invalid_response', 'effect_unknown');
+  }
+  for (const counts of [{ occupiedTransports: 2 }, { unknownEffects: 3 }]) {
+    reply = { ...complete, state: 'pending', inert: false, counts: { ...complete.counts, ...counts } };
+    await rejects(m.retirement('account-a', 'disable-a'), 'invalid_response', 'effect_unknown');
+  }
+  for (const changed of [{ operationRef: 'other-operation' }, { account: { ...complete.account, accountRef: 'other-account' } },
+    { fence: { ...complete.fence, authorizationEpoch: 1 } }, { state: 'pending' }]) {
+    reply = { ...complete, ...changed };
+    await rejects(m.retirement('account-a', 'disable-a'), 'invalid_response', 'effect_unknown');
+  }
+  missing = true;
+  await rejects(m.retirement('account-a', 'disable-a'), 'safe_error', 'effect_unknown');
+  assert.equal(calls, 13, 'each read enters once; missing readback never retries');
+});
+
+test('policy-use closure reads only the original fence and preserves ambiguous absence', async t => {
+  const completed = { operationRef: 'fence-X',policySubject: 'binding-X',policyRevision: 3,state: 'completed',closed: true,
+    counts: { retainedExecutions: 1,openExecutions: 0,requests: 1,occupiedTransports: 0,
+      acknowledgedNativeTransports: 1,positiveKernelNonEntryRequests: 0,unknownEffects: 1 } };
+  let reply = completed, missing = false;
+  const { management: m, execution: e, origin } = await fixture(t,(req,res) => {
+    assert.equal(req.method,'GET'); assert.equal(req.url,'/v1/policy-fences/fence-X/closure');
+    json(res,missing ? safe() : reply,missing ? 404 : 200);
+  });
+  assert.equal('policyClosure' in e,false);
+  assert.deepEqual(await m.policyClosure('fence-X'),completed);
+  assert.deepEqual(await sdk.createConsumerControlClient({ origin,role: 'consumer-control',token: 'fixture-control' }).policyClosure('fence-X'),completed);
+  reply={ ...completed,state: 'pending',closed: false,counts: { retainedExecutions: 1,openExecutions: 0,requests: 1,
+    occupiedTransports: 1,acknowledgedNativeTransports: 0,positiveKernelNonEntryRequests: 1,unknownEffects: 0 } };
+  assert.deepEqual(await m.policyClosure('fence-X'),reply,'non-entry remains occupied until closure ACK');
+  reply={ ...completed,operationRef: 'other-fence' }; await rejects(m.policyClosure('fence-X'),'invalid_response','effect_unknown');
+  reply={ ...completed,counts: { ...completed.counts,positiveKernelNonEntryRequests: 1,acknowledgedNativeTransports: 0 } };
+  await rejects(m.policyClosure('fence-X'),'invalid_response','effect_unknown');
+  reply={ ...completed,counts: Object.fromEntries(Object.keys(completed.counts).map(k=>[k,0])) };
+  assert.deepEqual(await m.policyClosure('fence-X'),reply);
+  missing=true; await rejects(m.policyClosure('fence-X'),'safe_error','effect_unknown');
+});
+
 // Regression: an added route, changed CAS, or reserialized native payload breaks the actual HTTP boundary.
 test('all thirteen facade routes, exact native bytes and stable readback identities', async t => {
   const observed = [];

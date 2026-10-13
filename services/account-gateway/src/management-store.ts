@@ -315,9 +315,133 @@ export class PostgresManagementStore implements ManagementStore {
         AND j.worker=$3 AND j.token=$4 AND j.generation=$5 AND c.native_identity=$6 AND c.profile=$7
         AND j.state='claimed' AND j.lease_until>clock_timestamp() AND NOT EXISTS
           (SELECT 1 FROM ag_kernel.accounts a WHERE a.consumer=j.consumer
-            AND a.active_generation=j.generation AND a.state='active')`,
+            AND a.active_generation=j.generation AND a.state='active')
+        AND NOT EXISTS (SELECT 1 FROM ag_kernel.requests r
+          JOIN ag_kernel.executions e ON e.consumer=r.consumer AND e.ref=r.execution_ref
+          WHERE r.consumer=j.consumer AND e.generation=j.generation AND r.transport_occupied)`,
       [ctx.consumerId,cleanupRef,worker,token,generation,identity,profile]);
       return r.rowCount === 1;
+    });
+  }
+  async retirement(context: TrustedContext, accountRef: string, operationId: string) {
+    const ctx = captureContext(context); uuid(accountRef); identifier(operationId);
+    return this.tx(ctx.consumerId, async db => {
+      const operation = (await db.query<{
+        account_ref: string | null; state: string; revision: number | null; epoch: number | null;
+        intent_kind: string | null; intent_target: string | null;
+      }>(`SELECT account_ref,state,revision,epoch,intent->>'kind' AS intent_kind,
+          intent->>'target' AS intent_target FROM ag_kernel.operations WHERE consumer=$1 AND id=$2`,
+      [ctx.consumerId, operationId])).rows[0];
+      // Missing is unknown through AccountManagement, never positive absence.
+      if (!operation) return undefined;
+      const account = (await db.query<{
+        ref: string; owner_ref: string; profile: string; display_name: string;
+        state: 'staging' | 'active' | 'disabled' | 'quarantined'; revision: number; epoch: number;
+      }>(`SELECT ref,owner_ref,profile,display_name,state,revision,epoch FROM ag_kernel.accounts
+          WHERE consumer=$1 AND ref=$2 FOR UPDATE`, [ctx.consumerId, accountRef])).rows[0];
+      if (!account) throw new KernelError('conflict');
+      const original = operation.state === 'applied' && operation.intent_kind === 'disable' &&
+        operation.intent_target === accountRef && operation.account_ref === accountRef &&
+        Number.isSafeInteger(operation.revision) && Number.isSafeInteger(operation.epoch);
+      const metadataRevision = operation.revision, authorizationEpoch = operation.epoch;
+      if (!original || typeof metadataRevision !== 'number' || typeof authorizationEpoch !== 'number') throw new KernelError('conflict');
+      const row = (await db.query<{
+        retained_generations: number; settled_native_erasure_generations: number; unbound_generations: number;
+        retained_executions: number; open_executions: number; requests: number; occupied_transports: number;
+        acknowledged_native_transports: number; positive_kernel_non_entry_requests: number; unknown_effects: number;
+        outstanding_intents: number;
+      }>(`SELECT
+          (SELECT count(*)::integer FROM ag_kernel.candidates c WHERE c.consumer=$1 AND c.account_ref=$2) AS retained_generations,
+          (SELECT count(*)::integer FROM ag_kernel.candidates c WHERE c.consumer=$1 AND c.account_ref=$2
+            AND c.state='retired' AND EXISTS (SELECT 1 FROM ag_kernel.cleanup j WHERE j.consumer=c.consumer
+              AND j.generation=c.generation AND j.state='done')) AS settled_native_erasure_generations,
+          (SELECT count(*)::integer FROM ag_kernel.candidates c WHERE c.consumer=$1 AND c.account_ref=$2
+            AND NOT EXISTS (SELECT 1 FROM ag_management.candidate_journal j JOIN ag_management.physical_mappings m
+              ON m.consumer=j.consumer AND m.generation=j.generation
+              WHERE j.consumer=c.consumer AND j.generation=c.generation)) AS unbound_generations,
+          (SELECT count(*)::integer FROM ag_kernel.executions e WHERE e.consumer=$1 AND e.account_ref=$2) AS retained_executions,
+          (SELECT count(*)::integer FROM ag_kernel.executions e WHERE e.consumer=$1 AND e.account_ref=$2
+            AND e.state='open') AS open_executions,
+          (SELECT count(*)::integer FROM ag_kernel.requests r JOIN ag_kernel.executions e
+            ON e.consumer=r.consumer AND e.ref=r.execution_ref WHERE r.consumer=$1 AND e.account_ref=$2) AS requests,
+          (SELECT count(*)::integer FROM ag_kernel.requests r JOIN ag_kernel.executions e
+            ON e.consumer=r.consumer AND e.ref=r.execution_ref
+            WHERE r.consumer=$1 AND e.account_ref=$2 AND r.transport_occupied) AS occupied_transports,
+          (SELECT count(*)::integer FROM ag_kernel.requests r JOIN ag_kernel.executions e
+            ON e.consumer=r.consumer AND e.ref=r.execution_ref WHERE r.consumer=$1 AND e.account_ref=$2
+            AND r.effect NOT IN ('not_dispatched','rejected_before_dispatch')
+            AND NOT r.transport_occupied AND r.closure_token IS NOT NULL
+            AND r.native_origin_ref IS NOT NULL AND r.engine_incarnation IS NOT NULL
+            AND r.request_nonce IS NOT NULL AND r.descriptor_generation IS NOT NULL) AS acknowledged_native_transports,
+          (SELECT count(*)::integer FROM ag_kernel.requests r JOIN ag_kernel.executions e
+            ON e.consumer=r.consumer AND e.ref=r.execution_ref WHERE r.consumer=$1 AND e.account_ref=$2
+            AND r.effect IN ('not_dispatched','rejected_before_dispatch')) AS positive_kernel_non_entry_requests,
+          (SELECT count(*)::integer FROM ag_kernel.requests r JOIN ag_kernel.executions e
+            ON e.consumer=r.consumer AND e.ref=r.execution_ref
+            WHERE r.consumer=$1 AND e.account_ref=$2 AND r.effect='effect_unknown') AS unknown_effects,
+          (SELECT count(*)::integer FROM ag_management.transient_intents i WHERE i.consumer=$1
+            AND i.account_ref=$2 AND i.ciphertext IS NOT NULL) AS outstanding_intents`,
+      [ctx.consumerId, accountRef])).rows[0];
+      const counts = Object.freeze({
+        retainedGenerations: row.retained_generations, settledNativeErasureGenerations: row.settled_native_erasure_generations,
+        retainedExecutions: row.retained_executions, openExecutions: row.open_executions, requests: row.requests,
+        occupiedTransports: row.occupied_transports, acknowledgedNativeTransports: row.acknowledged_native_transports,
+        positiveKernelNonEntryRequests: row.positive_kernel_non_entry_requests, unknownEffects: row.unknown_effects,
+      });
+      const fence = Object.freeze({ metadataRevision, authorizationEpoch });
+      const dtoAccount = Object.freeze({ accountRef: account.ref, ownerRef: account.owner_ref, profile: account.profile,
+        displayName: account.display_name, state: account.state, revision: account.revision, epoch: account.epoch });
+      const snapshot = account.state === 'disabled' && account.revision === metadataRevision && account.epoch === authorizationEpoch;
+      const complete = snapshot && counts.retainedGenerations > 0 &&
+        counts.settledNativeErasureGenerations === counts.retainedGenerations &&
+        row.unbound_generations === 0 && counts.openExecutions === 0 && counts.occupiedTransports === 0 &&
+        counts.acknowledgedNativeTransports + counts.positiveKernelNonEntryRequests === counts.requests &&
+        row.outstanding_intents === 0;
+      return Object.freeze({ operationRef: operationId, account: dtoAccount,
+        state: !snapshot ? 'rejected' as const : complete ? 'completed' as const : 'pending' as const,
+        fence, counts, inert: complete });
+    });
+  }
+  async policyClosure(context: TrustedContext, operationId: string) {
+    const ctx = captureContext(context); identifier(operationId);
+    return this.tx(ctx.consumerId, async db => {
+      const op = (await db.query<{ state: string; kind: string; subject: string; revision: number }>(
+        `SELECT state,intent->>'kind' AS kind,intent->>'subject' AS subject,intent->'revision' AS revision
+          FROM ag_kernel.operations WHERE consumer=$1 AND id=$2`, [ctx.consumerId, operationId])).rows[0];
+      if (!op) return undefined;
+      if (op.state !== 'applied' || op.kind !== 'fence' || !Number.isSafeInteger(op.revision) || op.revision < 0)
+        throw new KernelError('conflict');
+      identifier(op.subject);
+      const current = (await db.query<{ revision: string }>(`SELECT revision::text FROM ag_kernel.policy_fences
+        WHERE consumer=$1 AND subject=$2`, [ctx.consumerId, op.subject])).rows[0];
+      if (!current || Number(current.revision) < op.revision) throw new KernelError('conflict');
+      // The original immutable fence chooses the whole cohort. No account,
+      // owner, execution list or caller-supplied policy selector can truncate it.
+      const counts = (await db.query<{
+        retainedExecutions: number; openExecutions: number; requests: number; occupiedTransports: number;
+        acknowledgedNativeTransports: number; positiveKernelNonEntryRequests: number; unknownEffects: number;
+      }>(`WITH chosen_executions AS (
+          SELECT ref,state FROM ag_kernel.executions
+          WHERE consumer=$1 AND policy_subject=$2 AND policy_revision<=$3
+        ), chosen_requests AS (
+          SELECT r.* FROM ag_kernel.requests r JOIN chosen_executions e ON e.ref=r.execution_ref WHERE r.consumer=$1
+        ) SELECT
+          (SELECT count(*)::integer FROM chosen_executions) AS "retainedExecutions",
+          (SELECT count(*)::integer FROM chosen_executions WHERE state='open') AS "openExecutions",
+          (SELECT count(*)::integer FROM chosen_requests) AS requests,
+          (SELECT count(*)::integer FROM chosen_requests WHERE transport_occupied) AS "occupiedTransports",
+          (SELECT count(*)::integer FROM chosen_requests WHERE effect NOT IN ('not_dispatched','rejected_before_dispatch')
+            AND NOT transport_occupied AND closure_token IS NOT NULL AND native_origin_ref IS NOT NULL
+            AND engine_incarnation IS NOT NULL AND request_nonce IS NOT NULL AND descriptor_generation IS NOT NULL) AS "acknowledgedNativeTransports",
+          (SELECT count(*)::integer FROM chosen_requests WHERE effect IN ('not_dispatched','rejected_before_dispatch')) AS "positiveKernelNonEntryRequests",
+          (SELECT count(*)::integer FROM chosen_requests WHERE effect='effect_unknown') AS "unknownEffects"`,
+      [ctx.consumerId, op.subject, op.revision])).rows[0];
+      const closed = counts.openExecutions === 0 && counts.occupiedTransports === 0 &&
+        counts.acknowledgedNativeTransports + counts.positiveKernelNonEntryRequests === counts.requests;
+      // Zero uses is positive only because the exact applied fence is known and
+      // this consumer lock excludes a concurrent accepted old-policy dispatch.
+      return Object.freeze({ operationRef: operationId, policySubject: op.subject, policyRevision: op.revision,
+        state: closed ? 'completed' as const : 'pending' as const, counts: Object.freeze(counts), closed });
     });
   }
   async oauthCleanup(context: TrustedContext, worker: string, input: OAuthCleanupAuthority,

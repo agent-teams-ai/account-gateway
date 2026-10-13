@@ -7,8 +7,8 @@ import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
 import { PostgresKernel } from '../src/postgres.ts';
-import { KernelError } from '../src/domain.ts';
-import type { TrustedContext, AccountIntent, OperationStatus } from '../src/domain.ts';
+import { KernelError, defaults } from '../src/domain.ts';
+import type { TrustedContext, AccountIntent, OperationStatus, CleanupClaim } from '../src/domain.ts';
 import { AccountManagement } from '../src/management.ts';
 import type { CandidateJournal, CandidateScope, CreateInput, NativeReadback } from '../src/management.ts';
 import { IntentSecrets, PostgresManagementStore } from '../src/management-store.ts';
@@ -452,8 +452,9 @@ test('B3a cleanup compares the complete mapped descriptor and refuses stale nati
   }
 });
 
-// Regression: encrypted-intent cleanup must not release a held kernel transport or refund its accepted effect/request allowance.
-test('B3a generation erasure never frees occupied transport or changes accepted effect', async () => {
+// Regression: provider occupancy must block both adapter erase and trusted
+// settlement until the exact native closure ACK; all reconnect ages then retire.
+test('B3a held native transport defers complete generation retirement until exact closure', async () => {
   const context = ctx(),command = input(),f = await fixture(context);
   try {
     const created = await f.manager.create(context,command),account = await f.manager.account(context,created.accountRef!);
@@ -471,24 +472,113 @@ test('B3a generation erasure never frees occupied transport or changes accepted 
     assert.ok(claim.dispatch);
     await kernel.effect(context,prepared.executionRef,'held-request',f.worker,'response_started');
     await kernel.effect(context,prepared.executionRef,'held-request',f.worker,'completed');
-    await f.manager.disable(context,{ operationId: randomUUID(),accountRef: account.accountRef,expectedRevision: account.revision });
-    // Claim both kernel-owned scopes under the same live worker, then dispatch
-    // only the generation job to the adapter; transport work belongs to B3.
-    const jobs = [await kernel.claimCleanup(context,f.worker),await kernel.claimCleanup(context,f.worker)];
-    const generation = jobs.find(j => j?.scope.kind === 'generation'); assert.ok(generation);
-    assert.equal(await f.manager.cleanupClaim(context,generation),'erased'); assert.equal(f.erases(),1);
-    const execution = jobs.find(j => j?.scope.kind === 'execution'); assert.ok(execution);
-    assert.equal(await f.manager.cleanupClaim(context,execution),'transport_pending');
-    const held = (await pool.query(`SELECT transport_occupied,effect FROM ag_kernel.requests
-      WHERE consumer=$1 AND execution_ref=$2 AND id='held-request'`,[context.consumerId,prepared.executionRef])).rows[0];
-    assert.deepEqual(held,{ transport_occupied: true,effect: 'completed' });
+    // Reconnect retains the original generation as an older cleanup target.
+    await f.manager.reconnect(context,{ operationId: randomUUID(),accountRef: account.accountRef,
+      expectedRevision: account.revision,apiKey: 'fixture-key-' + randomUUID() });
+    const reconnected = await f.manager.account(context,account.accountRef);
+    const disabled = await f.manager.disable(context,{ operationId: randomUUID(),accountRef: account.accountRef,
+      expectedRevision: reconnected.revision });
+    assert.equal(disabled.state,'applied');
+
+    // Wrong owner/account operation and a missing operation are never positive
+    // completed readback. The former is a safe conflict; missing remains unknown.
+    const other = input(); other.ownerRef = 'other-workspace-fixture';
+    const otherOperation = await f.manager.create(context,other); assert.ok(otherOperation.accountRef);
+    await assert.rejects(f.manager.retirement(context,account.accountRef,otherOperation.operationRef),isCode('conflict'));
+    await assert.rejects(f.manager.retirement(context,account.accountRef,randomUUID()),isCode('unknown'));
+
+    const pending = await f.manager.retirement(context,account.accountRef,disabled.operationRef);
+    assert.equal(pending.state,'pending'); assert.equal(pending.inert,false);
+    assert.deepEqual(pending.counts,{ retainedGenerations: 2,settledNativeErasureGenerations: 0,
+      retainedExecutions: 1,openExecutions: 0,requests: 1,occupiedTransports: 1,acknowledgedNativeTransports: 0,
+      positiveKernelNonEntryRequests: 0,unknownEffects: 0 });
+    assert.deepEqual(pending.fence,{ metadataRevision: reconnected.revision + 1,authorizationEpoch: reconnected.epoch + 1 });
+
+    const jobs: CleanupClaim[] = [];
+    for (let i = 0; i < 4; i++) {
+      const job = await kernel.claimCleanup(context,f.worker);
+      if (!job) break;
+      if (job.scope.kind === 'generation') jobs.push(job); else assert.equal(await f.manager.cleanupClaim(context,job),'transport_pending');
+    }
+    assert.equal(jobs.length,2,'both retained reconnect generations have cleanup work');
+    const heldGeneration = jobs.find(j => j.scope.kind === 'generation' && j.scope.generation === claim.dispatch!.closure.native.generation);
+    const otherGeneration = jobs.find(j => j !== heldGeneration); assert.ok(heldGeneration && otherGeneration);
+    await assert.rejects(kernel.settleCleanup(context,heldGeneration.cleanupRef,f.worker,heldGeneration.token,true),isCode('conflict'));
+    assert.equal(await f.manager.cleanupClaim(context,heldGeneration),'quarantined'); assert.equal(f.erases(),0);
+    assert.deepEqual((await pool.query(`SELECT transport_occupied,effect FROM ag_kernel.requests
+      WHERE consumer=$1 AND execution_ref=$2 AND id='held-request'`,[context.consumerId,prepared.executionRef])).rows[0],
+      { transport_occupied: true,effect: 'completed' });
+
+    await kernel.acknowledgeTransportClosed(context,f.worker,claim.dispatch!.closure);
+    const fresh = await kernel.claimCleanup(context,f.worker); assert.ok(fresh && fresh.scope.kind === 'generation');
+    assert.equal(await f.manager.cleanupClaim(context,fresh),'erased');
+    assert.equal(await f.manager.cleanupClaim(context,otherGeneration),'erased');
+    assert.equal(f.erases(),2); assert.equal(f.providerCalls(),0);
+    const completed = await f.manager.retirement(context,account.accountRef,disabled.operationRef);
+    assert.equal(completed.state,'completed'); assert.equal(completed.inert,true);
+    assert.deepEqual(completed.counts,{ ...pending.counts,settledNativeErasureGenerations: 2,
+      occupiedTransports: 0,acknowledgedNativeTransports: 1 });
     assert.equal((await kernel.request(context,prepared.executionRef,'held-request')).effect,'completed');
     assert.equal((await pool.query('SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
       [context.consumerId,prepared.executionRef])).rows[0].n,1);
+
+    // Rename grants no dispatch but invalidates the exact completed snapshot.
+    await f.manager.rename(context,{ operationId: randomUUID(),accountRef: account.accountRef,
+      expectedRevision: completed.account.revision,displayName: 'Renamed tombstone' });
+    assert.equal((await f.manager.retirement(context,account.accountRef,disabled.operationRef)).state,'rejected');
   } finally { await f.close(); }
 });
 
 // Regression: a copied cleanup token after its DB lease expires must not authorize a native credential erase.
+test('policy-use closure fences borrower X while owner O and borrower Y remain live', async () => {
+  const context = ctx(), command = input(), f = await fixture(context);
+  const kernel = new PostgresKernel(pool,{ ...defaults,maxConcurrent: 2 });
+  try {
+    const created = await f.manager.create(context,command), account = await f.manager.account(context,created.accountRef!);
+    const issuer = await kernel.issuer(context), limits = { requests: 2,concurrency: 2,requestBytes: 4096,outputBytes: 4096,tokens: 32 };
+    const held = async (subject: string) => {
+      const op = await kernel.prepare(context,{ operationId: randomUUID(),intentDigest: 'controlled-'+subject,
+        invocationRef: randomUUID(),attemptRef: 'borrowed-attempt',permittedAccounts: [account.accountRef],profile: profile.profile,
+        policySubject: subject,policyRevision: 1,bindingRevision: 1,issuerEpoch: issuer,deadline: new Date(Date.now()+60000),limits });
+      assert.ok(op.executionRef);
+      const saved = await kernel.savedExecution(context,op.executionRef), requestId = randomUUID();
+      const claim = await kernel.claim(context,op.executionRef,requestId,f.worker,saved.admission,
+        { originRef: 'controlled-native-origin',engineIncarnation: randomUUID(),requestNonce: randomUUID() });
+      assert.ok(claim.dispatch);
+      await kernel.effect(context,op.executionRef,requestId,f.worker,'response_started');
+      return { ref: op.executionRef,requestId,proof: claim.dispatch.closure };
+    };
+    const x = await held('borrower-X'), y = await held('borrower-Y');
+    await kernel.effect(context,x.ref,x.requestId,f.worker,'effect_unknown');
+    const operationId = randomUUID(); await kernel.fence(context,operationId,'borrower-X',1);
+    const pending = await f.manager.policyClosure(context,operationId);
+    assert.equal(pending.state,'pending'); assert.equal(pending.closed,false);
+    assert.equal(pending.policySubject,'borrower-X'); assert.equal(pending.policyRevision,1);
+    assert.deepEqual(pending.counts,{ retainedExecutions: 1,openExecutions: 0,requests: 1,occupiedTransports: 1,
+      acknowledgedNativeTransports: 0,positiveKernelNonEntryRequests: 0,unknownEffects: 1 });
+    await assert.rejects(f.manager.policyClosure(context,created.operationRef),isCode('conflict'));
+    await assert.rejects(f.manager.policyClosure(context,randomUUID()),isCode('unknown'));
+    const foreign = ctx(); await kernel.issuer(foreign);
+    await assert.rejects(f.manager.policyClosure(foreign,operationId),isCode('unknown'));
+    // This PG fixture supplies a trusted exact owner ACK. The joint Go fixture
+    // separately proves real ContextDone/forward return/body close validation.
+    await kernel.acknowledgeTransportClosed(context,f.worker,x.proof);
+    const completed = await f.manager.policyClosure(context,operationId);
+    assert.equal(completed.state,'completed'); assert.equal(completed.closed,true);
+    assert.deepEqual(completed.counts,{ ...pending.counts,occupiedTransports: 0,acknowledgedNativeTransports: 1 });
+    assert.equal((await kernel.request(context,x.ref,x.requestId)).effect,'effect_unknown');
+    assert.equal((await kernel.savedExecution(context,y.ref)).state,'open');
+    assert.deepEqual((await pool.query(`SELECT effect,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3`,
+      [context.consumerId,y.ref,y.requestId])).rows[0],{ effect: 'response_started',transport_occupied: true });
+    assert.deepEqual(await f.manager.account(context,account.accountRef),account);
+    assert.equal(f.erases(),0); assert.equal(f.providerCalls(),0);
+    const emptyOp = randomUUID(); await kernel.fence(context,emptyOp,'no-retained-use',1);
+    const empty = await f.manager.policyClosure(context,emptyOp);
+    assert.equal(empty.closed,true); assert.equal(empty.counts.retainedExecutions,0); assert.equal(empty.counts.requests,0);
+    await kernel.acknowledgeTransportClosed(context,f.worker,y.proof);
+  } finally { await f.close(); }
+});
+
 test('B3a expired exact cleanup lease refuses native erasure', async () => {
   const context = ctx(),command = input(),f = await fixture(context);
   try {

@@ -1,6 +1,6 @@
 import { KernelError, identifier, uuid, revision } from './domain.ts';
 import type { AccountIntent, AccountPage, AccountPageQuery, AccountStatus, DurableKernel,
-  OperationStatus, TrustedContext, CleanupClaim } from './domain.ts';
+  OperationStatus, TrustedContext, CleanupClaim, AccountRetirementReadback, PolicyUseClosureReadback } from './domain.ts';
 
 // Private consumer-owned ports. They are not SDK DTOs or an inference authority.
 export interface ManagedProfile {
@@ -121,7 +121,15 @@ export interface AcceptedIntent {
 export interface IntentCustody {
   digest(accepted: AcceptedIntent): string;
 }
-export interface ManagementStore {
+// Required read-only lifecycle attestation. Kernel execution consumers remain
+// unchanged; AccountManagement delegates to this concrete store capability.
+export interface AccountRetirementRead {
+  retirement(context: TrustedContext, accountRef: string, operationId: string): Promise<AccountRetirementReadback | undefined>;
+}
+export interface PolicyUseClosureRead {
+  policyClosure(context: TrustedContext, operationId: string): Promise<PolicyUseClosureReadback | undefined>;
+}
+export interface ManagementStore extends AccountRetirementRead, PolicyUseClosureRead {
   stage(scope: CandidateScope, apiKey: string): Promise<boolean>;
   journal(scope: CandidateScope, generation: string, worker: string, profile: ManagedProfile): Promise<CandidateJournal>;
   readJournal(context: TrustedContext, operationId: string): Promise<CandidateJournal | undefined>;
@@ -555,6 +563,18 @@ export class AccountManagement {
   }
   async account(context: TrustedContext, ref: string): Promise<AccountStatus> {
     const ctx = captureContext(context); uuid(ref); return this.kernel.account(ctx, ref);
+  }
+  async retirement(context: TrustedContext, accountRef: string, operationId: string): Promise<AccountRetirementReadback> {
+    const ctx = captureContext(context); uuid(accountRef); identifier(operationId);
+    const readback = await this.store.retirement(ctx, accountRef, operationId);
+    if (!readback) throw new KernelError('unknown');
+    return readback;
+  }
+  async policyClosure(context: TrustedContext, operationId: string): Promise<PolicyUseClosureReadback> {
+    const ctx = captureContext(context); identifier(operationId);
+    const readback = await this.store.policyClosure(ctx, operationId);
+    if (!readback) throw new KernelError('unknown');
+    return readback;
   }
   async accounts(context: TrustedContext, query: AccountPageQuery = {}): Promise<AccountPage> {
     const ctx = captureContext(context);

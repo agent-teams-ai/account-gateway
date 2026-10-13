@@ -30,6 +30,52 @@ export const operation = z.discriminatedUnion('state', [
   (v.error.effect !== 'rejected_before_dispatch' || v.state === 'rejected')
 ));
 export const accountOperation = operation.refine(v => v.state !== 'applied' || v.result?.kind === 'account');
+const retirementCounts = z.strictObject({
+  retainedGenerations: revision, settledNativeErasureGenerations: revision,
+  retainedExecutions: revision, openExecutions: revision, requests: revision,
+  occupiedTransports: revision, acknowledgedNativeTransports: revision,
+  positiveKernelNonEntryRequests: revision, unknownEffects: revision,
+});
+/** Safe retirement attestation; counts cover the complete retained account set. */
+export const accountRetirement = z.strictObject({
+  operationRef: reference, account, state: z.enum(['pending', 'completed', 'rejected']),
+  fence: z.strictObject({ metadataRevision: revision, authorizationEpoch: revision }),
+  counts: retirementCounts, inert: z.boolean(),
+}).refine(v => v.counts.settledNativeErasureGenerations <= v.counts.retainedGenerations &&
+  v.counts.openExecutions <= v.counts.retainedExecutions &&
+  (v.counts.retainedExecutions > 0 || v.counts.requests === 0) &&
+  v.counts.occupiedTransports <= v.counts.requests &&
+  v.counts.acknowledgedNativeTransports <= v.counts.requests &&
+  v.counts.positiveKernelNonEntryRequests <= v.counts.requests &&
+  v.counts.unknownEffects <= v.counts.requests &&
+  v.counts.acknowledgedNativeTransports + v.counts.positiveKernelNonEntryRequests <= v.counts.requests &&
+  v.counts.acknowledgedNativeTransports + v.counts.occupiedTransports <= v.counts.requests &&
+  v.counts.unknownEffects + v.counts.positiveKernelNonEntryRequests <= v.counts.requests &&
+  v.inert === (v.state === 'completed'), { message: 'contradictory retirement counts' })
+  .refine(v => v.state !== 'completed' || (
+    v.account.state === 'disabled' &&
+    v.account.metadataRevision === v.fence.metadataRevision &&
+    v.account.authorizationEpoch === v.fence.authorizationEpoch &&
+    v.counts.retainedGenerations > 0 &&
+    v.counts.settledNativeErasureGenerations === v.counts.retainedGenerations &&
+    v.counts.openExecutions === 0 && v.counts.occupiedTransports === 0 &&
+    v.counts.unknownEffects <= v.counts.acknowledgedNativeTransports &&
+    v.counts.acknowledgedNativeTransports + v.counts.positiveKernelNonEntryRequests === v.counts.requests
+  ), { message: 'invalid completed retirement' });
+export const policyUseClosure = z.strictObject({
+  operationRef: reference, policySubject: reference, policyRevision: revision,
+  state: z.enum(['pending', 'completed']), closed: z.boolean(),
+  counts: retirementCounts.omit({ retainedGenerations: true, settledNativeErasureGenerations: true }),
+}).refine(v => v.counts.openExecutions <= v.counts.retainedExecutions &&
+  (v.counts.retainedExecutions > 0 || v.counts.requests === 0) &&
+  v.counts.unknownEffects <= v.counts.requests &&
+  v.counts.acknowledgedNativeTransports + v.counts.positiveKernelNonEntryRequests <= v.counts.requests &&
+  v.counts.acknowledgedNativeTransports + v.counts.occupiedTransports <= v.counts.requests &&
+  v.counts.unknownEffects + v.counts.positiveKernelNonEntryRequests <= v.counts.requests &&
+  v.closed === (v.state === 'completed'))
+  .refine(v => !v.closed || (v.counts.openExecutions === 0 && v.counts.occupiedTransports === 0 &&
+    v.counts.unknownEffects <= v.counts.acknowledgedNativeTransports &&
+    v.counts.acknowledgedNativeTransports + v.counts.positiveKernelNonEntryRequests === v.counts.requests));
 /** Reconnect selectors are browser-safe; account owner/profile come from the server. */
 export const oauthReconnect = z.strictObject({ operationId: reference, expectedMetadataRevision: revision });
 /** Enrollment carries no credential, callback, model or provider-origin input. */
@@ -94,6 +140,8 @@ export const fence = z.strictObject({ operationId: reference, subjectRef: refere
 export const admission = z.strictObject({ invocationRef: reference, attemptRef: reference, accountRef: reference, authorizationEpoch: revision, subjectRef: reference, policyRevision: revision, bindingRevision: revision, profileId: reference, limits, expiresAt: deadline });
 export type Profile = z.infer<typeof profile>;
 export type Account = z.infer<typeof account>;
+export type AccountRetirement = z.infer<typeof accountRetirement>;
+export type PolicyUseClosure = z.infer<typeof policyUseClosure>;
 export type Operation = z.infer<typeof operation>;
 export type OAuthReconnect = z.infer<typeof oauthReconnect>;
 export type OAuthBegin = z.infer<typeof oauthBegin>;

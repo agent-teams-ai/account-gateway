@@ -793,6 +793,12 @@ export class PostgresKernel implements DurableKernel {
           AND execution_ref=$2 AND transport_occupied LIMIT 1`, [tx.consumer, j.execution_ref]);
         if (occupied.rowCount) throw new KernelError('conflict');
       }
+      if (succeeded && j.generation) {
+        const occupied = await tx.db.query(`SELECT 1 FROM requests r
+          JOIN executions e ON e.consumer=r.consumer AND e.ref=r.execution_ref
+          WHERE r.consumer=$1 AND e.generation=$2 AND r.transport_occupied LIMIT 1`, [tx.consumer, j.generation]);
+        if (occupied.rowCount) throw new KernelError('conflict');
+      }
       if (j.state === 'done' && succeeded) return;
       const updated = await tx.db.query(`UPDATE cleanup SET state=$5 WHERE consumer=$1 AND ref=$2
         AND worker=$3 AND token=$4 AND state='claimed' AND lease_until>clock_timestamp() RETURNING generation`,
