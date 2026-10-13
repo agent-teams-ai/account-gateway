@@ -798,10 +798,14 @@ test('disable and idempotent close persist bounded scoped cleanup across worker 
   const reclaimed = await b.claimCleanup(ctx, w2); assert.ok(reclaimed);
   assert.equal(reclaimed.cleanupRef, j1.cleanupRef); assert.notEqual(reclaimed.token, j1.token);
   await assert.rejects(a.settleCleanup(ctx, j1.cleanupRef, w1, j1.token, true), isCode('denied'));
-  await acknowledgeCleanupPage(ctx, b, reclaimed, w2);
-  await b.settleCleanup(ctx, reclaimed.cleanupRef, w2, reclaimed.token, true);
-  await acknowledgeCleanupPage(ctx, b, j2, w2);
-  await b.settleCleanup(ctx, j2.cleanupRef, w2, j2.token, true);
+  const remaining = [reclaimed, j2];
+  for (const job of remaining) {
+    await assert.rejects(b.settleCleanup(ctx, job.cleanupRef, w2, job.token, true), isCode('conflict'));
+  }
+  // Generation cleanup cannot erase ahead of its execution's exact closure.
+  for (const job of remaining) await acknowledgeCleanupPage(ctx, b, job, w2);
+  assert.equal(await occupancy(ctx, account.accountRef!), 0);
+  for (const job of remaining) await b.settleCleanup(ctx, job.cleanupRef, w2, job.token, true);
   await b.settleCleanup(ctx, j2.cleanupRef, w2, j2.token, true);
   assert.equal((await a.account(ctx, account.accountRef!)).state, 'disabled');
   assert.equal(await a.claimCleanup(ctx, w2), undefined);
@@ -1238,7 +1242,7 @@ test('B2 old generation, credential cleanup and restore keep occupied account ca
   // Claim both preexisting cleanup jobs without releasing the execution transport.
   const jobs = [await a.claimCleanup(ctx, w), await b.claimCleanup(ctx, w)];
   const generation = jobs.find(j => j?.scope.kind === 'generation'); assert.ok(generation);
-  await b.settleCleanup(ctx, generation.cleanupRef, w, generation.token, true);
+  await assert.rejects(b.settleCleanup(ctx, generation.cleanupRef, w, generation.token, true), isCode('conflict'));
   assert.equal((await a.claim(ctx, newer.result.executionRef!, 'erasure-held', w, newer.admission, reservation())).dispatch, undefined);
   await a.restore(ctx, await a.issuer(ctx), randomUUID());
   assert.equal(await occupancy(ctx, account.accountRef!), 1);
@@ -1252,7 +1256,9 @@ test('B2 old generation, credential cleanup and restore keep occupied account ca
     { generation: recovery.candidate, nativePhysicalIdentity: randomUUID(), profile: recovery.profile });
   const current = await prepared(ctx, account.accountRef!);
   assert.equal((await b.claim(ctx, current.result.executionRef!, 'restore-held', w, current.admission, reservation())).dispatch, undefined);
+  await assert.rejects(b.settleCleanup(ctx, generation.cleanupRef, w, generation.token, true), isCode('conflict'));
   await a.acknowledgeTransportClosed(ctx, w, permit.dispatch.closure);
+  await b.settleCleanup(ctx, generation.cleanupRef, w, generation.token, true);
   assert.deepEqual(await b.request(ctx, old.result.executionRef!, 'old-generation'),
     { requestRef: 'old-generation', effect: 'effect_unknown', code: 'restore' });
   assert.ok((await b.claim(ctx, current.result.executionRef!, 'restored-after-closure', w, current.admission, reservation())).dispatch);
@@ -1856,18 +1862,25 @@ test('D-final final consumer fact slot is atomic and safety headroom is bounded'
     accountRef: account.accountRef!, expectedRevision: account.revision! });
   assert.equal(disabled.state, 'applied');
   const delegate = await worker(ctx, y);
+  const cleanupJobs: CleanupClaim[] = [];
   let found = false;
   for (let n = 0; n < 3; n++) {
     const job = await y.claimCleanup(ctx, delegate); assert.ok(job);
+    cleanupJobs.push(job);
+    if (job.scope.kind === 'generation') {
+      await assert.rejects(y.settleCleanup(ctx, job.cleanupRef, delegate, job.token, true), isCode('conflict'));
+    }
+  }
+  for (const job of cleanupJobs) {
     if (job.scope.kind === 'execution' && job.scope.executionRef === original.result.executionRef) {
       assert.deepEqual(job.scope.transports, [first.dispatch.closure]);
       await x.acknowledgeTransportClosed(ctx, delegate, job.scope.transports[0], { cleanupRef: job.cleanupRef, token: job.token });
       found = true;
     }
-    await y.settleCleanup(ctx, job.cleanupRef, delegate, job.token, true);
   }
   assert.ok(found);
   assert.equal(await occupancy(ctx, account.accountRef!), 0);
+  for (const job of cleanupJobs) await y.settleCleanup(ctx, job.cleanupRef, delegate, job.token, true);
   assert.deepEqual(await x.request(ctx, original.result.executionRef!, 'spent-at-cap'), rejected);
   assert.equal(Number(await budget()), 28, 'prepaid safety mutations cannot increase the budget');
 });
