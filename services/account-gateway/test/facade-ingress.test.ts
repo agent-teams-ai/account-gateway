@@ -7,13 +7,14 @@ import type { AccountStatus, DurableKernel, ExecutionRead, NativeDispatchProof, 
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer, request } from 'node:http';
 import type { Server } from 'node:http';
-import { createFacade } from '../src/facade.ts';
+import { createFacade, FacadeBearers } from '../src/facade.ts';
+import type { ManagementBearer } from '../src/facade.ts';
 import { IntentSecrets } from '../src/management-store.ts';
 import { codexOAuthProfile } from '../src/management.ts';
 import type { CandidateJournal, CandidateMapping, ManagementStore, PhysicalCandidate } from '../src/management.ts';
 import { NativeFailure, NativeOAuthEnrollmentClient } from '../src/native-client.ts';
 import { composeServiceControl, composeServiceNative } from '../src/service.ts';
-import { openRouterProfile } from '../src/service-config.ts';
+import { openRouterProfile, captureServiceBearers, captureServiceProfiles, ServiceError } from '../src/service-config.ts';
 const bytes = (text: string) => Buffer.from(text);
 const valid = { model: 'fixture-model', stream: true, store: false, service_tier: 'default', input: 'fixture' };
 const invalid = (fn: () => unknown) => assert.throws(fn, e => e instanceof KernelError && e.code === 'invalid');
@@ -223,7 +224,10 @@ async function sourceHTTP(oauth: boolean) {
     },
     credential: async s => staged.get(scopeKey(s, s.operationId)), eraseIntent: async s => { staged.delete(scopeKey(s, s.operationId)); },
     saveMapping: async m => { mappings.set(scopeKey(m, m.generation), m); },
-    mapping: async (c, id) => mappings.get(scopeKey(c, id)), cleanupAllowed: async () => false, expire: async () => [],
+    mapping: async (c, id) => mappings.get(scopeKey(c, id)), cleanupAllowed: async () => false,
+    // This source-ingress fixture does not qualify durable lifecycle readback.
+    retirement: async () => { throw new KernelError('denied'); },
+    policyClosure: async () => { throw new KernelError('denied'); }, expire: async () => [],
   };
   const nativeRows = new Map<string, { descriptor: Record<string, unknown>; state: string }>();
   const seen: { path: string; tuple: Record<string, unknown> }[] = [], forwarded: Record<string, unknown>[] = [];
@@ -355,6 +359,95 @@ async function sourceHTTP(oauth: boolean) {
     origin, callbackOrigin, facade, facadeOrigin, nativeRows, scopeKey };
   } catch (error) { await closeServers(); throw error; }
 }
+
+test('source HTTP: consumer-scoped management isolates explicit owner lists and consumer custody while OAuth enrollment stays separate from execution policy', async () => {
+  const f = await sourceHTTP(true);
+  try {
+    const initial = f.cfg.bearers.find(b => b.role === 'management');
+    assert.ok(initial && initial.role === 'management');
+    const { ownerRefs: _owners, ...base } = initial;
+    const scoped = { ...base, ownerScope: 'consumer' as const,
+      profileIds: [f.profile.profile, f.secondProfile.profile, codexOAuthProfile.profile],
+      preparation: { ...base.preparation, profileId: f.profile.profile } };
+    const profiles = captureServiceProfiles(f.cfg);
+    assert.deepEqual(captureServiceBearers([scoped], f.context.consumerId, profiles), [scoped]);
+    // Only an explicit opt-in replaces the old owner list; no wildcard/mixed mode.
+    for (const entry of [{ ...scoped, ownerRefs: ['owner-one'] }, { ...scoped, ownerScope: '*' },
+      { ...base, ownerScope: undefined }]) {
+      invalid(() => new FacadeBearers([entry as unknown as ManagementBearer]));
+      assert.throws(() => captureServiceBearers([entry], f.context.consumerId, profiles),
+        e => e instanceof ServiceError && e.code === 'config_denied');
+    }
+    f.control.bearers.replace([scoped]);
+    // Captured primitives remain authoritative after caller configuration mutation.
+    Object.assign(scoped, { ownerScope: '*', consumerId: 'foreign-consumer' });
+    scoped.profileIds.length = 0;
+    const localRef = randomUUID(), otherRef = randomUUID(), foreignRef = randomUUID();
+    const seed = (consumerId: string, accountRef: string, ownerRef: string) =>
+      f.accounts.set(f.scopeKey({ consumerId }, accountRef), { accountRef, ownerRef,
+        profile: f.profile.profile, displayName: 'Fixture', state: 'active', revision: 1, epoch: 1 });
+    seed(f.context.consumerId, localRef, 'owner-new');
+    seed(f.context.consumerId, otherRef, 'owner-other');
+    seed('foreign-consumer', foreignRef, 'owner-new');
+    assert.equal((await f.publicCall('/v1/accounts')).status, 403);
+    assert.equal((await f.publicCall('/v1/accounts?ownerRef=*')).status, 400);
+    const list = await f.publicCall('/v1/accounts?ownerRef=owner-new');
+    assert.equal(list.status, 200);
+    assert.deepEqual((await list.json() as { accounts: { accountRef: string }[] }).accounts.map(a => a.accountRef), [localRef]);
+    assert.notEqual((await f.publicCall('/v1/accounts/' + foreignRef)).status, 200);
+    assert.equal(f.control.bearers.authorizesOwner({ consumerId: 'foreign-consumer' }, 'owner-new', codexOAuthProfile.profile), false);
+    assert.equal(f.control.bearers.authorizesOwner(f.context, 'owner-new', 'unqualified-profile'), false);
+    let prepares = 0;
+    f.kernel.prepare = async () => { prepares++; throw new KernelError('denied'); };
+    const operationId = randomUUID();
+    const begun = await f.publicCall('/v1/accounts/oauth/begin', { operationId, ownerRef: 'owner-new',
+      profileId: codexOAuthProfile.profile, displayName: 'Fixture' });
+    assert.equal(begun.status, 202); assert.equal(f.begins(), 1);
+    const journal = f.journals.get(f.scopeKey(f.context, operationId))!;
+    assert.equal((await f.callback('oauth-owner-authority', { consumerId: journal.consumerId,
+      operationId, accountRef: journal.accountRef, generation: journal.generation })).status, 200);
+    const prepare = await f.publicCall('/v1/executions', { operationId: randomUUID(), invocationRef: 'source-invocation',
+      attemptRef: 'attempt', accountRefs: [journal.accountRef], profileId: codexOAuthProfile.profile,
+      subjectRef: base.preparation.subjectRef, policyRevision: base.preparation.policyRevision,
+      bindingRevision: base.preparation.bindingRevision, limits: base.preparation.limits,
+      deadline: new Date(Date.now() + 10_000).toISOString() });
+    assert.equal(prepare.status, 403); assert.equal(prepares, 0);
+    const narrowed = { ...base, ownerScope: 'consumer' as const, profileIds: [f.profile.profile] };
+    f.control.bearers.replace([narrowed]);
+    let operationReads = 0;
+    const originalOperation = f.control.management.operation.bind(f.control.management);
+    f.control.management.operation = async (...args) => { operationReads++; return originalOperation(...args); };
+    const nativeCalls = f.seen.length;
+    assert.equal((await f.publicCall('/v1/operations/' + operationId)).status, 403);
+    assert.equal(operationReads, 0); assert.equal(f.seen.length, nativeCalls);
+    // Replacement while a committed read waits revokes its captured reply.
+    let enteredList!: () => void, releaseList!: () => void;
+    const listEntered = new Promise<void>(resolve => { enteredList = resolve; });
+    const listGate = new Promise<void>(resolve => { releaseList = resolve; });
+    const originalAccounts = f.kernel.accounts.bind(f.kernel);
+    f.kernel.accounts = async (...args) => { enteredList(); await listGate; return originalAccounts(...args); };
+    const pendingList = f.publicCall('/v1/accounts?ownerRef=owner-new');
+    await listEntered; f.control.bearers.replace([narrowed]); releaseList();
+    assert.equal((await pendingList).status, 403);
+    f.kernel.accounts = originalAccounts;
+    const pendingId = randomUUID();
+    f.operations.set(f.scopeKey(f.context, pendingId), { operationRef: pendingId, accountRef: localRef,
+      state: 'pending' });
+    let enteredOperation!: () => void, releaseOperation!: () => void;
+    const operationEntered = new Promise<void>(resolve => { enteredOperation = resolve; });
+    const operationGate = new Promise<void>(resolve => { releaseOperation = resolve; });
+    f.control.management.operation = async (...args) => { enteredOperation(); await operationGate; return originalOperation(...args); };
+    const pendingOperation = f.publicCall('/v1/operations/' + pendingId);
+    await operationEntered; f.control.bearers.replace([narrowed]); releaseOperation();
+    assert.equal((await pendingOperation).status, 403);
+    f.control.management.operation = originalOperation;
+    f.control.bearers.replace([initial]);
+    assert.equal((await f.publicCall('/v1/accounts?ownerRef=owner-new')).status, 403);
+    assert.equal((await f.publicCall('/v1/accounts/' + localRef)).status, 403);
+    assert.equal((await f.callback('oauth-owner-authority', { consumerId: journal.consumerId,
+      operationId, accountRef: journal.accountRef, generation: journal.generation })).status, 403);
+  } finally { await f.close(); }
+});
 
 test('source HTTP: current management fences monotonically for its exact subject while prepare stays pinned', async () => {
   const f = await sourceHTTP(false);

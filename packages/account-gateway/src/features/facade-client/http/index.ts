@@ -80,7 +80,9 @@ function transport(input: ManagementConfig | ExecutionConfig | ConsumerControlCo
         if (!error.success || (identity.operationRef && error.data.operationRef && error.data.operationRef !== identity.operationRef) ||
           (identity.requestRef && error.data.requestRef && error.data.requestRef !== identity.requestRef)) throw handle.failure('invalid_response');
         // A missing readback record cannot establish absence of a prior effect.
-        const readbackMissing = response.status === 404 && (path.startsWith('/v1/operations/') || path.includes('/requests/'));
+        const readbackMissing = response.status === 404 && (path.startsWith('/v1/operations/') || path.includes('/requests/') ||
+          method === 'GET' && (/^\/v1\/accounts\/[A-Za-z0-9_-]+\/retirement\/[A-Za-z0-9_-]+$/.test(path) ||
+            /^\/v1\/policy-fences\/[A-Za-z0-9_-]+\/closure$/.test(path)));
         const diagnostic: c.SafeError = readbackMissing ? { ...error.data, effect: 'effect_unknown', retry: { kind: 'readback' } } : error.data;
         throw new GatewayError('safe_error', diagnostic.effect, identity.operationRef, identity.requestRef, diagnostic);
       }
@@ -180,6 +182,18 @@ function accountClient(settings: ManagementConfig | ConsumerControlConfig, role:
     rename: (accountRef: string, input: c.Rename, options?: CallOptions) => mutate(`/v1/accounts/${id(accountRef)}`, 'PATCH', valid(c.rename, input), options),
     reconnect: (accountRef: string, input: Reconnect, options?: CallOptions) => mutate(`/v1/accounts/${id(accountRef)}/reconnect`, 'POST', valid(reconnect, input), options),
     disable: (accountRef: string, input: c.Disable, options?: CallOptions) => mutate(`/v1/accounts/${id(accountRef)}/disable`, 'POST', valid(c.disable, input), options),
+    retirement: async (accountRef: string, operationId: string, options?: CallOptions): Promise<c.AccountRetirement> => {
+      const account = id(accountRef), operation = id(operationId);
+      const result = await json(`/v1/accounts/${account}/retirement/${operation}`, c.accountRetirement,
+        'GET', undefined, options, { operationRef: operationId });
+      if (result.account.accountRef !== accountRef || result.operationRef !== operationId) {
+        throw new GatewayError('invalid_response', 'effect_unknown', operationId);
+      }
+      return result;
+    },
+    policyClosure: (operationId: string, options?: CallOptions): Promise<c.PolicyUseClosure> =>
+      json(`/v1/policy-fences/${id(operationId)}/closure`, c.policyUseClosure,
+        'GET', undefined, options, { operationRef: operationId }),
     operation: (operationId: string, options?: CallOptions) => json(operationPath(operationId), c.operation, 'GET', undefined, options, { operationRef: operationId }),
     fence: (input: c.Fence, options?: CallOptions) => mutate('/v1/policy-fences', 'POST', valid(c.fence, input), options, c.acknowledgementOperation),
   }) };

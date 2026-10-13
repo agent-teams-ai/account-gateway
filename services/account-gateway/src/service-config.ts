@@ -144,7 +144,7 @@ export function captureServiceBearers(value: unknown, consumerId: string, profil
         return { role, profileIds, limits, token: b.token, consumerId: b.consumerId, maxRunMs: b.maxRunMs };
       }
       if (b.role === 'management') {
-        object(b, ['token','role','consumerId','ownerRefs','preparation'], ['profileIds']);
+        object(b, ['token','role','consumerId',Object.hasOwn(b, 'ownerScope') ? 'ownerScope' : 'ownerRefs','preparation'], ['profileIds']);
         object(b.preparation, ['accountRefs','subjectRef','policyRevision','bindingRevision','profileId','limits','maxRunMs']);
       } else object(b, ['token','role','consumerId','ownerRefs','profileIds','limits','maxRunMs']);
       return b;
