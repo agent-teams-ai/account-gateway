@@ -39,6 +39,33 @@ test('native diagnostics retains closed OAuth phases and rejects private or misp
   assert.deepEqual(f.records, expected);
 });
 
+test('native diagnostics forwards d718 OAuth intent references and closed conflict reasons without private fields', () => {
+  const f = sink();
+  const refs = { consumer: 'rr-production-fixture', account_ref: '11111111-1111-4111-8111-111111111111',
+    generation: '22222222-2222-4222-8222-222222222222', operation_ref: 'oauth-fixture-operation' };
+  const conflict = { event: 'gateway_native_oauth_connect_failure', phase: 'stage_conflict',
+    reason: 'principal_claim_scope_mismatch', ...refs };
+  const exchange = { event: 'gateway_native_oauth_connect_failure', phase: 'exchange_http_status', http_status: 401, ...refs };
+  const expected = [JSON.stringify(conflict) + '\n', JSON.stringify(exchange) + '\n'];
+  for (const record of [conflict, exchange]) {
+    for (const byte of Buffer.from(JSON.stringify(record) + '\n')) f.feed(Buffer.from([byte]));
+  }
+  for (const record of [
+    ...['subject', 'owner_ref', 'token', 'callback', 'error'].map(key => ({ ...conflict, [key]: 'SECRET_SENTINEL' })),
+    { ...conflict, reason: 'SECRET_SENTINEL' },
+    { ...exchange, reason: 'principal_claim_scope_mismatch' },
+    { ...conflict, operation_ref: 'https://example.invalid/SECRET_SENTINEL' },
+    { ...conflict, consumer: '' },
+    { ...conflict, account_ref: 'SECRET_SENTINEL' },
+    { ...conflict, generation: 'SECRET_SENTINEL' },
+    { event: conflict.event, phase: conflict.phase, account_ref: refs.account_ref },
+    { event: 'gateway_native_response_failure', phase: 'transport', ...refs },
+  ]) f.feed(Buffer.from(JSON.stringify(record) + '\n'));
+  f.feed(Buffer.from(valid + '\n'));
+  expected.push(valid + '\n');
+  assert.deepEqual(f.records, expected);
+});
+
 // Previously all native stderr records were discarded, hiding response failures.
 test('native response diagnostics forwards chunked records once in canonical form', () => {
   const f = sink();

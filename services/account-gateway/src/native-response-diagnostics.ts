@@ -1,5 +1,6 @@
 import { strictJSON } from './facade-ingress.ts';
 import { object } from './native-wire.ts';
+import { identifier, uuid } from './domain.ts';
 
 const phases = new Set(['transport', 'invalid_response', 'http_status', 'body_read', 'body_limit',
   'invalid_final', 'invalid_content_type', 'sse_frame_limit', 'sse_invalid_frame', 'sse_invalid_event',
@@ -8,6 +9,10 @@ const phases = new Set(['transport', 'invalid_response', 'http_status', 'body_re
 const oauthPhases = new Set(['exchange_transport', 'exchange_http_status', 'exchange_body_read',
   'exchange_body_limit', 'exchange_json_shape', 'exchange_token_fields', 'exchange_scopes',
   'exchange_bundle', 'stage_metadata', 'stage_identity', 'stage_custody', 'stage_conflict', 'stage_repository']);
+const oauthConflictReasons = new Set(['connect_scope_mismatch', 'connect_binding_read_failed', 'connect_binding_mismatch',
+  'principal_claim_scope_mismatch', 'logical_claim_conflict', 'reservation_readback_failed',
+  'reservation_commitment_mismatch', 'replay_mismatch', 'unclassified']);
+const oauthIntentFields = ['consumer', 'account_ref', 'generation', 'operation_ref'];
 
 const readErrorReasons = new Set(['idle_expired', 'context_canceled', 'context_deadline',
   'unexpected_eof', 'body_after_close', 'connection_closed', 'transport_timeout', 'compression_error', 'other']);
@@ -48,7 +53,7 @@ export function nativeResponseDiagnostics(write: (record: string) => void): (chu
     let record: string;
     try {
       const row = object(strictJSON(line, true), ['event'],
-        ['phase', 'http_status', 'provider_error_category', 'provider_error_shape', 'provider_error_parameter', 'read_error_reason', 'upstream_media_category', 'upstream_body_shape', 'upstream_body_prefix', ...shapeFields, 'unsupported_fields_present']);
+        ['phase', 'http_status', 'reason', ...oauthIntentFields, 'provider_error_category', 'provider_error_shape', 'provider_error_parameter', 'read_error_reason', 'upstream_media_category', 'upstream_body_shape', 'upstream_body_prefix', ...shapeFields, 'unsupported_fields_present']);
       if (row.event === 'gateway_native_codex_request_shape') {
         object(row, ['event', ...shapeFields, 'unsupported_fields_present']);
         const fields = object(row.unsupported_fields_present, unsupportedCodexFields);
@@ -60,17 +65,25 @@ export function nativeResponseDiagnostics(write: (record: string) => void): (chu
           instructions_string: row.instructions_string, instructions_nonblank: row.instructions_nonblank,
           unsupported_fields_present: Object.fromEntries(unsupportedCodexFields.map(key => [key, fields[key]])) }) + '\n';
       } else {
-        object(row, ['event', 'phase'], ['http_status', 'provider_error_category', 'provider_error_shape', 'provider_error_parameter', 'read_error_reason', 'upstream_media_category', 'upstream_body_shape', 'upstream_body_prefix']);
+        object(row, ['event', 'phase'], ['http_status', 'reason', ...oauthIntentFields, 'provider_error_category', 'provider_error_shape', 'provider_error_parameter', 'read_error_reason', 'upstream_media_category', 'upstream_body_shape', 'upstream_body_prefix']);
         if (row.event === 'gateway_native_oauth_connect_failure') {
-          object(row, ['event', 'phase'], ['http_status']);
+          object(row, ['event', 'phase'], ['http_status', 'reason', ...oauthIntentFields]);
           if (typeof row.phase !== 'string' || !oauthPhases.has(row.phase)) return;
           const status = row.http_status;
           if (row.phase === 'exchange_http_status') {
             if (!Number.isSafeInteger(status) || (status as number) < 100 || (status as number) > 599) return;
           } else if (Object.hasOwn(row, 'http_status')) return;
+          const reason = row.reason;
+          if (Object.hasOwn(row, 'reason') && (row.phase !== 'stage_conflict' || typeof reason !== 'string' || !oauthConflictReasons.has(reason))) return;
+          let intent: object = {};
+          if (oauthIntentFields.some(key => Object.hasOwn(row, key))) {
+            identifier(row.consumer); uuid(row.account_ref); uuid(row.generation); identifier(row.operation_ref);
+            intent = { consumer: row.consumer, account_ref: row.account_ref, generation: row.generation, operation_ref: row.operation_ref };
+          }
           record = JSON.stringify({ event: 'gateway_native_oauth_connect_failure', phase: row.phase,
-            ...(status === undefined ? {} : { http_status: status }) }) + '\n';
+            ...(reason === undefined ? {} : { reason }), ...(status === undefined ? {} : { http_status: status }), ...intent }) + '\n';
         } else {
+          object(row, ['event', 'phase'], ['http_status', 'provider_error_category', 'provider_error_shape', 'provider_error_parameter', 'read_error_reason', 'upstream_media_category', 'upstream_body_shape', 'upstream_body_prefix']);
           if (row.event !== 'gateway_native_response_failure' || typeof row.phase !== 'string' || !phases.has(row.phase)) return;
           const status = row.http_status;
           if (Object.hasOwn(row, 'http_status') && (!Number.isSafeInteger(status) || (status as number) < 100 || (status as number) > 599)) return;
