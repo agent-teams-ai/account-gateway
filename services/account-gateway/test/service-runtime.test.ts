@@ -21,8 +21,9 @@ import { object } from '../src/native-wire.ts';
 import { captureOAuthEnrollmentConfig, captureServiceProfiles, captureServiceBearers, openRouterProfile, ServiceError } from '../src/service-config.ts';
 import { AccountManagement } from '../src/management.ts';
 import { PostgresKernel } from '../src/postgres.ts';
-import { KernelError } from '../src/domain.ts';
+import { KernelError, defaults } from '../src/domain.ts';
 import { FacadeBearers } from '../src/facade.ts';
+import type { ConfiguredBearer } from '../src/facade.ts';
 
 // Keep the production restart scenario executable against the exact old base:
 // its meaningful RED must be missing automatic closure, not a missing import.
@@ -183,6 +184,10 @@ test('source catalog: singleton compatibility and finite simultaneous per-profil
   assert.equal(broadCaptured.length, 1);
   assert.equal(Object.hasOwn(broadCaptured[0], 'profileIds'), false, 'canonical capture preserves absent broad authority');
   const denied = (work: () => unknown) => assert.throws(work, e => e instanceof ServiceError && e.code === 'config_denied');
+  const managementOneHour = { ...grant, preparation: { ...grant.preparation, maxRunMs: 3_600_000 } };
+  assert.deepEqual(captureServiceBearers([managementOneHour], grant.consumerId, profiles)[0], managementOneHour);
+  denied(() => captureServiceBearers([{ ...managementOneHour,
+    preparation: { ...managementOneHour.preparation, maxRunMs: 3_600_001 } }], grant.consumerId, profiles));
   const legacy = new FacadeBearers([grant]).resolve(grant.token);
   assert.ok(legacy && legacy.role === 'management'); assert.equal(Object.hasOwn(legacy, 'profileIds'), false);
   // Management narrowing is independent of the preparation profile and caps.
@@ -239,6 +244,9 @@ test('source catalog: singleton compatibility and finite simultaneous per-profil
   const run = { token: 'source-run-catalog', role: 'run-control' as const, consumerId: grant.consumerId,
     ownerRefs: ['owner'], profileIds: profiles.map(p => p.profile), limits: secondProfile.limits, maxRunMs: 1000 };
   assert.equal(captureServiceBearers([run], run.consumerId, profiles).length, 1);
+  const runSixHours = { ...run, maxRunMs: 21_600_000 };
+  assert.deepEqual(captureServiceBearers([runSixHours], run.consumerId, profiles)[0], runSixHours);
+  denied(() => captureServiceBearers([{ ...runSixHours, maxRunMs: 21_600_001 }], run.consumerId, profiles));
   denied(() => captureServiceBearers([{ ...run, limits }], run.consumerId, profiles));
   denied(() => captureServiceBearers([{ ...run, profileIds: ['unconfigured'] }], run.consumerId, profiles));
   denied(() => captureServiceBearers([{ ...run, profileIds: [profile.profile, profile.profile] }], run.consumerId, profiles));
@@ -260,7 +268,7 @@ test('consumer-control capture is finite, detached and single-read before compos
   const profile = { profile: 'synthetic-profile', baseURL: 'https://fixture.invalid/v1', model: 'fixture-model',
     qualificationRef: 'synthetic-only', limits, providerTokenUpperBound: 1000 };
   const control = { token: 'synthetic-consumer-control', role: 'consumer-control' as const, consumerId: 'synthetic-consumer',
-    profileIds: [profile.profile], limits, maxRunMs: 1000 };
+    profileIds: [profile.profile], limits, maxRunMs: 21_600_000 };
   const capture = (value: unknown) => captureServiceBearers([value], control.consumerId, [profile]);
   assert.deepEqual(capture(control), [control]);
   const catalog = Array.from({ length: 128 }, (_, i) => ({ ...profile, profile: 'profile-' + i }));
@@ -269,9 +277,9 @@ test('consumer-control capture is finite, detached and single-read before compos
   for (const profileIds of [undefined, [], [profile.profile, profile.profile], ['unknown'], ['bad/profile'], ['x'.repeat(65)],
     Array.from({ length: 129 }, (_, i) => 'profile-' + i), null, 'profile']) denied({ ...control, profileIds });
   const { profileIds: _ids, ...absent } = control; denied(absent);
-  for (const maxRunMs of [0, 3_600_001, 1.5]) denied({ ...control, maxRunMs });
-  const maximum = capture({ ...control, maxRunMs: 3_600_000 })[0];
-  assert.ok(maximum.role === 'consumer-control'); assert.equal(maximum.maxRunMs, 3_600_000);
+  for (const maxRunMs of [0, 21_600_001, 1.5]) denied({ ...control, maxRunMs });
+  const maximum = capture({ ...control, maxRunMs: 21_600_000 })[0];
+  assert.ok(maximum.role === 'consumer-control'); assert.equal(maximum.maxRunMs, 21_600_000);
   for (const key of Object.keys(limits) as (keyof typeof limits)[])
     denied({ ...control, limits: { ...limits, [key]: limits[key] + 1 } });
   denied({ ...control, limits: { ...limits, concurrency: 5 } });
@@ -283,7 +291,7 @@ test('consumer-control capture is finite, detached and single-read before compos
   }]));
   const captured = capture(Object.defineProperties({}, getters));
   assert.ok([...reads.values()].every(count => count === 1));
-  callerIds[0] = 'unknown'; supplied.limits.tokens = 1000; supplied.maxRunMs = 3_600_000;
+  callerIds[0] = 'unknown'; supplied.limits.tokens = 1000; supplied.maxRunMs = 1000;
   assert.deepEqual(captured, [control]);
   assert.ok(captured[0].role === 'consumer-control');
   assert.ok(Object.isFrozen(captured[0]) && Object.isFrozen(captured[0].profileIds) && Object.isFrozen(captured[0].limits));
@@ -297,6 +305,19 @@ test('consumer-control capture is finite, detached and single-read before compos
   assert.equal(mapping.authorizesOwner({ consumerId: control.consumerId }, 'new-opaque-owner', 'unknown'), false);
   mapping.replace([]); assert.equal(mapping.current(grant), false);
   assert.equal(mapping.authorizesOwner({ consumerId: control.consumerId }, 'new-opaque-owner', profile.profile), false);
+});
+
+test('kernel composition derives a detached control duration while preserving defaults', () => {
+  const management = { role: 'management' } as ConfiguredBearer;
+  const execution = { role: 'execution' } as ConfiguredBearer;
+  assert.deepEqual(serviceComposition.composeKernelBounds([management, execution]), defaults);
+  const consumer = { role: 'consumer-control' as const, token: 'synthetic-duration-control', consumerId: 'synthetic-consumer',
+    profileIds: ['synthetic-profile'], limits: { requests: 4, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 100 },
+    maxRunMs: 21_600_000 };
+  const derived = serviceComposition.composeKernelBounds([management, execution, consumer]);
+  consumer.maxRunMs = 1000;
+  assert.deepEqual(derived, { ...defaults, maxRunMs: 21_600_000 });
+  assert.ok(Object.isFrozen(derived));
 });
 
 // Fixture-owned input projection. Actual startService validates production

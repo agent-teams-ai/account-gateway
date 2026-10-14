@@ -5,7 +5,8 @@ import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import pg from 'pg';
 import { ServiceAdmission, facadeControlRoute, inServiceLane } from './service-admission.ts';
-import { KernelError, uuid } from './domain.ts';
+import { KernelError, defaults, uuid } from './domain.ts';
+import type { Bounds } from './domain.ts';
 import { PostgresKernel } from './postgres.ts';
 import { IntentSecrets, PostgresManagementStore } from './management-store.ts';
 import { AccountManagement, exactCandidate, sameCandidate } from './management.ts';
@@ -17,12 +18,22 @@ import { NativeManagementClient, NativeOAuthEnrollmentClient, NativeOAuthLifecyc
 import { NativeAuthority } from './native-authority.ts';
 import { NativeHTTPTransport } from './native-transport.ts';
 import { createFacade, FacadeBearers, cancelFacadeTransport } from './facade.ts';
-import type { FacadeOptions } from './facade.ts';
+import type { ConfiguredBearer, FacadeOptions } from './facade.ts';
 import { strictJSON } from './facade-ingress.ts';
 import { object } from './native-wire.ts';
 import { nativeResponseDiagnostics } from './native-response-diagnostics.ts';
 import { captureServiceBearers, captureServiceProfiles, loadServiceConfig, keyBytes, ServiceError } from './service-config.ts';
 import type { ServiceConfig } from './service-config.ts';
+
+type RunDurationBearer = Extract<ConfiguredBearer, { readonly role: 'consumer-control' | 'run-control' }>;
+function isRunDurationBearer(bearer: ConfiguredBearer): bearer is RunDurationBearer {
+  return bearer.role === 'consumer-control' || bearer.role === 'run-control';
+}
+export function composeKernelBounds(bearers: readonly ConfiguredBearer[]): Bounds {
+  const runDurationBearers = bearers.filter(isRunDurationBearer);
+  const maxRunMs = runDurationBearers.reduce((max, bearer) => Math.max(max, bearer.maxRunMs), defaults.maxRunMs);
+  return Object.freeze({ ...defaults, maxRunMs });
+}
 
 // Cleanup gets the first turn. An acquired claim yields the next serial tick
 // to OAuth maintenance so a retained, uncloseable generation cannot starve it.
@@ -241,7 +252,8 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   const pool = new pg.Pool({ connectionString: cfg.kernelDSN, max: 8, connectionTimeoutMillis: 5000,
     query_timeout: 5000, statement_timeout: 5000, idle_in_transaction_session_timeout: 5000 });
   pool.on('error', error => fail(error, 'pool_error'));
-  const kernel = new PostgresKernel(pool, undefined, cfg.durableFacts), worker = randomUUID(), ctx = Object.freeze({ consumerId: cfg.consumer.consumerId });
+  const kernel = new PostgresKernel(pool, composeKernelBounds(cfg.bearers), cfg.durableFacts),
+    worker = randomUUID(), ctx = Object.freeze({ consumerId: cfg.consumer.consumerId });
   const custody = new IntentSecrets(keyBytes(cfg.keys.intentAEAD), keyBytes(cfg.keys.intentHMAC));
   const store = new PostgresManagementStore(pool, custody);
   const control = composeServiceControl(cfg, kernel, store, custody, worker);

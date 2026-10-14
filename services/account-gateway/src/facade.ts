@@ -50,6 +50,7 @@ export interface ConsumerControlBearer {
   readonly token: string; readonly role: 'consumer-control'; readonly consumerId: string;
   readonly profileIds: readonly string[]; readonly limits: ApprovedLimits; readonly maxRunMs: number;
 }
+export const RUN_CONTROL_MAX_RUN_MS = 21_600_000;
 export interface RunAccess {
   readonly operation: c.Operation; readonly bearer: string; readonly admission: c.Admission;
 }
@@ -101,13 +102,13 @@ export class FacadeBearers {
         const profileIds = Array.from({ length }, (_, i) => supplied[i]);
         const limits = parse(c.limits, { ...entry.limits }), maxRunMs = entry.maxRunMs;
         if (new Set(profileIds).size !== length || !Number.isSafeInteger(maxRunMs) ||
-            maxRunMs < 1 || maxRunMs > 3_600_000 || limits.concurrency > limits.requests) throw new KernelError('invalid');
+            maxRunMs < 1 || maxRunMs > RUN_CONTROL_MAX_RUN_MS || limits.concurrency > limits.requests) throw new KernelError('invalid');
         for (const id of profileIds) { parse(c.reference, id); identifier(id, 64); }
         grant = Object.freeze({ role, consumerId, profileIds: Object.freeze(profileIds),
           limits: Object.freeze(limits), maxRunMs });
       } else if (role === 'run-control') {
         if (!entry.ownerRefs.length || entry.ownerRefs.length > 100 || !entry.profileIds.length || entry.profileIds.length > 128 ||
-            !Number.isSafeInteger(entry.maxRunMs) || entry.maxRunMs < 1 || entry.maxRunMs > 3_600_000 ||
+            !Number.isSafeInteger(entry.maxRunMs) || entry.maxRunMs < 1 || entry.maxRunMs > RUN_CONTROL_MAX_RUN_MS ||
             entry.limits.concurrency > entry.limits.requests) throw new KernelError('invalid');
         entry.ownerRefs.forEach(value => parse(c.reference, value));
         entry.profileIds.forEach(value => { parse(c.reference, value); identifier(value, 64); });
