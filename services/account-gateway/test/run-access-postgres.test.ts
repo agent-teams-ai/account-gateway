@@ -9,7 +9,8 @@ import { createExecutionClient, GatewayError } from '@agent-teams/account-gatewa
 import { createFacade, FacadeBearers } from '../src/facade.ts';
 import type { ManagementBearer, NativeTransport, RunAccess, RunControlBearer } from '../src/facade.ts';
 import { PostgresKernel } from '../src/postgres.ts';
-import { KernelError } from '../src/domain.ts';
+import { KernelError, defaults } from '../src/domain.ts';
+import { composeKernelBounds } from '../src/service.ts';
 import { AccountManagement, exactCandidate } from '../src/management.ts';
 import type { CandidateNative, NativeReadback } from '../src/management.ts';
 import { IntentSecrets, PostgresManagementStore } from '../src/management-store.ts';
@@ -44,8 +45,11 @@ const limits = { requests: 4, concurrency: 1, requestBytes: 4096, outputBytes: 4
 const profile = { profile: 'synthetic-profile', baseURL: 'https://fixture.invalid/v1', model: 'fixture-model', qualificationRef: 'synthetic-only' };
 const forbidden = (error: unknown): boolean => error instanceof GatewayError && error.code === 'safe_error' && error.effect === 'not_dispatched';
 
-async function fixture() {
-  const context = { consumerId: 'run-access-' + randomUUID() }, kernel = new PostgresKernel(pool), worker = randomUUID();
+async function fixture(runControlMaxRunMs = 60_000) {
+  const context = { consumerId: 'run-access-' + randomUUID() }, worker = randomUUID();
+  const control: RunControlBearer = { role: 'run-control', token: 'fixture-control-' + randomUUID(), consumerId: context.consumerId,
+    ownerRefs: ['workspace-fixture'], profileIds: [profile.profile], limits: { ...limits }, maxRunMs: runControlMaxRunMs };
+  const kernel = new PostgresKernel(pool, composeKernelBounds([control]));
   await kernel.heartbeat(context, worker);
   const custody = new IntentSecrets(randomBytes(32), randomBytes(32)), store = new PostgresManagementStore(pool, custody);
   // Controlled native fixture has no provider. Management and route mappings are
@@ -66,8 +70,6 @@ async function fixture() {
     assert.equal(op.state, 'applied'); assert.ok(op.accountRef); return op.accountRef;
   }
   const accountRef = await account();
-  const control: RunControlBearer = { role: 'run-control', token: 'fixture-control-' + randomUUID(), consumerId: context.consumerId,
-    ownerRefs: ['workspace-fixture'], profileIds: [profile.profile], limits: { ...limits }, maxRunMs: 60_000 };
   const managementGrant: ManagementBearer = { role: 'management', token: 'fixture-management-' + randomUUID(), consumerId: context.consumerId,
     ownerRefs: ['workspace-fixture'], preparation: { accountRefs: [accountRef], subjectRef: 'binding-fixture',
       policyRevision: 2, bindingRevision: 3, profileId: profile.profile, limits: { ...limits }, maxRunMs: 60_000 } };
@@ -170,6 +172,38 @@ test('HTTP control requires distinct configured consumer authority before any pr
     assert.equal(await f.count(), 1); assert.deepEqual(f.stats(), { transportCalls: 0, entries: 0 });
     const publicResponse = await f.raw(undefined, granted.bearer, '/v1/executions/' + f.execution(granted).ref, 'GET');
     assert.equal(publicResponse.status, 200); c.execution.parse(await publicResponse.json());
+  } finally { await f.stop(); }
+});
+
+test('explicit six-hour control admits long runs and recovers the same immutable ID tuple', async () => {
+  const f = await fixture(21_600_000); try {
+    const threeHours = f.input({ deadline: new Date(Date.now() + 3 * 3_600_000).toISOString() });
+    const first = await f.mint(threeHours);
+    assert.equal(first.operation.state, 'applied');
+
+    const sixHours = f.input({ deadline: new Date(Date.now() + 21_600_000).toISOString() });
+    const lost = await f.raw(sixHours); assert.equal(lost.status, 200); await lost.body?.cancel();
+    const operation = await f.kernel.operation(f.context, sixHours.operationId);
+    assert.ok(operation.executionRef);
+    const original = await f.kernel.savedExecution(f.context, operation.executionRef);
+    const recovered = await f.mint(sixHours), replay = await f.mint(sixHours);
+    assert.deepEqual(recovered, replay);
+    assert.equal(recovered.operation.state, 'applied');
+    assert.ok(recovered.operation.result?.kind === 'execution');
+    assert.equal(recovered.operation.result.executionRef, operation.executionRef);
+    const { executionRef: _executionRef, issuerEpoch: _issuerEpoch, ...projection } = original.admission;
+    assert.deepEqual(recovered.admission, projection);
+    assert.deepEqual(await f.kernel.savedExecution(f.context, operation.executionRef), original);
+
+    await denied(await f.raw(f.input({ deadline: new Date(Date.now() + 21_660_000).toISOString() })));
+    assert.equal(await f.count(), 2); assert.deepEqual(f.stats(), { transportCalls: 0, entries: 0 });
+  } finally { await f.stop(); }
+});
+
+test('default one-hour kernel composition still denies a long run before native', async () => {
+  const f = await fixture(defaults.maxRunMs); try {
+    await denied(await f.raw(f.input({ deadline: new Date(Date.now() + 2 * defaults.maxRunMs).toISOString() })));
+    assert.equal(await f.count(), 0); assert.deepEqual(f.stats(), { transportCalls: 0, entries: 0 });
   } finally { await f.stop(); }
 });
 

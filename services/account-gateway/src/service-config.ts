@@ -3,7 +3,7 @@ import { dirname, isAbsolute, normalize } from 'node:path';
 import { createHash } from 'node:crypto';
 import { approvedLimits, boundedFacts, defaults, identifier, integer } from './domain.ts';
 import type { ApprovedLimits, DurableFactBounds } from './domain.ts';
-import { FacadeBearers } from './facade.ts';
+import { FacadeBearers, RUN_CONTROL_MAX_RUN_MS } from './facade.ts';
 import type { ManagementBearer, RunControlBearer, ConsumerControlBearer } from './facade.ts';
 import { strictJSON } from './facade-ingress.ts';
 import { object } from './native-wire.ts';
@@ -169,7 +169,7 @@ export function captureServiceBearers(value: unknown, consumerId: string, profil
         approvedLimits(grant.limits, { ...defaults, maxRequests: p.limits.requests, maxConcurrent: p.limits.concurrency,
           maxRequestBytes: p.limits.requestBytes, maxOutputBytes: p.limits.outputBytes, maxTokens: p.limits.tokens });
       }
-      integer(grant.maxRunMs, defaults.maxRunMs);
+      integer(grant.maxRunMs, b.role === 'management' ? defaults.maxRunMs : RUN_CONTROL_MAX_RUN_MS);
     }
     return freeze(captured);
   } catch { return deny(); }
