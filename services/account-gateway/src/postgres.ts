@@ -201,6 +201,34 @@ export class PostgresKernel implements DurableKernel {
     identifier(id);
     return this.transaction(context, tx => this.op(tx, id));
   }
+  // Fresh reauthorization may replace fully erased generations without undoing
+  // disable's epoch fence. The current operation/candidate is excluded only
+  // after this same guard admitted it; every prior birth must stay retired.
+  private async disabledReconnectReady(tx: Tx, account: Row, operation?: string, generation?: string): Promise<boolean> {
+    const result = await tx.db.query(`SELECT
+      EXISTS (SELECT 1 FROM operations o WHERE o.consumer=$1 AND o.account_ref=$2
+        AND o.state='applied' AND o.intent->>'kind'='disable' AND o.intent->>'target'=$2::text
+        AND o.epoch=$3 AND o.revision<=$4)
+      AND ($5::text IS NULL OR EXISTS (SELECT 1 FROM operations o WHERE o.consumer=$1 AND o.id=$5
+        AND o.account_ref=$2 AND o.state='pending' AND o.intent->>'kind'='reconnect'
+        AND o.intent->>'target'=$2::text AND (o.intent->>'expectedRevision')::integer=$4))
+      AND EXISTS (SELECT 1 FROM candidates c WHERE c.consumer=$1 AND c.account_ref=$2
+        AND ($6::uuid IS NULL OR c.generation<>$6))
+      AND NOT EXISTS (SELECT 1 FROM candidates c WHERE c.consumer=$1 AND c.account_ref=$2
+        AND ($6::uuid IS NULL OR c.generation<>$6)
+        AND (c.state<>'retired' OR NOT EXISTS (SELECT 1 FROM cleanup j WHERE j.consumer=c.consumer
+          AND j.generation=c.generation AND j.state='done')))
+      AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.consumer=$1 AND o.account_ref=$2
+        AND o.state='pending' AND ($5::text IS NULL OR o.id<>$5))
+      AND NOT EXISTS (SELECT 1 FROM executions e WHERE e.consumer=$1 AND e.account_ref=$2 AND e.state='open')
+      AND NOT EXISTS (SELECT 1 FROM requests r JOIN executions e ON e.consumer=r.consumer AND e.ref=r.execution_ref
+        WHERE e.consumer=$1 AND e.account_ref=$2 AND r.transport_occupied)
+      AND NOT EXISTS (SELECT 1 FROM cleanup j WHERE j.consumer=$1 AND j.state<>'done' AND
+        (j.generation IN (SELECT c.generation FROM candidates c WHERE c.consumer=$1 AND c.account_ref=$2)
+          OR j.execution_ref IN (SELECT e.ref FROM executions e WHERE e.consumer=$1 AND e.account_ref=$2))) AS ready`,
+    [tx.consumer, account.ref, account.epoch, account.revision, operation ?? null, generation ?? null]);
+    return result.rows[0]?.ready === true;
+  }
   async beginAccount(context: TrustedContext, input: AccountIntent): Promise<OperationStatus> {
     input = { operationId: input.operationId, kind: input.kind, intentDigest: input.intentDigest,
       accountRef: input.accountRef, expectedRevision: input.expectedRevision,
@@ -231,7 +259,8 @@ export class PostgresKernel implements DurableKernel {
       } else {
         a = await this.one(tx, 'SELECT * FROM accounts WHERE consumer=$1 AND ref=$2', [tx.consumer, input.accountRef]);
         if (a.revision !== input.expectedRevision) throw new KernelError('conflict');
-        if (input.kind === 'reconnect' && !['active','quarantined'].includes(a.state)) throw new KernelError('denied');
+        if (input.kind === 'reconnect' && !['active','quarantined'].includes(a.state) &&
+            !(a.state === 'disabled' && await this.disabledReconnectReady(tx, a))) throw new KernelError('denied');
       }
       await this.insertOperation(tx, input.operationId, intent, a.ref);
       if (input.kind === 'create' || input.kind === 'reconnect') {
@@ -269,7 +298,8 @@ export class PostgresKernel implements DurableKernel {
       const c = await this.one(tx, 'SELECT * FROM candidates WHERE consumer=$1 AND operation_id=$2', [tx.consumer, id]);
       if (c.state !== 'staged') return undefined; // Never repeat a possibly effected create.
       const a = await this.one(tx, 'SELECT * FROM accounts WHERE consumer=$1 AND ref=$2', [tx.consumer, c.account_ref]);
-      if (a.state === 'disabled' || a.revision !== c.expected_revision || a.epoch !== c.expected_epoch) {
+      if ((a.state === 'disabled' && !await this.disabledReconnectReady(tx, a, id, c.generation)) ||
+          a.revision !== c.expected_revision || a.epoch !== c.expected_epoch) {
         await tx.db.query("UPDATE operations SET state='rejected',code='revision_conflict' WHERE consumer=$1 AND id=$2", [tx.consumer, id]);
         await tx.db.query("UPDATE candidates SET state='quarantined' WHERE consumer=$1 AND generation=$2", [tx.consumer, c.generation]);
         await this.cleanup(tx, c.generation);
@@ -300,9 +330,12 @@ export class PostgresKernel implements DurableKernel {
       // Reconnect still loses metadata CAS; no authority fence is waived.
       const stagingRename = a.state === 'staging' && c.old_generation === null &&
         a.active_generation === null && a.revision >= c.expected_revision;
+      const disabledReauthorization = a.state === 'disabled' &&
+        await this.disabledReconnectReady(tx, a, id, c.generation);
       const stale = acknowledged.state === 'unknown' || (!stagingRename && a.revision !== c.expected_revision) ||
         a.profile !== c.profile || a.epoch !== c.expected_epoch ||
-        a.active_generation !== c.old_generation || c.state === 'quarantined' || !['staging','active','quarantined'].includes(a.state);
+        a.active_generation !== c.old_generation || c.state === 'quarantined' ||
+        (!['staging','active','quarantined'].includes(a.state) && !disabledReauthorization);
       await tx.db.query("UPDATE candidates SET native_identity=$3,state=$4 WHERE consumer=$1 AND generation=$2",
         [tx.consumer, c.generation, proof.nativePhysicalIdentity, stale ? 'quarantined' : 'ready']);
       if (stale) {
@@ -315,7 +348,7 @@ export class PostgresKernel implements DurableKernel {
       } else {
         const promoted = (await tx.db.query(`UPDATE accounts SET active_generation=$3,state='active',
           revision=revision+1,epoch=epoch+$4 WHERE consumer=$1 AND ref=$2 RETURNING revision,epoch`,
-        [tx.consumer, c.account_ref, c.generation, c.old_generation ? 1 : 0])).rows[0];
+        [tx.consumer, c.account_ref, c.generation, c.old_generation || disabledReauthorization ? 1 : 0])).rows[0];
         await tx.db.query("UPDATE operations SET state='applied',code=NULL,revision=$3,epoch=$4 WHERE consumer=$1 AND id=$2",
           [tx.consumer, id, promoted.revision, promoted.epoch]);
         if (c.old_generation) await this.cleanup(tx, c.old_generation);

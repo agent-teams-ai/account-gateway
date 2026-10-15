@@ -146,8 +146,11 @@ export class NativeAuthority {
     const account = await this.kernel.account(ctx, j.accountRef);
     if (op.operationRef !== j.operationId || op.accountRef !== j.accountRef || !['pending','applied'].includes(op.state) ||
         account.accountRef !== j.accountRef || account.ownerRef !== j.ownerRef || account.profile !== j.profile.profile ||
-        !['staging','active','quarantined'].includes(account.state)) return denied();
+        (!['staging','active','quarantined'].includes(account.state) &&
+          !(account.state === 'disabled' && op.state === 'pending' && j.purpose === 'reconnect'))) return denied();
     if (op.state === 'pending') {
+      // Disabled authorizes only the exact fresh candidate admitted by the
+      // kernel; the SQL selector below rechecks its original epoch/revision.
       const pending = await this.#owners.store.pendingOAuthRefresh?.(ctx, this.configuration.enrollment.worker,
         { consumerId: ctx.consumerId, operationId: j.operationId, accountRef: j.accountRef, generation: j.generation }, p);
       if (!pending || pending.ownerRef !== j.ownerRef || pending.worker !== j.worker || pending.purpose !== j.purpose) return denied();
