@@ -115,7 +115,10 @@ const pendingOAuthJournal = `SELECT j.* FROM ag_kernel.accounts a
       j.purpose='create' AND a.state='staging' AND a.active_generation IS NULL
         AND c.old_generation IS NULL AND c.expected_revision<=a.revision
         AND o.intent->>'owner'=j.owner_ref AND o.intent->>'profile'=j.profile
-      OR j.purpose='reconnect' AND a.state IN ('active','quarantined')
+      -- Disabled remains nonexecutable until fresh proof promotion. Kernel
+      -- admitted this exact new reconnect only after prior erasure/closure;
+      -- a later disable/rename still loses the revision/epoch checks above.
+      OR j.purpose='reconnect' AND a.state IN ('active','quarantined','disabled')
         AND c.expected_revision=a.revision AND c.old_generation IS NOT DISTINCT FROM a.active_generation
         AND o.intent->>'target'=a.ref::text AND (o.intent->>'expectedRevision')::integer=c.expected_revision)
     AND j.profile=$3 AND j.base_url=$4 AND j.model=$5 AND j.qualification_ref=$6

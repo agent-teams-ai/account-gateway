@@ -881,6 +881,120 @@ test('F OAuth reconnect: new verified birth promotes stable account and fences t
   } finally { await f.close(); }
 });
 
+test('F OAuth disabled reauthorization: completed erasure permits only a fresh proof and preserves the disable fence', async () => {
+  const f = await fixture({ descriptor: 'qualified' });
+  try {
+    const old = await activeOAuth(f), original = await f.kernel.account(f.context, old.accountRef);
+    const disabled = await f.management().disable(f.context, { operationId: randomUUID(), accountRef: old.accountRef,
+      expectedRevision: original.revision });
+    const deniedBeforeCleanup = f.stats().begins;
+    await assert.rejects(f.client().beginOAuthReconnect(old.accountRef,
+      { operationId: randomUUID(), expectedMetadataRevision: disabled.revision! }), GatewayError);
+    assert.equal(f.stats().begins, deniedBeforeCleanup, 'unsettled disable never begins authorization');
+    const cleanup = await f.kernel.claimCleanup(f.context, f.worker);
+    assert.ok(cleanup?.scope.kind === 'generation' && cleanup.scope.generation === old.generation);
+    assert.equal(await f.management().cleanupClaim(f.context, cleanup), 'erased');
+    assert.equal(f.erased.has(old.generation), true);
+    const before = await f.kernel.account(f.context, old.accountRef);
+    assert.equal(before.state, 'disabled'); assert.equal(before.epoch, original.epoch + 1);
+    const retained = await f.store.mapping(f.context, old.generation); assert.ok(retained);
+    const disableReadback = await f.kernel.operation(f.context, disabled.operationRef);
+    assert.equal((await f.management().retirement(f.context, old.accountRef, disabled.operationRef)).state, 'completed');
+    await assert.rejects(f.foreign().beginOAuthReconnect(old.accountRef,
+      { operationId: randomUUID(), expectedMetadataRevision: before.revision }), GatewayError);
+    await assert.rejects(f.client().beginOAuthReconnect(old.accountRef,
+      { operationId: randomUUID(), expectedMetadataRevision: before.revision - 1 }), GatewayError);
+    assert.equal(f.stats().begins, deniedBeforeCleanup);
+
+    f.state('prepared'); f.descriptor('pending');
+    const command = { operationId: randomUUID(), expectedMetadataRevision: before.revision };
+    const begun = await f.client().beginOAuthReconnect(old.accountRef, command);
+    assert.equal(begun.operation.state, 'pending'); assert.ok(begun.authorizationURL);
+    const fresh = await f.store.readJournal(f.context, command.operationId); assert.ok(fresh);
+    assert.equal(fresh.accountRef, old.accountRef); assert.equal(fresh.ownerRef, old.ownerRef);
+    assert.notEqual(fresh.generation, old.generation);
+    assert.equal((await f.management().retirement(f.context, old.accountRef, disabled.operationRef)).state, 'pending');
+    assert.equal((await f.callback('oauth-owner-authority', selectors(fresh))).status, 200);
+    assert.equal((await f.callback('oauth-owner-authority', selectors(old))).status, 403);
+    assert.deepEqual(await f.kernel.account(f.context, old.accountRef), before, 'Begin never enables the old route');
+    await assert.rejects(f.kernel.prepare(f.context, { operationId: randomUUID(), intentDigest: 'disabled-old-route',
+      invocationRef: randomUUID(), attemptRef: 'one', permittedAccounts: [old.accountRef], profile: oauthProfile.profile,
+      policySubject: 'disabled-binding', policyRevision: 1, bindingRevision: 1, issuerEpoch: await f.kernel.issuer(f.context),
+      deadline: new Date(Date.now() + 45_000), limits: bounds }), code('unknown'));
+    f.state('completed');
+    assert.equal((await f.client().readOAuth(command.operationId)).state, 'pending');
+    assert.deepEqual(await f.kernel.account(f.context, old.accountRef), before, 'custody without profile proof stays disabled');
+    f.descriptor('qualified');
+    const applied = await f.client().readOAuth(command.operationId); assert.equal(applied.state, 'applied');
+    const current = await f.kernel.account(f.context, old.accountRef);
+    assert.equal(current.state, 'active'); assert.equal(current.ownerRef, before.ownerRef);
+    assert.equal(current.epoch, before.epoch + 1); assert.equal(current.revision, before.revision + 1);
+    assert.equal((await f.management().retirement(f.context, old.accountRef, disabled.operationRef)).state, 'rejected');
+    assert.deepEqual(await f.store.mapping(f.context, old.generation), retained);
+    assert.equal(f.erased.has(old.generation), true, 'the old native tombstone is retained');
+    assert.equal(f.erased.has(fresh.generation), false);
+    assert.equal((await f.callback('oauth-refresh-authority', selectors(old))).status, 403);
+    assert.equal((await f.callback('oauth-refresh-authority', selectors(fresh))).status, 200);
+    assert.deepEqual(await f.kernel.operation(f.context, disabled.operationRef), disableReadback);
+    assert.equal((await pool.query('SELECT state FROM ag_kernel.candidates WHERE consumer=$1 AND generation=$2',
+      [f.context.consumerId, old.generation])).rows[0].state, 'retired');
+    assert.deepEqual(await f.client().readOAuth(command.operationId), applied);
+    assert.deepEqual(await f.client().beginOAuthReconnect(old.accountRef, command), { operation: applied });
+    assert.equal(f.stats().begins, deniedBeforeCleanup + 1); assert.equal(f.stats().activations, 0);
+    await f.assertHealthy();
+  } finally { await f.close(); }
+});
+
+test('F OAuth disabled reauthorization: unresolved old intent remains spent and blocks a new birth', async () => {
+  const f = await fixture({ descriptor: 'qualified' });
+  try {
+    const old = await activeOAuth(f), before = await f.kernel.account(f.context, old.accountRef);
+    f.state('prepared');
+    const operationId = randomUUID();
+    await f.client().beginOAuthReconnect(old.accountRef, { operationId, expectedMetadataRevision: before.revision });
+    const pending = await f.store.readJournal(f.context, operationId); assert.ok(pending);
+    const disabled = await f.management().disable(f.context, { operationId: randomUUID(), accountRef: old.accountRef,
+      expectedRevision: before.revision });
+    const begins = f.stats().begins;
+    await assert.rejects(f.client().beginOAuthReconnect(old.accountRef,
+      { operationId: randomUUID(), expectedMetadataRevision: disabled.revision! }), GatewayError);
+    assert.equal((await f.callback('oauth-owner-authority', selectors(pending))).status, 403);
+    assert.equal((await f.management().completeOAuth(f.context, { operationId, ownerRef: owner,
+      state: 'b'.repeat(64), code: 'synthetic-spent-old-callback' })).state, 'unknown');
+    assert.equal((await f.kernel.operation(f.context, operationId)).state, 'unknown');
+    assert.equal(await f.kernel.startCandidate(f.context, operationId, f.worker), undefined);
+    assert.equal((await f.kernel.account(f.context, old.accountRef)).state, 'disabled');
+    assert.equal(f.stats().begins, begins); await f.assertHealthy();
+  } finally { await f.close(); }
+});
+
+test('F OAuth disabled reauthorization: another disable fences its new callback and final proof', async () => {
+  const f = await fixture({ descriptor: 'qualified' });
+  try {
+    const old = await activeOAuth(f), original = await f.kernel.account(f.context, old.accountRef);
+    await f.management().disable(f.context, { operationId: randomUUID(), accountRef: old.accountRef,
+      expectedRevision: original.revision });
+    const cleanup = await f.kernel.claimCleanup(f.context, f.worker); assert.ok(cleanup);
+    assert.equal(await f.management().cleanupClaim(f.context, cleanup), 'erased');
+    const before = await f.kernel.account(f.context, old.accountRef);
+    f.state('prepared');
+    const operationId = randomUUID();
+    await f.client().beginOAuthReconnect(old.accountRef, { operationId, expectedMetadataRevision: before.revision });
+    const fresh = await f.store.readJournal(f.context, operationId); assert.ok(fresh);
+    const again = await f.management().disable(f.context, { operationId: randomUUID(), accountRef: old.accountRef,
+      expectedRevision: before.revision });
+    assert.equal((await f.callback('oauth-owner-authority', selectors(fresh))).status, 403);
+    f.state('completed');
+    const result = await f.client().readOAuth(operationId); assert.equal(result.state, 'unknown');
+    assert.equal((await f.kernel.account(f.context, old.accountRef)).state, 'disabled');
+    assert.equal((await f.kernel.account(f.context, old.accountRef)).epoch, again.epoch);
+    assert.equal(await f.kernel.startCandidate(f.context, operationId, f.worker), undefined);
+    assert.equal((await f.kernel.operation(f.context, operationId)).code, 'account_disabled');
+    assert.equal(f.erased.has(old.generation), true); assert.equal(f.stats().begins, 2);
+    await f.assertHealthy();
+  } finally { await f.close(); }
+});
+
 test('F OAuth reconnect: stored owner, metadata CAS and original creator fence native entry', async () => {
   const f = await fixture({ descriptor: 'qualified' });
   try {
