@@ -637,7 +637,7 @@ test('synthetic TCP/SQL: no-permit limit refusals beyond maxPending retain SQL t
       const r = await f.request(); denied.push(r.requestId);
       assert.equal(r.failed, false); assert.equal(r.response.status, 202);
       assert.deepEqual(await f.kernel.request(f.context, f.saved.admission.executionRef, r.requestId),
-        { requestRef: r.requestId, effect: 'not_dispatched', code: 'limit' });
+        { requestRef: r.requestId, effect: 'not_dispatched', code: 'concurrency_limit' });
       assert.equal(await f.kernel.requestProof(f.context, f.saved.admission.executionRef, r.requestId), undefined);
       assert.equal(await f.occupied(r.requestId), false);
     }
