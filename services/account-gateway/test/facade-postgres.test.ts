@@ -294,8 +294,38 @@ test('concurrent duplicate SDK POST and native callbacks return one SQL permit a
     assert.equal((await pool.query('SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2', [f.context.consumerId, f.executionRef])).rows[0].request_count, 1);
     // Output and TS socket closure did not release native occupancy.
     assert.equal((await pool.query('SELECT transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND id=$2', [f.context.consumerId, request.requestId])).rows[0].transport_occupied, true);
+    const blocked = f.request();
+    const busy = await f.execution.request(f.executionRef, blocked);
+    assert.ok(busy.kind === 'status');
+    assert.equal(busy.status.status, 'failed'); assert.equal(busy.status.effect, 'not_dispatched');
+    assert.equal(busy.status.error?.code, 'admission_limited');
+    assert.deepEqual(busy.status.error?.retry, { kind: 'after', milliseconds: 1000 });
+    assert.equal(f.stats().entries, 1);
+    const deniedRow = (await pool.query(`SELECT code,transport_occupied,native_origin_ref,engine_incarnation,descriptor_generation
+      FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3`, [f.context.consumerId, f.executionRef, blocked.requestId])).rows[0];
+    assert.deepEqual(deniedRow, { code: 'concurrency_limit', transport_occupied: false,
+      native_origin_ref: null, engine_incarnation: null, descriptor_generation: null });
     await assert.rejects(last.callback.closed({ ...last.proof, token: randomUUID() }));
     await last.callback.closed(last.proof); assert.equal((await f.execution.status(f.executionRef, request.requestId)).effect, 'completed');
+    const repeated = await f.execution.request(f.executionRef, blocked);
+    assert.ok(repeated.kind === 'status');
+    assert.equal(repeated.status.effect, 'not_dispatched');
+    assert.equal(repeated.status.requestRef, blocked.requestId);
+    assert.deepEqual(repeated.status.error?.retry, { kind: 'after', milliseconds: 1000 });
+    assert.equal(f.stats().entries, 1, 'a denied request identity never becomes dispatchable');
+    for (let admitted = 1; admitted < limits.requests; admitted++) {
+      const next = await f.execution.request(f.executionRef, f.request());
+      assert.ok(next.kind === 'stream'); await consume(next);
+      const completed = f.last(); await completed.callback.closed(completed.proof);
+    }
+    const quota = await f.execution.request(f.executionRef, f.request());
+    assert.ok(quota.kind === 'status');
+    assert.equal(quota.status.status, 'failed'); assert.equal(quota.status.effect, 'not_dispatched');
+    assert.equal(quota.status.error?.code, 'admission_limited');
+    assert.deepEqual(quota.status.error?.retry, { kind: 'never' });
+    assert.equal(f.stats().entries, limits.requests);
+    assert.equal((await pool.query('SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
+      [f.context.consumerId, f.executionRef])).rows[0].request_count, limits.requests);
   } finally { await f.stop(); }
 });
 test('lost controlled transport ACK and absent readback preserve unknown without replay or secret diagnostics', async () => {

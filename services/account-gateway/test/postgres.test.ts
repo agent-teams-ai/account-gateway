@@ -589,6 +589,16 @@ test('atomic request limits and runtime deadline/config enforcement', async () =
   assert.equal(pair.filter(r => r.status === 'fulfilled' && r.value.dispatch).length, 1);
   const first = pair[0].status === 'fulfilled' && pair[0].value.dispatch ? 'one' : 'two';
   const denied = first === 'one' ? 'two' : 'one';
+  const deniedClaim = pair.find(r => r.status === 'fulfilled' && !r.value.dispatch);
+  assert.ok(deniedClaim && deniedClaim.status === 'fulfilled');
+  assert.equal(deniedClaim.value.status.code, 'concurrency_limit');
+  assert.equal(deniedClaim.value.status.effect, 'not_dispatched');
+  const accountBusy = await b.claim(ctx, other.result.executionRef!, 'account-busy', w, other.admission, reservation());
+  assert.equal(accountBusy.dispatch, undefined);
+  assert.equal(accountBusy.status.code, 'concurrency_limit');
+  assert.equal(accountBusy.status.effect, 'not_dispatched');
+  assert.equal(await count('SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
+    [ctx.consumerId, other.result.executionRef]), 0);
   await assert.rejects(a.effect(ctx, e.result.executionRef!, first, w, 'completed'), isCode('conflict'));
   await a.effect(ctx, e.result.executionRef!, first, w, 'response_started');
   await a.effect(ctx, e.result.executionRef!, first, w, 'completed');
@@ -596,12 +606,19 @@ test('atomic request limits and runtime deadline/config enforcement', async () =
   assert.ok(permit && permit.status === 'fulfilled' && permit.value.dispatch);
   await a.acknowledgeTransportClosed(ctx, w, permit.value.dispatch.closure);
   assert.equal((await b.claim(ctx, e.result.executionRef!, denied, w, e.admission, reservation())).dispatch, undefined);
+  assert.deepEqual(await b.claim(ctx, other.result.executionRef!, 'account-busy', w, other.admission, reservation()), accountBusy);
   const third = await a.claim(ctx, e.result.executionRef!, 'third', w, e.admission, reservation()); assert.ok(third.dispatch);
   await a.effect(ctx, e.result.executionRef!, 'third', w, 'response_started');
   await a.effect(ctx, e.result.executionRef!, 'third', w, 'completed');
   await a.acknowledgeTransportClosed(ctx, w, third.dispatch.closure);
+  const accountFreed = await b.claim(ctx, other.result.executionRef!, 'account-freed', w, other.admission, reservation());
+  assert.ok(accountFreed.dispatch);
   const total = await b.claim(ctx, e.result.executionRef!, 'fourth', w, e.admission, reservation());
+  // The original request quota wins even while the same account is occupied.
   assert.equal(total.status.code, 'limit'); assert.equal(total.status.effect, 'not_dispatched');
+  await b.effect(ctx, other.result.executionRef!, 'account-freed', w, 'response_started');
+  await b.effect(ctx, other.result.executionRef!, 'account-freed', w, 'completed');
+  await b.acknowledgeTransportClosed(ctx, w, accountFreed.dispatch.closure);
   await assert.rejects(a.prepare(ctx, await approval(ctx, account.accountRef!, { limits: { ...e.input.limits, requests: 0 } })), isCode('invalid'));
   // Red if pretransaction validation throws outside the Promise port or admits zero limits.
   await assert.rejects(b.prepare(ctx, await approval(ctx, account.accountRef!, { limits: { ...e.input.limits, concurrency: 0 } })), isCode('invalid'));
@@ -1051,7 +1068,7 @@ test('B2 distinct executions contend for one account slot, unrelated accounts an
   assert.equal(pair.every(r => r.status === 'fulfilled'), true);
   // This fails behaviorally on old production before any new column/API is read.
   assert.equal(pair.filter(r => r.status === 'fulfilled' && r.value.dispatch).length, 1);
-  assert.equal(pair.filter(r => r.status === 'fulfilled' && r.value.status.code === 'limit').length, 1);
+  assert.equal(pair.filter(r => r.status === 'fulfilled' && r.value.status.code === 'concurrency_limit').length, 1);
   assert.equal(await occupancy(ctx, account.accountRef!), 1);
   const other = await prepared(ctx, unrelated.accountRef!);
   assert.ok((await b.claim(ctx, other.result.executionRef!, 'other-account', w2, other.admission, reservation())).dispatch);
@@ -1066,7 +1083,7 @@ test('B2 execution keeps its narrower approval while sharing the configured acco
   const ctx = context(), account = await connected(ctx), w = await worker(ctx);
   const first = await prepared(ctx, account.accountRef!, {}, x), second = await prepared(ctx, account.accountRef!, {}, x);
   assert.ok((await x.claim(ctx, first.result.executionRef!, 'one', w, first.admission, reservation())).dispatch);
-  assert.equal((await y.claim(ctx, first.result.executionRef!, 'too-wide', w, first.admission, reservation())).status.code, 'limit');
+  assert.equal((await y.claim(ctx, first.result.executionRef!, 'too-wide', w, first.admission, reservation())).status.code, 'concurrency_limit');
   assert.ok((await y.claim(ctx, second.result.executionRef!, 'two', w, second.admission, reservation())).dispatch);
   const third = await prepared(ctx, account.accountRef!, {}, x);
   assert.equal((await x.claim(ctx, third.result.executionRef!, 'account-full', w, third.admission, reservation())).dispatch, undefined);
@@ -1080,7 +1097,7 @@ test('B2 lost owner retains occupancy; exact late closure frees one without refu
   await expire(ctx, owner);
   const denied = await b.claim(ctx, second.result.executionRef!, 'held', live, second.admission, reservation());
   assert.equal(denied.dispatch, undefined, 'lost ownership is not local transport closure');
-  assert.equal(denied.status.code, 'limit');
+  assert.equal(denied.status.code, 'concurrency_limit');
   const unknown = { requestRef: 'old', effect: 'effect_unknown', code: 'owner_lost' };
   assert.deepEqual(await b.request(ctx, first.result.executionRef!, 'old'), unknown);
   assert.equal((await b.execution(ctx, first.result.executionRef!)).state, 'fenced');
@@ -1307,7 +1324,7 @@ test('B2 accepted insert omitting occupancy conservatively holds the account slo
   assert.equal(await occupancy(ctx, account.accountRef!), 1);
   const denied = await b.claim(ctx, second.result.executionRef!, 'must-stay-held', w, second.admission, reservation());
   assert.equal(denied.dispatch, undefined);
-  assert.deepEqual(denied.status, { requestRef: 'must-stay-held', effect: 'not_dispatched', code: 'limit' });
+  assert.deepEqual(denied.status, { requestRef: 'must-stay-held', effect: 'not_dispatched', code: 'concurrency_limit' });
   const row = (await admin.query(`SELECT closure_token FROM ag_kernel.requests
     WHERE consumer=$1 AND execution_ref=$2 AND id='accepted-without-new-fields'`,
   [ctx.consumerId, first.result.executionRef])).rows[0];
@@ -1363,7 +1380,7 @@ test('B2a exact positive rejection retains occupancy and spent budget until clos
   assert.equal((await b.execution(ctx, e.result.executionRef!)).state, 'open');
   assert.equal(await occupancy(ctx, account.accountRef!), 1);
   const blocked = await b.claim(ctx, e.result.executionRef!, 'held', w, e.admission, reservation());
-  assert.deepEqual(blocked, { status: { requestRef: 'held', effect: 'not_dispatched', code: 'limit' } });
+  assert.deepEqual(blocked, { status: { requestRef: 'held', effect: 'not_dispatched', code: 'concurrency_limit' } });
   const budget = async () => (await admin.query(
     'SELECT request_count,max_requests,max_tokens,deadline,state FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
     [ctx.consumerId, e.result.executionRef])).rows[0];

@@ -240,8 +240,14 @@ function safe(code: c.SafeError['code'], effect: c.SafeError['effect'] = 'effect
 function requestDTO(r: RequestStatus): c.RequestStatus {
   const status = r.effect === 'completed' ? 'completed' : r.effect === 'effect_unknown' ? 'unknown' :
     ['not_dispatched', 'rejected_before_dispatch'].includes(r.effect) ? 'failed' : 'pending';
+  const concurrencyLimited = r.code === 'concurrency_limit' && r.effect === 'not_dispatched';
+  const error = status === 'failed' || status === 'unknown' ? {
+    ...safe(r.code === 'limit' || r.code === 'concurrency_limit' ? 'admission_limited' : 'upstream_failure',
+      r.effect, { requestRef: r.requestRef }),
+    ...(concurrencyLimited ? { retry: { kind: 'after', milliseconds: 1000 } } : {}),
+  } : undefined;
   return c.requestStatus.parse({ requestRef: r.requestRef, effect: r.effect, status,
-    ...(status === 'failed' || status === 'unknown' ? { error: safe(r.code === 'limit' ? 'admission_limited' : 'upstream_failure', r.effect, { requestRef: r.requestRef }) } : {}) });
+    ...(error ? { error } : {}) });
 }
 function accountDTO(a: Awaited<ReturnType<AccountManagement['account']>>): c.Account {
   return c.account.parse({ accountRef: a.accountRef, ownerRef: a.ownerRef, profileId: a.profile,
