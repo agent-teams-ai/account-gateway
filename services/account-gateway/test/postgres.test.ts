@@ -589,6 +589,16 @@ test('atomic request limits and runtime deadline/config enforcement', async () =
   assert.equal(pair.filter(r => r.status === 'fulfilled' && r.value.dispatch).length, 1);
   const first = pair[0].status === 'fulfilled' && pair[0].value.dispatch ? 'one' : 'two';
   const denied = first === 'one' ? 'two' : 'one';
+  const deniedClaim = pair.find(r => r.status === 'fulfilled' && !r.value.dispatch);
+  assert.ok(deniedClaim && deniedClaim.status === 'fulfilled');
+  assert.equal(deniedClaim.value.status.code, 'concurrency_limit');
+  assert.equal(deniedClaim.value.status.effect, 'not_dispatched');
+  const accountBusy = await b.claim(ctx, other.result.executionRef!, 'account-busy', w, other.admission, reservation());
+  assert.equal(accountBusy.dispatch, undefined);
+  assert.equal(accountBusy.status.code, 'concurrency_limit');
+  assert.equal(accountBusy.status.effect, 'not_dispatched');
+  assert.equal(await count('SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
+    [ctx.consumerId, other.result.executionRef]), 0);
   await assert.rejects(a.effect(ctx, e.result.executionRef!, first, w, 'completed'), isCode('conflict'));
   await a.effect(ctx, e.result.executionRef!, first, w, 'response_started');
   await a.effect(ctx, e.result.executionRef!, first, w, 'completed');
@@ -596,12 +606,19 @@ test('atomic request limits and runtime deadline/config enforcement', async () =
   assert.ok(permit && permit.status === 'fulfilled' && permit.value.dispatch);
   await a.acknowledgeTransportClosed(ctx, w, permit.value.dispatch.closure);
   assert.equal((await b.claim(ctx, e.result.executionRef!, denied, w, e.admission, reservation())).dispatch, undefined);
+  assert.deepEqual(await b.claim(ctx, other.result.executionRef!, 'account-busy', w, other.admission, reservation()), accountBusy);
   const third = await a.claim(ctx, e.result.executionRef!, 'third', w, e.admission, reservation()); assert.ok(third.dispatch);
   await a.effect(ctx, e.result.executionRef!, 'third', w, 'response_started');
   await a.effect(ctx, e.result.executionRef!, 'third', w, 'completed');
   await a.acknowledgeTransportClosed(ctx, w, third.dispatch.closure);
+  const accountFreed = await b.claim(ctx, other.result.executionRef!, 'account-freed', w, other.admission, reservation());
+  assert.ok(accountFreed.dispatch);
   const total = await b.claim(ctx, e.result.executionRef!, 'fourth', w, e.admission, reservation());
+  // The original request quota wins even while the same account is occupied.
   assert.equal(total.status.code, 'limit'); assert.equal(total.status.effect, 'not_dispatched');
+  await b.effect(ctx, other.result.executionRef!, 'account-freed', w, 'response_started');
+  await b.effect(ctx, other.result.executionRef!, 'account-freed', w, 'completed');
+  await b.acknowledgeTransportClosed(ctx, w, accountFreed.dispatch.closure);
   await assert.rejects(a.prepare(ctx, await approval(ctx, account.accountRef!, { limits: { ...e.input.limits, requests: 0 } })), isCode('invalid'));
   // Red if pretransaction validation throws outside the Promise port or admits zero limits.
   await assert.rejects(b.prepare(ctx, await approval(ctx, account.accountRef!, { limits: { ...e.input.limits, concurrency: 0 } })), isCode('invalid'));

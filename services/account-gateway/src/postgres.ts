@@ -533,8 +533,9 @@ export class PostgresKernel implements DurableKernel {
           count(*) FILTER (WHERE r.execution_ref=$2)::integer AS execution_n
           FROM requests r JOIN executions x ON x.consumer=r.consumer AND x.ref=r.execution_ref
           WHERE r.consumer=$1 AND x.account_ref=$3 AND r.transport_occupied`, [tx.consumer, ref, e.account_ref])).rows[0];
-        if (e.request_count >= e.max_requests || occupied.execution_n >= e.max_concurrent ||
-            occupied.account_n >= this.bounds.maxConcurrent) code = 'limit';
+        if (e.request_count >= e.max_requests) code = 'limit';
+        else if (occupied.execution_n >= e.max_concurrent ||
+            occupied.account_n >= this.bounds.maxConcurrent) code = 'concurrency_limit';
       }
       if (!code) {
         await this.worker(tx, worker);
