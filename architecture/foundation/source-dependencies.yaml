@@ -79,9 +79,9 @@ boundaries:
     allow: {boundaries: [kernel-domain, kernel-postgres, native-management, contracts, http], packages: ['@agent-teams/account-gateway'], builtins: ['node:http', 'node:crypto', 'node:events'], runtimeReferences: []}
   - id: private-facade-tests
     dependencyMode: runtime
-    roots: [services/account-gateway/test/facade-ingress.test.ts, services/account-gateway/test/facade-postgres.test.ts, services/account-gateway/test/run-access-postgres.test.ts, services/account-gateway/test/oauth-enrollment-postgres.test.ts]
-    entrypoints: [services/account-gateway/test/facade-ingress.test.ts, services/account-gateway/test/facade-postgres.test.ts, services/account-gateway/test/run-access-postgres.test.ts, services/account-gateway/test/oauth-enrollment-postgres.test.ts]
-    allow: {boundaries: [private-facade, contracts, http, kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http, foreground-service-entry, native-transport-http], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:http', 'node:net', 'node:fs/promises', 'node:timers/promises'], runtimeReferences: []}
+    roots: [services/account-gateway/test/facade-ingress.test.ts, services/account-gateway/test/facade-postgres.test.ts, services/account-gateway/test/run-access-postgres.test.ts, services/account-gateway/test/oauth-enrollment-postgres.test.ts, services/account-gateway/test/native-retained-custody-joined.ts]
+    entrypoints: [services/account-gateway/test/facade-ingress.test.ts, services/account-gateway/test/facade-postgres.test.ts, services/account-gateway/test/run-access-postgres.test.ts, services/account-gateway/test/oauth-enrollment-postgres.test.ts, services/account-gateway/test/native-retained-custody-joined.ts]
+    allow: {boundaries: [private-facade, contracts, http, kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http, foreground-service-entry, native-transport-http], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:http', 'node:net', 'node:fs/promises', 'node:timers/promises', 'node:path', 'node:readline'], runtimeReferences: []}
   - id: native-transport-http
     dependencyMode: runtime
     roots: [services/account-gateway/src/native-transport.ts, services/account-gateway/src/native-authority.ts, services/account-gateway/src/native-wire.ts, services/account-gateway/src/native-response-diagnostics.ts]

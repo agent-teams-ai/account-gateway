@@ -11,8 +11,11 @@ import type { ApprovedLimits, ClaimResult, DurableKernel, ExecutionRead, NativeD
   OperationStatus, PrivateAdmission, RequestStatus, SavedExecution, TrustedContext, CleanupAuthority } from './domain.ts';
 import { captureContext, physicalCandidate, codexOAuthProfile } from './management.ts';
 import type { AccountManagement, ManagementStore, PhysicalCandidate } from './management.ts';
+import type { AccountLifecycleReadback } from './management.ts';
 import { strictJSON, validateResponses } from './facade-ingress.ts';
 
+// Re-export the single wire authority to private composition/configuration.
+export const lifecycleContract = c.LIFECYCLE_CAPABILITY_CONTRACT;
 interface Schema<T> { parse(value: unknown): T; safeParse(value: unknown): { success: boolean; data?: T } }
 function parse<T>(schema: Schema<T>, value: unknown): T {
   const result = schema.safeParse(value);
@@ -224,6 +227,9 @@ export interface FacadeOptions {
   readonly ingressBytes?: number;
   readonly timeoutMs?: number;
   readonly bufferBytes?: number;
+  // Compatible readers remain available after writes close; omission disables
+  // new lifecycle writes without hiding existing suspended rows or receipts.
+  readonly lifecycle?: { readonly contract: typeof c.LIFECYCLE_CAPABILITY_CONTRACT; readonly writeGate: 'enabled' | 'disabled' };
 }
 function admissionTuple(a: PrivateAdmission): readonly unknown[] {
   return [a.executionRef, a.issuerEpoch, a.invocationRef, a.attemptRef, a.accountRef, a.authorizationEpoch,
@@ -252,6 +258,12 @@ function requestDTO(r: RequestStatus): c.RequestStatus {
 function accountDTO(a: Awaited<ReturnType<AccountManagement['account']>>): c.Account {
   return c.account.parse({ accountRef: a.accountRef, ownerRef: a.ownerRef, profileId: a.profile,
     displayName: a.displayName, state: a.state, metadataRevision: a.revision, authorizationEpoch: a.epoch });
+}
+function lifecycleAccountDTO(r: AccountLifecycleReadback): c.LifecycleAccount {
+  const a = r.account;
+  return c.lifecycleAccount.parse({ accountRef: a.accountRef, ownerRef: a.ownerRef, profileId: a.profile,
+    displayName: a.displayName, state: a.state, metadataRevision: a.revision, authorizationEpoch: a.epoch,
+    authKind: r.authKind, resumeCustody: r.resumeCustody });
 }
 function retirementDTO(r: Awaited<ReturnType<AccountManagement['retirement']>>): c.AccountRetirement {
   return c.accountRetirement.parse({ operationRef: r.operationRef, account: accountDTO(r.account), state: r.state,
@@ -312,6 +324,9 @@ export function createFacade(options: FacadeOptions): Server {
   if (!Number.isSafeInteger(ingressBytes) || ingressBytes < 1024 || ingressBytes > 16_777_216 ||
       !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 3_600_000 ||
       !Number.isSafeInteger(bufferBytes) || bufferBytes < 1024 || bufferBytes > 1_048_576 || options.intentHmacKey.byteLength !== 32) throw new KernelError('invalid');
+  if (options.lifecycle !== undefined && (options.lifecycle.contract !== c.LIFECYCLE_CAPABILITY_CONTRACT ||
+      !['enabled','disabled'].includes(options.lifecycle.writeGate) || Object.keys(options.lifecycle).sort().join(',') !== 'contract,writeGate')) throw new KernelError('invalid');
+  const lifecycleWriteGate = options.lifecycle?.writeGate ?? 'disabled';
   const hmac = Buffer.from(options.intentHmacKey);
   const profiles = new Map<string, { dto: c.Profile; maxOutputTokens: number; limits?: Readonly<ApprovedLimits> }>();
   for (const entry of options.profiles) {
@@ -464,7 +479,7 @@ export function createFacade(options: FacadeOptions): Server {
       const grant = bearers.resolve(authorization.slice(7));
       if (!grant) { send(res, c.safeError, safe('unauthenticated', 'not_dispatched'), 401); return; }
       requireCurrent(grant); const context = captureContext(grant);
-      if (!req.url || req.url.length > 2048 || !/^\/(?:v1|internal\/v1)\//.test(req.url) || req.url.includes('#')) throw new KernelError('invalid');
+      if (!req.url || req.url.length > 2048 || !/^\/(?:v1|v2|internal\/v1)\//.test(req.url) || req.url.includes('#')) throw new KernelError('invalid');
       const url = new URL(req.url, 'http://facade.invalid');
       if (url.origin !== 'http://facade.invalid') throw new KernelError('invalid');
       const path = url.pathname, method = req.method;
@@ -473,7 +488,7 @@ export function createFacade(options: FacadeOptions): Server {
           singleton(req, 'accept') !== (streamRoute ? 'text/event-stream' : 'application/json')) throw new KernelError('invalid');
       const match = /^\/v1\/executions\/([A-Za-z0-9_-]+)(?:\/(requests)(?:\/([A-Za-z0-9_-]+))?|\/(close))?$/.exec(path);
       const opMatch = /^\/v1\/operations\/([A-Za-z0-9_-]+)$/.exec(path);
-      if (url.search && !(path === '/v1/accounts' && method === 'GET')) throw new KernelError('invalid');
+      if (url.search && !((path === '/v1/accounts' || path === '/v2/accounts') && method === 'GET')) throw new KernelError('invalid');
       if (path === '/internal/v1/run-access') {
         if (grant.role !== 'run-control' && grant.role !== 'consumer-control') throw new KernelError('denied');
         if (method !== 'POST' || req.url !== '/internal/v1/run-access') throw new KernelError('invalid');
@@ -633,7 +648,9 @@ export function createFacade(options: FacadeOptions): Server {
       if (path === '/v1/profiles' && method === 'GET') {
         reply(c.profiles, { profiles: [...profiles.values()].filter(p => permitsProfile(grant, p.dto.profileId)).map(p => p.dto) }); return;
       }
-      if (path === '/v1/accounts' && method === 'GET') {
+      const lifecycleGate = singleton(req, c.LIFECYCLE_CAPABILITY_HEADER, false) === c.LIFECYCLE_CAPABILITY_CONTRACT &&
+        singleton(req, c.LIFECYCLE_CLIENT_HEADER, false) === c.LIFECYCLE_CLIENT_CONTRACT;
+      if ((path === '/v1/accounts' || lifecycleGate && path === '/v2/accounts') && method === 'GET') {
         const query = new Map<string, unknown>();
         for (const [key, value] of url.searchParams) {
           if (query.has(key)) throw new KernelError('invalid');
@@ -647,8 +664,71 @@ export function createFacade(options: FacadeOptions): Server {
         if (input.ownerRef && !permitsOwner(grant, input.ownerRef)) throw new KernelError('denied');
         const page = await management.accounts(context, { ...input,
           allowedOwnerRefs: grant.role === 'management' && !consumerOwnerScope ? grant.ownerRefs! : [input.ownerRef!] });
-        reply(c.accounts, { accounts: page.accounts.filter(a => permitsProfile(grant, a.profile)).map(accountDTO),
+        const visible = page.accounts.filter(a => permitsProfile(grant, a.profile));
+        if (path === '/v2/accounts') {
+          const accounts = await Promise.all(visible.map(a => management.lifecycle(context, a.accountRef).then(lifecycleAccountDTO)));
+          reply(c.lifecycleAccounts, { accounts, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) }); return;
+        }
+        if (visible.some(a => a.state === 'suspended')) throw new KernelError('conflict');
+        reply(c.accounts, { accounts: visible.map(accountDTO),
           ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) }); return;
+      }
+      if (lifecycleGate) {
+        const lifecycleAccountDTOWithReadback = async (ref: string): Promise<c.LifecycleAccount> =>
+          lifecycleAccountDTO(await management.lifecycle(context, ref));
+        const lifecycleOperationDTO = async (op: OperationStatus): Promise<c.LifecycleOperation> => {
+          if (!op.accountRef || !op.lifecycle || op.lifecycle.account.accountRef !== op.accountRef) throw new KernelError('conflict');
+          const original = op.lifecycle.account;
+          const account = lifecycleAccountDTO({ account: original,
+            authKind: original.profile === codexOAuthProfile.profile ? 'oauth' : 'api_key',
+            resumeCustody: original.state === 'suspended' ? 'attention_required' : 'not_applicable' });
+          const intent = { action: op.lifecycle.kind, accountRef: original.accountRef, profileId: original.profile,
+            expectedMetadataRevision: op.lifecycle.expectedRevision };
+          if (op.state === 'applied') return c.lifecycleOperation.parse({ operationRef: op.operationRef, intent, state: 'applied',
+            result: { kind: 'account_lifecycle', account } });
+          return c.lifecycleOperation.parse({ operationRef: op.operationRef, intent, state: op.state, account,
+            ...(op.state === 'pending' ? {} : { error: safe('upstream_failure', op.state === 'unknown' ? 'effect_unknown' : 'not_dispatched', { operationRef: op.operationRef }) }) });
+        };
+        if (path === '/v2/capabilities/account-lifecycle' && method === 'GET') {
+          reply(c.lifecycleCapability, { contract: c.LIFECYCLE_CAPABILITY_CONTRACT,
+            clientContract: c.LIFECYCLE_CLIENT_CONTRACT, writeGate: lifecycleWriteGate,
+            operations: ['suspend', 'resume'], custody: { contract: 'native-retained-custody/v1',
+              api_key: 'native-attestation-required', oauth: 'native-attestation-required' } }); return;
+        }
+        const lifecycleAccountMatch = /^\/v2\/accounts\/([A-Za-z0-9_-]+)(?:\/(suspend|resume))?$/.exec(path);
+        if (lifecycleAccountMatch) {
+          const ref = parse(c.reference, lifecycleAccountMatch[1]);
+          const account = await management.account(context, ref);
+          if (!permitsOwner(grant, account.ownerRef) || !permitsProfile(grant, account.profile))
+            throw new KernelError('denied');
+          if (method === 'GET' && !lifecycleAccountMatch[2]) {
+            reply(c.lifecycleAccount, await lifecycleAccountDTOWithReadback(ref)); return;
+          }
+          if (method === 'POST' && lifecycleAccountMatch[2]) {
+            if (lifecycleWriteGate !== 'enabled') throw new KernelError('denied');
+            const input = parse(c.lifecycleTransition, strictJSON(await body(req, Math.min(ingressBytes, 16_384)), true));
+            identity = { operationRef: input.operationId };
+            requireCurrent(grant); uncertain = true;
+            const op = lifecycleAccountMatch[2] === 'suspend'
+              ? await management.suspend(context, { operationId: input.operationId, accountRef: ref,
+                  expectedRevision: input.expectedMetadataRevision })
+              : await management.resume(context, { operationId: input.operationId, accountRef: ref,
+                  expectedRevision: input.expectedMetadataRevision });
+            requireCurrent(grant);
+            reply(c.lifecycleOperation, await lifecycleOperationDTO(op), op.state === 'pending' ? 202 : 200); return;
+          }
+        }
+        const lifecycleOperationMatch = /^\/v2\/operations\/([A-Za-z0-9_-]+)$/.exec(path);
+        if (lifecycleOperationMatch && method === 'GET') {
+          identity = { operationRef: parse(c.reference, lifecycleOperationMatch[1]) };
+          requireCurrent(grant);
+          const op = await kernel.operation(context, identity.operationRef!);
+          if (!op.accountRef || !op.lifecycle) throw new KernelError('denied');
+          const account = await management.account(context, op.accountRef);
+          if (!permitsOwner(grant, account.ownerRef) || !permitsProfile(grant, account.profile)) throw new KernelError('denied');
+          requireCurrent(grant);
+          reply(c.lifecycleOperation, await lifecycleOperationDTO(op)); return;
+        }
       }
       if (path === '/v1/accounts/oauth/begin' && method === 'POST') {
         const parsed = parse(c.oauthBegin, strictJSON(await body(req, Math.min(ingressBytes, 16_384)), true));
@@ -710,7 +790,10 @@ export function createFacade(options: FacadeOptions): Server {
         const ref = parse(c.reference, accountMatch[1]);
         const account = await management.account(context, ref);
         if (!permitsOwner(grant, account.ownerRef) || !permitsProfile(grant, account.profile)) throw new KernelError('denied');
-        if (method === 'GET' && !accountMatch[2]) { reply(c.account, accountDTO(account)); return; }
+        if (method === 'GET' && !accountMatch[2]) {
+          if (account.state === 'suspended') throw new KernelError('conflict');
+          reply(c.account, accountDTO(account)); return;
+        }
         if (method === 'PATCH' && !accountMatch[2]) {
           const input = parse(c.rename, strictJSON(await body(req, ingressBytes), true)); identity = { operationRef: input.operationId };
           requireCurrent(grant); uncertain = true;

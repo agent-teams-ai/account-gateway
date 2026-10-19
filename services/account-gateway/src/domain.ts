@@ -3,7 +3,7 @@
 export interface TrustedContext { readonly consumerId: string }
 export type OperationState = 'pending' | 'applied' | 'rejected' | 'unknown';
 export type Effect = 'not_dispatched' | 'dispatch_started' | 'response_started' | 'completed' | 'effect_unknown' | 'rejected_before_dispatch';
-export type AccountState = 'staging' | 'active' | 'disabled' | 'quarantined';
+export type AccountState = 'staging' | 'active' | 'suspended' | 'disabled' | 'quarantined';
 export class KernelError extends Error {
   readonly code: 'invalid' | 'unknown' | 'conflict' | 'denied' | 'unavailable';
   constructor(code: KernelError['code']) { super(code); this.code = code; }
@@ -26,7 +26,7 @@ export function instant(value: unknown): bigint {
 }
 export interface AccountIntent {
   operationId: string;
-  kind: 'create' | 'reconnect' | 'rename' | 'disable';
+  kind: 'create' | 'reconnect' | 'rename' | 'suspend' | 'resume' | 'disable';
   // Opaque, credential-safe ingress token. Never derive this from a plain key.
   intentDigest: string;
   accountRef?: string;
@@ -38,6 +38,20 @@ export interface AccountIntent {
 export interface AccountStatus {
   accountRef: string; ownerRef: string; profile: string; displayName: string;
   state: AccountState; revision: number; epoch: number;
+}
+
+// Produced only by a trusted retained-custody adapter after inert native
+// readback. It is never accepted from ingress and is not part of an intent.
+export interface RetainedCustodyProof {
+  contract: 'native-retained-custody/v1';
+  generation: string; nativePhysicalIdentity: string;
+  credentialKinds: readonly ('api_key' | 'oauth')[];
+}
+export interface ResumeCustodyAuthority extends RetainedCustodyProof {
+  metadataRevision: number; authorizationEpoch: number;
+}
+export interface AccountCustodyIdentity {
+  generation: string; nativePhysicalIdentity: string; revision: number; epoch: number;
 }
 export type AccountRetirementState = 'pending' | 'completed' | 'rejected';
 export interface AccountRetirementCounts {
@@ -67,6 +81,7 @@ export interface OperationStatus {
   operationRef: string; state: OperationState; code?: string;
   accountRef?: string; executionRef?: string; revision?: number; epoch?: number;
   deadline?: string;
+  lifecycle?: { kind: 'suspend' | 'resume'; expectedRevision: number; account: AccountStatus };
 }
 // Protected-private proof. An actual native adapter must qualify the physical
 // identity mechanism before accepting this proof. Never send it in a safe DTO.
@@ -213,9 +228,13 @@ export function uuid(value: unknown): asserts value is string {
 export interface DurableKernel {
   issuer(context: TrustedContext): Promise<string>;
   account(context: TrustedContext, accountRef: string): Promise<AccountStatus>;
+  // Optional to preserve historical in-memory test adapters; absence can never
+  // grant resume. PostgreSQL exposes this only to trusted management custody.
+  accountCustody?(context: TrustedContext, accountRef: string): Promise<AccountCustodyIdentity>;
   accounts(context: TrustedContext, query?: AccountPageQuery): Promise<AccountPage>;
   operation(context: TrustedContext, operationId: string): Promise<OperationStatus>;
-  beginAccount(context: TrustedContext, intent: AccountIntent): Promise<OperationStatus>;
+  beginAccount(context: TrustedContext, intent: AccountIntent,
+    retainedCustody?: ResumeCustodyAuthority): Promise<OperationStatus>;
   startCandidate(context: TrustedContext, operationId: string, worker: string): Promise<NativeCreatePermit | undefined>;
   acknowledgeCandidate(context: TrustedContext, operationId: string, worker: string, proof: NativeDescriptor): Promise<OperationStatus>;
   unknownCandidate(context: TrustedContext, operationId: string, worker: string): Promise<OperationStatus>;

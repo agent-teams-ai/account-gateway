@@ -5,6 +5,7 @@ import {
 } from './domain.ts';
 import type {
   TrustedContext, DurableKernel, Bounds, DurableFactBounds, AccountIntent, AccountStatus, OperationStatus,
+  ResumeCustodyAuthority, AccountCustodyIdentity,
   ApprovedPreparation, ExecutionStatus, NativeDescriptor, NativeCreatePermit,
   PrivateAdmission, ApprovedLimits, AccountPageQuery, AccountPage, ClaimResult, RequestStatus, Effect, CleanupClaim, TransportClosure, CleanupAuthority, NativeReservation, NativeDispatchProof, NativeBinding,
 } from './domain.ts';
@@ -20,6 +21,7 @@ const operationStatus = (r: Row): OperationStatus => ({
   ...(r.execution_ref ? { executionRef: r.execution_ref } : {}),
   ...(r.revision ? { revision: r.revision } : {}), ...(r.epoch ? { epoch: r.epoch } : {}),
   ...(r.deadline ? { deadline: r.deadline.toISOString() } : {}),
+  ...(r.lifecycle_result ? { lifecycle: { kind: r.intent.kind, expectedRevision: r.intent.expectedRevision, account: r.lifecycle_result as AccountStatus } } : {}),
 });
 const requestStatus = (r: Row): RequestStatus => ({
   requestRef: r.id, effect: r.effect, ...(r.code ? { code: r.code } : {}),
@@ -176,6 +178,16 @@ export class PostgresKernel implements DurableKernel {
       return accountStatus(r);
     });
   }
+  async accountCustody(context: TrustedContext, ref: string): Promise<AccountCustodyIdentity> {
+    uuid(ref);
+    return this.transaction(context, async tx => {
+      const r = await this.one(tx, `SELECT a.active_generation,a.revision,a.epoch,c.native_identity FROM accounts a
+        JOIN candidates c ON c.consumer=a.consumer AND c.generation=a.active_generation
+        WHERE a.consumer=$1 AND a.ref=$2 AND a.state='suspended' AND c.state='ready'`,
+      [tx.consumer, ref]);
+      return { generation: r.active_generation, nativePhysicalIdentity: r.native_identity, revision: r.revision, epoch: r.epoch };
+    });
+  }
   async accounts(context: TrustedContext, query: AccountPageQuery = {}): Promise<AccountPage> {
     const { ownerRef, cursor: after, limit: requestedLimit, allowedOwnerRefs } = query;
     if (ownerRef !== undefined) identifier(ownerRef);
@@ -229,12 +241,17 @@ export class PostgresKernel implements DurableKernel {
     [tx.consumer, account.ref, account.epoch, account.revision, operation ?? null, generation ?? null]);
     return result.rows[0]?.ready === true;
   }
-  async beginAccount(context: TrustedContext, input: AccountIntent): Promise<OperationStatus> {
+  async beginAccount(context: TrustedContext, input: AccountIntent,
+    retainedCustody?: ResumeCustodyAuthority): Promise<OperationStatus> {
+    retainedCustody = retainedCustody && Object.freeze({ contract: retainedCustody.contract,
+      generation: retainedCustody.generation, nativePhysicalIdentity: retainedCustody.nativePhysicalIdentity,
+      metadataRevision: retainedCustody.metadataRevision, authorizationEpoch: retainedCustody.authorizationEpoch,
+      credentialKinds: Object.freeze([...retainedCustody.credentialKinds]) });
     input = { operationId: input.operationId, kind: input.kind, intentDigest: input.intentDigest,
       accountRef: input.accountRef, expectedRevision: input.expectedRevision,
       ownerRef: input.ownerRef, profile: input.profile, displayName: input.displayName };
     identifier(input.operationId); identifier(input.intentDigest);
-    if (!['create','reconnect','rename','disable'].includes(input.kind)) throw new KernelError('invalid');
+    if (!['create','reconnect','rename','suspend','resume','disable'].includes(input.kind)) throw new KernelError('invalid');
     if (input.kind === 'create') {
       identifier(input.ownerRef); identifier(input.profile, 64);
       if (input.accountRef !== undefined || input.expectedRevision !== undefined) throw new KernelError('invalid');
@@ -259,6 +276,9 @@ export class PostgresKernel implements DurableKernel {
       } else {
         a = await this.one(tx, 'SELECT * FROM accounts WHERE consumer=$1 AND ref=$2', [tx.consumer, input.accountRef]);
         if (a.revision !== input.expectedRevision) throw new KernelError('conflict');
+        if (input.kind === 'rename' && a.state === 'suspended') throw new KernelError('denied');
+        if (input.kind === 'suspend' && a.state !== 'active') throw new KernelError('denied');
+        if (input.kind === 'resume' && a.state !== 'suspended') throw new KernelError('denied');
         if (input.kind === 'reconnect' && !['active','quarantined'].includes(a.state) &&
             !(a.state === 'disabled' && await this.disabledReconnectReady(tx, a))) throw new KernelError('denied');
       }
@@ -267,11 +287,37 @@ export class PostgresKernel implements DurableKernel {
         await tx.db.query(`INSERT INTO candidates(consumer,generation,account_ref,operation_id,profile,
           expected_revision,expected_epoch,old_generation,state) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'staged')`,
         [tx.consumer, randomUUID(), a.ref, input.operationId, a.profile, a.revision, a.epoch, a.active_generation]);
+      } else if (input.kind === 'resume') {
+        const proof = retainedCustody && retainedCustody.contract === 'native-retained-custody/v1' &&
+          retainedCustody.metadataRevision === a.revision && retainedCustody.authorizationEpoch === a.epoch &&
+          retainedCustody.generation === a.active_generation && retainedCustody.credentialKinds.length === 1 &&
+          retainedCustody.credentialKinds[0] === (a.profile === 'openai-codex-oauth-responses-v1' ? 'oauth' : 'api_key');
+        const candidate = proof ? await tx.db.query(`SELECT native_identity FROM candidates
+          WHERE consumer=$1 AND generation=$2 AND account_ref=$3 AND state='ready'
+            AND NOT EXISTS (SELECT 1 FROM cleanup WHERE consumer=$1 AND generation=$2)`,
+        [tx.consumer, a.active_generation, a.ref]) : undefined;
+        const exactCustody = candidate?.rowCount === 1 && candidate.rows[0].native_identity === retainedCustody!.nativePhysicalIdentity;
+        if (!exactCustody) {
+          await tx.db.query("UPDATE operations SET state='rejected',code='custody_unavailable',revision=$3,epoch=$4 WHERE consumer=$1 AND id=$2",
+            [tx.consumer, input.operationId, a.revision, a.epoch]);
+          await tx.db.query('UPDATE operations SET lifecycle_result=$3 WHERE consumer=$1 AND id=$2',
+            [tx.consumer, input.operationId, JSON.stringify(accountStatus(a))]);
+          return this.op(tx, input.operationId);
+        }
+        a = (await tx.db.query(`UPDATE accounts SET state='active',revision=revision+1,epoch=epoch+1
+          WHERE consumer=$1 AND ref=$2 AND state='suspended' AND revision=$3 AND active_generation=$4 RETURNING *`,
+        [tx.consumer, a.ref, a.revision, a.active_generation])).rows[0];
+        if (!a) throw new KernelError('conflict');
+        await tx.db.query("UPDATE operations SET state='applied',revision=$3,epoch=$4 WHERE consumer=$1 AND id=$2",
+          [tx.consumer, input.operationId, a.revision, a.epoch]);
       } else {
         const disabled = input.kind === 'disable';
+        const suspended = input.kind === 'suspend';
         a = (await tx.db.query(`UPDATE accounts SET display_name=$3, revision=revision+1,
-          epoch=epoch+$4, state=$5 WHERE consumer=$1 AND ref=$2 RETURNING *`,
-        [tx.consumer, a.ref, input.displayName ?? a.display_name, disabled ? 1 : 0, disabled ? 'disabled' : a.state])).rows[0];
+          epoch=epoch+$4, state=$5 WHERE consumer=$1 AND ref=$2 AND revision=$6 AND state=$7 RETURNING *`,
+        [tx.consumer, a.ref, input.displayName ?? a.display_name, disabled || suspended ? 1 : 0,
+          disabled ? 'disabled' : suspended ? 'suspended' : a.state, a.revision, a.state])).rows[0];
+        if (!a) throw new KernelError('conflict');
         if (disabled) {
           await tx.db.query(`UPDATE operations o SET state=CASE WHEN c.state='staged' THEN 'rejected' ELSE 'unknown' END,
             code='account_disabled' FROM candidates c WHERE o.consumer=$1 AND c.consumer=o.consumer
@@ -284,10 +330,19 @@ export class PostgresKernel implements DurableKernel {
           const candidates = await tx.db.query('SELECT generation FROM candidates WHERE consumer=$1 AND account_ref=$2',
             [tx.consumer, a.ref]);
           for (const c of candidates.rows) await this.cleanup(tx, c.generation);
+        } else if (suspended) {
+          // Reversible fencing retains the active native generation and its
+          // credentials. Only already-open execution transports get closure work.
+          const executions = await tx.db.query("UPDATE executions SET state='fenced' WHERE consumer=$1 AND account_ref=$2 AND state='open' RETURNING ref",
+            [tx.consumer, a.ref]);
+          for (const e of executions.rows) await this.cleanup(tx, undefined, e.ref);
         }
         await tx.db.query("UPDATE operations SET state='applied',revision=$3,epoch=$4 WHERE consumer=$1 AND id=$2",
           [tx.consumer, input.operationId, a.revision, a.epoch]);
       }
+      if (input.kind === 'suspend' || input.kind === 'resume')
+        await tx.db.query('UPDATE operations SET lifecycle_result=$3 WHERE consumer=$1 AND id=$2',
+          [tx.consumer, input.operationId, JSON.stringify(accountStatus(a))]);
       return this.op(tx, input.operationId);
     });
   }
@@ -758,7 +813,7 @@ export class PostgresKernel implements DurableKernel {
       await tx.db.query("UPDATE requests SET effect='effect_unknown',code='restore' WHERE consumer=$1 AND effect IN ('dispatch_started','response_started')", [tx.consumer]);
       const es = await tx.db.query("UPDATE executions SET state='fenced' WHERE consumer=$1 RETURNING ref", [tx.consumer]);
       for (const e of es.rows) await this.cleanup(tx, undefined, e.ref);
-      await tx.db.query("UPDATE accounts SET state='quarantined',epoch=epoch+1 WHERE consumer=$1 AND state IN ('active','staging')", [tx.consumer]);
+      await tx.db.query("UPDATE accounts SET state='quarantined',epoch=epoch+1 WHERE consumer=$1 AND state IN ('active','staging','suspended')", [tx.consumer]);
       const cs = await tx.db.query("UPDATE candidates SET state='quarantined' WHERE consumer=$1 AND state IN ('ready','creating','staged','quarantined') RETURNING generation", [tx.consumer]);
       for (const c of cs.rows) await this.cleanup(tx, c.generation);
       await tx.db.query("UPDATE operations SET state='unknown',code='restore' WHERE consumer=$1 AND state='pending'", [tx.consumer]);
@@ -771,7 +826,7 @@ export class PostgresKernel implements DurableKernel {
       const r = await tx.db.query(`SELECT j.*,c.native_identity,c.profile FROM cleanup j LEFT JOIN candidates c
         ON c.consumer=j.consumer AND c.generation=j.generation WHERE j.consumer=$1
         AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.consumer=j.consumer
-          AND a.active_generation=j.generation AND a.state='active')
+          AND a.active_generation=j.generation AND a.state IN ('active','suspended'))
         AND (j.state='pending' OR (j.state='claimed' AND j.lease_until<=clock_timestamp()))
         ORDER BY j.lease_until NULLS FIRST,j.ref LIMIT 1 FOR UPDATE OF j SKIP LOCKED`, [tx.consumer]);
       const j = r.rows[0];
@@ -840,7 +895,7 @@ export class PostgresKernel implements DurableKernel {
       if (!updated.rowCount) throw new KernelError('denied');
       if (succeeded && j.generation) {
         // A stale cleanup task must never retire a currently active route.
-        const active = await tx.db.query("SELECT 1 FROM accounts WHERE consumer=$1 AND active_generation=$2 AND state='active'", [tx.consumer, j.generation]);
+        const active = await tx.db.query("SELECT 1 FROM accounts WHERE consumer=$1 AND active_generation=$2 AND state IN ('active','suspended')", [tx.consumer, j.generation]);
         if (active.rowCount) throw new KernelError('conflict');
         await tx.db.query("UPDATE candidates SET state='retired' WHERE consumer=$1 AND generation=$2", [tx.consumer, j.generation]);
       }

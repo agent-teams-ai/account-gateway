@@ -2,6 +2,9 @@ export { reference, revision, deadline, protocol, accountState, executionState, 
  safeError, profile, profiles, account, accounts, listQuery, accountResult, executionResult, operation,
  accountOperation, oauthBegin, oauthReconnect, oauthAuthorizationURL, oauthBeginResponse,
  accountRetirement, policyUseClosure, preparationOperation, acknowledgementOperation, execution, requestStatus,
- limits, prepare, rename, disable, close, fence, admission } from '../features/facade-client/contracts/index.js';
+ limits, prepare, rename, disable, close, fence, admission,
+ LIFECYCLE_CAPABILITY_CONTRACT, LIFECYCLE_CLIENT_CONTRACT, LIFECYCLE_CAPABILITY_HEADER, LIFECYCLE_CLIENT_HEADER,
+ lifecycleCapability, lifecycleTransition, lifecycleAccount, lifecycleAccounts, lifecycleOperation } from '../features/facade-client/contracts/index.js';
 export type { Profile, Account, AccountRetirement, PolicyUseClosure, Operation, Execution, RequestStatus, SafeError, Prepare, Rename,
- Disable, Close, Fence, Admission, ListQuery, OAuthBegin, OAuthReconnect, OAuthBeginResponse } from '../features/facade-client/contracts/index.js';
+ Disable, Close, Fence, Admission, ListQuery, OAuthBegin, OAuthReconnect, OAuthBeginResponse,
+ LifecycleCapability, LifecycleTransition, LifecycleAccount, LifecycleAccounts, LifecycleOperation } from '../features/facade-client/contracts/index.js';

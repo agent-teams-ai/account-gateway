@@ -14,7 +14,7 @@ import type { CandidateJournal, CandidateNative, IntentCustody, ManagementStore,
   OAuthCleanupAuthority, OAuthCleanupAction } from './management.ts';
 import type { DurableKernel, ExecutionRead, TrustedContext } from './domain.ts';
 import { codexOAuthProfile } from './management.ts';
-import { NativeManagementClient, NativeOAuthEnrollmentClient, NativeOAuthLifecycleClient } from './native-client.ts';
+import { NativeManagementClient, NativeRetainedCustodyClient, NativeOAuthEnrollmentClient, NativeOAuthLifecycleClient } from './native-client.ts';
 import { NativeAuthority } from './native-authority.ts';
 import { NativeHTTPTransport } from './native-transport.ts';
 import { createFacade, FacadeBearers, cancelFacadeTransport } from './facade.ts';
@@ -73,6 +73,7 @@ export function composeServiceControl(cfg: Pick<ServiceConfig, 'native' | 'consu
   const forScope = (scope: OAuthScope) => new NativeOAuthEnrollmentClient({ ...control, ownerRef: scope.ownerRef });
   const management = new AccountManagement({ kernel, store, custody, native, worker,
     profiles: profiles.filter(p => p.profile !== codexOAuthProfile.profile),
+    retainedCustody: new NativeRetainedCustodyClient(control),
     ...(oauthProfile ? { oauth: { profile: oauthProfile, native: {
       begin: (scope: OAuthScope) => forScope(scope).begin(scope),
       read: (scope: OAuthScope) => forScope(scope).read(scope),
@@ -308,7 +309,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
       if (!controlFacade || stopping || invalid) { res.writeHead(503); res.end(); return; }
       controlFacade.emit('request', req, res); return;
     }
-    if (req.method !== 'POST' || !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-refresh-authority|oauth-cleanup-authority)$/.test(req.url ?? '')) {
+    if (req.method !== 'POST' || !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-custody-authority|oauth-refresh-authority|oauth-cleanup-authority)$/.test(req.url ?? '')) {
       res.writeHead(403); res.end(); return;
     }
     // Go's first enrollment can arrive before stdout's actual starting binding.
@@ -426,7 +427,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     startupActive();
     options = { admission, kernel, management, store, bearers, enrollment, transport,
       profiles: catalog, intentHmacKey: keyBytes(cfg.keys.facadeHMAC), ingressBytes: Math.max(1024, ...profiles.map(p => p.limits.requestBytes)),
-      bufferBytes: 65_536 };
+      bufferBytes: 65_536, ...(cfg.accountLifecycle ? { lifecycle: cfg.accountLifecycle } : {}) };
     startupStage = 'facade-listen';
     facade = createFacade(options); facade.on('error', error => fail(error, 'facade_error'));
     controlFacade = createFacade({ ...options, controlOnly: true }); controlFacade.on('error', error => fail(error, 'control_error'));

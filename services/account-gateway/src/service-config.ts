@@ -3,7 +3,7 @@ import { dirname, isAbsolute, normalize } from 'node:path';
 import { createHash } from 'node:crypto';
 import { approvedLimits, boundedFacts, defaults, identifier, integer } from './domain.ts';
 import type { ApprovedLimits, DurableFactBounds } from './domain.ts';
-import { FacadeBearers, RUN_CONTROL_MAX_RUN_MS } from './facade.ts';
+import { FacadeBearers, RUN_CONTROL_MAX_RUN_MS, lifecycleContract } from './facade.ts';
 import type { ManagementBearer, RunControlBearer, ConsumerControlBearer } from './facade.ts';
 import { strictJSON } from './facade-ingress.ts';
 import { object } from './native-wire.ts';
@@ -29,6 +29,7 @@ export interface ServiceConfig {
   readonly keys: Readonly<{ intentAEAD: string; intentHMAC: string; facadeHMAC: string }>;
   // Explicit opt-in with its own qualification and limits, captured before IO.
   readonly oauthEnrollment?: OAuthEnrollmentConfig;
+  readonly accountLifecycle?: Readonly<{ contract: typeof lifecycleContract; writeGate: 'enabled' | 'disabled' }>;
 }
 export interface OAuthEnrollmentConfig {
   readonly enabled: true;
@@ -90,6 +91,13 @@ export function captureOAuthEnrollmentConfig(value: unknown): OAuthEnrollmentCon
       modelScope: Object.freeze(['gpt-5.6-sol'] as const), ...(qualified ? {
         qualificationRef: qualified.qualificationRef, limits: qualified.limits,
         providerTokenUpperBound: qualified.providerTokenUpperBound } : {}) });
+  } catch { return deny(); }
+}
+export function captureAccountLifecycle(value: unknown): NonNullable<ServiceConfig['accountLifecycle']> {
+  try {
+    const r = object(value, ['contract','writeGate']);
+    if (r.contract !== lifecycleContract || (r.writeGate !== 'enabled' && r.writeGate !== 'disabled')) return deny();
+    return Object.freeze({ contract: lifecycleContract, writeGate: r.writeGate });
   } catch { return deny(); }
 }
 function captureProfile(value: unknown): ServiceProfile {
@@ -189,7 +197,8 @@ export function loadServiceConfig(file: string): ServiceConfig {
       // readFileSync would permit growth after fstat; bounded positional read below.
       bytes = readBounded(fd, bytes);
     } finally { closeSync(fd); }
-    const r = object(strictJSON(bytes), ['kernelDSN','durableFacts','facadeOrigin','callbackOrigin','native','consumer','profile','bearers','keys'], ['oauthEnrollment','secondProfile']);
+    const r = object(strictJSON(bytes), ['kernelDSN','durableFacts','facadeOrigin','callbackOrigin','native','consumer','profile','bearers','keys'], ['oauthEnrollment','secondProfile','accountLifecycle']);
+    const accountLifecycle = r.accountLifecycle === undefined ? undefined : captureAccountLifecycle(r.accountLifecycle);
     const oauthEnrollment = Object.hasOwn(r, 'oauthEnrollment') ? captureOAuthEnrollmentConfig(r.oauthEnrollment) : undefined;
     // Use the kernel's existing bound authority after exact protected parsing.
     // Missing, extra, nonnumeric or inconsistent values deny before startup IO.
@@ -220,6 +229,7 @@ export function loadServiceConfig(file: string): ServiceConfig {
     if (new Set([facadeOrigin, callbackOrigin, native.origin]).size !== 3) deny();
     return freeze({ kernelDSN, durableFacts, facadeOrigin, callbackOrigin, native, consumer, profile, bearers, keys,
       ...(secondProfile === undefined ? {} : { secondProfile }),
+      ...(accountLifecycle === undefined ? {} : { accountLifecycle }),
       ...(oauthEnrollment === undefined ? {} : { oauthEnrollment }) });
   } catch { return deny(); }
 }

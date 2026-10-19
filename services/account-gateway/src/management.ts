@@ -1,6 +1,7 @@
 import { KernelError, identifier, uuid, revision } from './domain.ts';
 import type { AccountIntent, AccountPage, AccountPageQuery, AccountStatus, DurableKernel,
-  OperationStatus, TrustedContext, CleanupClaim, AccountRetirementReadback, PolicyUseClosureReadback } from './domain.ts';
+  OperationStatus, TrustedContext, CleanupClaim, AccountRetirementReadback, PolicyUseClosureReadback,
+  RetainedCustodyProof, ResumeCustodyAuthority } from './domain.ts';
 
 // Private consumer-owned ports. They are not SDK DTOs or an inference authority.
 export interface ManagedProfile {
@@ -115,6 +116,16 @@ export interface ControlledProof {
   // Trusted qualified inert readback; MUST NOT probe a provider or compare tokens.
   verify(scope: CandidateJournal, descriptor: PhysicalCandidate): Promise<boolean>;
 }
+// Exact native custody attestation is a separate write-only boundary. It must
+// prove the same mapping and retained credential capability without inference,
+// token comparison, retirement or deletion.
+export interface RetainedCustodyVerifier {
+  verify(mapping: CandidateMapping): Promise<RetainedCustodyProof | undefined>;
+}
+export type ResumeCustodyState = 'not_applicable' | 'verified' | 'attention_required';
+export interface AccountLifecycleReadback {
+  account: AccountStatus; authKind: 'api_key' | 'oauth'; resumeCustody: ResumeCustodyState;
+}
 export interface AcceptedIntent {
   readonly context: TrustedContext; readonly intent: AccountIntent; readonly apiKey?: string;
 }
@@ -154,6 +165,8 @@ export type CreateInput = Pick<AccountIntent, 'operationId' | 'ownerRef' | 'prof
 export type ReconnectInput = Pick<AccountIntent, 'operationId' | 'accountRef' | 'expectedRevision'> & { apiKey: string };
 export type RenameInput = Pick<AccountIntent, 'operationId' | 'accountRef' | 'expectedRevision' | 'displayName'>;
 export type DisableInput = Pick<AccountIntent, 'operationId' | 'accountRef' | 'expectedRevision'>;
+export type SuspendInput = Pick<AccountIntent, 'operationId' | 'accountRef' | 'expectedRevision'>;
+export type ResumeInput = Pick<AccountIntent, 'operationId' | 'accountRef' | 'expectedRevision'>;
 
 export function captureContext(context: TrustedContext): TrustedContext {
   const consumerId = context.consumerId; identifier(consumerId);
@@ -202,6 +215,7 @@ export class AccountManagement {
   private readonly custody: IntentCustody;
   private readonly native: CandidateNative;
   private readonly proof: ControlledProof;
+  private readonly retainedCustody?: RetainedCustodyVerifier;
   private readonly worker: string;
   private readonly profiles: ReadonlyMap<string, ManagedProfile>;
   private readonly oauth?: Readonly<OAuthEnrollmentOptions>;
@@ -210,7 +224,7 @@ export class AccountManagement {
   private refreshInFlight = false;
   constructor(options: { kernel: DurableKernel; store: ManagementStore; custody: IntentCustody;
     native: CandidateNative; proof: ControlledProof; worker: string; profiles: readonly ManagedProfile[];
-    oauth?: OAuthEnrollmentOptions; refresh?: OAuthRefreshNative }) {
+    oauth?: OAuthEnrollmentOptions; refresh?: OAuthRefreshNative; retainedCustody?: RetainedCustodyVerifier }) {
     uuid(options.worker);
     if (!options.profiles.length || options.profiles.length > 128) throw new KernelError('invalid');
     const profiles = new Map<string, ManagedProfile>();
@@ -230,6 +244,7 @@ export class AccountManagement {
     if (profiles.size > 128 || (!oauth && profiles.has(codexOAuthProfile.profile))) throw new KernelError('invalid');
     this.kernel = options.kernel; this.store = options.store; this.custody = options.custody;
     this.native = options.native; this.proof = options.proof; this.worker = options.worker; this.profiles = profiles;
+    this.retainedCustody = options.retainedCustody;
     this.oauth = oauth;
     this.refreshNative = options.refresh;
   }
@@ -560,6 +575,55 @@ export class AccountManagement {
     identifier(intent.operationId); uuid(intent.accountRef); revision(intent.expectedRevision);
     intent.intentDigest = this.custody.digest({ context: ctx, intent });
     return this.kernel.beginAccount(ctx, Object.freeze(intent));
+  }
+  private lifecycleIntent(kind: 'suspend' | 'resume', input: SuspendInput | ResumeInput): AccountIntent {
+    const intent: AccountIntent = { kind, operationId: input.operationId, accountRef: input.accountRef,
+      expectedRevision: input.expectedRevision, intentDigest: '' };
+    identifier(intent.operationId); uuid(intent.accountRef); revision(intent.expectedRevision);
+    return intent;
+  }
+  async suspend(context: TrustedContext, input: SuspendInput): Promise<OperationStatus> {
+    const ctx = captureContext(context);
+    const intent = this.lifecycleIntent('suspend', input);
+    intent.intentDigest = this.custody.digest({ context: ctx, intent });
+    return this.kernel.beginAccount(ctx, Object.freeze(intent));
+  }
+  private async retainedProof(ctx: TrustedContext, account: AccountStatus): Promise<ResumeCustodyAuthority | undefined> {
+    try {
+      if (!this.kernel.accountCustody || !this.retainedCustody || account.state !== 'suspended') return undefined;
+      const identity = await this.kernel.accountCustody(ctx, account.accountRef);
+      if (identity.revision !== account.revision || identity.epoch !== account.epoch) return undefined;
+      const mapping = await this.store.mapping(ctx, identity.generation);
+      if (!mapping || mapping.consumerId !== ctx.consumerId || mapping.accountRef !== account.accountRef ||
+          mapping.ownerRef !== account.ownerRef || mapping.generation !== identity.generation ||
+          mapping.descriptor.generation !== identity.generation ||
+          mapping.descriptor.nativePhysicalIdentity !== identity.nativePhysicalIdentity ||
+          !exactCandidate(mapping, physicalCandidate(mapping.descriptor))) return undefined;
+      const proof = await this.retainedCustody.verify(mapping);
+      const authKind = account.profile === codexOAuthProfile.profile ? 'oauth' : 'api_key';
+      if (!proof || proof.contract !== 'native-retained-custody/v1' ||
+          proof.generation !== identity.generation ||
+          proof.nativePhysicalIdentity !== identity.nativePhysicalIdentity ||
+          proof.credentialKinds.length !== 1 || proof.credentialKinds[0] !== authKind) return undefined;
+      return Object.freeze({ ...proof, metadataRevision: account.revision, authorizationEpoch: account.epoch, credentialKinds: Object.freeze([...proof.credentialKinds]) });
+    } catch { return undefined; }
+  }
+  async lifecycle(context: TrustedContext, accountRef: string): Promise<AccountLifecycleReadback> {
+    const ctx = captureContext(context); uuid(accountRef);
+    const account = await this.kernel.account(ctx, accountRef);
+    const authKind = account.profile === codexOAuthProfile.profile ? 'oauth' : 'api_key';
+    const proof = account.state === 'suspended' ? await this.retainedProof(ctx, account) : undefined;
+    const current = await this.kernel.account(ctx, accountRef);
+    return Object.freeze({ account: current, authKind, resumeCustody: current.state !== 'suspended' ? 'not_applicable' :
+      proof && current.revision === account.revision && current.epoch === account.epoch ? 'verified' : 'attention_required' });
+  }
+  async resume(context: TrustedContext, input: ResumeInput): Promise<OperationStatus> {
+    const ctx = captureContext(context);
+    const intent = this.lifecycleIntent('resume', input);
+    intent.intentDigest = this.custody.digest({ context: ctx, intent });
+    const account = await this.kernel.account(ctx, intent.accountRef!);
+    const proof = await this.retainedProof(ctx, account);
+    return this.kernel.beginAccount(ctx, Object.freeze(intent), proof);
   }
   async account(context: TrustedContext, ref: string): Promise<AccountStatus> {
     const ctx = captureContext(context); uuid(ref); return this.kernel.account(ctx, ref);

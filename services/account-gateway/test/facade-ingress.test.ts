@@ -1,4 +1,5 @@
 import test from 'node:test';
+import * as lifecycleWire from '@agent-teams/account-gateway/contracts';
 import assert from 'node:assert/strict';
 import { createManagementClient, secretSubmission } from '@agent-teams/account-gateway/http';
 import { strictJSON, validateResponses } from '../src/facade-ingress.ts';
@@ -980,4 +981,73 @@ test('source HTTP: simultaneous finite tuples create/read/admit/forward independ
     }
     assert.equal(f.forwarded.length, 2);
   } finally { await f.close(); }
+});
+
+// Suspended OAuth may attest retained custody, but that purpose must not grant
+// the existing enrollment or refresh authorities.
+test('source HTTP: suspended OAuth custody purpose excludes enrollment and refresh', async () => {
+  const f = await sourceHTTP(true);
+  try {
+    const operationId = randomUUID();
+    assert.equal((await f.publicCall('/v1/accounts/oauth/begin', { operationId, ownerRef: 'owner-one',
+      profileId: codexOAuthProfile.profile, displayName: 'Custody fixture' })).status, 202);
+    const j = f.journals.get(f.scopeKey(f.context, operationId))!;
+    const physical: PhysicalCandidate = { generation: j.generation, nativePhysicalIdentity: j.generation, nativeId: 42,
+      createdAt: '2026-10-06T01:02:03.123456789Z', ...codexOAuthProfile };
+    f.mappings.set(f.scopeKey(f.context, j.generation), { ...j, descriptor: physical });
+    const op = f.operations.get(f.scopeKey(f.context, operationId))!; op.state = 'applied';
+    const account = f.accounts.get(f.scopeKey(f.context, j.accountRef))!; account.state = 'suspended';
+    let generation = j.generation;
+    f.kernel.accountCustody = async () => ({ generation, nativePhysicalIdentity: generation, revision: account.revision, epoch: account.epoch });
+    const input = { consumerId: j.consumerId, operationId, accountRef: j.accountRef, generation: j.generation };
+    const custody = await f.callback('oauth-custody-authority', input);
+    assert.equal(custody.status, 200); assert.deepEqual(await custody.json(), { ok: true, ownerRef: j.ownerRef });
+    assert.equal((await f.callback('oauth-owner-authority', input)).status, 403);
+    assert.equal((await f.callback('oauth-refresh-authority', input)).status, 403);
+    generation = randomUUID();
+    assert.equal((await f.callback('oauth-custody-authority', input)).status, 403);
+    generation = j.generation; account.state = 'disabled';
+    assert.equal((await f.callback('oauth-custody-authority', input)).status, 403);
+    account.state = 'suspended'; f.control.bearers.replace([]);
+    assert.equal((await f.callback('oauth-custody-authority', input)).status, 403);
+    assert.equal(f.forwarded.length, 0);
+  } finally { await f.close(); }
+});
+
+
+// Operation readback cannot enter enrollment recovery before lifecycle/owner
+// authorization, even if the caller knows another owner's exact operation ID.
+test('v2 lifecycle readback never recovers foreign or same-owner enrollment operations', async () => {
+  const f = await sourceHTTP(true);
+  const facade = createFacade({ kernel: f.kernel, store: f.store, management: f.control.management,
+    bearers: f.control.bearers, profiles: f.control.catalog, intentHmacKey: randomBytes(32),
+    lifecycle: { contract: lifecycleWire.LIFECYCLE_CAPABILITY_CONTRACT, writeGate: 'enabled' } });
+  try {
+    const pending: CandidateJournal[] = [];
+    for (const ownerRef of ['owner-one','owner-two']) {
+      const operationId = randomUUID();
+      assert.equal((await f.publicCall('/v1/accounts/oauth/begin', { operationId, ownerRef,
+        profileId: codexOAuthProfile.profile, displayName: 'Authorization fixture' })).status, 202);
+      pending.push(f.journals.get(f.scopeKey(f.context, operationId))!);
+    }
+    const grant = f.cfg.bearers[0]; assert.equal(grant.role, 'management');
+    assert.ok(grant.role === 'management');
+    f.control.bearers.replace([{ ...grant, ownerRefs: ['owner-one'] }]);
+    await new Promise<void>(resolve => facade.listen(0, '127.0.0.1', resolve));
+    const address = facade.address(); assert.ok(address && typeof address === 'object');
+    const before = f.seen.length;
+    for (const journal of pending) {
+      const response = await fetch('http://127.0.0.1:' + address.port + '/v2/operations/' + journal.operationId, {
+        headers: { authorization: 'Bearer ' + grant.token, 'content-type': 'application/json', accept: 'application/json',
+          [lifecycleWire.LIFECYCLE_CAPABILITY_HEADER]: lifecycleWire.LIFECYCLE_CAPABILITY_CONTRACT,
+          [lifecycleWire.LIFECYCLE_CLIENT_HEADER]: lifecycleWire.LIFECYCLE_CLIENT_CONTRACT } });
+      assert.equal(response.status, 403); await response.arrayBuffer();
+      assert.equal((await f.kernel.operation(f.context, journal.operationId)).state, 'pending');
+      assert.equal((await f.kernel.account(f.context, journal.accountRef)).state, 'staging');
+    }
+    assert.equal(f.seen.length, before, 'no protected OAuth readback/promotion attempted');
+  } finally {
+    facade.closeAllConnections(); await new Promise<void>(resolve => facade.close(() => resolve()));
+    await f.close();
+  }
 });

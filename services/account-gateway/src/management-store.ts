@@ -318,7 +318,7 @@ export class PostgresManagementStore implements ManagementStore {
         AND j.worker=$3 AND j.token=$4 AND j.generation=$5 AND c.native_identity=$6 AND c.profile=$7
         AND j.state='claimed' AND j.lease_until>clock_timestamp() AND NOT EXISTS
           (SELECT 1 FROM ag_kernel.accounts a WHERE a.consumer=j.consumer
-            AND a.active_generation=j.generation AND a.state='active')
+            AND a.active_generation=j.generation AND a.state IN ('active','suspended'))
         AND NOT EXISTS (SELECT 1 FROM ag_kernel.requests r
           JOIN ag_kernel.executions e ON e.consumer=r.consumer AND e.ref=r.execution_ref
           WHERE r.consumer=j.consumer AND e.generation=j.generation AND r.transport_occupied)`,
@@ -475,7 +475,7 @@ export class PostgresManagementStore implements ManagementStore {
           AND c.state IN ('ready','quarantined') AND o.state IN ('applied','unknown')
           AND ((j.purpose='create' AND o.intent->>'owner'=j.owner_ref AND o.intent->>'profile'=j.profile)
             OR (j.purpose='reconnect' AND o.intent->>'target'=j.account_ref::text))
-          AND NOT (a.state='active' AND a.active_generation=j.generation)
+          AND NOT (a.state IN ('active','suspended') AND a.active_generation=j.generation)
           AND EXISTS (SELECT 1 FROM ag_kernel.workers w WHERE w.consumer=l.consumer AND w.worker=$3 AND w.lease_until>clock_timestamp())
           AND ($9::text IS NULL OR j.operation_id=$9 AND j.account_ref=$10 AND j.generation=$11)
           AND ($12::boolean=false OR NOT EXISTS (SELECT 1 FROM ag_kernel.requests r

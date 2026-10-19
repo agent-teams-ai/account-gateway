@@ -7,7 +7,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
 import * as c from '@agent-teams/account-gateway/contracts';
-import { createManagementClient, createExecutionClient, createConsumerControlClient, GatewayError } from '@agent-teams/account-gateway/http';
+import { createManagementClient, createExecutionClient, createConsumerControlClient, createLifecycleClient, GatewayError } from '@agent-teams/account-gateway/http';
 import { createFacade, FacadeBearers, cancelFacadeTransport } from '../src/facade.ts';
 import type { FacadeOptions, ManagementBearer, ConsumerControlBearer, NativeCallback, NativePermit, NativeTransport } from '../src/facade.ts';
 import { PostgresKernel } from '../src/postgres.ts';
@@ -51,12 +51,14 @@ async function stop(server: ReturnType<typeof createServer>): Promise<void> { se
 // Explicit synthetic native peer, not Go/provider evidence. Real management
 // HTTP -> encrypted custody/mapping SQL and real kernel claims are exercised.
 async function fixture(mode: 'normal' | 'lost_ack' | 'overflow' | 'held' | 'missing' = 'normal', controlProfiles = false,
-  lifetime: { readonly streamDurationMs?: number; readonly deadlineMs?: number } = {}) {
+  lifetime: { readonly streamDurationMs?: number; readonly deadlineMs?: number } = {},
+  lifecycle?: FacadeOptions['lifecycle']) {
   const context = { consumerId: 'facade-' + randomUUID() }, kernel = new PostgresKernel(pool);
   const custody = new IntentSecrets(randomBytes(32), randomBytes(32)), store = new PostgresManagementStore(pool, custody);
   const worker = randomUUID(), incarnation = randomUUID(), managementToken = 'fixture-management-' + randomUUID(), executionToken = 'fixture-execution-' + randomUUID();
   await kernel.heartbeat(context, worker);
   let creates = 0, calls = 0, entries = 0, cancelled = 0, oauthReads = 0;
+  let custodyReady = true;
   let last: { callback: NativeCallback; proof: NativeDispatchProof; permit: NativePermit } | undefined;
   const raws: Uint8Array[] = [], nativeRows = new Map<string, { descriptor: object; state: string }>();
   const native = createServer((req, res) => {
@@ -85,6 +87,8 @@ async function fixture(mode: 'normal' | 'lost_ack' | 'overflow' | 'held' | 'miss
   const nativeOrigin = await listen(native);
   const management = new AccountManagement({ kernel, store, custody, worker, profiles: [profile], oauth: controlProfiles ? { profile: { ...codexOAuthProfile, qualificationRef: 'synthetic-only' },
       native: new NativeOAuthEnrollmentClient({ origin: nativeOrigin, consumerId: context.consumerId, ownerRef: 'new-opaque-owner', controlCredential: 'synthetic-control' }) } : undefined, proof: { async verify() { return true; } },
+    retainedCustody: { async verify(mapping) { return custodyReady ? { contract: 'native-retained-custody/v1', generation: mapping.generation,
+      nativePhysicalIdentity: mapping.descriptor.nativePhysicalIdentity, credentialKinds: ['api_key'] } : undefined; } },
     native: new NativeManagementClient({ origin: nativeOrigin, consumerId: context.consumerId, controlCredential: 'synthetic-control' }) });
   let managementGrant: ManagementBearer = { role: 'management', token: managementToken, consumerId: context.consumerId, ownerRefs: ['workspace-fixture'],
     preparation: { accountRefs: [], subjectRef: 'binding-fixture', policyRevision: 2, bindingRevision: 3, profileId: profile.profile, limits, maxRunMs: 60_000 } };
@@ -124,7 +128,7 @@ async function fixture(mode: 'normal' | 'lost_ack' | 'overflow' | 'held' | 'miss
       { dto: { ...safeProfile, profileId: codexOAuthProfile.profile, modelIds: [codexOAuthProfile.model], authKinds: ['oauth'] as c.Profile['authKinds'] }, maxOutputTokens: 1000 },
     ] : [])],
     intentHmacKey: randomBytes(32), enrollment: mode === 'missing' ? undefined : { originRef: 'synthetic-origin', engineIncarnation: incarnation, worker }, transport: mode === 'missing' ? undefined : transport,
-    timeoutMs: 5000, bufferBytes: 4096 };
+    timeoutMs: 5000, bufferBytes: 4096, ...(lifecycle ? { lifecycle } : {}) };
   const server = createFacade(options);
   const origin = await listen(server), client = createManagementClient({ role: 'management', origin, token: managementToken });
   try {
@@ -145,7 +149,8 @@ async function fixture(mode: 'normal' | 'lost_ack' | 'overflow' | 'held' | 'miss
   const raw = async (path: string, method = 'GET', payload?: unknown, token = managementToken, headers: Record<string, string> = {}) => fetch(origin + path, {
     method, headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json', accept: 'application/json', ...headers }, body: payload === undefined ? undefined : JSON.stringify(payload) });
   return { context, kernel, store, worker, bearers, managementGrant, executionGrant, server, origin, client, execution, created, accountRef, executionRef, saved, admission, prepared, preparedInput,
-    request, raw, options, stats: () => ({ creates, calls, entries, cancelled, oauthReads }), last: () => { assert.ok(last); return last; }, raws,
+    request, raw, options, setCustodyReady: (ready: boolean) => { custodyReady = ready; },
+    stats: () => ({ creates, calls, entries, cancelled, oauthReads }), last: () => { assert.ok(last); return last; }, raws,
     stop: async () => { await stop(server); await stop(native); } };
   } catch (error) {
     await stop(server); await stop(native);
@@ -172,6 +177,49 @@ test('exported SDK management routes persist duplicate mutation/readback and saf
     const disabled = await f.client.disable(f.accountRef, { operationId: randomUUID(), expectedMetadataRevision: reconnected.result.metadataRevision });
     assert.equal(disabled.state, 'applied'); assert.equal((await f.client.get(f.accountRef)).state, 'disabled');
     assert.equal(JSON.stringify([a, renamed, reconnected, disabled]).includes('fixture-key-private'), false);
+  } finally { await f.stop(); }
+});
+test('feature default hides lifecycle writes; explicit gate suspends and resumes with old-reader fail-closed', async () => {
+  const off = await fixture();
+  try {
+    const hidden = createLifecycleClient({ role: 'management', origin: off.origin, token: off.managementGrant.token,
+      capability: c.LIFECYCLE_CAPABILITY_CONTRACT, clientContract: c.LIFECYCLE_CLIENT_CONTRACT });
+    assert.equal((await hidden.capability()).writeGate, 'disabled');
+    await assert.rejects(hidden.suspend(off.accountRef, { operationId: randomUUID(), expectedMetadataRevision: 1 }), denied());
+  } finally { await off.stop(); }
+
+  const gate = { contract: c.LIFECYCLE_CAPABILITY_CONTRACT, writeGate: 'enabled' as const };
+  const f = await fixture('normal', false, {}, gate);
+  try {
+    const lifecycle = createLifecycleClient({ role: 'management', origin: f.origin, token: f.managementGrant.token,
+      capability: c.LIFECYCLE_CAPABILITY_CONTRACT, clientContract: c.LIFECYCLE_CLIENT_CONTRACT });
+    assert.deepEqual(await lifecycle.capability(), { ...gate, clientContract: c.LIFECYCLE_CLIENT_CONTRACT,
+      operations: ['suspend', 'resume'], custody: { contract: 'native-retained-custody/v1',
+        api_key: 'native-attestation-required', oauth: 'native-attestation-required' } });
+    const current = await lifecycle.get(f.accountRef);
+    assert.equal(current.authKind, 'api_key'); assert.equal(current.resumeCustody, 'not_applicable');
+    const suspendId = randomUUID();
+    const suspended = await lifecycle.suspend(f.accountRef, { operationId: suspendId, expectedMetadataRevision: current.metadataRevision });
+    assert.ok(suspended.state === 'applied' && suspended.result.account.state === 'suspended');
+    assert.deepEqual(await lifecycle.operation(suspendId), suspended);
+    assert.deepEqual(await lifecycle.suspend(f.accountRef, { operationId: suspendId, expectedMetadataRevision: current.metadataRevision }), suspended);
+    await assert.rejects(f.client.get(f.accountRef), error => error instanceof GatewayError && error.effect === 'not_dispatched');
+    await assert.rejects(f.execution.request(f.executionRef, f.request()), denied());
+
+    f.setCustodyReady(false);
+    const unavailable = await lifecycle.resume(f.accountRef, { operationId: randomUUID(),
+      expectedMetadataRevision: suspended.result.account.metadataRevision });
+    assert.equal(unavailable.state, 'rejected');
+    assert.equal(unavailable.account.resumeCustody, 'attention_required');
+    f.setCustodyReady(true);
+    const resumed = await lifecycle.resume(f.accountRef, { operationId: randomUUID(),
+      expectedMetadataRevision: suspended.result.account.metadataRevision });
+    assert.ok(resumed.state === 'applied' && resumed.result.account.state === 'active');
+    assert.equal(resumed.result.account.metadataRevision, suspended.result.account.metadataRevision + 1);
+    assert.equal(resumed.result.account.authorizationEpoch, suspended.result.account.authorizationEpoch + 1);
+    assert.deepEqual(await lifecycle.operation(suspendId), suspended, 'original result survives resume');
+    assert.deepEqual(await lifecycle.suspend(f.accountRef, { operationId: suspendId, expectedMetadataRevision: current.metadataRevision }), suspended);
+    assert.equal((await lifecycle.list({ ownerRef: current.ownerRef })).accounts[0]?.state, 'active');
   } finally { await f.stop(); }
 });
 test('exported SDK preparation with fresh operation IDs reads the original execution before and after unknown fencing', async () => {
@@ -685,4 +733,37 @@ test('consumer-control replacement during real SQL waits denies readback and iss
     }
     assert.equal(f.stats().calls, 0); assert.equal(f.stats().entries, 0);
   } finally { await lock.query('ROLLBACK'); lock.release(); await f.stop(); }
+});
+
+
+// Closing writes after a suspension must preserve compatible reads and exact
+// original receipts, so rollout rollback does not strand the account inventory.
+test('lifecycle off-on-off keeps v2 inventory and original operation reads while refusing writes', async () => {
+  const f = await fixture(); let original: c.LifecycleOperation | undefined;
+  try {
+    for (const writeGate of ['disabled','enabled','disabled'] as const) {
+      const server = createFacade({ ...f.options, lifecycle: { contract: c.LIFECYCLE_CAPABILITY_CONTRACT, writeGate } });
+      const origin = await listen(server);
+      const client = createLifecycleClient({ role: 'management', origin, token: f.managementGrant.token,
+        capability: c.LIFECYCLE_CAPABILITY_CONTRACT, clientContract: c.LIFECYCLE_CLIENT_CONTRACT });
+      try {
+        assert.equal((await client.capability()).writeGate, writeGate);
+        const current = await client.get(f.accountRef);
+        assert.equal((await client.list({ ownerRef: current.ownerRef })).accounts[0]?.accountRef, f.accountRef);
+        if (writeGate === 'enabled') {
+          original = await client.suspend(f.accountRef, { operationId: randomUUID(), expectedMetadataRevision: current.metadataRevision });
+          assert.equal(original.state, 'applied');
+        } else {
+          for (const action of ['suspend','resume'] as const) await assert.rejects(client[action](f.accountRef,
+            { operationId: randomUUID(), expectedMetadataRevision: current.metadataRevision }), denied('not_dispatched'));
+          if (original) {
+            assert.equal(current.state, 'suspended');
+            assert.equal((await client.list({ ownerRef: current.ownerRef })).accounts[0]?.state, 'suspended');
+            assert.deepEqual(await client.operation(original.operationRef), original);
+          }
+        }
+      } finally { await stop(server); }
+    }
+    assert.equal((await f.kernel.account(f.context, f.accountRef)).state, 'suspended');
+  } finally { await f.stop(); }
 });
