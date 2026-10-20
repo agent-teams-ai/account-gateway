@@ -24,7 +24,7 @@ test('configured bounds are a frozen value copy', () => {
   const input = { ...defaults };
   const copy = boundedConfig(input);
   input.maxRequests = 999;
-  assert.equal(copy.maxRequests, 32);
+  assert.equal(copy.maxRequests, defaults.maxRequests);
   assert.equal(Object.isFrozen(copy), true);
 });
 

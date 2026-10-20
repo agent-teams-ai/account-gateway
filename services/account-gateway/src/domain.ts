@@ -172,8 +172,11 @@ export function boundedFacts(input: DurableFactBounds): Readonly<DurableFactBoun
       1 + input.workerSlots + input.issuerSlots > input.maxConsumerFacts) throw new KernelError('invalid');
   return Object.freeze({ ...input });
 }
+const requestCeiling = 10_000;
 export const defaults: Readonly<Bounds> = Object.freeze({
-  maxRequests: 32, maxConcurrent: 1, maxRequestBytes: 1_048_576, maxOutputBytes: 8_388_608, maxTokens: 100_000, maxRunMs: 3_600_000,
+  // Acceptance ceiling only: the operational run budget is granted per service profile in
+  // service.json, so raising it is a config change, not a code change.
+  maxRequests: requestCeiling, maxConcurrent: 1, maxRequestBytes: 1_048_576, maxOutputBytes: 8_388_608, maxTokens: 100_000, maxRunMs: 3_600_000,
   workerLeaseMs: 30_000, cleanupLeaseMs: 30_000, maintenanceBatch: 100,
 });
 export function integer(value: unknown, max = 2_147_483_647): asserts value is number {
@@ -193,7 +196,7 @@ export function approvedLimits(input: ApprovedLimits, bounds: Readonly<Bounds>):
     outputBytes: input.outputBytes, tokens: input.tokens };
 }
 export function boundedConfig(input: Bounds): Readonly<Bounds> {
-  const caps: Bounds = { maxRequests: 10_000, maxConcurrent: 128, maxRequestBytes: 16_777_216,
+  const caps: Bounds = { maxRequests: requestCeiling, maxConcurrent: 128, maxRequestBytes: 16_777_216,
     maxOutputBytes: 67_108_864, maxTokens: 10_000_000, maxRunMs: 86_400_000,
     workerLeaseMs: 300_000, cleanupLeaseMs: 300_000, maintenanceBatch: 1_000 };
   if (!input || typeof input !== 'object' || Object.keys(input).length !== Object.keys(caps).length ||
