@@ -81,15 +81,16 @@ test('OAuth callback ingress accepts genuine encoding and rejects aliases, malfo
 
 // Source boundary fixtures have test-owned committed state and real HTTP hops.
 // They qualify neither SQL transactions nor Go middleware/provider transport.
-async function sourceHTTP(oauth: boolean) {
+async function sourceHTTP(oauth: boolean, outputEnvelope = false) {
   const consumerId = 'source-consumer', worker = randomUUID();
   let issuer: string = randomUUID();
   const context = { consumerId }, enrollment = { originRef: 'source-origin', engineIncarnation: randomUUID(), worker };
-  const limits = { requests: 4, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 100 };
+  const limits = outputEnvelope ? { requests: 640, concurrency: 1, requestBytes: 1_048_576, outputBytes: 1_048_576, tokens: 32_768 }
+    : { requests: 4, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 100 };
   const profile = { profile: 'openai-responses-apikey-v1', baseURL: 'https://api.xiaomimimo.com/v1', model: 'mimo-v2-flash',
-    qualificationRef: 'source-mimo', limits, providerTokenUpperBound: 1000 };
-  const secondProfile = { ...openRouterProfile, qualificationRef: 'source-openrouter', providerTokenUpperBound: 2000,
-    limits: { requests: 2, concurrency: 1, requestBytes: 2048, outputBytes: 4096, tokens: 50 } };
+    qualificationRef: 'source-mimo', limits, providerTokenUpperBound: outputEnvelope ? 32_768 : 1000 };
+  const secondProfile = { ...openRouterProfile, qualificationRef: 'source-openrouter', providerTokenUpperBound: outputEnvelope ? 32_768 : 2000,
+    limits: outputEnvelope ? limits : { requests: 2, concurrency: 1, requestBytes: 2048, outputBytes: 4096, tokens: 50 } };
   const consumer = { consumerId, managementCredential: 'source-native-management', executionCredential: 'source-native-execution',
     cleanupCredential: 'source-native-cleanup', callbackCredential: 'source-native-callback' };
   const accounts = new Map<string, AccountStatus>(), operations = new Map<string, OperationStatus>();
@@ -233,6 +234,7 @@ async function sourceHTTP(oauth: boolean) {
   const seen: { path: string; tuple: Record<string, unknown> }[] = [], forwarded: Record<string, unknown>[] = [];
   const receipts = new Map<string, Record<string, unknown>>();
   let callbackOrigin = '', begins = 0, completions = 0, loseCompletion = false, bodyOwner: string | undefined, descriptorReply: unknown;
+  let responseBytes: number | undefined;
   let connectState: 'prepared' | 'entered' | 'completed' | 'expired' | 'unknown' = 'completed';
   let descriptorMode: 'normal' | 'redirect' | 'overflow' | 'headers' | 'utf8' | 'timeout' = 'normal';
   const callback = async (route: string, body: unknown, token = consumer.callbackCredential) => fetch(callbackOrigin + '/private/native/v1/' + route,
@@ -308,7 +310,7 @@ async function sourceHTTP(oauth: boolean) {
           lifetime: { entered: true, contextDone: true, forwardingReturned: true, bodyKnown: true, bodyClosed: true,
             closeFailed: false, completed: true, sealed: true } });
         res.writeHead(200, { 'content-type': 'text/event-stream', 'x-gateway-request-ref': proof.requestRef });
-        res.end('data: {"type":"response.completed","fixture":"tools-and-final"}\n\n'); return;
+        res.end(responseBytes === undefined ? 'data: {"type":"response.completed","fixture":"tools-and-final"}\n\n' : Buffer.alloc(responseBytes, 0x20)); return;
       }
       if (path === '/private/native/v1/transports/read-owner' || path === '/private/native/v1/transports/ack-owner') {
         const proof = tuple.proof as NativeDispatchProof, r = receipts.get(proof.requestRef)!; assert.ok(r);
@@ -336,7 +338,8 @@ async function sourceHTTP(oauth: boolean) {
   const cfg = { native: { executable: '/unused', sha256: 'unused', bootstrapFile: '/unused', authorityDir: '/unused', origin, originRef: enrollment.originRef, uid: 1, gid: 1 },
     consumer, profile, secondProfile, bearers, ...(oauth ? { oauthEnrollment: { enabled: true as const,
       profile: 'openai-codex-oauth-responses-v1' as const, modelScope: ['gpt-5.6-sol'] as const,
-      qualificationRef: 'source-codex', limits, providerTokenUpperBound: 1000 } } : {}) };
+      qualificationRef: 'source-codex', limits: outputEnvelope ? { ...limits, outputBytes: 8_388_608 } : limits,
+      providerTokenUpperBound: outputEnvelope ? 32_768 : 1000 } } : {}) };
   const closeServers = async () => { for (const s of servers.reverse()) {
     s.closeAllConnections(); await new Promise<void>(resolve => s.close(() => resolve())); } };
   try {
@@ -344,7 +347,7 @@ async function sourceHTTP(oauth: boolean) {
   const { authority, transport } = composeServiceNative(cfg, control, kernel, store, enrollment);
   const callbacks = authority.createServer(); servers.push(callbacks); callbackOrigin = await listen(callbacks);
   const facade = createFacade({ kernel, store, management: control.management, bearers: control.bearers,
-    profiles: control.catalog, enrollment, transport, intentHmacKey: randomBytes(32), ingressBytes: 4096 });
+    profiles: control.catalog, enrollment, transport, intentHmacKey: randomBytes(32), ingressBytes: outputEnvelope ? 1_048_576 : 4096 });
   servers.push(facade); const facadeOrigin = await listen(facade);
   const publicCall = (path: string, body?: unknown, token = managementGrant.token, headers: Record<string, string> = {}) =>
     fetch(facadeOrigin + path, { method: body === undefined ? 'GET' : 'POST', headers: { authorization: 'Bearer ' + token,
@@ -355,6 +358,7 @@ async function sourceHTTP(oauth: boolean) {
     completions: () => completions, connect: (state: typeof connectState, lose = false) => { connectState = state; loseCompletion = lose; },
     owner: (value: string | undefined) => { bodyOwner = value; },
     descriptor: (value: unknown, mode: typeof descriptorMode = 'normal') => { descriptorReply = value; descriptorMode = mode; },
+    responseBytes: (value: number) => { responseBytes = value; },
     close: closeServers,
     origin, callbackOrigin, facade, facadeOrigin, nativeRows, scopeKey };
   } catch (error) { await closeServers(); throw error; }
@@ -931,6 +935,88 @@ test('source HTTP: explicit management profile capability denies same-owner MiMo
     f.control.bearers.replace([restricted]);
     assert.equal((await f.publicCall('/v1/accounts/' + accepted.result.accountRef)).status, 403);
     assert.equal((await f.publicCall('/v1/operations/' + accepted.operationRef)).status, 200, 'narrowing retains accepted operation readback');
+  } finally { await f.close(); }
+});
+
+// Red if an output envelope bypasses selected-profile admission, widens any
+// other limit, or changes the immutable cap of an already captured execution.
+test('source HTTP: consumer output envelope preserves physical and historical admission caps', async () => {
+  const f = await sourceHTTP(true, true);
+  try {
+    const profiles = captureServiceProfiles(f.cfg), token = 'source-output-envelope';
+    const control = { role: 'consumer-control' as const, consumerId: f.context.consumerId, token,
+      profileIds: profiles.map(p => p.profile), limits: { ...f.profile.limits, outputBytes: 8_388_608 }, maxRunMs: 21_600_000 };
+    // Exercise the startup capture boundary and actual facade, not just a
+    // permissive hand-created bearer registry.
+    const captured = captureServiceBearers([control], f.context.consumerId, profiles);
+    f.control.bearers.replace(captured);
+    const prepare = (profileId: string, accountRef: string, outputBytes: number) => ({
+      operationId: randomUUID(), invocationRef: randomUUID(), attemptRef: 'attempt', accountRefs: [accountRef],
+      profileId, subjectRef: 'source-subject', policyRevision: 1, bindingRevision: 1,
+      limits: { ...f.profile.limits, outputBytes }, deadline: new Date(Date.now() + 60_000).toISOString() });
+    type Access = { operation: { result: { executionRef: string } }; bearer: string;
+      admission: { limits: typeof control.limits } };
+    let historic: Access | undefined;
+    for (const p of profiles) {
+      // Explicit fixture-owned committed account/mapping state; no provider or
+      // OAuth credentials are used to test the policy admission boundary.
+      const accountRef = randomUUID(), generation = randomUUID();
+      f.accounts.set(f.scopeKey(f.context, accountRef), { accountRef, ownerRef: 'owner-one', profile: p.profile,
+        displayName: 'Synthetic budget', state: 'active', revision: 1, epoch: 1 });
+      f.mappings.set(f.scopeKey(f.context, generation), { consumerId: f.context.consumerId, operationId: randomUUID(),
+        accountRef, ownerRef: 'owner-one', purpose: 'create', generation, worker: randomUUID(), profile: p,
+        descriptor: { generation, nativePhysicalIdentity: generation, nativeId: 1, createdAt: '2026-10-06T01:02:03Z',
+          profile: p.profile, baseURL: p.baseURL, model: p.model } });
+      const input = prepare(p.profile, accountRef, p.limits.outputBytes);
+      const before = f.executions.size;
+      const denied = await f.publicCall('/internal/v1/run-access', { ...input,
+        limits: { ...input.limits, outputBytes: p.limits.outputBytes + 1 } }, token);
+      assert.ok([400, 403].includes(denied.status)); assert.equal(f.executions.size, before);
+      for (const field of ['requests', 'concurrency', 'requestBytes', 'tokens'] as const) {
+        const rejected = await f.publicCall('/internal/v1/run-access', { ...input,
+          limits: { ...input.limits, [field]: input.limits[field] + 1 } }, token);
+        assert.equal(rejected.status, 403); assert.equal(f.executions.size, before);
+      }
+      const accepted = await f.publicCall('/internal/v1/run-access', input, token);
+      assert.equal(accepted.status, 200);
+      const access = await accepted.json() as Access;
+      assert.deepEqual(access.admission.limits, p.limits);
+      if (p.profile === f.profile.profile) historic = access;
+      assert.equal(f.forwarded.length, 0, 'admission never dispatches');
+    }
+    assert.ok(historic);
+    const ref = historic.operation.result.executionRef, saved = await f.kernel.savedExecution(f.context, ref);
+    assert.equal(saved.admission.limits.outputBytes, 1_048_576);
+    const initial = f.cfg.bearers[0]; assert.equal(initial.role, 'management');
+    const management = { ...initial, preparation: { ...initial.preparation, accountRefs: [saved.admission.accountRef],
+      profileId: f.profile.profile, limits: control.limits } };
+    f.control.bearers.replace([...captured, management,
+      { role: 'execution', consumerId: f.context.consumerId, token: historic.bearer, saved }]);
+    const count = f.executions.size;
+    const direct = await f.publicCall('/v1/executions', prepare(f.profile.profile, saved.admission.accountRef, 1_048_577));
+    assert.equal(direct.status, 403); assert.equal(f.executions.size, count); assert.equal(f.forwarded.length, 0);
+    const body = { model: f.profile.model, stream: true, store: false, service_tier: 'default', input: 'fixture' };
+    const request = (admission: Access['admission']) => f.publicCall('/v1/executions/' + ref + '/requests', body, historic!.bearer,
+      { 'x-gateway-request-id': randomUUID(), 'x-gateway-admission': JSON.stringify(admission) });
+    const widened = await request({ ...historic.admission, limits: { ...historic.admission.limits, outputBytes: 8_388_608 } });
+    assert.equal(widened.status, 403); assert.equal(f.forwarded.length, 0);
+    // A matching stored admission and execution bearer must still be rechecked
+    // against the current selected physical profile before native transport.
+    const oversized = { ...saved, admission: { ...saved.admission,
+      limits: { ...saved.admission.limits, outputBytes: 1_048_577 } } };
+    f.executions.set(f.scopeKey(f.context, ref), oversized);
+    f.control.bearers.replace([{ role: 'execution', consumerId: f.context.consumerId, token: historic.bearer, saved: oversized }]);
+    assert.equal((await request({ ...historic.admission, limits: oversized.admission.limits })).status, 403);
+    assert.equal(f.forwarded.length, 0);
+    f.executions.set(f.scopeKey(f.context, ref), saved);
+    f.control.bearers.replace([{ role: 'execution', consumerId: f.context.consumerId, token: historic.bearer, saved }]);
+    f.responseBytes(1_048_576);
+    const exact = await request(historic.admission); assert.equal(exact.status, 200);
+    assert.equal((await exact.arrayBuffer()).byteLength, 1_048_576);
+    f.responseBytes(1_048_577);
+    const overflow = await request(historic.admission); assert.equal(overflow.status, 200);
+    await assert.rejects(overflow.arrayBuffer(), 'historical admission still enforces its one MiB stream cap');
+    assert.deepEqual(await f.kernel.savedExecution(f.context, ref), saved);
   } finally { await f.close(); }
 });
 
