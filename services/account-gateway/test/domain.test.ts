@@ -37,7 +37,7 @@ test('qualified Codex profile admits eight MiB raw SSE and rejects one byte abov
     baseURL: 'https://api.xiaomimimo.com/v1', qualificationRef: 'synthetic-mimo',
     limits, providerTokenUpperBound: 32_768 };
   const oauthEnrollment = { enabled: true as const, profile: 'openai-codex-oauth-responses-v1' as const,
-    modelScope: ['gpt-5.6-sol'], qualificationRef: 'synthetic-codex',
+    modelScope: ['gpt-5.6-sol'] as const, qualificationRef: 'synthetic-codex',
     limits: { ...limits, outputBytes: 8_388_608 }, providerTokenUpperBound: 32_768 };
   const captured = captureServiceProfiles({ profile, oauthEnrollment });
   assert.deepEqual(captured[1].limits, { ...limits, outputBytes: 8_388_608 });
