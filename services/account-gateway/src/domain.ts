@@ -173,7 +173,7 @@ export function boundedFacts(input: DurableFactBounds): Readonly<DurableFactBoun
   return Object.freeze({ ...input });
 }
 export const defaults: Readonly<Bounds> = Object.freeze({
-  maxRequests: 32, maxConcurrent: 1, maxRequestBytes: 1_048_576, maxOutputBytes: 4_194_304, maxTokens: 100_000, maxRunMs: 3_600_000,
+  maxRequests: 32, maxConcurrent: 1, maxRequestBytes: 1_048_576, maxOutputBytes: 8_388_608, maxTokens: 100_000, maxRunMs: 3_600_000,
   workerLeaseMs: 30_000, cleanupLeaseMs: 30_000, maintenanceBatch: 100,
 });
 export function integer(value: unknown, max = 2_147_483_647): asserts value is number {
