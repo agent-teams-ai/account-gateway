@@ -176,7 +176,7 @@ const requestCeiling = 10_000;
 export const defaults: Readonly<Bounds> = Object.freeze({
   // Acceptance ceiling only: the operational run budget is granted per service profile in
   // service.json, so raising it is a config change, not a code change.
-  maxRequests: requestCeiling, maxConcurrent: 1, maxRequestBytes: 1_048_576, maxOutputBytes: 4_194_304, maxTokens: 100_000, maxRunMs: 3_600_000,
+  maxRequests: requestCeiling, maxConcurrent: 1, maxRequestBytes: 1_048_576, maxOutputBytes: 8_388_608, maxTokens: 100_000, maxRunMs: 3_600_000,
   workerLeaseMs: 30_000, cleanupLeaseMs: 30_000, maintenanceBatch: 100,
 });
 export function integer(value: unknown, max = 2_147_483_647): asserts value is number {
