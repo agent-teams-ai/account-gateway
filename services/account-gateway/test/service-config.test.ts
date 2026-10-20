@@ -9,9 +9,12 @@ const serviceProfile = (requests: number) => ({ profile: 'openai-responses-apike
 const denied = (body: () => unknown) =>
   assert.throws(body, e => e instanceof ServiceError && e.code === 'config_denied');
 
-// Red if an approved multi-batch run budget is denied at startup and strands a large review after its first batches.
-test('service profile admits an approved 640-request run budget and still denies above the bound', () => {
-  const [profile] = captureServiceProfiles({ profile: serviceProfile(640) });
-  assert.equal(profile.limits.requests, 640);
-  denied(() => captureServiceProfiles({ profile: serviceProfile(641) }));
+// Red if raising the run budget needs a code change again: the operational knob is the service
+// profile, the code keeps only the acceptance ceiling.
+test('service profile admits production budgets up to the code ceiling and denies above it', () => {
+  const [prod] = captureServiceProfiles({ profile: serviceProfile(640) });
+  assert.equal(prod.limits.requests, 640);
+  const [ceiling] = captureServiceProfiles({ profile: serviceProfile(10_000) });
+  assert.equal(ceiling.limits.requests, 10_000);
+  denied(() => captureServiceProfiles({ profile: serviceProfile(10_001) }));
 });
