@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { captureServiceProfiles, ServiceError } from '../src/service-config.ts';
+import { captureServiceBearers, captureServiceProfiles, ServiceError } from '../src/service-config.ts';
 
 const serviceProfile = (requests: number) => ({ profile: 'openai-responses-apikey-v1', model: 'gpt-5.4-mini',
   baseURL: 'https://api.openai.com/v1', qualificationRef: 'qualification-a',
@@ -17,6 +17,28 @@ test('service profile admits production budgets up to the code ceiling and denie
   const [ceiling] = captureServiceProfiles({ profile: serviceProfile(10_000) });
   assert.equal(ceiling.limits.requests, 10_000);
   denied(() => captureServiceProfiles({ profile: serviceProfile(10_001) }));
+});
+
+// Red if configuration intersects output across profiles instead of capturing
+// the selected envelope, or grants borrow an unselected profile's authority.
+test('consumer output envelope uses only selected profiles and preserves all other grant bounds', () => {
+  const profiles = [serviceProfile(640), { ...serviceProfile(640), profile: 'other-profile',
+    limits: { ...serviceProfile(640).limits, outputBytes: 8_388_608 } }];
+  const control = { role: 'consumer-control' as const, token: 'synthetic-consumer-control', consumerId: 'fixture-consumer',
+    profileIds: profiles.map(p => p.profile), limits: { ...profiles[0].limits, outputBytes: 8_388_608 }, maxRunMs: 21_600_000 };
+  const capture = (value: unknown) => captureServiceBearers([value], control.consumerId, profiles);
+  assert.deepEqual(capture(control), [control]);
+  denied(() => capture({ ...control, profileIds: [profiles[0].profile] }));
+  denied(() => capture({ ...control, profileIds: [...control.profileIds, 'missing'] }));
+  denied(() => capture({ ...control, limits: { ...control.limits, outputBytes: 8_388_609 } }));
+  for (const field of ['requests', 'concurrency', 'requestBytes', 'tokens'] as const)
+    denied(() => capture({ ...control, limits: { ...control.limits, [field]: control.limits[field] + 1 } }));
+  denied(() => capture({ ...control, role: 'run-control', ownerRefs: ['fixture-owner'] }));
+  denied(() => capture({ role: 'management', token: control.token, consumerId: control.consumerId, ownerRefs: ['fixture-owner'],
+    preparation: { accountRefs: [], subjectRef: 'fixture-subject', policyRevision: 1, bindingRevision: 1,
+      profileId: profiles[0].profile, limits: control.limits, maxRunMs: 60_000 } }));
+  assert.deepEqual(capture({ ...control, limits: profiles[0].limits, maxRunMs: 1 }),
+    [{ ...control, limits: profiles[0].limits, maxRunMs: 1 }]);
 });
 
 // Red if the canonical configuration parser still rejects the native raw-SSE
