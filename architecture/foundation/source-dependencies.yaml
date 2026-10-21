@@ -76,7 +76,7 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/src/facade.ts, services/account-gateway/src/facade-ingress.ts]
     entrypoints: [services/account-gateway/src/facade.ts, services/account-gateway/src/facade-ingress.ts]
-    allow: {boundaries: [kernel-domain, kernel-postgres, native-management, contracts, http], packages: ['@agent-teams/account-gateway'], builtins: ['node:http', 'node:crypto', 'node:events'], runtimeReferences: []}
+    allow: {boundaries: [kernel-domain, kernel-postgres, native-management, contracts, http, usage-journal], packages: ['@agent-teams/account-gateway'], builtins: ['node:http', 'node:crypto', 'node:events'], runtimeReferences: []}
   - id: private-facade-tests
     dependencyMode: runtime
     roots: [services/account-gateway/test/facade-ingress.test.ts, services/account-gateway/test/facade-postgres.test.ts, services/account-gateway/test/run-access-postgres.test.ts, services/account-gateway/test/oauth-enrollment-postgres.test.ts, services/account-gateway/test/native-retained-custody-joined.ts]
@@ -86,7 +86,7 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/src/native-transport.ts, services/account-gateway/src/native-authority.ts, services/account-gateway/src/native-wire.ts, services/account-gateway/src/native-response-diagnostics.ts]
     entrypoints: [services/account-gateway/src/native-transport.ts, services/account-gateway/src/native-authority.ts, services/account-gateway/src/native-wire.ts, services/account-gateway/src/native-response-diagnostics.ts]
-    allow: {boundaries: [kernel-domain, kernel-postgres, native-management, private-facade], packages: [], builtins: ['node:http', 'node:https', 'node:crypto', 'node:timers/promises'], runtimeReferences: []}
+    allow: {boundaries: [kernel-domain, kernel-postgres, native-management, private-facade, usage-journal], packages: [], builtins: ['node:http', 'node:https', 'node:crypto', 'node:timers/promises'], runtimeReferences: []}
   - id: native-transport-tests
     dependencyMode: runtime
     roots: [services/account-gateway/test/native-transport-postgres.test.ts, services/account-gateway/test/native-wire.test.ts, services/account-gateway/test/native-response-diagnostics.test.ts]
@@ -101,7 +101,7 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/src/service.ts, services/account-gateway/src/service-config.ts, services/account-gateway/src/serve.ts]
     entrypoints: [services/account-gateway/src/serve.ts, services/account-gateway/src/service.ts, services/account-gateway/src/service-config.ts]
-    allow: {boundaries: [kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http, native-transport-http, private-facade], packages: [pg], builtins: ['node:child_process', 'node:crypto', 'node:http', 'node:fs', 'node:path'], runtimeReferences: []}
+    allow: {boundaries: [kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http, native-transport-http, private-facade, usage-journal], packages: [pg], builtins: ['node:child_process', 'node:crypto', 'node:http', 'node:fs', 'node:path'], runtimeReferences: []}
   - id: foreground-service-runtime-test
     dependencyMode: runtime
     roots: [services/account-gateway/test/service-runtime.test.ts]
@@ -112,3 +112,14 @@ boundaries:
     roots: [services/account-gateway/test/service-config.test.ts]
     entrypoints: [services/account-gateway/test/service-config.test.ts]
     allow: {boundaries: [foreground-service-entry], packages: [], builtins: ['node:test', 'node:assert/strict'], runtimeReferences: []}
+
+  - id: usage-journal
+    dependencyMode: runtime
+    roots: [services/account-gateway/src/usage.ts]
+    entrypoints: [services/account-gateway/src/usage.ts]
+    allow: {boundaries: [kernel-domain, contracts], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:crypto'], runtimeReferences: []}
+  - id: usage-tests
+    dependencyMode: runtime
+    roots: [services/account-gateway/test/usage.test.ts, services/account-gateway/test/usage-postgres.test.ts]
+    entrypoints: [services/account-gateway/test/usage.test.ts, services/account-gateway/test/usage-postgres.test.ts]
+    allow: {boundaries: [usage-journal, contracts, native-transport-http], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:fs/promises'], runtimeReferences: []}

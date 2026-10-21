@@ -24,6 +24,11 @@ for (const field of ['accountRef','authorizationEpoch']) {
 }
 assert.equal(wire.operation.safeParse({...prepared,result:{...selected,nativeDescriptor:'private-sentinel'}}).success,false);
 assert.equal(typeof sdk.createManagementClient, 'function');
+assert.equal(typeof sdk.createLifecycleClient, 'function');
+assert.equal(wire.LIFECYCLE_CAPABILITY_CONTRACT, 'account-gateway/account-lifecycle/v2');
+assert.equal(wire.LIFECYCLE_CLIENT_CONTRACT, 'account-gateway-client/account-lifecycle/v2');
+assert.equal(typeof wire.lifecycleOperation.parse, 'function');
+assert.equal(typeof wire.lifecycleAccount.parse, 'function');
 assert.equal(typeof gm.constructExecutionClient, 'function');
 assert.equal('connect' in sdk.createExecutionClient({ origin:'http://127.0.0.1:1', role:'execution', token:'fixture-only' }), false);
 const resolved = realpathSync(new URL(import.meta.resolve('@agent-teams/account-gateway/http')));
@@ -41,7 +46,10 @@ export async function readOwnedConnection(port: ConnectionReader, reference: str
 `);
 writeFileSync('closure.mts', `import type {Account, Operation, Prepare, ListQuery} from '@agent-teams/account-gateway/contracts';
 import {createExecutionClient, createManagementClient} from '@agent-teams/account-gateway/http';
-import type {ManagementConfig} from '@agent-teams/account-gateway/http';
+import type {ManagementConfig, LifecycleConfig, LifecycleClient} from '@agent-teams/account-gateway/http';
+import {createLifecycleClient} from '@agent-teams/account-gateway/http';
+import {LIFECYCLE_CAPABILITY_CONTRACT, LIFECYCLE_CLIENT_CONTRACT, lifecycleAccount, lifecycleOperation} from '@agent-teams/account-gateway/contracts';
+import type {LifecycleAccount, LifecycleOperation} from '@agent-teams/account-gateway/contracts';
 import {constructManagementClient, bindExecutionFactory} from '@agent-teams/account-gateway/get-modular';
 import type {ConnectionReader} from './consumer-port.mjs';
 export {readOwnedConnection} from './consumer-port.mjs';
@@ -50,6 +58,13 @@ export function readerFor(settings: ManagementConfig): ConnectionReader {
  const client=createManagementClient(settings);
  return {owner: async reference => (await client.get(reference)).ownerRef};
 }
+// Actual dashboard composition also constructs the lifecycle reader even while
+// writes are disabled. Preserve its authenticated owner projection and exports.
+export function lifecycleReaderFor(settings: ManagementConfig): ConnectionReader {
+ const client=createLifecycleClient({...settings,capability:LIFECYCLE_CAPABILITY_CONTRACT,clientContract:LIFECYCLE_CLIENT_CONTRACT});
+ return {owner:async reference=>(await client.get(reference)).ownerRef};
+}
+export type LifecycleClosure=[LifecycleConfig,LifecycleClient,LifecycleAccount,LifecycleOperation,typeof lifecycleAccount,typeof lifecycleOperation];
 if(false) {
  const run=createExecutionClient({origin:'http://127.0.0.1:1',role:'execution',token:'fixture'});
  // @ts-expect-error execution role cannot administer accounts

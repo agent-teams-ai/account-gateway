@@ -86,7 +86,7 @@ export class NativeAuthority {
     }
     if (this.#pending.size >= this.configuration.maxPending) return denied();
     // Capture callable methods rather than a mutable callback container.
-    const callback = Object.freeze({ admit: input.callback.admit.bind(input.callback), effect: input.callback.effect.bind(input.callback),
+    const callback = Object.freeze({ ...(input.callback.usage ? {usage: input.callback.usage.bind(input.callback)} : {}), admit: input.callback.admit.bind(input.callback), effect: input.callback.effect.bind(input.callback),
       rejectBeforeDispatch: input.callback.rejectBeforeDispatch.bind(input.callback), closed: input.callback.closed.bind(input.callback) });
     const a: Association = { context, saved: snapshot, requestId: input.requestId, digest, callback, signal: input.signal,
       ready: false, admitStarted: false, outboundStarted: false, acknowledged: false };

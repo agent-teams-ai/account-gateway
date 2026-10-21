@@ -68,6 +68,10 @@ export class NativeHTTPTransport implements NativeTransport {
       const current = await authority.kernel.request(a.context, p.executionRef, p.requestRef);
       if (current.effect === 'response_started') await a.callback.effect(p, 'completed');
     } else await this.#unknown(a);
+    if (r.nativeUsage?.finalized && a.callback.usage) {
+      // Analytics delivery failure cannot repeat provider entry or block closure.
+      await a.callback.usage(p, r.nativeUsage).catch(() => undefined);
+    }
     // The Go ack-owner performs the authenticated Node closure callback. Only
     // that callback durably releases SQL occupancy; EOF does not call closed().
     if (a.ackStarted) return denied(); // No automatic replay of an uncertain ACK.

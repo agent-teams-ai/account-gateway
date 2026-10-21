@@ -262,6 +262,16 @@ const consumerList = c.listQuery.extend({ ownerRef: c.reference });
 export function createConsumerControlClient(settings: ConsumerControlConfig) {
   const { client, json } = accountClient(settings, 'consumer-control');
   return Object.freeze({ ...client,
+    observeUsage: (executionRef: string, requestRef: string, options?: CallOptions): Promise<c.UsageObservation | null> =>
+      json(`/v1/usage/${id(executionRef)}/${id(requestRef)}`, c.usageRead, 'GET', undefined, options).then(result => result.observation),
+    listUsage: (input: c.UsageQuery = {}, options?: CallOptions): Promise<c.UsagePage> => {
+      const query = valid(c.usageQuery, input);
+      const params = new URLSearchParams();
+      if (query.afterCursor) params.set('afterCursor', query.afterCursor);
+      if (query.highWaterCursor) params.set('highWaterCursor', query.highWaterCursor);
+      if (query.limit) params.set('limit', String(query.limit));
+      return json('/v1/usage' + (params.size ? '?' + params : ''), c.usagePage, 'GET', undefined, options);
+    },
     list: (input: c.ListQuery & { ownerRef: string }, options?: CallOptions) => client.list(valid(consumerList, input), options),
     runAccess: (input: c.Prepare, options?: CallOptions) => {
       const parsed = valid(c.prepare, input);

@@ -197,3 +197,21 @@ export type Close = z.infer<typeof close>;
 export type Fence = z.infer<typeof fence>;
 export type Admission = z.infer<typeof admission>;
 export type ListQuery = z.infer<typeof listQuery>;
+
+// Safe request facts. Null means the source did not observe the value.
+export const usageObservation = z.strictObject({
+  schemaVersion: z.literal(1), eventId: reference, revision,
+  executionRef: reference, requestRef: reference, invocationRef: reference,
+  attemptRef: reference, accountRef: reference, profileId: reference,
+  model: z.string().min(1).max(128), occurredAt: deadline,
+  effect: effectState, completeness: z.enum(['partial', 'complete']),
+  inputTokens: revision.nullable(), outputTokens: revision.nullable(), cachedInputTokens: revision.nullable(),
+  reasoningTokens: revision.nullable(), cost: z.null(),
+});
+export const usageQuery = z.strictObject({ afterCursor: z.string().min(1).max(512).optional(), highWaterCursor: z.string().min(1).max(512).optional(), limit: z.number().int().min(1).max(100).optional() });
+export const usagePage = z.strictObject({ observations: z.array(usageObservation).max(100), nextCursor: z.string().max(512), highWaterCursor: z.string().max(512) });
+export type UsageObservation = z.infer<typeof usageObservation>;
+export type UsageQuery = z.infer<typeof usageQuery>;
+export type UsagePage = z.infer<typeof usagePage>;
+
+export const usageRead = z.strictObject({ observation: usageObservation.nullable() });
