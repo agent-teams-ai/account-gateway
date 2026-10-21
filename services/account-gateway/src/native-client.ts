@@ -1,5 +1,7 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
+import type { RetainedCustodyProof } from './domain.ts';
+import type { RetainedCustodyVerifier } from './management.ts';
 import { KernelError, identifier, uuid } from './domain.ts';
 import { secretSubmission } from '@agent-teams/account-gateway/http';
 import { oauthAuthorizationURL } from '@agent-teams/account-gateway/contracts';
@@ -42,8 +44,9 @@ function decode(bytes: Buffer): unknown {
   };
   const value = (depth: number): void => {
     space();
+    if (depth > 4) throw new NativeFailure('invalid_readback');
     if (text[position] === '{') {
-      if (depth > 1) throw new NativeFailure('invalid_readback');
+      if (depth > 4) throw new NativeFailure('invalid_readback');
       position++; space(); const keys = new Set<string>();
       if (text[position] === '}') { position++; return; }
       while (position < text.length) {
@@ -69,7 +72,14 @@ function decode(bytes: Buffer): unknown {
       }
       throw new NativeFailure('invalid_readback');
     }
-    if (text[position] === '[') throw new NativeFailure('invalid_readback');
+    if (text[position] === '[') {
+      position++; space(); if (text[position] === ']') { position++; return; }
+      for (;;) {
+        value(depth + 1); space(); const next = text[position++];
+        if (next === ']') return;
+        if (next !== ',') throw new NativeFailure('invalid_readback');
+      }
+    }
     if (text[position] === '"') { string(); return; }
     const start = position;
     while (position < text.length && !/[\s,}]/.test(text[position])) position++;
@@ -187,6 +197,52 @@ class NativeControlHTTP {
     });
   }
 }
+// Separate inert custody protocol. Metadata GET is intentionally insufficient.
+export class NativeRetainedCustodyClient extends NativeControlHTTP implements RetainedCustodyVerifier {
+  async verify(input: CandidateMapping): Promise<RetainedCustodyProof> {
+    this.scope(input);
+    const d = physicalCandidate(input.descriptor);
+    if (!exactCandidate(input, d) || d.nativePhysicalIdentity !== d.generation) throw new NativeFailure('denied');
+    const oauth = d.profile === codexOAuthProfile.profile;
+    if (oauth) identifier(input.operationId);
+    const request = { contract: 'native-retained-custody/v1', owner_ref: input.ownerRef,
+      account_ref: input.accountRef, descriptor: wireDescriptor(d),
+      ...(oauth ? { operation: input.operationId, generation: input.generation } : {}) };
+    const bytes = await this.call(oauth ? 'POST' : 'GET', oauth ? '/private/native/v1/oauth/connect/custody' :
+      candidatesPath + '/' + d.generation + '/custody', request);
+    try {
+      const r = object(decode(bytes), ['contract','generation','native','credential_kinds','retention','proof'],
+        oauth ? ['oauth_policy'] : []);
+      const native = oauthPhysicalOrAPI(r.native);
+      const retention = object(r.retention, ['state','credential']);
+      const proof = object(r.proof, ['authenticated']);
+      const kinds = r.credential_kinds;
+      if (r.contract !== 'native-retained-custody/v1' || r.generation !== d.generation ||
+          !samePhysical(d, native) || !Array.isArray(kinds) || kinds.length !== 1 || kinds[0] !== (oauth ? 'oauth' : 'api_key') ||
+          retention.state !== (oauth ? 'inactive' : 'active') || retention.credential !== 'retained' ||
+          proof.authenticated !== true) throw new NativeFailure('invalid_readback');
+      if (oauth) {
+        const policy = object(r.oauth_policy, ['provider_validity','expired_but_refreshable']);
+        if (retention.state !== 'inactive' || policy.provider_validity !== 'unasserted' ||
+            !['not-qualified-by-existing-policy','not-due-by-existing-policy','eligible-by-existing-policy'].includes(policy.expired_but_refreshable as string))
+          throw new NativeFailure('invalid_readback');
+      }
+      return Object.freeze({ contract: 'native-retained-custody/v1', generation: d.generation,
+        nativePhysicalIdentity: d.nativePhysicalIdentity, credentialKinds: Object.freeze([oauth ? 'oauth' as const : 'api_key' as const]) });
+    } catch { throw new NativeFailure('invalid_readback'); }
+  }
+}
+function oauthPhysicalOrAPI(value: unknown): PhysicalCandidate {
+  const d = object(value, ['account_id','generation','created_at','profile','base_url','model']);
+  return physicalCandidate({ nativeId: d.account_id as number, generation: d.generation as string,
+    nativePhysicalIdentity: d.generation as string, createdAt: d.created_at as string,
+    profile: d.profile as string, baseURL: d.base_url as string, model: d.model as string });
+}
+function samePhysical(a: PhysicalCandidate, b: PhysicalCandidate): boolean {
+  return a.nativeId === b.nativeId && a.generation === b.generation && a.nativePhysicalIdentity === b.nativePhysicalIdentity &&
+    a.createdAt === b.createdAt && a.profile === b.profile && a.baseURL === b.baseURL && a.model === b.model;
+}
+
 export class NativeManagementClient extends NativeControlHTTP implements CandidateNative {
   async create(input: CandidateJournal, displayName: string, apiKey: string): Promise<void> {
     const scope = { consumerId: input.consumerId, generation: input.generation, accountRef: input.accountRef,

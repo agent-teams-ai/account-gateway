@@ -760,6 +760,37 @@ test('restore durably cleans every exact generation and repeated restores do not
 
 // Red if startup rotates all grants, expired ownership retries inference,
 // incomplete candidates become active, or restore is treated like restart.
+// Restore retires the recovered authority, including suspended sources. Leaving
+// suspended while quarantining its candidate makes both resume and cleanup fail.
+test('restore quarantines suspended account and permits cleanup plus fresh recovery', async () => {
+  const ctx = context(), source = await connected(ctx), w = await worker(ctx);
+  const before = await a.account(ctx, source.accountRef!);
+  await a.beginAccount(ctx, { kind: 'suspend', operationId: op(), intentDigest: digest(),
+    accountRef: before.accountRef, expectedRevision: before.revision });
+  const suspended = await a.account(ctx, before.accountRef);
+  const original = await a.accountCustody(ctx, before.accountRef);
+  await a.restore(ctx, await a.issuer(ctx), randomUUID());
+  const restored = await a.account(ctx, before.accountRef);
+  assert.equal(restored.state, 'quarantined'); assert.equal(restored.epoch, suspended.epoch + 1);
+  await assert.rejects(a.beginAccount(ctx, { kind: 'resume', operationId: op(), intentDigest: digest(),
+    accountRef: before.accountRef, expectedRevision: restored.revision }, {
+    contract: 'native-retained-custody/v1', generation: original.generation,
+    nativePhysicalIdentity: original.nativePhysicalIdentity, credentialKinds: ['api_key'],
+    metadataRevision: suspended.revision, authorizationEpoch: suspended.epoch }), isCode('denied'));
+  const cleanup = await a.claimCleanup(ctx, w); assert.ok(cleanup && cleanup.scope.kind === 'generation');
+  assert.equal(cleanup.scope.generation, original.generation);
+  await a.settleCleanup(ctx, cleanup.cleanupRef, w, cleanup.token, true);
+  const reconnect = await a.beginAccount(ctx, { kind: 'reconnect', operationId: op(), intentDigest: digest(),
+    accountRef: before.accountRef, expectedRevision: restored.revision });
+  const candidate = await a.startCandidate(ctx, reconnect.operationRef, w); assert.ok(candidate);
+  assert.notEqual(candidate.candidate, original.generation);
+  assert.equal((await a.acknowledgeCandidate(ctx, reconnect.operationRef, w, { generation: candidate.candidate,
+    nativePhysicalIdentity: randomUUID(), profile: candidate.profile })).state, 'applied');
+  assert.equal((await a.account(ctx, before.accountRef)).state, 'active');
+  assert.equal((await admin.query('SELECT state FROM ag_kernel.candidates WHERE consumer=$1 AND generation=$2',
+    [ctx.consumerId, original.generation])).rows[0].state, 'retired');
+});
+
 test('restart reconciles only lost claims; explicit restore rotates and quarantines', async () => {
   const ctx = context(), account = await connected(ctx);
   const separate = await connected(ctx);

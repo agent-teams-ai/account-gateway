@@ -8,9 +8,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
 import { PostgresKernel } from '../src/postgres.ts';
 import { KernelError, defaults } from '../src/domain.ts';
-import type { TrustedContext, AccountIntent, OperationStatus, CleanupClaim } from '../src/domain.ts';
-import { AccountManagement } from '../src/management.ts';
-import type { CandidateJournal, CandidateScope, CreateInput, NativeReadback } from '../src/management.ts';
+import type { TrustedContext, AccountIntent, OperationStatus, CleanupClaim, PrivateAdmission } from '../src/domain.ts';
+import { AccountManagement, exactCandidate, physicalCandidate } from '../src/management.ts';
+import type { CandidateJournal, CandidateScope, CandidateMapping, CreateInput, ManagedProfile, NativeReadback } from '../src/management.ts';
 import { IntentSecrets, PostgresManagementStore } from '../src/management-store.ts';
 import { NativeManagementClient } from '../src/native-client.ts';
 
@@ -636,4 +636,191 @@ test('B3a reconciliation erases expired owned intent and quarantines its spent c
     assert.equal((await manager.create(context,command)).state,'unknown');
     assert.equal(f.creates(),0); assert.equal(f.providerCalls(),0);
   } finally { await f.close(); }
+});
+
+const lifecycleProfile: ManagedProfile = Object.freeze({ profile: 'lifecycle-profile',
+  baseURL: 'https://fixture.invalid/v1', model: 'lifecycle-model', qualificationRef: 'fixture-only' });
+const lifecycleIntent = (kind: AccountIntent['kind'], operationId: string, accountRef?: string,
+  expectedRevision?: number, extra: Partial<AccountIntent> = {}): AccountIntent => Object.freeze({
+  operationId, kind, intentDigest: randomUUID(), accountRef, expectedRevision, ...extra,
+});
+const lifecycleCode = (expected: string) => (error: unknown): boolean => error instanceof KernelError && error.code === expected;
+
+interface LifecycleFixture {
+  context: TrustedContext; worker: string; accountRef: string; generation: string;
+  manager: AccountManagement; retention: { failRetained: boolean; beforeProof?: () => Promise<void> }; erases: number;
+}
+async function lifecycleActivate(): Promise<LifecycleFixture> {
+  const context = ctx(), worker = randomUUID();
+  await kernel.heartbeat(context, worker);
+  const created = await kernel.beginAccount(context, lifecycleIntent('create', randomUUID(), undefined, undefined,
+    { ownerRef: 'lifecycle-owner', profile: lifecycleProfile.profile, displayName: 'Lifecycle fixture' }));
+  assert.equal(created.state, 'pending');
+  const permit = await kernel.startCandidate(context, created.operationRef, worker); assert.ok(permit);
+  const scope: CandidateScope = { consumerId: context.consumerId, operationId: created.operationRef,
+    accountRef: created.accountRef!, ownerRef: 'lifecycle-owner', purpose: 'create' };
+  const journal = await store.journal(scope, permit.candidate, worker, lifecycleProfile);
+  const mapping: CandidateMapping = Object.freeze({ ...journal, descriptor: physicalCandidate({
+    generation: journal.generation, nativePhysicalIdentity: journal.generation, nativeId: nextNativeID++,
+    createdAt: '2026-10-19T00:00:00.000Z', ...lifecycleProfile }) });
+  await store.saveMapping(mapping);
+  assert.equal((await kernel.acknowledgeCandidate(context, created.operationRef, worker,
+    { generation: mapping.generation, nativePhysicalIdentity: mapping.descriptor.nativePhysicalIdentity,
+      profile: lifecycleProfile.profile })).state, 'applied');
+  const retention: LifecycleFixture['retention'] = { failRetained: false }; let erases = 0;
+  const manager = new AccountManagement({ kernel, store, worker, profiles: [lifecycleProfile],
+    custody,
+    native: { create: async () => { throw new Error('unused'); }, read: async () => [],
+      setState: async () => { throw new Error('unused'); }, erase: async () => { erases++; } },
+    proof: { verify: async (candidate, source) => exactCandidate(candidate, physicalCandidate(source)) },
+    retainedCustody: { verify: async candidate => {
+      await retention.beforeProof?.();
+      return retention.failRetained ? undefined : {
+        contract: 'native-retained-custody/v1', generation: candidate.generation,
+        nativePhysicalIdentity: candidate.descriptor.nativePhysicalIdentity, credentialKinds: ['api_key'],
+      };
+    } } });
+  return { context, worker, accountRef: created.accountRef!, generation: permit.candidate,
+    manager, retention, get erases() { return erases; } };
+}
+async function lifecyclePrepared(f: LifecycleFixture, operationId: string):
+  Promise<{ operation: OperationStatus; admission: PrivateAdmission }> {
+  const issuer = await kernel.issuer(f.context);
+  const operation = await kernel.prepare(f.context, { operationId, intentDigest: randomUUID(),
+    invocationRef: 'invocation-' + operationId, attemptRef: 'attempt-' + operationId,
+    permittedAccounts: [f.accountRef], profile: lifecycleProfile.profile, policySubject: 'policy-' + operationId,
+    policyRevision: 1, bindingRevision: 1, issuerEpoch: issuer, deadline: new Date(Date.now() + 60_000),
+    limits: { requests: 4, concurrency: 1, requestBytes: 4096, outputBytes: 4096, tokens: 100 } });
+  assert.equal(operation.state, 'applied');
+  return { operation, admission: (await kernel.savedExecution(f.context, operation.executionRef!)).admission };
+}
+
+// Regression: suspend must retain the exact native mapping while fencing old
+// and new dispatch; only a fresh post-resume epoch can dispatch again.
+test('Gateway lifecycle suspend/resume retains identity and fences old authority', async () => {
+  const f = await lifecycleActivate(), beforeSuspend = await kernel.account(f.context, f.accountRef);
+  const first = await lifecyclePrepared(f, randomUUID());
+  const claimed = await kernel.claim(f.context, first.operation.executionRef!, 'request-before', f.worker,
+    first.admission, { originRef: 'origin-before', engineIncarnation: f.worker, requestNonce: randomUUID() });
+  assert.ok(claimed.dispatch);
+  const suspended = await f.manager.suspend(f.context, { operationId: 'suspend-stable',
+    accountRef: f.accountRef, expectedRevision: beforeSuspend.revision });
+  assert.equal(suspended.state, 'applied');
+  const suspendedAccount = await kernel.account(f.context, f.accountRef);
+  assert.equal(suspendedAccount.state, 'suspended'); assert.equal(suspendedAccount.revision, beforeSuspend.revision + 1);
+  assert.equal(suspendedAccount.epoch, beforeSuspend.epoch + 1);
+  const row = (await pool.query(`SELECT c.state,m.native_physical_identity AS mapped_identity,
+    (SELECT count(*) FROM ag_kernel.cleanup j WHERE j.generation=c.generation) AS generation_cleanup
+    FROM ag_kernel.candidates c JOIN ag_management.physical_mappings m ON m.consumer=c.consumer AND m.generation=c.generation
+    WHERE c.consumer=$1 AND c.generation=$2`, [f.context.consumerId, f.generation])).rows[0];
+  assert.equal(row.state, 'ready'); assert.ok(row.mapped_identity);
+  assert.equal(Number(row.generation_cleanup), 0); assert.equal(f.erases, 0);
+
+  await assert.rejects(kernel.prepare(f.context, { operationId: randomUUID(), intentDigest: randomUUID(),
+    invocationRef: randomUUID(), attemptRef: randomUUID(), permittedAccounts: [f.accountRef],
+    profile: lifecycleProfile.profile, policySubject: randomUUID(), policyRevision: 1, bindingRevision: 1,
+    issuerEpoch: first.admission.issuerEpoch, deadline: new Date(Date.now() + 60_000), limits: first.admission.limits }),
+  lifecycleCode('unknown'));
+  const deniedClaim = await kernel.claim(f.context, first.operation.executionRef!, 'request-after-suspend', f.worker,
+    first.admission, { originRef: 'origin-after', engineIncarnation: f.worker, requestNonce: randomUUID() });
+  assert.equal(deniedClaim.status.effect, 'not_dispatched'); assert.equal(deniedClaim.status.code, 'fenced');
+  assert.equal('dispatch' in deniedClaim, false);
+  assert.equal((await kernel.savedExecution(f.context, first.operation.executionRef!)).dispatchAllowed, false);
+  assert.equal((await kernel.effect(f.context, first.operation.executionRef!, 'request-before', f.worker, 'response_started')).effect, 'response_started');
+  assert.equal((await kernel.effect(f.context, first.operation.executionRef!, 'request-before', f.worker, 'completed')).effect, 'completed');
+
+  assert.deepEqual(await f.manager.suspend(f.context, { operationId: 'suspend-stable',
+    accountRef: f.accountRef, expectedRevision: beforeSuspend.revision }), suspended);
+  await assert.rejects(f.manager.resume(f.context, { operationId: 'suspend-stable',
+    accountRef: f.accountRef, expectedRevision: suspendedAccount.revision }), lifecycleCode('conflict'));
+  await assert.rejects(f.manager.resume(f.context, { operationId: 'resume-wrong-revision',
+    accountRef: f.accountRef, expectedRevision: suspendedAccount.revision - 1 }), lifecycleCode('conflict'));
+  f.retention.failRetained = true;
+  const attention = await f.manager.resume(f.context, { operationId: 'resume-attention',
+    accountRef: f.accountRef, expectedRevision: suspendedAccount.revision });
+  assert.equal(attention.state, 'rejected'); assert.equal(attention.code, 'custody_unavailable');
+  assert.equal((await kernel.account(f.context, f.accountRef)).state, 'suspended');
+  f.retention.failRetained = false;
+  const resumed = await f.manager.resume(f.context, { operationId: 'resume-stable',
+    accountRef: f.accountRef, expectedRevision: suspendedAccount.revision });
+  assert.equal(resumed.state, 'applied');
+  const active = await kernel.account(f.context, f.accountRef);
+  assert.equal(active.state, 'active'); assert.equal(active.revision, suspendedAccount.revision + 1);
+  assert.equal(active.epoch, suspendedAccount.epoch + 1);
+  const old = await kernel.claim(f.context, first.operation.executionRef!, 'old-token-after-resume', f.worker,
+    first.admission, { originRef: 'origin-old', engineIncarnation: f.worker, requestNonce: randomUUID() });
+  assert.equal(old.status.code, 'fenced'); assert.equal('dispatch' in old, false);
+  await kernel.acknowledgeTransportClosed(f.context, f.worker, claimed.dispatch.closure);
+  const fresh = await lifecyclePrepared(f, randomUUID());
+  assert.ok((await kernel.claim(f.context, fresh.operation.executionRef!, 'fresh-after-resume', f.worker,
+    fresh.admission, { originRef: 'origin-fresh', engineIncarnation: f.worker, requestNonce: randomUUID() })).dispatch);
+  assert.equal(f.erases, 0);
+});
+
+// Regression: lifecycle and destructive disable serialize on one authority, but
+// only disabled fresh credential recovery remains a separate reconnect path.
+test('Gateway lifecycle serializes with disable and keeps fresh reconnect distinct', async () => {
+  const f = await lifecycleActivate(), account = await kernel.account(f.context, f.accountRef);
+  const results = await Promise.allSettled([
+    f.manager.suspend(f.context, { operationId: randomUUID(), accountRef: f.accountRef, expectedRevision: account.revision }),
+    f.manager.disable(f.context, { operationId: randomUUID(), accountRef: f.accountRef, expectedRevision: account.revision }),
+    f.manager.resume(f.context, { operationId: randomUUID(), accountRef: f.accountRef, expectedRevision: account.revision }),
+  ]);
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+  assert.ok(['suspended','disabled'].includes((await kernel.account(f.context, f.accountRef)).state));
+
+  const disabled = await lifecycleActivate(), original = await kernel.account(disabled.context, disabled.accountRef);
+  assert.equal((await disabled.manager.disable(disabled.context, { operationId: 'destructive-disable',
+    accountRef: disabled.accountRef, expectedRevision: original.revision })).state, 'applied');
+  const row = (await pool.query(`SELECT c.state,(SELECT count(*) FROM ag_kernel.cleanup j
+    WHERE j.generation=c.generation) AS cleanup FROM ag_kernel.candidates c
+    WHERE c.consumer=$1 AND c.generation=$2`, [disabled.context.consumerId, disabled.generation])).rows[0];
+  assert.equal(row.state, 'quarantined'); assert.equal(Number(row.cleanup), 1);
+  await assert.rejects(disabled.manager.resume(disabled.context, { operationId: randomUUID(),
+    accountRef: disabled.accountRef, expectedRevision: original.revision + 1 }), lifecycleCode('denied'));
+  const reconnectIntent = lifecycleIntent('reconnect', 'fresh-reconnect', disabled.accountRef, original.revision + 1);
+  await assert.rejects(kernel.beginAccount(disabled.context, reconnectIntent), lifecycleCode('denied'));
+  const cleanup = await kernel.claimCleanup(disabled.context, disabled.worker); assert.ok(cleanup);
+  assert.equal(cleanup.scope.kind, 'generation');
+  await kernel.settleCleanup(disabled.context, cleanup.cleanupRef, disabled.worker, cleanup.token, true);
+  const reconnect = await kernel.beginAccount(disabled.context, reconnectIntent);
+  assert.equal(reconnect.state, 'pending'); assert.equal(reconnect.accountRef, disabled.accountRef);
+});
+
+// A valid but delayed native attestation must never undo retirement committed
+// while the HTTP read was outstanding.
+test('delayed retained custody cannot resurrect a concurrently retired account', async () => {
+  const f = await lifecycleActivate(), original = await kernel.account(f.context, f.accountRef);
+  await f.manager.suspend(f.context, { operationId: randomUUID(), accountRef: f.accountRef, expectedRevision: original.revision });
+  const suspended = await kernel.account(f.context, f.accountRef);
+  let entered!: () => void, release!: () => void;
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  f.retention.beforeProof = async () => { entered(); await held; };
+  const resume = f.manager.resume(f.context, { operationId: randomUUID(), accountRef: f.accountRef, expectedRevision: suspended.revision });
+  await waiting;
+  await f.manager.disable(f.context, { operationId: randomUUID(), accountRef: f.accountRef, expectedRevision: suspended.revision });
+  release();
+  await assert.rejects(resume, lifecycleCode('conflict'));
+  assert.equal((await kernel.account(f.context, f.accountRef)).state, 'disabled');
+});
+
+// Cleanup admission is itself a deny, even before physical erasure settles.
+test('retained custody cannot resume a generation already admitted to erasure', async () => {
+  const f = await lifecycleActivate(), account = await kernel.account(f.context, f.accountRef);
+  await f.manager.suspend(f.context, { operationId: randomUUID(), accountRef: f.accountRef, expectedRevision: account.revision });
+  const suspended = await kernel.account(f.context, f.accountRef);
+  await pool.query('INSERT INTO ag_kernel.cleanup(consumer,generation) VALUES ($1,$2)', [f.context.consumerId, f.generation]);
+  const result = await f.manager.resume(f.context, { operationId: randomUUID(), accountRef: f.accountRef, expectedRevision: suspended.revision });
+  assert.equal(result.state, 'rejected'); assert.equal(result.code, 'custody_unavailable');
+  assert.equal((await kernel.account(f.context, f.accountRef)).state, 'suspended');
+  assert.equal(await kernel.claimCleanup(f.context, f.worker), undefined, 'suspended current generation is retained');
+  const token = randomUUID();
+  const job = (await pool.query(`UPDATE ag_kernel.cleanup SET state='claimed',worker=$3,token=$4,
+    lease_until=clock_timestamp()+interval '1 minute' WHERE consumer=$1 AND generation=$2 RETURNING ref`,
+    [f.context.consumerId, f.generation, f.worker, token])).rows[0];
+  const mapping = await store.mapping(f.context, f.generation); assert.ok(mapping);
+  assert.equal(await store.cleanupAllowed(f.context, job.ref, f.worker, token, f.generation,
+    mapping.descriptor.nativePhysicalIdentity, lifecycleProfile.profile), false);
+  await assert.rejects(kernel.settleCleanup(f.context, job.ref, f.worker, token, true), lifecycleCode('conflict'));
 });

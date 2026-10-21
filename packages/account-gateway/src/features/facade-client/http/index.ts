@@ -10,6 +10,12 @@ const config = z.strictObject({ role: z.enum(['management', 'execution', 'consum
 export type ManagementConfig = z.input<typeof config> & { role: 'management' };
 export type ConsumerControlConfig = z.input<typeof config> & { role: 'consumer-control' };
 export type ExecutionConfig = z.input<typeof config> & { role: 'execution' };
+const lifecycleConfig = config.extend({
+  role: z.enum(['management', 'consumer-control']),
+  capability: z.literal(c.LIFECYCLE_CAPABILITY_CONTRACT),
+  clientContract: z.literal(c.LIFECYCLE_CLIENT_CONTRACT),
+});
+export type LifecycleConfig = z.input<typeof lifecycleConfig>;
 export type Connect = z.infer<typeof connect>;
 export type Reconnect = z.infer<typeof reconnect>;
 export interface CallOptions { signal?: AbortSignal }
@@ -69,8 +75,10 @@ function transport(input: ManagementConfig | ExecutionConfig | ConsumerControlCo
       return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
     } finally { await reader.cancel().catch(() => {}); }
   }
-  async function json<T>(path: string, schema: z.ZodType<T>, method = 'GET', input?: unknown, options: CallOptions = {}, identity: Identity = {}): Promise<T> {
-    const handle = await enter(path, method, input === undefined ? undefined : JSON.stringify(input), { 'content-type': 'application/json', accept: 'application/json' }, options, identity);
+  async function json<T>(path: string, schema: z.ZodType<T>, method = 'GET', input?: unknown, options: CallOptions = {},
+    identity: Identity = {}, extraHeaders: Record<string, string> = {}): Promise<T> {
+    const handle = await enter(path, method, input === undefined ? undefined : JSON.stringify(input),
+      { 'content-type': 'application/json', accept: 'application/json', ...extraHeaders }, options, identity);
     try {
       const { response } = handle;
       if (response.status >= 300 && response.status < 400 || response.headers.get('content-type')?.split(';')[0] !== 'application/json') throw handle.failure('invalid_response');
@@ -80,7 +88,7 @@ function transport(input: ManagementConfig | ExecutionConfig | ConsumerControlCo
         if (!error.success || (identity.operationRef && error.data.operationRef && error.data.operationRef !== identity.operationRef) ||
           (identity.requestRef && error.data.requestRef && error.data.requestRef !== identity.requestRef)) throw handle.failure('invalid_response');
         // A missing readback record cannot establish absence of a prior effect.
-        const readbackMissing = response.status === 404 && (path.startsWith('/v1/operations/') || path.includes('/requests/') ||
+        const readbackMissing = response.status === 404 && ((path.startsWith('/v1/operations/') || path.startsWith('/v2/operations/')) || path.includes('/requests/') ||
           method === 'GET' && (/^\/v1\/accounts\/[A-Za-z0-9_-]+\/retirement\/[A-Za-z0-9_-]+$/.test(path) ||
             /^\/v1\/policy-fences\/[A-Za-z0-9_-]+\/closure$/.test(path)));
         const diagnostic: c.SafeError = readbackMissing ? { ...error.data, effect: 'effect_unknown', retry: { kind: 'readback' } } : error.data;
@@ -207,6 +215,43 @@ export function createManagementClient(settings: ManagementConfig) {
     },
   });
 }
+export function createLifecycleClient(settings: LifecycleConfig) {
+  const captured = valid(lifecycleConfig, settings);
+  const base: ManagementConfig | ConsumerControlConfig = { role: captured.role, origin: captured.origin, token: captured.token,
+    responseBytes: captured.responseBytes, timeoutMs: captured.timeoutMs, bufferBytes: captured.bufferBytes };
+  const { json } = transport(base, captured.role);
+  const headers = {
+    [c.LIFECYCLE_CAPABILITY_HEADER]: c.LIFECYCLE_CAPABILITY_CONTRACT,
+    [c.LIFECYCLE_CLIENT_HEADER]: c.LIFECYCLE_CLIENT_CONTRACT,
+  };
+  const mutate = async (accountRef: string, action: 'suspend' | 'resume', input: c.LifecycleTransition,
+    options?: CallOptions): Promise<c.LifecycleOperation> => {
+    const parsed = valid(c.lifecycleTransition, input);
+    const result = await json(`/v2/accounts/${id(accountRef)}/${action}`, c.lifecycleOperation, 'POST', parsed, options,
+      { operationRef: parsed.operationId }, headers);
+    if ((result.state === 'applied' ? result.result.account : result.account).accountRef !== accountRef ||
+        result.intent.accountRef !== accountRef || result.intent.action !== action ||
+        result.intent.expectedMetadataRevision !== parsed.expectedMetadataRevision)
+      throw new GatewayError('invalid_response', 'effect_unknown', parsed.operationId);
+    return result;
+  };
+  return Object.freeze({
+    capability: (options?: CallOptions) => json('/v2/capabilities/account-lifecycle', c.lifecycleCapability, 'GET', undefined, options, {}, headers),
+    list: (input: c.ListQuery = {}, options?: CallOptions) => {
+      const query = new URLSearchParams(Object.entries(valid(c.listQuery, input)).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
+      return json(query.size ? `/v2/accounts?${query}` : '/v2/accounts', c.lifecycleAccounts, 'GET', undefined, options, {}, headers);
+    },
+    get: async (accountRef: string, options?: CallOptions) => {
+      const result = await json(`/v2/accounts/${id(accountRef)}`, c.lifecycleAccount, 'GET', undefined, options, {}, headers);
+      if (result.accountRef !== accountRef) throw new GatewayError('invalid_response', 'effect_unknown');
+      return result;
+    },
+    suspend: (accountRef: string, input: c.LifecycleTransition, options?: CallOptions) => mutate(accountRef, 'suspend', input, options),
+    resume: (accountRef: string, input: c.LifecycleTransition, options?: CallOptions) => mutate(accountRef, 'resume', input, options),
+    operation: (operationId: string, options?: CallOptions) =>
+      json(`/v2/operations/${id(operationId)}`, c.lifecycleOperation, 'GET', undefined, options, { operationRef: operationId }, headers),
+  });
+}
 const runAccessResponse = z.strictObject({ operation: c.preparationOperation,
   bearer: z.string().regex(/^[A-Za-z0-9._~-]{16,1024}$/), admission: c.admission })
   .refine(v => v.operation.state === 'applied' && v.operation.result?.kind === 'execution' &&
@@ -239,3 +284,4 @@ export function createExecutionClient(settings: ExecutionConfig) {
 export type ManagementClient = ReturnType<typeof createManagementClient>;
 export type ExecutionClient = ReturnType<typeof createExecutionClient>;
 export type ConsumerControlClient = ReturnType<typeof createConsumerControlClient>;
+export type LifecycleClient = ReturnType<typeof createLifecycleClient>;

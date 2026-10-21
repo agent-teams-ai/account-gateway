@@ -6,7 +6,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { IntentSecrets } from '../src/management-store.ts';
-import { NativeFailure, NativeManagementClient, NativeOAuthEnrollmentClient, NativeOAuthLifecycleClient } from '../src/native-client.ts';
+import { NativeFailure, NativeManagementClient, NativeRetainedCustodyClient, NativeOAuthEnrollmentClient, NativeOAuthLifecycleClient } from '../src/native-client.ts';
 import { physicalCandidate, codexOAuthProfile } from '../src/management.ts';
 import type { CandidateJournal, CandidateScope, PhysicalCandidate, OAuthScope } from '../src/management.ts';
 import { KernelError } from '../src/domain.ts';
@@ -329,5 +329,45 @@ test('actual HTTP header bound and ingress key bound fail with classified errors
     await assert.rejects(native.read(j),code('unavailable'));
     await assert.rejects(native.create(j,'Fixture','x'.repeat(4097)),code('bounded'));
     assert.equal(calls,1);
+  } finally { await server.close(); }
+});
+
+
+// Independent wire tests catch wrong protocol/descriptor/purpose acceptance.
+for (const oauth of [false, true]) test('retained custody HTTP binds exact ' + (oauth ? 'OAuth' : 'API-key') + ' scope and rejects unknown peers', async () => {
+  const source = journal();
+  const j = { ...source, ...(oauth ? { profile: { ...codexOAuthProfile, qualificationRef: 'fixture-only' } } : {}) };
+  const d = descriptor(j), mapping = { ...j, descriptor: d };
+  const native = { account_id: d.nativeId, generation: d.generation, created_at: d.createdAt,
+    profile: d.profile, base_url: d.baseURL, model: d.model };
+  let reply: unknown = { contract: 'native-retained-custody/v1', generation: j.generation, native,
+    credential_kinds: [oauth ? 'oauth' : 'api_key'], retention: { state: oauth ? 'inactive' : 'active', credential: 'retained' },
+    proof: { authenticated: true }, ...(oauth ? { oauth_policy: { provider_validity: 'unasserted',
+      expired_but_refreshable: 'eligible-by-existing-policy' } } : {}) };
+  const valid = reply; let calls = 0; const received: unknown[] = [];
+  const server = await local((req, res) => {
+    calls++; assert.equal(req.headers.authorization, 'Bearer synthetic-control');
+    assert.equal(req.method, oauth ? 'POST' : 'GET');
+    assert.equal(req.url, oauth ? '/private/native/v1/oauth/connect/custody' : '/private/native/v1/candidates/' + j.generation + '/custody');
+    const chunks: Buffer[] = []; req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => { received.push(JSON.parse(Buffer.concat(chunks).toString())); res.end(JSON.stringify(reply)); });
+  });
+  try {
+    const client = new NativeRetainedCustodyClient({ origin: server.origin, consumerId: j.consumerId, controlCredential: 'synthetic-control' });
+    assert.deepEqual(await client.verify(mapping), { contract: 'native-retained-custody/v1', generation: j.generation,
+      nativePhysicalIdentity: j.generation, credentialKinds: [oauth ? 'oauth' : 'api_key'] });
+    assert.deepEqual(received[0], { contract: 'native-retained-custody/v1', owner_ref: j.ownerRef,
+      account_ref: j.accountRef, descriptor: native, ...(oauth ? { operation: j.operationId, generation: j.generation } : {}) });
+    for (const changed of [{ contract: 'unknown/v1' }, { generation: randomUUID() },
+      { native: { ...native, account_id: d.nativeId + 1 } }, { proof: { authenticated: false } },
+      { credential_kinds: [oauth ? 'api_key' : 'oauth'] }, { retention: { state: oauth ? 'inactive' : 'active', credential: 'erased' } },
+      { retention: { state: oauth ? 'active' : 'inactive', credential: 'retained' } },
+      { secret: 'must-not-escape' }]) {
+      reply = { ...(valid as object), ...changed };
+      await assert.rejects(client.verify(mapping), code('invalid_readback'));
+    }
+    reply = valid; const before = calls;
+    await assert.rejects(client.verify({ ...mapping, consumerId: 'foreign-consumer' }), code('denied'));
+    assert.equal(calls, before);
   } finally { await server.close(); }
 });

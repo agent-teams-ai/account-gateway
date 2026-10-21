@@ -135,6 +135,42 @@ export const limits = z.strictObject({ requests: z.number().int().min(1).max(100
 export const prepare = z.strictObject({ operationId: reference, invocationRef: reference, attemptRef: reference, accountRefs: z.array(reference).min(1).max(100), subjectRef: reference, policyRevision: revision, bindingRevision: revision, profileId: reference, limits, deadline });
 export const rename = z.strictObject({ operationId: reference, expectedMetadataRevision: revision, displayName: z.string().min(1).max(128) });
 export const disable = z.strictObject({ operationId: reference, expectedMetadataRevision: revision });
+/** Versioned opt-in lifecycle authority. This is deliberately not v1 accountState. */
+export const LIFECYCLE_CAPABILITY_CONTRACT = 'account-gateway/account-lifecycle/v2' as const;
+export const LIFECYCLE_CLIENT_CONTRACT = 'account-gateway-client/account-lifecycle/v2' as const;
+export const LIFECYCLE_CAPABILITY_HEADER = 'x-account-gateway-capability' as const;
+export const LIFECYCLE_CLIENT_HEADER = 'x-account-gateway-client-contract' as const;
+export const lifecycleCapability = z.strictObject({
+  contract: z.literal(LIFECYCLE_CAPABILITY_CONTRACT),
+  clientContract: z.literal(LIFECYCLE_CLIENT_CONTRACT),
+  writeGate: z.enum(['enabled','disabled']),
+  operations: z.array(z.enum(['suspend', 'resume'])).length(2).refine(v => v[0] === 'suspend' && v[1] === 'resume'),
+  custody: z.strictObject({ contract: z.literal('native-retained-custody/v1'),
+    api_key: z.literal('native-attestation-required'), oauth: z.literal('native-attestation-required') }),
+});
+export const lifecycleTransition = z.strictObject({ operationId: reference, expectedMetadataRevision: revision });
+export const lifecycleAccountState = z.enum(['staging', 'active', 'suspended', 'disabled', 'quarantined']);
+export const lifecycleAccount = z.strictObject({
+  accountRef: reference, ownerRef: reference, profileId: reference, displayName: z.string().min(1).max(128),
+  state: lifecycleAccountState, metadataRevision: revision, authorizationEpoch: revision,
+  authKind: z.enum(['api_key', 'oauth']),
+  resumeCustody: z.enum(['not_applicable', 'verified', 'attention_required']),
+});
+export const lifecycleAccounts = z.strictObject({ accounts: z.array(lifecycleAccount).max(100), nextCursor: reference.optional() });
+export const lifecycleResult = z.strictObject({ kind: z.literal('account_lifecycle'), account: lifecycleAccount });
+export const lifecycleIntent = z.strictObject({ action: z.enum(['suspend','resume']), accountRef: reference,
+  profileId: reference, expectedMetadataRevision: revision });
+export const lifecycleOperation = z.discriminatedUnion('state', [
+  z.strictObject({ operationRef: reference, intent: lifecycleIntent, state: z.literal('pending'), account: lifecycleAccount }),
+  z.strictObject({ operationRef: reference, intent: lifecycleIntent, state: z.literal('applied'), result: lifecycleResult }),
+  z.strictObject({ operationRef: reference, intent: lifecycleIntent, state: z.literal('rejected'), account: lifecycleAccount, error: safeError }),
+  z.strictObject({ operationRef: reference, intent: lifecycleIntent, state: z.literal('unknown'), account: lifecycleAccount, error: safeError }),
+]).refine(v => {
+  const account = v.state === 'applied' ? v.result.account : v.account;
+  return v.intent.accountRef === account.accountRef && v.intent.profileId === account.profileId &&
+    (v.state !== 'applied' || account.metadataRevision === v.intent.expectedMetadataRevision + 1 &&
+      account.state === (v.intent.action === 'suspend' ? 'suspended' : 'active'));
+});
 export const close = z.strictObject({ operationId: reference, reason: z.enum(['completed', 'cancelled', 'failed', 'deadline', 'revoked']) });
 export const fence = z.strictObject({ operationId: reference, subjectRef: reference, revision });
 export const admission = z.strictObject({ invocationRef: reference, attemptRef: reference, accountRef: reference, authorizationEpoch: revision, subjectRef: reference, policyRevision: revision, bindingRevision: revision, profileId: reference, limits, expiresAt: deadline });
@@ -152,6 +188,11 @@ export type SafeError = z.infer<typeof safeError>;
 export type Prepare = z.infer<typeof prepare>;
 export type Rename = z.infer<typeof rename>;
 export type Disable = z.infer<typeof disable>;
+export type LifecycleCapability = z.infer<typeof lifecycleCapability>;
+export type LifecycleTransition = z.infer<typeof lifecycleTransition>;
+export type LifecycleAccount = z.infer<typeof lifecycleAccount>;
+export type LifecycleAccounts = z.infer<typeof lifecycleAccounts>;
+export type LifecycleOperation = z.infer<typeof lifecycleOperation>;
 export type Close = z.infer<typeof close>;
 export type Fence = z.infer<typeof fence>;
 export type Admission = z.infer<typeof admission>;

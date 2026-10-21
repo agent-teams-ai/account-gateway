@@ -130,6 +130,34 @@ export class NativeAuthority {
     if (a.signal.aborted) return denied();
     a.descriptor = d; a.ready = true;
   }
+  // Only the native inert custody route calls this purpose-specific callback.
+  // Enrollment and refresh keep their existing authority and reject suspended.
+  async #custodyOwner(ctx: TrustedContext, value: unknown): Promise<{ ok: true; ownerRef: string }> {
+    const r = object(value, ['consumerId','operationId','accountRef','generation']);
+    if (!this.#owners || !this.kernel.accountCustody || r.consumerId !== ctx.consumerId) return denied();
+    identifier(r.operationId); uuid(r.accountRef); uuid(r.generation);
+    const j = await this.#owners.store.readJournal(ctx, r.operationId);
+    const p = this.configuration.profiles.find(p => p.profile === codexOAuthProfile.profile);
+    if (!j || !p || j.consumerId !== ctx.consumerId || j.operationId !== r.operationId ||
+        j.accountRef !== r.accountRef || j.generation !== r.generation || !['create','reconnect'].includes(j.purpose) ||
+        j.profile.profile !== p.profile || p.profile !== codexOAuthProfile.profile ||
+        j.profile.baseURL !== p.baseURL || p.baseURL !== codexOAuthProfile.baseURL ||
+        j.profile.model !== p.model || p.model !== codexOAuthProfile.model ||
+        j.profile.qualificationRef !== p.qualificationRef) return denied();
+    const op = await this.kernel.operation(ctx, j.operationId);
+    const account = await this.kernel.account(ctx, j.accountRef);
+    const mapping = await this.#store.mapping(ctx, j.generation);
+    if (op.state !== 'applied' || op.accountRef !== j.accountRef || account.state !== 'suspended' ||
+        account.ownerRef !== j.ownerRef || account.profile !== j.profile.profile || !mapping ||
+        mapping.operationId !== j.operationId || mapping.consumerId !== ctx.consumerId ||
+        mapping.accountRef !== j.accountRef || mapping.ownerRef !== j.ownerRef ||
+        mapping.purpose !== j.purpose || mapping.profile.qualificationRef !== j.profile.qualificationRef ||
+        mapping.generation !== j.generation || !exactCandidate(j, physicalCandidate(mapping.descriptor))) return denied();
+    const current = await this.kernel.accountCustody(ctx, j.accountRef);
+    if (current.generation !== j.generation || current.nativePhysicalIdentity !== mapping.descriptor.nativePhysicalIdentity ||
+        !this.#owners.bearers.authorizesOwner(ctx, j.ownerRef, j.profile.profile)) return denied();
+    return { ok: true, ownerRef: j.ownerRef };
+  }
   async #owner(ctx: TrustedContext, value: unknown): Promise<{ ok: true; ownerRef: string }> {
     const r = object(value, ['consumerId','operationId','accountRef','generation']);
     if (!this.#owners || r.consumerId !== ctx.consumerId) return denied();
@@ -277,7 +305,7 @@ export class NativeAuthority {
       res.once('close', () => clearTimeout(timer)); res.once('finish', () => clearTimeout(timer));
       const send = (status: number, body: unknown) => { if (!res.destroyed) { res.writeHead(status, { 'content-type': 'application/json', connection: 'close' }); res.end(JSON.stringify(body)); } };
       return (async () => {
-        if (req.method !== 'POST' || !req.url || !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-refresh-authority|oauth-cleanup-authority)$/.test(req.url) ||
+        if (req.method !== 'POST' || !req.url || !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-custody-authority|oauth-refresh-authority|oauth-cleanup-authority)$/.test(req.url) ||
             req.rawHeaders.length > 64 || singleton(req, 'content-type') !== 'application/json' ||
             req.rawHeaders.some((h, i) => i % 2 === 0 && ['content-encoding','transfer-encoding'].includes(h.toLowerCase()))) return denied();
         const authorization = singleton(req, 'authorization');
@@ -285,10 +313,12 @@ export class NativeAuthority {
         const h = hash(authorization.slice(7)), caller = this.#callers.find(c => timingSafeEqual(c.hash, h));
         if (!caller) return denied();
         const ownerLookup = req.url.endsWith('/oauth-owner-authority');
+        const custodyLookup = req.url.endsWith('/oauth-custody-authority');
         const refreshLookup = req.url.endsWith('/oauth-refresh-authority');
         const cleanupLookup = req.url.endsWith('/oauth-cleanup-authority');
-        const ctx = Object.freeze({ consumerId: caller.consumerId }), body = await jsonBody(req, ownerLookup || refreshLookup || cleanupLookup ? Math.min(1024, cfg.controlBytes) : cfg.controlBytes);
+        const ctx = Object.freeze({ consumerId: caller.consumerId }), body = await jsonBody(req, ownerLookup || custodyLookup || refreshLookup || cleanupLookup ? Math.min(1024, cfg.controlBytes) : cfg.controlBytes);
         if (ownerLookup) { send(200, await this.#owner(ctx, body)); return; }
+        if (custodyLookup) { send(200, await this.#custodyOwner(ctx, body)); return; }
         if (refreshLookup) { send(200, await this.#refreshOwner(ctx, body)); return; }
         if (cleanupLookup) { send(200, await this.#cleanupOwner(ctx, body)); return; }
         if (req.url.endsWith('/enrollment')) {

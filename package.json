@@ -8,7 +8,8 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node --test tests/*.test.mjs",
+    "test": "node --test tests/*.test.mjs tests/*.test.mts",
+    "typecheck:tests": "tsc --project tsconfig.tests.json",
     "test:static": "node --test --test-name-pattern=\"public Core/Assembly\" tests/client.test.mjs && node --test tests/source-policy.test.mjs",
     "foundation": "agent-teams-foundation check architecture.source-dependencies --consumer .",
     "docs:check": "agent-teams-docs check --consumer . --profile docs.config.yaml",
