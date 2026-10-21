@@ -631,7 +631,7 @@ export function createFacade(options: FacadeOptions): Server {
         if (!profile || !withinProfile(saved.admission.profileId, saved.admission.limits) || saved.admission.limits.requestBytes > ingressBytes) throw new KernelError('denied');
         const raw = await body(req, Math.min(ingressBytes, saved.admission.limits.requestBytes));
         parse(secretSubmission.nativeRequest, { requestId: identity.requestRef, admission, body: raw });
-        validateResponses(raw, profile.dto.modelIds, profile.maxOutputTokens);
+        const requestedModel = validateResponses(raw, profile.dto.modelIds, profile.maxOutputTokens);
         requireCurrent(grant);
         if (!transport || !enrollment) throw new KernelError('unavailable');
         const remainingMs = Date.parse(saved.admission.expiresAt) - Date.now();
@@ -644,7 +644,7 @@ export function createFacade(options: FacadeOptions): Server {
         const factBase = { schemaVersion: 1 as const, eventId: createHash('sha256').update(ref + ':' + identity.requestRef!).digest('hex'),
           executionRef: ref, requestRef: identity.requestRef!, invocationRef: admission.invocationRef,
           attemptRef: admission.attemptRef, accountRef: admission.accountRef, profileId: admission.profileId,
-          model: profile.dto.modelIds[0], occurredAt, cost: null };
+          model: requestedModel, occurredAt, cost: null };
         let recordedClaim = false, nativeObserved = false;
         const nativeCallback = callback(context, grant, saved, identity.requestRef!, controller.signal, async status => {
           if (options.usage) {
