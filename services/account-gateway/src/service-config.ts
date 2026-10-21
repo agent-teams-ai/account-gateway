@@ -171,11 +171,15 @@ export function captureServiceBearers(value: unknown, consumerId: string, profil
       const ids = b.role === 'management' ? [b.preparation.profileId] : b.profileIds;
       if (!Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length) deny();
       const grant = b.role === 'management' ? b.preparation : b;
+      // Consumer output is a budget envelope over its selected profiles. Each
+      // admission still checks both the grant and the selected physical cap.
+      const outputEnvelope = b.role === 'consumer-control'
+        ? Math.max(...ids.map(id => profiles.find(p => p.profile === id)?.limits.outputBytes ?? 0)) : undefined;
       for (const id of ids) {
         const p = profiles.find(p => p.profile === id);
         if (!p) return deny();
         approvedLimits(grant.limits, { ...defaults, maxRequests: p.limits.requests, maxConcurrent: p.limits.concurrency,
-          maxRequestBytes: p.limits.requestBytes, maxOutputBytes: p.limits.outputBytes, maxTokens: p.limits.tokens });
+          maxRequestBytes: p.limits.requestBytes, maxOutputBytes: outputEnvelope ?? p.limits.outputBytes, maxTokens: p.limits.tokens });
       }
       integer(grant.maxRunMs, b.role === 'management' ? defaults.maxRunMs : RUN_CONTROL_MAX_RUN_MS);
     }
