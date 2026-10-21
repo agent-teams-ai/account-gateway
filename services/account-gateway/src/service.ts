@@ -1,3 +1,4 @@
+import { PostgresUsageJournal } from './usage.ts';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { writeSync } from 'node:fs';
@@ -426,6 +427,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     await inServiceLane('control', () => kernel.heartbeat(ctx, worker));
     startupActive();
     options = { admission, kernel, management, store, bearers, enrollment, transport,
+      usage: new PostgresUsageJournal(pool, keyBytes(cfg.keys.facadeHMAC)),
       profiles: catalog, intentHmacKey: keyBytes(cfg.keys.facadeHMAC), ingressBytes: Math.max(1024, ...profiles.map(p => p.limits.requestBytes)),
       bufferBytes: 65_536, ...(cfg.accountLifecycle ? { lifecycle: cfg.accountLifecycle } : {}) };
     startupStage = 'facade-listen';

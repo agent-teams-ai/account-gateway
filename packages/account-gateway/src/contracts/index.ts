@@ -8,3 +8,6 @@ export { reference, revision, deadline, protocol, accountState, executionState, 
 export type { Profile, Account, AccountRetirement, PolicyUseClosure, Operation, Execution, RequestStatus, SafeError, Prepare, Rename,
  Disable, Close, Fence, Admission, ListQuery, OAuthBegin, OAuthReconnect, OAuthBeginResponse,
  LifecycleCapability, LifecycleTransition, LifecycleAccount, LifecycleAccounts, LifecycleOperation } from '../features/facade-client/contracts/index.js';
+
+export { usageObservation, usageQuery, usagePage, usageRead } from '../features/facade-client/contracts/index.js';
+export type { UsageObservation, UsageQuery, UsagePage } from '../features/facade-client/contracts/index.js';

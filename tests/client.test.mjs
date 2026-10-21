@@ -520,3 +520,27 @@ test('B2a public HTTP readback accepts only consistent positive rejection and ne
   await rejects(e.request('execution-a', { requestId: 'request-a', admission, body: Buffer.from('{}') }), 'safe_error', 'rejected_before_dispatch');
   assert.equal(calls, 2 + invalid.length + 2, 'every public invocation sends exactly one HTTP request');
 });
+
+test('consumer usage feed sends only bounded cursor query and rejects scope injection before network', async t => {
+  let calls=0;
+  const {origin,management,execution}=await fixture(t, (req,res) => {
+    calls++; assert.equal(req.url,'/v1/usage?afterCursor=opaque-a&highWaterCursor=opaque-b&limit=2');
+    json(res,{observations:[],nextCursor:'opaque-b',highWaterCursor:'opaque-b'});
+  });
+  const control=sdk.createConsumerControlClient({origin,role:'consumer-control',token:'fixture-control'});
+  assert.equal('listUsage' in management,false); assert.equal('listUsage' in execution,false);
+  assert.deepEqual(await control.listUsage({afterCursor:'opaque-a',highWaterCursor:'opaque-b',limit:2}),{observations:[],nextCursor:'opaque-b',highWaterCursor:'opaque-b'});
+  assert.throws(()=>control.listUsage({consumerId:'foreign',limit:2}),error=>error.code==='invalid_input');
+  assert.throws(()=>control.listUsage({limit:101}),error=>error.code==='invalid_input');
+  assert.equal(calls,1);
+});
+
+test('single usage read is consumer-control only and exposes absence as null without execution effects', async t => {
+  let calls=0;
+  const {origin,management,execution}=await fixture(t,(req,res)=>{
+    calls++;assert.equal(req.method,'GET');assert.equal(req.url,'/v1/usage/execution/request');json(res,{observation:null});
+  });
+  const control=sdk.createConsumerControlClient({origin,role:'consumer-control',token:'fixture-control'});
+  assert.equal('observeUsage' in management,false);assert.equal('observeUsage' in execution,false);
+  assert.equal(await control.observeUsage('execution','request'),null);assert.equal(calls,1);
+});

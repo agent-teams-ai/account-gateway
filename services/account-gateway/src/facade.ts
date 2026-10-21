@@ -1,3 +1,7 @@
+import { nativeUsage } from './usage.ts';
+import type { NativeUsage } from './usage.ts';
+import { ResponsesUsageCapture } from './usage.ts';
+import type { UsageJournal } from './usage.ts';
 import { createServer } from 'node:http';
 import { ServiceCapacityError, facadeControlRoute, inServiceLane } from './service-admission.ts';
 import type { ServiceAdmission } from './service-admission.ts';
@@ -197,6 +201,7 @@ export interface NativeCallback {
   // A directly composed protected callback. The native adapter authenticates its
   // enrolled peer before invoking this capability; it is never a public route.
   admit(requestNonce: string): Promise<NativePermit>;
+  usage?(proof: NativeDispatchProof, usage: NativeUsage): Promise<void>;
   effect(proof: NativeDispatchProof, next: 'response_started' | 'completed' | 'effect_unknown'): Promise<RequestStatus>;
   rejectBeforeDispatch(proof: NativeDispatchProof, entered: false): Promise<RequestStatus>;
   closed(proof: NativeDispatchProof, cleanup?: CleanupAuthority): Promise<void>;
@@ -213,6 +218,7 @@ export interface NativeTransport {
   cancel?(context: TrustedContext, proof: NativeDispatchProof, cleanup: CleanupAuthority): Promise<void>;
 }
 export interface FacadeOptions {
+  readonly usage?: UsageJournal;
   readonly admission?: ServiceAdmission;
   readonly controlOnly?: boolean;
   readonly kernel: DurableKernel & ExecutionRead;
@@ -371,7 +377,7 @@ export function createFacade(options: FacadeOptions): Server {
     }
     return c.acknowledgementOperation.parse({ operationRef: op.operationRef, state: 'applied' });
   }
-  function callback(context: TrustedContext, grant: Grant, saved: SavedExecution, requestId: string, signal: AbortSignal): NativeCallback {
+  function callback(context: TrustedContext, grant: Grant, saved: SavedExecution, requestId: string, signal: AbortSignal, recordClaim?: (status: RequestStatus) => Promise<void>, recordNative?: (usage: NativeUsage) => Promise<void>): NativeCallback {
     if (!enrollment) throw new KernelError('unavailable');
     const peer = enrollment;
     const validProof = (input: NativeDispatchProof): NativeDispatchProof => {
@@ -405,6 +411,7 @@ export function createFacade(options: FacadeOptions): Server {
         requireCurrent(grant); if (signal.aborted) throw new KernelError('denied');
         const claim = await kernel.claim(context, fresh.admission.executionRef, requestId, peer.worker, fresh.admission,
           { originRef: peer.originRef, engineIncarnation: peer.engineIncarnation, requestNonce });
+        if (recordClaim) await recordClaim(claim.status);
         if (!claim.dispatch) return { claim };
         try {
           const lease = await kernel.currentWorkerLease(context, peer.worker);
@@ -419,6 +426,13 @@ export function createFacade(options: FacadeOptions): Server {
           throw new KernelError('unknown');
         }
       },
+      usage: async (proof: NativeDispatchProof, usage: NativeUsage) => {
+        const p = validProof(proof), observed = nativeUsage(usage);
+        const persisted = await kernel.requestProof(context, p.executionRef, p.requestRef);
+        if (!persisted || p.token !== persisted.token || p.worker !== persisted.worker ||
+            p.native.requestNonce !== persisted.native.requestNonce || p.native.engineIncarnation !== persisted.native.engineIncarnation) throw new KernelError('denied');
+        if (observed.finalized && recordNative) await recordNative(observed);
+      },
       effect: async (proof: NativeDispatchProof, next: 'response_started' | 'completed' | 'effect_unknown') => {
         const p = validProof(proof);
         const persisted = await kernel.requestProof(context, p.executionRef, p.requestRef);
@@ -432,6 +446,7 @@ export function createFacade(options: FacadeOptions): Server {
     });
     return Object.freeze({
       admit: (nonce: string) => inServiceLane('control', () => callbacks.admit(nonce)),
+      usage: (proof: NativeDispatchProof, usage: NativeUsage) => inServiceLane('control', () => callbacks.usage!(proof, usage)),
       effect: (proof: NativeDispatchProof, next: 'response_started' | 'completed' | 'effect_unknown') => inServiceLane('control', () => callbacks.effect(proof, next)),
       rejectBeforeDispatch: (proof: NativeDispatchProof, entered: false) => inServiceLane('control', () => callbacks.rejectBeforeDispatch(proof, entered)),
       closed: (proof: NativeDispatchProof, cleanup?: CleanupAuthority) => inServiceLane('control', () => callbacks.closed(proof, cleanup)),
@@ -488,7 +503,25 @@ export function createFacade(options: FacadeOptions): Server {
           singleton(req, 'accept') !== (streamRoute ? 'text/event-stream' : 'application/json')) throw new KernelError('invalid');
       const match = /^\/v1\/executions\/([A-Za-z0-9_-]+)(?:\/(requests)(?:\/([A-Za-z0-9_-]+))?|\/(close))?$/.exec(path);
       const opMatch = /^\/v1\/operations\/([A-Za-z0-9_-]+)$/.exec(path);
-      if (url.search && !((path === '/v1/accounts' || path === '/v2/accounts') && method === 'GET')) throw new KernelError('invalid');
+      if (url.search && !((path === '/v1/accounts' || path === '/v2/accounts' || path === '/v1/usage') && method === 'GET')) throw new KernelError('invalid');
+      const usageMatch = /^\/v1\/usage\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/.exec(path);
+      if (usageMatch && method === 'GET') {
+        if (grant.role !== 'consumer-control' || !options.usage) throw new KernelError('denied');
+        const executionRef = parse(c.reference, usageMatch[1]), requestRef = parse(c.reference, usageMatch[2]);
+        uuid(executionRef);
+        const observation = await options.usage.observe(context, executionRef, requestRef);
+        requireCurrent(grant); send(res, c.usageRead, { observation }); return;
+      }
+      if (path === '/v1/usage' && method === 'GET') {
+        if (grant.role !== 'consumer-control' || !options.usage) throw new KernelError('denied');
+        const values: Record<string, unknown> = {};
+        for (const [key, value] of url.searchParams) {
+          if (Object.hasOwn(values, key)) throw new KernelError('invalid');
+          values[key] = key === 'limit' && /^[1-9]\d*$/.test(value) ? Number(value) : value;
+        }
+        const page = await options.usage.list(context, parse(c.usageQuery, values));
+        requireCurrent(grant); send(res, c.usagePage, page); return;
+      }
       if (path === '/internal/v1/run-access') {
         if (grant.role !== 'run-control' && grant.role !== 'consumer-control') throw new KernelError('denied');
         if (method !== 'POST' || req.url !== '/internal/v1/run-access') throw new KernelError('invalid');
@@ -598,7 +631,7 @@ export function createFacade(options: FacadeOptions): Server {
         if (!profile || !withinProfile(saved.admission.profileId, saved.admission.limits) || saved.admission.limits.requestBytes > ingressBytes) throw new KernelError('denied');
         const raw = await body(req, Math.min(ingressBytes, saved.admission.limits.requestBytes));
         parse(secretSubmission.nativeRequest, { requestId: identity.requestRef, admission, body: raw });
-        validateResponses(raw, profile.dto.modelIds, profile.maxOutputTokens);
+        const requestedModel = validateResponses(raw, profile.dto.modelIds, profile.maxOutputTokens);
         requireCurrent(grant);
         if (!transport || !enrollment) throw new KernelError('unavailable');
         const remainingMs = Date.parse(saved.admission.expiresAt) - Date.now();
@@ -607,7 +640,27 @@ export function createFacade(options: FacadeOptions): Server {
         // Validated execution streams use their saved absolute deadline. The
         // ingress budget and socket inactivity bounds have distinct roles.
         clearTimeout(ingressTimer);
-        const nativeCallback = callback(context, grant, saved, identity.requestRef!, controller.signal);
+        const capture = new ResponsesUsageCapture(), occurredAt = new Date().toISOString();
+        const factBase = { schemaVersion: 1 as const, eventId: createHash('sha256').update(ref + ':' + identity.requestRef!).digest('hex'),
+          executionRef: ref, requestRef: identity.requestRef!, invocationRef: admission.invocationRef,
+          attemptRef: admission.attemptRef, accountRef: admission.accountRef, profileId: admission.profileId,
+          model: requestedModel, occurredAt, cost: null };
+        let recordedClaim = false, nativeObserved = false;
+        const nativeCallback = callback(context, grant, saved, identity.requestRef!, controller.signal, async status => {
+          if (options.usage) {
+            await options.usage.append(context, { ...factBase, revision: 0, effect: status.effect, ...capture.snapshot() });
+            recordedClaim = true;
+          }
+        }, async observed => {
+          if (options.usage && recordedClaim) {
+            const status = await kernel.request(context, ref, identity.requestRef!);
+            await options.usage.append(context, { ...factBase, revision: 2, effect: status.effect,
+              completeness: observed.state === 'complete' ? 'complete' : 'partial',
+              inputTokens: observed.inputTokens ?? null, outputTokens: observed.outputTokens ?? null,
+              cachedInputTokens: observed.cachedInputTokens ?? null, reasoningTokens: observed.reasoningOutputTokens ?? null });
+            nativeObserved = true;
+          }
+        });
         transportScope = { context, ref, id: identity.requestRef! };
         enteredTransport = true; uncertain = true;
         try {
@@ -626,6 +679,7 @@ export function createFacade(options: FacadeOptions): Server {
             res.flushHeaders();
             let output = 0;
             for await (const chunk of result.body) {
+              capture.push(chunk);
               output += chunk.byteLength;
               if (!(chunk instanceof Uint8Array) || chunk.byteLength > bufferBytes || output > saved.admission.limits.outputBytes || controller.signal.aborted) throw new KernelError('unknown');
               if (!res.write(chunk)) await once(res, 'drain', { signal: controller.signal });
@@ -637,7 +691,17 @@ export function createFacade(options: FacadeOptions): Server {
             controller.signal.removeEventListener('abort', cancel);
             if (!finished) { controller.abort(); await cancel(); }
           }
-        } finally { clearTimeout(abortAt); }
+        } finally {
+          clearTimeout(abortAt);
+          if (recordedClaim && !nativeObserved && options.usage) {
+            // Initial durable partial fact survives producer/network loss. A final
+            // observation failure never repeats inference or loses that fact.
+            try {
+              const status = await kernel.request(context, ref, identity.requestRef!);
+              await options.usage.append(context, { ...factBase, revision: 1, effect: status.effect, ...capture.snapshot() });
+            } catch { /* retained initial observation explicitly remains partial */ }
+          }
+        }
         return;
       }
       if (grant.role !== 'management' && grant.role !== 'consumer-control') throw new KernelError('denied');

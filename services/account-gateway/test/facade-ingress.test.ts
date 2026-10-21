@@ -1137,3 +1137,9 @@ test('v2 lifecycle readback never recovers foreign or same-owner enrollment oper
     await f.close();
   }
 });
+
+// The journal model is the validated request model; response model authority is absent.
+test('usage request selection preserves the second allowed model', async () => {
+  const requested=validateResponses(Buffer.from(JSON.stringify({model:'second',stream:true,store:false,service_tier:'default'})),['first','second'],100);
+  assert.equal(requested,'second');
+});

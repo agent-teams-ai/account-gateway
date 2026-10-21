@@ -35,6 +35,8 @@ jobs:
       AG_KERNEL_TEST_DSN: postgresql://postgres@127.0.0.1:5432/ag_kernel_test_ci
       AG_MANAGEMENT_DISPOSABLE_DB: ag_kernel_test_management_ci
       AG_MANAGEMENT_TEST_DSN: postgresql://postgres@127.0.0.1:5432/ag_kernel_test_management_ci
+      AG_USAGE_DISPOSABLE_DB: ag_usage_test_ci
+      AG_USAGE_TEST_DSN: postgresql://postgres@127.0.0.1:5432/ag_usage_test_ci
       AG_FACADE_DISPOSABLE_DB: ag_kernel_test_facade_ci
       AG_FACADE_TEST_DSN: postgresql://postgres@127.0.0.1:5432/ag_kernel_test_facade_ci
     steps:
@@ -61,6 +63,7 @@ jobs:
         run: |
           docker exec "${{ job.services.postgres.id }}" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ag_kernel_test_management_ci'
           docker exec "${{ job.services.postgres.id }}" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ag_kernel_test_facade_ci'
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ag_usage_test_ci'
           mkdir -p "$RUNNER_TEMP/gateway-pg-bin"
           printf '#!/bin/sh\nexec docker exec -e PGHOST -e PGPORT -e PGUSER -e PGPASSWORD -e PGDATABASE "%s" pg_dump "$@"\n' "${{ job.services.postgres.id }}" > "$RUNNER_TEMP/gateway-pg-bin/pg_dump"
           printf '#!/bin/sh\nexec docker exec -i -e PGHOST -e PGPORT -e PGUSER -e PGPASSWORD -e PGDATABASE "%s" psql "$@"\n' "${{ job.services.postgres.id }}" > "$RUNNER_TEMP/gateway-pg-bin/psql"
@@ -71,6 +74,8 @@ jobs:
           echo "AG_KERNEL_TEST_PSQL=$RUNNER_TEMP/gateway-pg-bin/psql" >> "$GITHUB_ENV"
           echo "$RUNNER_TEMP/gateway-pg-bin" >> "$GITHUB_PATH"
       - run: node --test --test-concurrency=1 services/account-gateway/test/postgres.test.ts services/account-gateway/test/management-postgres.test.ts services/account-gateway/test/facade-postgres.test.ts
+      - name: Durable usage journal against its own empty disposable database
+        run: node --test services/account-gateway/test/usage-postgres.test.ts
       - name: Protected OAuth enrollment against its own empty disposable database
         env:
           AG_MANAGEMENT_DISPOSABLE_DB: ag_kernel_test_oauth_enrollment_ci

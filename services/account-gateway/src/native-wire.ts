@@ -1,3 +1,5 @@
+import { nativeUsage } from './usage.ts';
+import type { NativeUsage } from './usage.ts';
 // Private Go v1 mapping. Public admission still belongs to the SDK contracts;
 // these representations never enter public DTOs or consumer policy.
 import { request as httpRequest } from 'node:http';
@@ -70,13 +72,14 @@ export function cleanup(value: unknown): Readonly<CleanupLease> {
   return Object.freeze({ ...r }) as unknown as CleanupLease;
 }
 export interface Receipt {
+  nativeUsage?: NativeUsage;
   consumerId: string; executionRef: string; requestRef: string; native: NativeDispatchProof['native'];
   proof?: NativeDispatchProof; phase: string; effect: string; sealed: boolean; acknowledged: boolean;
   lifetime: { entered: boolean; contextDone: boolean; forwardingReturned: boolean; bodyKnown: boolean;
     bodyClosed: boolean; closeFailed: boolean; completed: boolean; sealed: boolean };
 }
 export function receipt(value: unknown, consumer: string, p: NativeDispatchProof): Receipt {
-  const r = object(value, ['consumerId','executionRef','requestRef','native','phase','effect','sealed','acknowledged','lifetime'], ['proof','status']);
+  const r = object(value, ['consumerId','executionRef','requestRef','native','phase','effect','sealed','acknowledged','lifetime'], ['proof','status','nativeUsage']);
   if (r.consumerId !== consumer || r.executionRef !== p.executionRef || r.requestRef !== p.requestRef ||
       !r.proof || !sameProof(proof(r.proof), p) || !sameProof({ ...p, native: binding(r.native) }, p) ||
       !['reserved','admitted','entered','closed'].includes(r.phase as string) ||
@@ -91,7 +94,7 @@ export function receipt(value: unknown, consumer: string, p: NativeDispatchProof
     if (status.requestRef !== p.requestRef || !['not_dispatched','dispatch_started','response_started','completed','effect_unknown','rejected_before_dispatch'].includes(status.effect as string)) return denied();
     if (status.code !== undefined) identifier(status.code);
   }
-  return { ...r, lifetime } as unknown as Receipt;
+  return { ...r, lifetime, ...(r.nativeUsage === undefined ? {} : {nativeUsage: nativeUsage(r.nativeUsage)}) } as unknown as Receipt;
 }
 export function physicallyClosed(r: Receipt): boolean {
   const l = r.lifetime;
