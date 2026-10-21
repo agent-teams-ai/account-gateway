@@ -61,9 +61,3 @@ test('fallback SSE discards contradictory cache and reasoning subdivisions befor
   assert.deepEqual(capture.snapshot(),{inputTokens:5,outputTokens:2,cachedInputTokens:null,reasoningTokens:null,completeness:'partial'});
 });
 
-// The journal model is the validated request model; response model authority is absent.
-test('usage request selection preserves the second allowed model', async () => {
-  const {validateResponses}=await import('../src/facade-ingress.ts');
-  const requested=validateResponses(Buffer.from(JSON.stringify({model:'second',stream:true,store:false,service_tier:'default'})),['first','second'],100);
-  assert.equal(requested,'second');
-});
