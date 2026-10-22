@@ -34,6 +34,7 @@ export interface AccountIntent {
   ownerRef?: string;
   profile?: string;
   displayName?: string;
+  oauthMethod?: 'device_code';
 }
 export interface AccountStatus {
   accountRef: string; ownerRef: string; profile: string; displayName: string;
@@ -81,6 +82,7 @@ export interface OperationStatus {
   operationRef: string; state: OperationState; code?: string;
   accountRef?: string; executionRef?: string; revision?: number; epoch?: number;
   deadline?: string;
+  oauthMethod?: 'device_code';
   lifecycle?: { kind: 'suspend' | 'resume'; expectedRevision: number; account: AccountStatus };
 }
 // Protected-private proof. An actual native adapter must qualify the physical

@@ -185,6 +185,12 @@ function accountClient(settings: ManagementConfig | ConsumerControlConfig, role:
       return json('/v1/accounts/oauth/complete', c.accountOperation, 'POST', captured, options,
         { operationRef: captured.operationId });
     },
+    // Explicit mutation. Native owns provider polling, throttling and exchange.
+    pollDeviceOAuth: (input: c.OAuthPoll, options?: CallOptions): Promise<c.Operation> => {
+      const captured = valid(c.oauthPoll, input);
+      return json('/v1/accounts/oauth/poll', c.accountOperation, 'POST', captured, options,
+        { operationRef: captured.operationId });
+    },
     readOAuth: (operationId: string, options?: CallOptions): Promise<c.Operation> =>
       json(operationPath(operationId), c.accountOperation, 'GET', undefined, options, { operationRef: operationId }),
     rename: (accountRef: string, input: c.Rename, options?: CallOptions) => mutate(`/v1/accounts/${id(accountRef)}`, 'PATCH', valid(c.rename, input), options),

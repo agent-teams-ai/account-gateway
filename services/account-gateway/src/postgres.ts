@@ -21,6 +21,7 @@ const operationStatus = (r: Row): OperationStatus => ({
   ...(r.execution_ref ? { executionRef: r.execution_ref } : {}),
   ...(r.revision ? { revision: r.revision } : {}), ...(r.epoch ? { epoch: r.epoch } : {}),
   ...(r.deadline ? { deadline: r.deadline.toISOString() } : {}),
+  ...(r.intent?.oauthMethod === 'device_code' ? { oauthMethod: 'device_code' } : {}),
   ...(r.lifecycle_result ? { lifecycle: { kind: r.intent.kind, expectedRevision: r.intent.expectedRevision, account: r.lifecycle_result as AccountStatus } } : {}),
 });
 const requestStatus = (r: Row): RequestStatus => ({
@@ -249,9 +250,10 @@ export class PostgresKernel implements DurableKernel {
       credentialKinds: Object.freeze([...retainedCustody.credentialKinds]) });
     input = { operationId: input.operationId, kind: input.kind, intentDigest: input.intentDigest,
       accountRef: input.accountRef, expectedRevision: input.expectedRevision,
-      ownerRef: input.ownerRef, profile: input.profile, displayName: input.displayName };
+      ownerRef: input.ownerRef, profile: input.profile, displayName: input.displayName, oauthMethod: input.oauthMethod };
     identifier(input.operationId); identifier(input.intentDigest);
     if (!['create','reconnect','rename','suspend','resume','disable'].includes(input.kind)) throw new KernelError('invalid');
+    if (input.oauthMethod !== undefined && (input.oauthMethod !== 'device_code' || !['create','reconnect'].includes(input.kind))) throw new KernelError('invalid');
     if (input.kind === 'create') {
       identifier(input.ownerRef); identifier(input.profile, 64);
       if (input.accountRef !== undefined || input.expectedRevision !== undefined) throw new KernelError('invalid');
@@ -264,7 +266,8 @@ export class PostgresKernel implements DurableKernel {
     } else if (input.displayName !== undefined) throw new KernelError('invalid');
     const intent = { kind: input.kind, digest: input.intentDigest,
       target: input.accountRef ?? null, expectedRevision: input.expectedRevision ?? null,
-      owner: input.ownerRef ?? null, profile: input.profile ?? null, name: input.displayName ?? null };
+      owner: input.ownerRef ?? null, profile: input.profile ?? null, name: input.displayName ?? null,
+      ...(input.oauthMethod === undefined ? {} : { oauthMethod: input.oauthMethod }) };
     return this.transaction(context, async tx => {
       const old = await this.existing(tx, input.operationId, intent);
       if (old) return old;

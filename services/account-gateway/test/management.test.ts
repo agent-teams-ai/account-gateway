@@ -36,6 +36,47 @@ const client = (origin: string, options: { deadlineMs?: number; bodyBytes?: numb
   new NativeManagementClient({ origin, consumerId: 'synthetic-consumer', controlCredential: 'synthetic-control', ...options });
 const code = (expected: string) => (e: unknown): boolean => e instanceof NativeFailure && e.code === expected && e.classification === 'uncertain';
 
+// A native peer returning a device identifier, substituted provider origin or
+// replayed handoff must fail before any capability reaches a consumer.
+test('device native boundary validates fresh handoff and keeps read/poll scope secret-free', async () => {
+  const j = journal(), wire = { operation: j.operationId, owner_ref: j.ownerRef, account_ref: j.accountRef, generation: j.generation };
+  const handoff = { user_code: 'ABCD-EFGH', verification_url: 'https://auth.openai.com/codex/device',
+    expires_at: '2099-01-01T00:00:00Z', interval_seconds: 5 };
+  const ack = { operation: j.operationId, account_ref: j.accountRef, state: 'prepared', method: 'device_code' };
+  let response: unknown = { ...ack, device_authorization: handoff };
+  const requests: { path: string | undefined; body: unknown }[] = [];
+  const server = await local((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', chunk => chunks.push(chunk)); req.on('end', () => {
+      requests.push({ path: req.url, body: JSON.parse(Buffer.concat(chunks).toString()) });
+      res.end(JSON.stringify(response));
+    });
+  });
+  try {
+    const client = new NativeOAuthEnrollmentClient({ origin: server.origin, consumerId: j.consumerId,
+      ownerRef: j.ownerRef, controlCredential: 'synthetic-control' });
+    assert.deepEqual((await client.begin(j, 'device_code')).deviceAuthorization, { userCode: 'ABCD-EFGH',
+      verificationURL: 'https://auth.openai.com/codex/device', expiresAt: '2099-01-01T00:00:00Z', intervalSeconds: 5 });
+    assert.deepEqual(requests[0], { path: '/private/native/v1/oauth/connect', body: { ...wire, method: 'device_code' } });
+    for (const patch of [{ verification_url: 'https://fixture.invalid/device' }, { user_code: 'bad code' },
+      { interval_seconds: 0 }, { device_auth_id: 'synthetic-private-id' }, { expires_at: 'invalid' }]) {
+      response = { ...ack, device_authorization: { ...handoff, ...patch } };
+      await assert.rejects(client.begin(j, 'device_code'), code('invalid_readback'));
+    }
+    response = { ...ack, device_authorization: handoff };
+    await assert.rejects(client.read(j), code('invalid_readback'));
+    await assert.rejects(client.poll(j), code('invalid_readback'));
+    response = ack;
+    assert.equal((await client.read(j)).state, 'prepared');
+    assert.equal((await client.poll(j)).state, 'prepared');
+    assert.deepEqual(requests.slice(-2), [{ path: '/private/native/v1/oauth/connect/read', body: wire },
+      { path: '/private/native/v1/oauth/connect/poll', body: wire }]);
+    const calls = requests.length;
+    await assert.rejects(client.poll({ ...j, ownerRef: 'other-owner' }), code('denied'));
+    assert.equal(requests.length, calls, 'owner mismatch never enters HTTP');
+  } finally { await server.close(); }
+});
+
 // RED on the former TS adapter with actual Go handler first and cached success
 // bodies. Root produces these using the native signed-custody/account-check test.
 const joinedFixture = process.env.AG_OAUTH_JOINED_DESCRIPTOR_FIXTURE_DIR;

@@ -12,7 +12,7 @@ import { PostgresKernel } from './postgres.ts';
 import { IntentSecrets, PostgresManagementStore } from './management-store.ts';
 import { AccountManagement, exactCandidate, sameCandidate } from './management.ts';
 import type { CandidateJournal, CandidateNative, IntentCustody, ManagementStore, OAuthScope, OAuthCallback,
-  OAuthCleanupAuthority, OAuthCleanupAction } from './management.ts';
+  OAuthCleanupAuthority, OAuthCleanupAction, OAuthMethod } from './management.ts';
 import type { DurableKernel, ExecutionRead, TrustedContext } from './domain.ts';
 import { codexOAuthProfile } from './management.ts';
 import { NativeManagementClient, NativeRetainedCustodyClient, NativeOAuthEnrollmentClient, NativeOAuthLifecycleClient } from './native-client.ts';
@@ -76,8 +76,9 @@ export function composeServiceControl(cfg: Pick<ServiceConfig, 'native' | 'consu
     profiles: profiles.filter(p => p.profile !== codexOAuthProfile.profile),
     retainedCustody: new NativeRetainedCustodyClient(control),
     ...(oauthProfile ? { oauth: { profile: oauthProfile, native: {
-      begin: (scope: OAuthScope) => forScope(scope).begin(scope),
+      begin: (scope: OAuthScope, method?: OAuthMethod) => forScope(scope).begin(scope, method),
       read: (scope: OAuthScope) => forScope(scope).read(scope),
+      poll: (scope: OAuthScope) => forScope(scope).poll(scope),
       complete: (scope: OAuthScope, callback: OAuthCallback) => forScope(scope).complete(scope, callback),
     }, descriptor: { describe: (scope: OAuthScope) => forScope(scope).describe(scope) },
       lifecycle: { cleanup: (scope: OAuthScope, authority: OAuthCleanupAuthority, action: OAuthCleanupAction) => new NativeOAuthLifecycleClient({ ...control,

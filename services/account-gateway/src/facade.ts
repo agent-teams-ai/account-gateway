@@ -361,6 +361,7 @@ export function createFacade(options: FacadeOptions): Server {
   };
   async function operationDTO(context: TrustedContext, op: OperationStatus): Promise<c.Operation> {
     if (op.state !== 'applied') return c.operation.parse({ operationRef: op.operationRef, state: op.state,
+      ...(op.oauthMethod === undefined ? {} : { oauthMethod: op.oauthMethod }),
       ...(op.state === 'unknown' || op.state === 'rejected' ? { error: safe('upstream_failure', op.state === 'unknown' ? 'effect_unknown' : 'not_dispatched', { operationRef: op.operationRef }) } : {}) });
     // Persisted deadline marks preparation; close/fence acknowledgements have no
     // result variant. Readbacks use the original persisted account/epoch tuple.
@@ -372,7 +373,8 @@ export function createFacade(options: FacadeOptions): Server {
     }
     if (op.accountRef && !op.executionRef) {
       const a = await management.account(context, op.accountRef);
-      return c.accountOperation.parse({ operationRef: op.operationRef, state: 'applied', result: { kind: 'account',
+      return c.accountOperation.parse({ operationRef: op.operationRef, state: 'applied',
+        ...(op.oauthMethod === undefined ? {} : { oauthMethod: op.oauthMethod }), result: { kind: 'account',
         accountRef: op.accountRef, metadataRevision: op.revision ?? a.revision, authorizationEpoch: op.epoch ?? a.epoch } });
     }
     return c.acknowledgementOperation.parse({ operationRef: op.operationRef, state: 'applied' });
@@ -805,12 +807,28 @@ export function createFacade(options: FacadeOptions): Server {
             !management.supportsOAuthProfile(input.profileId)) throw new KernelError('denied');
         requireCurrent(grant); uncertain = true;
         const result = await management.beginOAuth(context, { operationId: input.operationId, ownerRef: input.ownerRef,
-          profile: input.profileId, displayName: input.displayName });
+          profile: input.profileId, displayName: input.displayName, method: input.method });
         // A retired management grant never receives a newly returned owner URL.
         requireCurrent(grant);
         reply(c.oauthBeginResponse, { operation: await operationDTO(context, result.operation),
-          ...(result.authorizationURL === undefined ? {} : { authorizationURL: result.authorizationURL }) },
+          ...(result.authorizationURL === undefined ? {} : { authorizationURL: result.authorizationURL }),
+          ...(result.deviceAuthorization === undefined ? {} : { deviceAuthorization: c.oauthDeviceAuthorization.parse(result.deviceAuthorization) }) },
           result.operation.state === 'pending' ? 202 : 200); return;
+      }
+      if (path === '/v1/accounts/oauth/poll' && method === 'POST') {
+        const input = parse(c.oauthPoll, strictJSON(await body(req, Math.min(ingressBytes, 16_384)), true));
+        identity = { operationRef: input.operationId };
+        const original = await kernel.operation(context, input.operationId);
+        if (!original.accountRef || original.executionRef || original.oauthMethod !== 'device_code') throw new KernelError('denied');
+        const account = await management.account(context, original.accountRef), profile = profiles.get(account.profile);
+        if (account.ownerRef !== input.ownerRef || !permitsOwner(grant, account.ownerRef) ||
+            !permitsOAuthProfile(grant, account.profile) || !profile || profile.dto.authKinds[0] !== 'oauth' ||
+            !management.supportsOAuthProfile(account.profile)) throw new KernelError('denied');
+        requireCurrent(grant); uncertain = true;
+        const operation = await management.pollDeviceOAuth(context, input);
+        const dto = await operationDTO(context, operation);
+        requireCurrent(grant);
+        reply(c.accountOperation, dto, operation.state === 'pending' ? 202 : 200); return;
       }
       if (path === '/v1/accounts/oauth/complete' && method === 'POST') {
         const input = parse(secretSubmission.oauthComplete, strictJSON(await body(req, 32_768), true));
@@ -881,10 +899,11 @@ export function createFacade(options: FacadeOptions): Server {
                 !permitsOAuthProfile(grant, account.profile)) throw new KernelError('denied');
             requireCurrent(grant); uncertain = true;
             const result = await management.beginOAuthReconnect(context, { operationId: input.operationId,
-              accountRef: ref, expectedRevision: input.expectedMetadataRevision });
+              accountRef: ref, expectedRevision: input.expectedMetadataRevision, method: input.method });
             requireCurrent(grant);
             reply(c.oauthBeginResponse, { operation: await operationDTO(context, result.operation),
-              ...(result.authorizationURL === undefined ? {} : { authorizationURL: result.authorizationURL }) },
+              ...(result.authorizationURL === undefined ? {} : { authorizationURL: result.authorizationURL }),
+              ...(result.deviceAuthorization === undefined ? {} : { deviceAuthorization: c.oauthDeviceAuthorization.parse(result.deviceAuthorization) }) },
               result.operation.state === 'pending' ? 202 : 200); return;
           }
           if (profiles.get(account.profile)?.dto.authKinds[0] !== 'api_key') throw new KernelError('denied');
