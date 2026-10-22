@@ -369,7 +369,42 @@ func run() error {
 				w.WriteHeader(403)
 				return
 			}
-			if _, err = db.ExecContext(r.Context(), `UPDATE accounts SET deleted_at=clock_timestamp() WHERE id=$1 AND created_at=$2`, route.AccountID, route.CreatedAt); err != nil {
+			ctx, err := service.WithGatewayNativeConsumer(r.Context(), cfg.Consumer)
+			if err != nil {
+				w.WriteHeader(403)
+				return
+			}
+			scope, operation, err := claudeRepo.ResolveGatewayClaudeCanonical(ctx, route, in.AccountRef)
+			if err != nil || scope.Owner != in.OwnerRef {
+				w.WriteHeader(403)
+				return
+			}
+			ctx, err = service.WithGatewayNativeOAuthOwner(ctx, scope.Owner)
+			if err != nil {
+				w.WriteHeader(403)
+				return
+			}
+			// This protected fixture controller requests the real source custody
+			// eraser. It never bypasses the account/intent guards with raw SQL.
+			// Recheck the live Gateway owner/mapping at both cleanup fences.
+			cleanup := service.GatewayNativeOAuthCleanupRequest{Scope: scope, Operation: operation, Action: "erase", CleanupRef: uuid.NewString(), CleanupToken: uuid.NewString()}
+			lease := time.Now().Add(5 * time.Second)
+			result, err := claude.Cleanup(ctx, cleanup, func(checkCtx context.Context, request service.GatewayNativeOAuthCleanupRequest) (service.GatewayNativeOAuthCleanupAuthority, error) {
+				if request != cleanup || !time.Now().Before(lease) {
+					return service.GatewayNativeOAuthCleanupAuthority{}, deny
+				}
+				fresh, err := authorizeLimits(checkCtx, in)
+				if err != nil || !service.SameGatewayNativeDescriptor(fresh, route) {
+					return service.GatewayNativeOAuthCleanupAuthority{}, deny
+				}
+				return service.GatewayNativeOAuthCleanupAuthority{Owner: scope.Owner, LeaseExpiresAt: lease, Native: &fresh}, nil
+			})
+			if err != nil || !result.CredentialsErased || result.Closure != "closed" || result.Native == nil || !service.SameGatewayNativeDescriptor(*result.Native, route) {
+				w.WriteHeader(409)
+				return
+			}
+			var erased bool
+			if db.QueryRowContext(ctx, `SELECT a.deleted_at IS NOT NULL AND a.credentials='{}'::jsonb AND c.state='erased' AND c.material_envelope='' AND NOT EXISTS(SELECT 1 FROM gateway_claude_limits_snapshots s WHERE s.account_id=a.id) FROM accounts a JOIN gateway_claude_connect_intents c ON c.account_id=a.id AND c.native_created_at=a.created_at WHERE a.id=$1 AND a.created_at=$2`, route.AccountID, route.CreatedAt).Scan(&erased) != nil || !erased {
 				w.WriteHeader(409)
 				return
 			}
