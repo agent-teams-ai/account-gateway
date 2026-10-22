@@ -64,3 +64,13 @@ test('shutdown waits for the retained handler reservation and denies new work', 
   release(); await drain; assert.equal(stopped, true);
   release(); // Repeated cleanup cannot underflow the ownership count.
 });
+
+test('protected usage reads admit only bounded list queries and exact observation paths', () => {
+  for (const path of ['/v1/usage', '/v1/usage?limit=100', '/v1/usage?afterCursor=abc_-&highWaterCursor=def_-&limit=1',
+    '/v1/usage/00000000-0000-4000-8000-000000000001/request-1']) assert.equal(facadeControlRoute('GET', path), true, path);
+  for (const path of ['/v1/usage?', '/v1/usage?limit=1&limit=2', '/v1/usage?ownerRef=other', '/v1/usage?limit=0',
+    '/v1/usage?afterCursor=' + 'a'.repeat(513), '/v1/usage?afterCursor=%61', '/v1/usage/x/y?limit=1',
+    '/v1/usage/x', '/v1/usage/x/y/z', '/v1/accounts?limit=1', '/v1/operations/op?limit=1', '/v1/usage#fragment'])
+    assert.equal(facadeControlRoute('GET', path), false, path);
+  assert.equal(facadeControlRoute('POST', '/v1/usage'), false);
+});

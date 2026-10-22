@@ -9,11 +9,12 @@
   "scripts": {
     "start": "node src/serve.ts",
     "typecheck": "tsc --project tsconfig.json",
-    "test:domain": "node --test test/domain.test.ts test/facade-ingress.test.ts test/native-wire.test.ts test/native-response-diagnostics.test.ts test/postgres-client-error.test.ts test/service-admission.test.ts test/service-config.test.ts test/usage.test.ts",
+    "test:domain": "node --test test/domain.test.ts test/facade-ingress.test.ts test/native-wire.test.ts test/native-response-diagnostics.test.ts test/postgres-client-error.test.ts test/service-admission.test.ts test/service-config.test.ts test/usage.test.ts test/usage-checkout.test.ts",
     "qualify:retained-custody": "node test/native-retained-custody-joined.ts",
     "test:management": "node --test test/management.test.ts",
     "test:pg": "node --test --test-concurrency=1 test/postgres.test.ts test/management-postgres.test.ts test/facade-postgres.test.ts test/native-transport-postgres.test.ts",
-    "test": "npm run test:domain && npm run test:management && npm run test:pg"
+    "test": "npm run test:domain && npm run test:management && npm run test:pg",
+    "qualify:usage": "node --test test/service-usage-runtime.test.ts"
   },
   "dependencies": {
     "pg": "8.23.1",

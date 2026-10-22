@@ -11,7 +11,21 @@ export type Checkout = () => Promise<PoolClient>;
 export class ServiceCapacityError extends KernelError { constructor() { super('unavailable'); } }
 const lane = new AsyncLocalStorage<ServiceLane>();
 export const inServiceLane = <T>(selected: ServiceLane, work: () => T): T => lane.run(selected, work);
+export function facadeUsageReadRoute(method: string | undefined, path: string | undefined): boolean {
+  if (method !== 'GET' || !path) return false;
+  const query = path.indexOf('?');
+  if (query < 0) return /^\/v1\/usage(?:\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+)?$/.test(path);
+  if (path.slice(0, query) !== '/v1/usage' || path.length - query > 1600) return false;
+  const seen = new Set<string>();
+  return path.slice(query + 1).split('&').every(pair => {
+    const match = /^(limit|afterCursor|highWaterCursor)=([A-Za-z0-9_-]+)$/.exec(pair);
+    if (!match || seen.has(match[1])) return false;
+    seen.add(match[1]);
+    return match[1] === 'limit' ? /^[1-9][0-9]{0,2}$/.test(match[2]) : match[2].length <= 512;
+  });
+}
 export function facadeControlRoute(method: string | undefined, path: string | undefined): boolean {
+  if (facadeUsageReadRoute(method, path)) return true;
   if (!path || /[?#%\r\n]/.test(path)) return false;
   return method === 'POST' && (/^\/v1\/executions\/[A-Za-z0-9_-]+\/close$/.test(path) ||
     path === '/v1/policy-fences' || /^\/v2\/accounts\/[A-Za-z0-9_-]+\/(suspend|resume)$/.test(path) || /^\/v1\/accounts\/[A-Za-z0-9_-]+\/disable$/.test(path)) ||
