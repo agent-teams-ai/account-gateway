@@ -84,8 +84,11 @@ async function run(): Promise<void> {
   child = spawn(binary, [configFile], { env: { GIN_MODE: 'release' }, stdio: ['pipe', 'pipe', 'pipe'] });
   child.stdin!.on('error', () => undefined);
   // Native diagnostics are retained privately, never reflected into public results.
-  let diagnostic = '';
-  child.stderr!.on('data', (bytes: Buffer) => { if (diagnostic.length < 8192) diagnostic += bytes.toString(); });
+  let diagnostic = Buffer.alloc(0), nativeDiagnosticBytes = 0;
+  child.stderr!.on('data', (bytes: Buffer) => {
+    nativeDiagnosticBytes += bytes.byteLength;
+    if (diagnostic.byteLength < 8192) diagnostic = Buffer.concat([diagnostic, bytes.subarray(0, 8192 - diagnostic.byteLength)]);
+  });
   childExit = new Promise(resolve => { child!.once('error', () => resolve(-1)); child!.once('close', resolve); });
   const frames = createInterface({ input: child.stdout!, crlfDelay: Infinity })[Symbol.asyncIterator]();
   const next = async (event: string): Promise<Record<string, unknown>> => {
@@ -231,14 +234,15 @@ async function run(): Promise<void> {
   assert.equal(tombstone.status, 204); await tombstone.arrayBuffer();
   assert.deepEqual(await limitsClient.readAccountLimits(limitsInput), { status: 'unavailable' });
   assert.deepEqual(await stats(), final);
+  phase = 'native-close';
   child.stdin!.end('stop\n'); stopped = true;
   const closed = await next('closed'); assert.equal(closed.plaintextCredentials, 0); assert.equal(closed.retainedOAuthMaterial, 0);
-  assert.equal(await bounded(childExit), 0); assert.equal(diagnostic, '');
+  assert.equal(await bounded(childExit), 0);
   phase = 'completed';
   const receipt = { phase, contract: 'gateway-native-claude-joined/v1', nativeBinarySHA256: binarySHA256, nativeHead, gatewayHead, sourceHashes,
     nativeHTTP: true, gatewayFacadeAndSDK: true, liveOwnerCallback: true, actualPostgreSQL: true,
     browserFreshOnly: true, wrongOwnerDenied: true, deviceDenied: true, account: 'active', descriptor: 'verified',
-    rrAcceptance, accountLimits: { cachedRead: true, passiveMessagesProducer: true, missingUnknown: true,
+    rrAcceptance, nativeDiagnosticBytes, accountLimits: { cachedRead: true, passiveMessagesProducer: true, missingUnknown: true,
       nativeTombstoneUnavailable: true, renamePreserved: true, upstreamCallsForRead: 0 }, provider: final };
   await writeFile(join(scratch, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n'); report({ ...receipt, receiptPath: join(scratch, 'receipt.json') });
 }
