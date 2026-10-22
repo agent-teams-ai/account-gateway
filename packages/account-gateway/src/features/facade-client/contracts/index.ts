@@ -91,7 +91,7 @@ export const oauthDeviceAuthorization = z.strictObject({
 });
 // This is a temporary owner capability, not safe account/operation metadata.
 // Validate it without including Zod issues or the original URL in diagnostics.
-export const oauthAuthorizationURL = z.string().min(1).max(4096).refine(value => {
+export const codexOAuthAuthorizationURL = z.string().min(1).max(4096).refine(value => {
   try {
     if (/[^\u0021-\u007e]/.test(value) || value.includes('\\') ||
         !value.startsWith('https://auth.openai.com/oauth/authorize?')) return false;
@@ -123,6 +123,36 @@ export const oauthAuthorizationURL = z.string().min(1).max(4096).refine(value =>
       /^[A-Za-z0-9_-]{16,512}$/.test(url.searchParams.get('state') ?? '');
   } catch { return false; }
 });
+// Claude's official browser handoff displays a manual code#state. It never
+// redirects to a caller-supplied local listener or a consumer endpoint.
+export const claudeOAuthAuthorizationURL = z.string().min(1).max(4096).refine(value => {
+  try {
+    if (/[^\u0021-\u007e]/.test(value) || value.includes('\\') ||
+        !value.startsWith('https://claude.com/cai/oauth/authorize?')) return false;
+    const url = new URL(value);
+    if (url.origin !== 'https://claude.com' || url.pathname !== '/cai/oauth/authorize' ||
+        url.username || url.password || url.hash || value.includes('#')) return false;
+    const fixed: Readonly<Record<string, string>> = {
+      code: 'true', client_id: '9d1c250a-e61b-44d9-88ed-5944d1962f5e', response_type: 'code',
+      redirect_uri: 'https://platform.claude.com/oauth/code/callback', code_challenge_method: 'S256',
+      scope: 'user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload',
+    };
+    const seen = new Set<string>();
+    for (const part of url.search.slice(1).split('&')) {
+      const equal = part.indexOf('=');
+      if (equal < 1 || /%(?![0-9a-fA-F]{2})/.test(part)) return false;
+      const key = part.slice(0, equal);
+      if (!/^[a-z_]+$/.test(key) || seen.has(key) ||
+          !(Object.hasOwn(fixed, key) || key === 'state' || key === 'code_challenge')) return false;
+      seen.add(key);
+      decodeURIComponent(part.slice(equal + 1).replace(/\+/g, ' '));
+    }
+    for (const [key, expected] of Object.entries(fixed)) if (url.searchParams.get(key) !== expected) return false;
+    return /^[A-Za-z0-9_-]{43}$/.test(url.searchParams.get('code_challenge') ?? '') &&
+      /^[0-9a-f]{64}$/.test(url.searchParams.get('state') ?? '');
+  } catch { return false; }
+});
+export const oauthAuthorizationURL = z.union([codexOAuthAuthorizationURL, claudeOAuthAuthorizationURL]);
 /** Only fresh Begin returns a handoff; ordinary reads retain the safe union. */
 export const oauthBeginResponse = z.strictObject({ operation: accountOperation,
   authorizationURL: oauthAuthorizationURL.optional(), deviceAuthorization: oauthDeviceAuthorization.optional() })
@@ -243,17 +273,19 @@ export const accountLimitsCapabilities = z.strictObject({
   contract: z.literal(ACCOUNT_LIMITS_CONTRACT), cachedRead: z.boolean(), quotaOnlyRefresh: z.boolean(),
 });
 const accountLimitsWindow = z.strictObject({
-  id: reference, family: z.literal('codex'),
+  id: reference, family: z.enum(['codex', 'claude']),
   durationSeconds: z.number().finite().positive().max(Number.MAX_SAFE_INTEGER).nullable(),
   usedPercent: z.number().finite().nonnegative().nullable(),
   observedAt: limitsInstant.nullable(), resetAt: limitsInstant.nullable(),
   basis: z.enum(['duration', 'legacy_alias', 'unknown']),
   reason: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/).optional(),
-}).refine(v => (v.basis === 'duration') === (v.durationSeconds !== null));
+}).refine(v => (v.basis === 'duration') === (v.durationSeconds !== null))
+  .refine(v => v.family !== 'claude' || ['claude-5h', 'claude-7d', 'claude-7d-sonnet', 'claude-7d-fable'].includes(v.id));
 export const accountLimits = z.discriminatedUnion('status', [
   z.strictObject({ status: z.literal('snapshot'), physicalGeneration: reference, principalVersion: reference,
     revision, scope: z.enum(['account', 'subscription']), windows: z.array(accountLimitsWindow).min(1).max(8)
-      .refine(v => new Set(v.map(w => w.id)).size === v.length) }),
+      .refine(v => new Set(v.map(w => w.id)).size === v.length)
+      .refine(v => v.every(w => w.family === v[0]?.family)) }),
   z.strictObject({ status: z.literal('unknown') }),
   z.strictObject({ status: z.literal('unsupported') }),
   z.strictObject({ status: z.literal('unavailable') }),

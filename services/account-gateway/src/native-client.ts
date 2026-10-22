@@ -5,8 +5,9 @@ import type { RetainedCustodyProof } from './domain.ts';
 import type { RetainedCustodyVerifier } from './management.ts';
 import { KernelError, identifier, uuid } from './domain.ts';
 import { secretSubmission } from '@agent-teams/account-gateway/http';
-import { accountLimitsRequest, accountLimitsCapabilities, accountLimits, oauthAuthorizationURL, oauthDeviceAuthorization } from '@agent-teams/account-gateway/contracts';
-import { codexOAuthProfile, codexOAuthCleanupModels, exactCandidate, physicalCandidate } from './management.ts';
+import { accountLimitsRequest, accountLimitsCapabilities, accountLimits, codexOAuthAuthorizationURL, claudeOAuthAuthorizationURL, oauthDeviceAuthorization } from '@agent-teams/account-gateway/contracts';
+import { codexOAuthProfile, exactCandidate, physicalCandidate } from './management.ts';
+import { oauthProfileDefinition, type OAuthProfileDefinition } from './oauth-profiles.ts';
 import type { CandidateJournal, CandidateMapping, CandidateNative, NativeReadback, PhysicalCandidate } from './management.ts';
 import type { OAuthScope, OAuthEnrollmentNative, OAuthReadback, OAuthBeginReadback, OAuthCallback, OAuthMethod } from './management.ts';
 import type { OAuthDescriptor, OAuthDescriptorBoundary } from './management.ts';
@@ -107,15 +108,20 @@ function wireDescriptor(d: PhysicalCandidate): object {
   return { account_id: d.nativeId,generation: d.generation,created_at: d.createdAt,
     profile: d.profile,base_url: d.baseURL,model: d.model };
 }
-function oauthPhysical(value: unknown, generation: string, cleanupOnly = false): PhysicalCandidate {
+function oauthPhysical(value: unknown, generation: string, definition: OAuthProfileDefinition, cleanupOnly = false): PhysicalCandidate {
   const d = object(value, ['account_id','generation','created_at','profile','base_url','model']);
   const native = physicalCandidate({ nativeId: d.account_id as number, generation: d.generation as string,
     nativePhysicalIdentity: d.generation as string, createdAt: d.created_at as string,
     profile: d.profile as string, baseURL: d.base_url as string, model: d.model as string });
-  if (native.generation !== generation || native.profile !== codexOAuthProfile.profile ||
-      native.baseURL !== codexOAuthProfile.baseURL ||
-      (cleanupOnly ? !codexOAuthCleanupModels.includes(native.model) : native.model !== codexOAuthProfile.model)) throw new NativeFailure('invalid_readback');
+  if (native.generation !== generation || native.profile !== definition.profile ||
+      native.baseURL !== definition.baseURL ||
+      (cleanupOnly ? !definition.cleanupModels.includes(native.model) : native.model !== definition.model)) throw new NativeFailure('invalid_readback');
   return native;
+}
+function oauthEndpoint(definition: OAuthProfileDefinition, action: 'begin' | 'read' | 'complete' | 'poll' | 'descriptor' | 'custody' | 'cleanup' | 'refresh'): string {
+  if (action === 'refresh') return definition.refreshPath;
+  return definition.nativePath + (action === 'begin' ? '' : '/' + ({ complete: 'complete', read: 'read', poll: 'poll',
+    descriptor: 'descriptor', custody: 'custody', cleanup: 'cleanup' } as const)[action]);
 }
 export interface NativeManagementOptions {
   readonly origin: string; readonly consumerId: string; readonly controlCredential: string;
@@ -155,7 +161,7 @@ class NativeControlHTTP {
     let body: Buffer | undefined;
     try {
       body = value === undefined ? undefined : Buffer.from(JSON.stringify(value));
-      if (body && body.length > (path === '/private/native/v1/oauth/connect/complete' ? 32_768 : 16_384)) throw new NativeFailure('bounded');
+      if (body && body.length > (path.endsWith('/oauth/connect/complete') ? 32_768 : 16_384)) throw new NativeFailure('bounded');
     } catch { throw new NativeFailure('bounded'); }
     return new Promise<Buffer>((resolve, reject) => {
       let finished = false;
@@ -204,12 +210,13 @@ export class NativeRetainedCustodyClient extends NativeControlHTTP implements Re
     this.scope(input);
     const d = physicalCandidate(input.descriptor);
     if (!exactCandidate(input, d) || d.nativePhysicalIdentity !== d.generation) throw new NativeFailure('denied');
-    const oauth = d.profile === codexOAuthProfile.profile;
+    const definition = oauthProfileDefinition(d.profile);
+    const oauth = !!definition;
     if (oauth) identifier(input.operationId);
     const request = { contract: 'native-retained-custody/v1', owner_ref: input.ownerRef,
       account_ref: input.accountRef, descriptor: wireDescriptor(d),
       ...(oauth ? { operation: input.operationId, generation: input.generation } : {}) };
-    const bytes = await this.call(oauth ? 'POST' : 'GET', oauth ? '/private/native/v1/oauth/connect/custody' :
+    const bytes = await this.call(oauth ? 'POST' : 'GET', definition ? oauthEndpoint(definition, 'custody') :
       candidatesPath + '/' + d.generation + '/custody', request);
     try {
       const r = object(decode(bytes), ['contract','generation','native','credential_kinds','retention','proof'],
@@ -292,10 +299,14 @@ export class NativeManagementClient extends NativeControlHTTP implements Candida
 // Completed custody remains pending until separate exact descriptor readback.
 export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OAuthEnrollmentNative, OAuthDescriptorBoundary, OAuthRefreshNative {
   readonly #owner: string;
-  constructor(options: NativeManagementOptions & { readonly ownerRef: string }) {
+  readonly #definition: OAuthProfileDefinition;
+  constructor(options: NativeManagementOptions & { readonly ownerRef: string; readonly profileId?: string }) {
     super(options);
     identifier(options.ownerRef);
     this.#owner = options.ownerRef;
+    const definition = oauthProfileDefinition(options.profileId ?? codexOAuthProfile.profile);
+    if (!definition) throw new KernelError('invalid');
+    this.#definition = definition;
   }
   private capture(input: OAuthScope): OAuthScope {
     const scope = Object.freeze({ consumerId: input.consumerId, operationId: input.operationId,
@@ -317,7 +328,8 @@ export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OA
         begin ? ['outcome','authorize_url','device_authorization','method'] : ['outcome','method']);
       if (r.operation !== scope.operationId || r.account_ref !== scope.accountRef ||
           !['prepared','entered','completed','expired','unknown'].includes(r.state as string)) throw new NativeFailure('invalid_readback');
-      if (Object.hasOwn(r, 'method') && r.method !== 'device_code' && r.method !== 'browser') throw new NativeFailure('invalid_readback');
+      if ((Object.hasOwn(r, 'method') && r.method !== 'device_code' && r.method !== 'browser') ||
+          (!this.#definition.deviceCode && r.method === 'device_code')) throw new NativeFailure('invalid_readback');
       // Native outcome is not a safe DTO or a no-effect receipt. Validate its
       // bounded primitive shape then discard; never reflect vendor diagnostics.
       if (Object.hasOwn(r, 'outcome') && (typeof r.outcome !== 'string' ||
@@ -325,13 +337,13 @@ export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OA
       let authorizationURL: string | undefined;
       if (Object.hasOwn(r, 'authorize_url')) {
         if (!begin || r.state !== 'prepared' || r.method === 'device_code') throw new NativeFailure('invalid_readback');
-        const parsed = oauthAuthorizationURL.safeParse(r.authorize_url);
+        const parsed = (this.#definition.family === 'claude' ? claudeOAuthAuthorizationURL : codexOAuthAuthorizationURL).safeParse(r.authorize_url);
         if (!parsed.success) throw new NativeFailure('invalid_readback');
         authorizationURL = parsed.data;
       }
       let deviceAuthorization: OAuthBeginReadback['deviceAuthorization'];
       if (Object.hasOwn(r, 'device_authorization')) {
-        if (!begin || r.state !== 'prepared' || r.method !== 'device_code' || authorizationURL !== undefined) throw new NativeFailure('invalid_readback');
+        if (!this.#definition.deviceCode || !begin || r.state !== 'prepared' || r.method !== 'device_code' || authorizationURL !== undefined) throw new NativeFailure('invalid_readback');
         const d = object(r.device_authorization, ['user_code','verification_url','expires_at','interval_seconds']);
         const parsed = oauthDeviceAuthorization.safeParse({ userCode: d.user_code, verificationURL: d.verification_url,
           expiresAt: d.expires_at, intervalSeconds: d.interval_seconds });
@@ -345,34 +357,36 @@ export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OA
   }
   async begin(input: OAuthScope, method?: OAuthMethod): Promise<OAuthBeginReadback> {
     const scope = this.capture(input);
-    if (method !== undefined && method !== 'device_code' && method !== 'browser') throw new NativeFailure('denied');
-    const result = this.ack(await this.call('POST', '/private/native/v1/oauth/connect',
+    if ((method !== undefined && method !== 'device_code' && method !== 'browser') ||
+        (method === 'device_code' && !this.#definition.deviceCode)) throw new NativeFailure('denied');
+    const result = this.ack(await this.call('POST', oauthEndpoint(this.#definition, 'begin'),
       { ...this.wire(scope), ...(method === undefined ? {} : { method }) }), scope, true);
     if (method === 'device_code' ? result.authorizationURL !== undefined : result.deviceAuthorization !== undefined)
       throw new NativeFailure('invalid_readback');
     return result;
   }
   async poll(input: OAuthScope): Promise<OAuthReadback> {
+    if (!this.#definition.deviceCode) throw new NativeFailure('denied');
     const scope = this.capture(input);
-    const result = this.ack(await this.call('POST', '/private/native/v1/oauth/connect/poll', this.wire(scope)), scope, false);
+    const result = this.ack(await this.call('POST', oauthEndpoint(this.#definition, 'poll'), this.wire(scope)), scope, false);
     return Object.freeze({ operationId: result.operationId, accountRef: result.accountRef, state: result.state });
   }
   async complete(input: OAuthScope, callback: OAuthCallback): Promise<OAuthReadback> {
     const scope = this.capture(input), state = callback.state, code = callback.code;
     if (!secretSubmission.oauthCallbackState.safeParse(state).success ||
-        !secretSubmission.oauthCallbackCode.safeParse(code).success) throw new NativeFailure('bounded');
-    const result = this.ack(await this.call('POST', '/private/native/v1/oauth/connect/complete',
+        !(this.#definition.family === 'claude' ? secretSubmission.claudeOAuthCallbackCode : secretSubmission.oauthCallbackCode).safeParse(code).success) throw new NativeFailure('bounded');
+    const result = this.ack(await this.call('POST', oauthEndpoint(this.#definition, 'complete'),
       { ...this.wire(scope), state, code }), scope, false);
     return Object.freeze({ operationId: result.operationId, accountRef: result.accountRef, state: result.state });
   }
   async read(input: OAuthScope): Promise<OAuthReadback> {
     const scope = this.capture(input);
-    const result = this.ack(await this.call('POST', '/private/native/v1/oauth/connect/read', this.wire(scope)), scope, false);
+    const result = this.ack(await this.call('POST', oauthEndpoint(this.#definition, 'read'), this.wire(scope)), scope, false);
     return Object.freeze({ operationId: result.operationId, accountRef: result.accountRef, state: result.state });
   }
   async refresh(input: OAuthScope): Promise<OAuthRefreshReadback> {
     const scope = this.capture(input);
-    const bytes = await this.call('POST', '/private/native/v1/oauth/refresh', this.wire(scope), 5000);
+    const bytes = await this.call('POST', oauthEndpoint(this.#definition, 'refresh'), this.wire(scope), 5000);
     try {
       const r = object(decode(bytes), ['operation','account_ref','state'], ['refresh_ref']);
       if (r.operation !== scope.operationId || r.account_ref !== scope.accountRef ||
@@ -385,7 +399,7 @@ export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OA
   }
   async describe(input: OAuthScope): Promise<OAuthDescriptor> {
     const scope = this.capture(input);
-    const bytes = await this.call('POST', '/private/native/v1/oauth/connect/descriptor', this.wire(scope));
+    const bytes = await this.call('POST', oauthEndpoint(this.#definition, 'descriptor'), this.wire(scope));
     try {
       const r = object(decode(bytes), ['operation','account_ref','state','qualification'], ['native']);
       if (r.operation !== scope.operationId || r.account_ref !== scope.accountRef) throw new NativeFailure('invalid_readback');
@@ -394,7 +408,7 @@ export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OA
         return Object.freeze({ ...logical, state: 'staged', qualification: 'pending' });
       }
       if (r.state !== 'staged' || r.qualification !== 'controlled-source-v1') throw new NativeFailure('invalid_readback');
-      const native = oauthPhysical(r.native, scope.generation);
+      const native = oauthPhysical(r.native, scope.generation, this.#definition);
       return Object.freeze({ ...logical, state: 'qualified', qualification: 'controlled-source-v1', native });
     } catch { throw new NativeFailure('invalid_readback'); }
   }
@@ -403,8 +417,12 @@ export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OA
 // Purpose-bound cleanup credential is composed separately from connect/control.
 export class NativeOAuthLifecycleClient extends NativeControlHTTP implements OAuthLifecycleNative {
   readonly #owner: string;
-  constructor(options: NativeManagementOptions & { readonly ownerRef: string }) {
+  readonly #definition: OAuthProfileDefinition;
+  constructor(options: NativeManagementOptions & { readonly ownerRef: string; readonly profileId?: string }) {
     super(options); identifier(options.ownerRef); this.#owner = options.ownerRef;
+    const definition = oauthProfileDefinition(options.profileId ?? codexOAuthProfile.profile);
+    if (!definition) throw new KernelError('invalid');
+    this.#definition = definition;
   }
   async cleanup(input: OAuthScope, authority: OAuthCleanupAuthority, action: OAuthCleanupAction): Promise<OAuthCleanupReadback> {
     const scope = Object.freeze({ consumerId: input.consumerId, operationId: input.operationId,
@@ -412,14 +430,14 @@ export class NativeOAuthLifecycleClient extends NativeControlHTTP implements OAu
     const cleanupRef = authority.cleanupRef, cleanupToken = authority.cleanupToken;
     this.scope(scope); identifier(scope.operationId); uuid(cleanupRef); uuid(cleanupToken);
     if (scope.ownerRef !== this.#owner || !['read','erase'].includes(action)) throw new NativeFailure('denied');
-    const bytes = await this.call('POST', '/private/native/v1/oauth/connect/cleanup', {
+    const bytes = await this.call('POST', oauthEndpoint(this.#definition, 'cleanup'), {
       operation: scope.operationId, owner_ref: scope.ownerRef, account_ref: scope.accountRef,
       generation: scope.generation, action, cleanup_ref: cleanupRef, cleanup_token: cleanupToken });
     try {
       const r = object(decode(bytes), ['operation','account_ref','credentials_erased','closure'], ['native']);
       if (r.operation !== scope.operationId || r.account_ref !== scope.accountRef || typeof r.credentials_erased !== 'boolean' ||
           !['pending','closed','unknown'].includes(r.closure as string) || r.closure === 'closed' && !r.credentials_erased) throw new NativeFailure('invalid_readback');
-      const native = Object.hasOwn(r, 'native') ? oauthPhysical(r.native, scope.generation, true) : undefined;
+      const native = Object.hasOwn(r, 'native') ? oauthPhysical(r.native, scope.generation, this.#definition, true) : undefined;
       return Object.freeze({ operationId: scope.operationId, accountRef: scope.accountRef,
         credentialsErased: r.credentials_erased, closure: r.closure as OAuthCleanupReadback['closure'], ...(native ? { native } : {}) });
     } catch { throw new NativeFailure('invalid_readback'); }

@@ -62,3 +62,21 @@ test('qualified Codex profile admits eight MiB raw SSE and rejects one byte abov
     ...oauthEnrollment, limits: { ...oauthEnrollment.limits, requestBytes: 1_048_577 },
   } }));
 });
+
+// The independent opt-in must not borrow Codex qualification or accept caller endpoints.
+test('Claude enrollment captures only the fixed qualified tuple alongside Codex', () => {
+  const profile = serviceProfile(4);
+  const claudeOAuthEnrollment = { enabled: true as const, profile: 'anthropic-claude-oauth-messages-v1' as const,
+    modelScope: ['claude-sonnet-4-6'] as const, qualificationRef: 'synthetic-claude', limits: profile.limits, providerTokenUpperBound: 65536 };
+  const oauthEnrollment = { enabled: true as const, profile: 'openai-codex-oauth-responses-v1' as const,
+    modelScope: ['gpt-5.6-sol'] as const, qualificationRef: 'synthetic-codex', limits: profile.limits, providerTokenUpperBound: 65536 };
+  const profiles = captureServiceProfiles({ profile, oauthEnrollment, claudeOAuthEnrollment });
+  assert.deepEqual(profiles.map(p => [p.profile, p.model, p.qualificationRef]), [
+    ['openai-responses-apikey-v1', 'gpt-5.4-mini', 'qualification-a'],
+    ['openai-codex-oauth-responses-v1', 'gpt-5.6-sol', 'synthetic-codex'],
+    ['anthropic-claude-oauth-messages-v1', 'claude-sonnet-4-6', 'synthetic-claude'],
+  ]);
+  for (const patch of [{ profile: oauthEnrollment.profile }, { modelScope: ['other'] }, { baseURL: 'https://fixture.invalid' },
+    { qualificationRef: undefined }, { limits: undefined }])
+    denied(() => captureServiceProfiles({ profile, claudeOAuthEnrollment: { ...claudeOAuthEnrollment, ...patch } as typeof claudeOAuthEnrollment }));
+});

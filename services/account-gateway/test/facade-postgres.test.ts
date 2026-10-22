@@ -1,3 +1,4 @@
+import { claudeOAuthProfile } from '../src/oauth-profiles.ts';
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -770,11 +771,11 @@ test('lifecycle off-on-off keeps v2 inventory and original operation reads while
 
 // Regression: old quota could escape a reconnect/delete/revoke while the native
 // read is awaited. Real PG kernel+mapping and both HTTP adapters fence the result.
-test('cached native limits fence owner, epoch, pending reconnect and late revocation', async () => {
+for (const family of ['codex', 'claude'] as const) test(`cached ${family} native limits fence owner, epoch, pending reconnect and late revocation`, async () => {
   const context = { consumerId: 'limits-' + randomUUID() }, kernel = new PostgresKernel(pool);
   const secrets = new IntentSecrets(randomBytes(32), randomBytes(32)), store = new PostgresManagementStore(pool, secrets);
   const worker = randomUUID(), operationId = randomUUID();
-  const ownerRef = 'limits-owner', p = { ...codexOAuthProfile, qualificationRef: 'controlled-source-v1' };
+  const ownerRef = 'limits-owner', p = { ...(family === 'claude' ? claudeOAuthProfile : codexOAuthProfile), qualificationRef: 'controlled-source-v1' };
   await kernel.heartbeat(context, worker);
   const created = await kernel.beginAccount(context, { operationId, kind: 'create', intentDigest: randomUUID(),
     ownerRef, profile: p.profile, displayName: 'Limits fixture' });
@@ -788,7 +789,7 @@ test('cached native limits fence owner, epoch, pending reconnect and late revoca
   const input = { accountRef, ownerRef, profileId: p.profile, expectedAuthorizationEpoch: a.epoch };
   let entered = 0, hold: Promise<void> | undefined, onRead: (() => void) | undefined;
   let nativeResult: c.AccountLimits = { status: 'snapshot', physicalGeneration: generation, principalVersion: 'principal-v1', revision: 1,
-    scope: 'account', windows: [{ id: 'primary', family: 'codex', durationSeconds: 18000, usedPercent: 37.5,
+    scope: family === 'claude' ? 'subscription' : 'account', windows: [{ id: family === 'claude' ? 'claude-5h' : 'primary', family, durationSeconds: 18000, usedPercent: 37.5,
       observedAt: '2026-10-22T00:00:00Z', resetAt: null, basis: 'duration' }] };
   const native = createServer((req, res) => { void (async () => {
     assert.equal(req.headers.authorization, 'Bearer fixture-native-limits');
@@ -813,7 +814,11 @@ test('cached native limits fence owner, epoch, pending reconnect and late revoca
   const origin = await listen(facade), client = createAccountLimitsClient({ role: 'consumer-control', origin, token });
   try {
     assert.deepEqual(await client.readAccountLimits(input), nativeResult);
-    assert.equal(entered, 1);
+    const expectedSnapshot = nativeResult;
+    nativeResult = { ...expectedSnapshot, windows: [{ ...expectedSnapshot.windows[0]!, id: family === 'claude' ? 'primary' : 'claude-5h', family: family === 'claude' ? 'codex' : 'claude' }] };
+    assert.deepEqual(await client.readAccountLimits(input), { status: 'unavailable' }, 'a neighboring provider snapshot cannot become this account quota');
+    nativeResult = expectedSnapshot;
+    assert.equal(entered, 2);
     const forManagement = (token: string) => createAccountLimitsClient({ role: 'management', origin, token });
     assert.deepEqual(await forManagement(managementToken).readAccountLimits(input), nativeResult);
     const beforeForeign = entered;

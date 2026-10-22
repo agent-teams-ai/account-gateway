@@ -11,7 +11,7 @@ import type { Server } from 'node:http';
 import { createFacade, FacadeBearers } from '../src/facade.ts';
 import type { ManagementBearer } from '../src/facade.ts';
 import { IntentSecrets } from '../src/management-store.ts';
-import { codexOAuthProfile } from '../src/management.ts';
+import { codexOAuthProfile, claudeOAuthProfile } from '../src/management.ts';
 import type { CandidateJournal, CandidateMapping, ManagementStore, PhysicalCandidate } from '../src/management.ts';
 import { NativeFailure, NativeOAuthEnrollmentClient } from '../src/native-client.ts';
 import { composeServiceControl, composeServiceNative } from '../src/service.ts';
@@ -82,7 +82,9 @@ test('OAuth callback ingress accepts genuine encoding and rejects aliases, malfo
 
 // Source boundary fixtures have test-owned committed state and real HTTP hops.
 // They qualify neither SQL transactions nor Go middleware/provider transport.
-async function sourceHTTP(oauth: boolean, outputEnvelope = false) {
+async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false) {
+  const oauthProfile = oauth === 'claude' ? claudeOAuthProfile : codexOAuthProfile;
+  const oauthPath = '/private/native/v1/' + (oauth === 'claude' ? 'claude/oauth' : 'oauth');
   const consumerId = 'source-consumer', worker = randomUUID();
   let issuer: string = randomUUID();
   const context = { consumerId }, enrollment = { originRef: 'source-origin', engineIncarnation: randomUUID(), worker };
@@ -246,14 +248,14 @@ async function sourceHTTP(oauth: boolean, outputEnvelope = false) {
       const tuple = chunks.length ? strictJSON(Buffer.concat(chunks)) as Record<string, unknown> : {};
       const path = req.url!; seen.push({ path: req.method + ' ' + path, tuple });
       const reply = (body: unknown, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
-      if (path === '/private/native/v1/oauth/refresh') {
+      if (path === oauthPath + '/refresh') {
         assert.equal(req.method, 'POST'); assert.equal(req.headers.authorization, 'Bearer ' + consumer.managementCredential);
         const grant = await callback('oauth-refresh-authority', { consumerId, operationId: tuple.operation,
           accountRef: tuple.account_ref, generation: tuple.generation });
         if (grant.status !== 200) { reply({ code: 'denied' }, 403); return; }
         reply({ operation: tuple.operation, account_ref: tuple.account_ref, state: 'idle' }); return;
       }
-      if (path.startsWith('/private/native/v1/oauth/connect')) {
+      if (path.startsWith(oauthPath + '/connect')) {
         assert.equal(req.method, 'POST'); assert.equal(req.headers.authorization, 'Bearer ' + consumer.managementCredential);
         assert.deepEqual(Object.keys(tuple).sort(), path.endsWith('/complete') ?
           ['account_ref','code','generation','operation','owner_ref','state'] : ['account_ref','generation','operation','owner_ref']);
@@ -270,7 +272,7 @@ async function sourceHTTP(oauth: boolean, outputEnvelope = false) {
           if (descriptorMode === 'timeout') return;
           reply(descriptorReply ?? { operation: tuple.operation, account_ref: tuple.account_ref, state: 'staged', qualification: 'pending' }); return;
         }
-        if (path === '/private/native/v1/oauth/connect') begins++;
+        if (path === oauthPath + '/connect') begins++;
         if (path.endsWith('/complete')) {
           assert.equal(tuple.state, 'a'.repeat(64));
           completions++;
@@ -328,7 +330,7 @@ async function sourceHTTP(oauth: boolean, outputEnvelope = false) {
   const listen = async (server: Server) => { await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     const a = server.address(); assert.ok(a && typeof a === 'object'); return 'http://127.0.0.1:' + a.port; };
   const origin = await listen(peer);
-  const selected = oauth ? codexOAuthProfile.profile : profile.profile;
+  const selected = oauth ? oauthProfile.profile : profile.profile;
   const preparation = { accountRefs: [], subjectRef: 'source-subject', policyRevision: 1, bindingRevision: 1,
     profileId: selected, limits: secondProfile.limits, maxRunMs: 20_000 };
   const managementGrant = { token: 'source-public-management', role: 'management' as const, consumerId,
@@ -337,7 +339,9 @@ async function sourceHTTP(oauth: boolean, outputEnvelope = false) {
     { token: 'source-public-run', role: 'run-control' as const, consumerId, ownerRefs: managementGrant.ownerRefs,
       profileIds: [profile.profile, secondProfile.profile], limits: secondProfile.limits, maxRunMs: 20_000 }];
   const cfg = { native: { executable: '/unused', sha256: 'unused', bootstrapFile: '/unused', authorityDir: '/unused', origin, originRef: enrollment.originRef, uid: 1, gid: 1 },
-    consumer, profile, secondProfile, bearers, ...(oauth ? { oauthEnrollment: { enabled: true as const,
+    consumer, profile, secondProfile, bearers, ...(oauth === 'claude' ? { claudeOAuthEnrollment: { enabled: true as const,
+      profile: 'anthropic-claude-oauth-messages-v1' as const, modelScope: ['claude-sonnet-4-6'] as const,
+      qualificationRef: 'source-claude', limits, providerTokenUpperBound: 1000 } } : oauth ? { oauthEnrollment: { enabled: true as const,
       profile: 'openai-codex-oauth-responses-v1' as const, modelScope: ['gpt-5.6-sol'] as const,
       qualificationRef: 'source-codex', limits: outputEnvelope ? { ...limits, outputBytes: 8_388_608 } : limits,
       providerTokenUpperBound: outputEnvelope ? 32_768 : 1000 } } : {}) };
@@ -1142,4 +1146,51 @@ test('v2 lifecycle readback never recovers foreign or same-owner enrollment oper
 test('usage request selection preserves the second allowed model', async () => {
   const requested=validateResponses(Buffer.from(JSON.stringify({model:'second',stream:true,store:false,service_tier:'default'})),['first','second'],100);
   assert.equal(requested,'second');
+});
+
+// Red if family is caller-selected, a Claude device flow enters native HTTP,
+// or a spent secret can be replayed after an ambiguous completion.
+test('source HTTP: Claude browser completion follows saved profile and qualified physical birth', async () => {
+  const f = await sourceHTTP('claude');
+  try {
+    f.connect('prepared');
+    const sdk = createManagementClient({ role: 'management', origin: f.facadeOrigin, token: 'source-public-management' });
+    const profiles = await sdk.profiles();
+    assert.deepEqual(profiles.profiles.find(p => p.profileId === claudeOAuthProfile.profile), {
+      profileId: claudeOAuthProfile.profile, protocol: 'openai-responses', modelIds: ['claude-sonnet-4-6'], authKinds: ['oauth'],
+    });
+    const operationId = randomUUID(), state = 'a'.repeat(64), code = 'x'.repeat(8192);
+    const begin = { operationId, ownerRef: 'owner-one', profileId: claudeOAuthProfile.profile, displayName: 'Claude fixture' };
+    const begun = await sdk.beginOAuth(begin);
+    assert.equal(begun.operation.state, 'pending');
+    const journal = f.journals.get(f.scopeKey(f.context, operationId))!;
+    const lookup = { consumerId: journal.consumerId, operationId, accountRef: journal.accountRef, generation: journal.generation };
+    assert.equal((await f.callback('oauth-owner-authority', lookup)).status, 200);
+    f.connect('completed');
+    assert.equal((await sdk.readOAuth(operationId)).state, 'pending');
+    assert.equal(f.seen.some(call => call.path === 'POST /private/native/v1/claude/oauth/refresh'), false, 'display GET cannot refresh provider credentials');
+    f.connect('prepared');
+    const before = f.seen.length;
+    assert.equal((await f.publicCall('/v1/accounts/oauth/begin', { ...begin, operationId: randomUUID(), method: 'device_code' })).status, 403);
+    assert.equal((await f.publicCall('/v1/accounts/oauth/poll', { operationId, ownerRef: 'owner-one' })).status, 403);
+    const wrongFamily = { operationId, ownerRef: 'owner-one', callbackURL: 'http://localhost:1455/auth/callback?code=fixture&state=' + state };
+    assert.equal((await f.publicCall('/v1/accounts/oauth/complete', wrongFamily)).status, 400);
+    assert.equal(f.seen.length, before, 'wrong family and method reject before protected native request');
+    const input = { operationId, ownerRef: 'owner-one', authorizationCode: code + '#' + state };
+    assert.equal((await f.publicCall('/v1/accounts/oauth/complete', { ...input, ownerRef: 'owner-two' })).status, 403);
+    const d: PhysicalCandidate = { ...claudeOAuthProfile, generation: journal.generation,
+      nativePhysicalIdentity: journal.generation, nativeId: 42, createdAt: '2026-10-06T01:02:03.123456789Z' };
+    f.descriptor({ operation: operationId, account_ref: journal.accountRef, state: 'staged', qualification: 'controlled-source-v1',
+      native: { account_id: d.nativeId, generation: d.generation, created_at: d.createdAt,
+        profile: d.profile, base_url: d.baseURL, model: d.model } });
+    const applied = await sdk.completeOAuth(input);
+    assert.equal(applied.state, 'applied'); assert.equal(f.completions(), 1);
+    assert.deepEqual(f.seen.find(s => s.path === 'POST /private/native/v1/claude/oauth/connect/complete')?.tuple,
+      { operation: operationId, owner_ref: journal.ownerRef, account_ref: journal.accountRef, generation: journal.generation, state, code });
+    assert.deepEqual(await sdk.completeOAuth(input), applied); assert.equal(f.completions(), 1);
+    assert.equal((await sdk.get(journal.accountRef)).state, 'active');
+    assert.equal(JSON.stringify(applied).includes(code), false);
+    f.control.bearers.replace([]);
+    assert.equal((await f.callback('oauth-owner-authority', lookup)).status, 403);
+  } finally { await f.close(); }
 });

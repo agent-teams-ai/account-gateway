@@ -18,3 +18,5 @@ export { ACCOUNT_LIMITS_CONTRACT, accountLimitsRequest, accountLimitsCapabilitie
 export type { AccountLimitsRequest, AccountLimitsCapabilities, AccountLimits } from '../features/facade-client/contracts/index.js';
 export { accountLimitsResult } from '../features/facade-client/contracts/index.js';
 export type { AccountLimitsResult } from '../features/facade-client/contracts/index.js';
+
+export { codexOAuthAuthorizationURL, claudeOAuthAuthorizationURL } from '../features/facade-client/contracts/index.js';

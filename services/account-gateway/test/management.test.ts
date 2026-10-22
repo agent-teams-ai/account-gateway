@@ -7,7 +7,7 @@ import { readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { IntentSecrets } from '../src/management-store.ts';
 import { NativeFailure, NativeManagementClient, NativeRetainedCustodyClient, NativeOAuthEnrollmentClient, NativeOAuthLifecycleClient } from '../src/native-client.ts';
-import { physicalCandidate, codexOAuthProfile } from '../src/management.ts';
+import { physicalCandidate, codexOAuthProfile, claudeOAuthProfile } from '../src/management.ts';
 import type { CandidateJournal, CandidateScope, PhysicalCandidate, OAuthScope } from '../src/management.ts';
 import { KernelError } from '../src/domain.ts';
 
@@ -109,20 +109,20 @@ test('joined Go protected descriptor first and cached success reaches TS consume
 
 // Regression: the genuine staged/source-qualified tuple was rejected, while
 // fabricated qualified/qualified or substituted birth could gain admission.
-test('OAuth descriptor HTTP accepts native provenance and denies other finite tuples', async () => {
-  const j = { ...journal(), profile: { ...codexOAuthProfile, qualificationRef: 'fixture-only' } }, d = descriptor(j);
+for (const profile of [codexOAuthProfile, claudeOAuthProfile]) test(profile.profile + ' descriptor HTTP accepts native provenance and denies other finite tuples', async () => {
+  const j = { ...journal(), profile: { ...profile, qualificationRef: 'fixture-only' } }, d = descriptor(j);
   const native = { account_id: d.nativeId, generation: d.generation, created_at: d.createdAt,
     profile: d.profile, base_url: d.baseURL, model: d.model };
   const success = { operation: j.operationId, account_ref: j.accountRef, state: 'staged', qualification: 'controlled-source-v1', native };
   let response = JSON.stringify(success);
   const server = await local((req, res) => {
-    assert.equal(req.url, '/private/native/v1/oauth/connect/descriptor');
+    assert.equal(req.url, '/private/native/v1/' + (profile === claudeOAuthProfile ? 'claude/oauth' : 'oauth') + '/connect/descriptor');
     assert.equal(req.headers.authorization, 'Bearer synthetic-control');
     req.resume(); req.on('end', () => res.end(response));
   });
   try {
     const oauth = new NativeOAuthEnrollmentClient({ origin: server.origin, consumerId: j.consumerId,
-      ownerRef: j.ownerRef, controlCredential: 'synthetic-control' });
+      ownerRef: j.ownerRef, profileId: profile.profile, controlCredential: 'synthetic-control' });
     assert.deepEqual(await oauth.describe(j), { operationId: j.operationId, accountRef: j.accountRef,
       state: 'qualified', qualification: 'controlled-source-v1', native: d });
     const { native: _native, ...pending } = { ...success, qualification: 'pending' };
@@ -143,15 +143,15 @@ test('OAuth descriptor HTTP accepts native provenance and denies other finite tu
 
 // Regression: credential erasure was treated as transport/effect closure, or
 // cleanup sent native IDs/private enrollment operations instead of scoped claims.
-test('OAuth cleanup HTTP preserves erased-but-unknown and validates closed receipts', async () => {
-  const j = { ...journal(), profile: { ...codexOAuthProfile, qualificationRef: 'fixture-only' } }, d = descriptor(j);
+for (const profile of [codexOAuthProfile, claudeOAuthProfile]) test(profile.profile + ' cleanup HTTP preserves erased-but-unknown and validates closed receipts', async () => {
+  const j = { ...journal(), profile: { ...profile, qualificationRef: 'fixture-only' } }, d = descriptor(j);
   const authority = { cleanupRef: randomUUID(), cleanupToken: randomUUID() };
   const native = { account_id: d.nativeId, generation: d.generation, created_at: d.createdAt,
     profile: d.profile, base_url: d.baseURL, model: d.model };
   const receipt = { operation: j.operationId, account_ref: j.accountRef, credentials_erased: true, closure: 'unknown', native };
   let response = JSON.stringify(receipt);
   const server = await local((req, res) => {
-    assert.equal(req.url, '/private/native/v1/oauth/connect/cleanup'); assert.equal(req.method, 'POST');
+    assert.equal(req.url, '/private/native/v1/' + (profile === claudeOAuthProfile ? 'claude/oauth' : 'oauth') + '/connect/cleanup'); assert.equal(req.method, 'POST');
     assert.equal(req.headers.authorization, 'Bearer synthetic-cleanup');
     const chunks: Buffer[] = []; req.on('data', chunk => chunks.push(chunk as Buffer));
     req.on('end', () => {
@@ -163,7 +163,7 @@ test('OAuth cleanup HTTP preserves erased-but-unknown and validates closed recei
   });
   try {
     const client = new NativeOAuthLifecycleClient({ origin: server.origin, consumerId: j.consumerId,
-      ownerRef: j.ownerRef, controlCredential: 'synthetic-cleanup' });
+      ownerRef: j.ownerRef, profileId: profile.profile, controlCredential: 'synthetic-cleanup' });
     assert.deepEqual(await client.cleanup(j, authority, 'erase'), { operationId: j.operationId, accountRef: j.accountRef,
       credentialsErased: true, closure: 'unknown', native: d });
     const { native: _native, ...unbound } = { ...receipt, closure: 'closed' };
@@ -375,9 +375,9 @@ test('actual HTTP header bound and ingress key bound fail with classified errors
 
 
 // Independent wire tests catch wrong protocol/descriptor/purpose acceptance.
-for (const oauth of [false, true]) test('retained custody HTTP binds exact ' + (oauth ? 'OAuth' : 'API-key') + ' scope and rejects unknown peers', async () => {
-  const source = journal();
-  const j = { ...source, ...(oauth ? { profile: { ...codexOAuthProfile, qualificationRef: 'fixture-only' } } : {}) };
+for (const profile of [undefined, codexOAuthProfile, claudeOAuthProfile]) test('retained custody HTTP binds exact ' + (profile?.profile ?? 'API-key') + ' scope and rejects unknown peers', async () => {
+  const source = journal(), oauth = !!profile;
+  const j = { ...source, ...(profile ? { profile: { ...profile, qualificationRef: 'fixture-only' } } : {}) };
   const d = descriptor(j), mapping = { ...j, descriptor: d };
   const native = { account_id: d.nativeId, generation: d.generation, created_at: d.createdAt,
     profile: d.profile, base_url: d.baseURL, model: d.model };
@@ -389,7 +389,7 @@ for (const oauth of [false, true]) test('retained custody HTTP binds exact ' + (
   const server = await local((req, res) => {
     calls++; assert.equal(req.headers.authorization, 'Bearer synthetic-control');
     assert.equal(req.method, oauth ? 'POST' : 'GET');
-    assert.equal(req.url, oauth ? '/private/native/v1/oauth/connect/custody' : '/private/native/v1/candidates/' + j.generation + '/custody');
+    assert.equal(req.url, oauth ? '/private/native/v1/' + (profile === claudeOAuthProfile ? 'claude/oauth' : 'oauth') + '/connect/custody' : '/private/native/v1/candidates/' + j.generation + '/custody');
     const chunks: Buffer[] = []; req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('end', () => { received.push(JSON.parse(Buffer.concat(chunks).toString())); res.end(JSON.stringify(reply)); });
   });
