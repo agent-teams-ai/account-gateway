@@ -76,6 +76,13 @@ jobs:
       - run: node --test --test-concurrency=1 services/account-gateway/test/postgres.test.ts services/account-gateway/test/management-postgres.test.ts services/account-gateway/test/facade-postgres.test.ts
       - name: Durable usage journal against its own empty disposable database
         run: node --test services/account-gateway/test/usage-postgres.test.ts
+      - name: Protected usage capacity against its own empty disposable database
+        env:
+          AG_USAGE_CAPACITY_DISPOSABLE_DB: ag_usage_capacity_test_ci
+          AG_USAGE_CAPACITY_TEST_DSN: postgresql://postgres@127.0.0.1:5432/ag_usage_capacity_test_ci
+        run: |
+          docker exec "${{ job.services.postgres.id }}" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ag_usage_capacity_test_ci'
+          node --test services/account-gateway/test/usage-capacity-postgres.test.ts
       - name: Protected OAuth enrollment against its own empty disposable database
         env:
           AG_MANAGEMENT_DISPOSABLE_DB: ag_kernel_test_oauth_enrollment_ci

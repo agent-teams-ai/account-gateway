@@ -4,6 +4,8 @@ import { usageObservation } from '@agent-teams/account-gateway/contracts';
 import type { UsageObservation, UsagePage, UsageQuery } from '@agent-teams/account-gateway/contracts';
 import { KernelError } from './domain.ts';
 import type { TrustedContext } from './domain.ts';
+import { sharedCheckout } from './service-admission.ts';
+import type { Checkout } from './service-admission.ts';
 
 export interface UsageJournal {
   observe(context: TrustedContext, executionRef: string, requestRef: string): Promise<UsageObservation | null>;
@@ -13,17 +15,25 @@ export interface UsageJournal {
 // Every writer holds the counter lock through commit. A captured high water
 // therefore cannot hide an earlier uncommitted insert or late correction.
 export class PostgresUsageJournal implements UsageJournal {
-  readonly #pool: Pool; readonly #key: Uint8Array;
-  constructor(pool: Pool, key: Uint8Array) { this.#pool = pool; this.#key = createHash('sha256').update(key).update('usage-cursor-v1').digest(); }
+  readonly #checkout: Checkout; readonly #key: Uint8Array;
+  constructor(pool: Pool, key: Uint8Array) { this.#checkout = sharedCheckout(pool); this.#key = createHash('sha256').update(key).update('usage-cursor-v1').digest(); }
   async observe(context: TrustedContext, executionRef: string, requestRef: string): Promise<UsageObservation | null> {
-    const result = await this.#pool.query('SELECT fact FROM ag_kernel.usage_observations WHERE consumer=$1 AND execution_ref=$2 AND request_ref=$3 ORDER BY revision DESC LIMIT 1',
-      [context.consumerId, executionRef, requestRef]);
-    return result.rows.length ? usageObservation.parse(result.rows[0].fact) : null;
+    const db = await this.#checkout();
+    let failed = false; const onError = () => { failed = true; }; db.on('error', onError);
+    try {
+      const result = await db.query('SELECT fact FROM ag_kernel.usage_observations WHERE consumer=$1 AND execution_ref=$2 AND request_ref=$3 ORDER BY revision DESC LIMIT 1',
+        [context.consumerId, executionRef, requestRef]);
+      if (failed) throw new KernelError('unavailable');
+      return result.rows.length ? usageObservation.parse(result.rows[0].fact) : null;
+    } finally { db.removeListener('error', onError); db.release(failed); }
   }
   async append(context: TrustedContext, input: UsageObservation): Promise<void> {
-    const fact = usageObservation.parse(input), db = await this.#pool.connect();
+    const fact = usageObservation.parse(input), db = await this.#checkout();
+    let transaction = false, destroy = false;
+    const onError = () => { destroy = true; }; db.on('error', onError);
     try {
       await db.query('BEGIN');
+      transaction = true;
       await db.query('SELECT value FROM ag_kernel.usage_feed_counter WHERE singleton FOR UPDATE');
       const previous = await db.query('SELECT fact FROM ag_kernel.usage_observations WHERE consumer=$1 AND execution_ref=$2 AND request_ref=$3 AND revision=$4',
         [context.consumerId, fact.executionRef, fact.requestRef, fact.revision]);
@@ -35,7 +45,13 @@ export class PostgresUsageJournal implements UsageJournal {
           [position.rows[0].value, context.consumerId, fact.executionRef, fact.requestRef, fact.revision, fact]);
       }
       await db.query('COMMIT');
-    } catch (error) { await db.query('ROLLBACK'); throw error; } finally { db.release(); }
+      transaction = false;
+      if (destroy) throw new KernelError('unavailable');
+    } catch (error) {
+      if (transaction) { try { await db.query('ROLLBACK'); } catch { destroy = true; } }
+      else destroy = true;
+      throw error;
+    } finally { db.removeListener('error', onError); db.release(destroy); }
   }
   #cursor(consumer: string, after: string, high: string): string {
     const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', this.#key, iv);
@@ -60,32 +76,32 @@ export class PostgresUsageJournal implements UsageJournal {
   async list(context: TrustedContext, query: UsageQuery): Promise<UsagePage> {
     const limit = query.limit ?? 100;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new KernelError('invalid');
-    let after = '0', high: string;
-    if (query.afterCursor) {
-      const values = this.#readCursor(context.consumerId, query.afterCursor);
-      after = values[0]; high = values[1];
+    const previous = query.afterCursor ? this.#readCursor(context.consumerId, query.afterCursor) : undefined;
+    const bound = query.highWaterCursor ? this.#readCursor(context.consumerId, query.highWaterCursor) : undefined;
+    const after = previous?.[0] ?? '0';
+    if (bound && (bound[0] !== bound[1] || (previous && previous[1] !== bound[1]) || BigInt(after) > BigInt(bound[1]))) throw new KernelError('invalid');
+    const db = await this.#checkout();
+    let failed = false; const onError = () => { failed = true; }; db.on('error', onError);
+    try {
       // A completed page begins a new captured window on its next request.
-      if (after === high && !query.highWaterCursor) high = String((await this.#pool.query('SELECT value FROM ag_kernel.usage_feed_counter WHERE singleton')).rows[0].value);
-    } else high = String((await this.#pool.query('SELECT value FROM ag_kernel.usage_feed_counter WHERE singleton')).rows[0].value);
-    if (query.highWaterCursor) {
-      const bound = this.#readCursor(context.consumerId, query.highWaterCursor);
-      if (bound[0] !== bound[1] || (query.afterCursor && high !== bound[1]) || BigInt(after) > BigInt(bound[1])) throw new KernelError('invalid');
-      high = bound[1];
-    }
-    const rows = await this.#pool.query('SELECT position,fact FROM ag_kernel.usage_observations WHERE consumer=$1 AND position>$2 AND position<=$3 ORDER BY position LIMIT $4',
-      [context.consumerId, after, high, limit]);
-    // Facade control responses have a hard 64KiB bound. A full count-based
-    // page can exceed it with valid maximal references; never skip those rows.
-    const observations: UsageObservation[] = [];
-    let bytes = 0, last = after;
-    for (const row of rows.rows) {
-      const fact = usageObservation.parse(row.fact), size = Buffer.byteLength(JSON.stringify(fact)) + 1;
-      if (bytes + size > 55_000) break;
-      observations.push(fact); bytes += size; last = String(row.position);
-    }
-    if (observations.length === rows.rows.length && rows.rows.length < limit) last = high;
-    const highWaterCursor = query.highWaterCursor ?? this.#cursor(context.consumerId, high, high);
-    return { observations, nextCursor: last === high ? highWaterCursor : this.#cursor(context.consumerId, last, high), highWaterCursor };
+      const high = bound?.[1] ?? (previous && previous[0] !== previous[1] ? previous[1] :
+        String((await db.query('SELECT value FROM ag_kernel.usage_feed_counter WHERE singleton')).rows[0].value));
+      const rows = await db.query('SELECT position,fact FROM ag_kernel.usage_observations WHERE consumer=$1 AND position>$2 AND position<=$3 ORDER BY position LIMIT $4',
+        [context.consumerId, after, high, limit]);
+      // Facade control responses have a hard 64KiB bound. A full count-based
+      // page can exceed it with valid maximal references; never skip those rows.
+      const observations: UsageObservation[] = [];
+      let bytes = 0, last = after;
+      for (const row of rows.rows) {
+        const fact = usageObservation.parse(row.fact), size = Buffer.byteLength(JSON.stringify(fact)) + 1;
+        if (bytes + size > 55_000) break;
+        observations.push(fact); bytes += size; last = String(row.position);
+      }
+      if (observations.length === rows.rows.length && rows.rows.length < limit) last = high;
+      const highWaterCursor = query.highWaterCursor ?? this.#cursor(context.consumerId, high, high);
+      if (failed) throw new KernelError('unavailable');
+      return { observations, nextCursor: last === high ? highWaterCursor : this.#cursor(context.consumerId, last, high), highWaterCursor };
+    } finally { db.removeListener('error', onError); db.release(failed); }
   }
 }
 

@@ -117,9 +117,21 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/src/usage.ts]
     entrypoints: [services/account-gateway/src/usage.ts]
-    allow: {boundaries: [kernel-domain, contracts], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:crypto'], runtimeReferences: []}
+    allow: {boundaries: [kernel-domain, kernel-postgres, contracts], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:crypto'], runtimeReferences: []}
   - id: usage-tests
     dependencyMode: runtime
-    roots: [services/account-gateway/test/usage.test.ts, services/account-gateway/test/usage-postgres.test.ts]
-    entrypoints: [services/account-gateway/test/usage.test.ts, services/account-gateway/test/usage-postgres.test.ts]
-    allow: {boundaries: [usage-journal, contracts, native-transport-http], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:fs/promises'], runtimeReferences: []}
+    roots: [services/account-gateway/test/usage.test.ts, services/account-gateway/test/usage-postgres.test.ts, services/account-gateway/test/usage-checkout.test.ts]
+    entrypoints: [services/account-gateway/test/usage.test.ts, services/account-gateway/test/usage-postgres.test.ts, services/account-gateway/test/usage-checkout.test.ts]
+    allow: {boundaries: [usage-journal, contracts, native-transport-http], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:fs/promises', 'node:events'], runtimeReferences: []}
+
+  - id: usage-capacity-tests
+    dependencyMode: runtime
+    roots: [services/account-gateway/test/usage-capacity-postgres.test.ts]
+    entrypoints: [services/account-gateway/test/usage-capacity-postgres.test.ts]
+    allow: {boundaries: [usage-journal, kernel-domain, kernel-postgres, private-facade, native-management, native-management-postgres, native-management-http], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:timers/promises'], runtimeReferences: []}
+
+  - id: service-usage-runtime-test
+    dependencyMode: runtime
+    roots: [services/account-gateway/test/service-usage-runtime.test.ts]
+    entrypoints: [services/account-gateway/test/service-usage-runtime.test.ts]
+    allow: {boundaries: [foreground-service-entry, contracts, http], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:http', 'node:https', 'node:timers/promises'], runtimeReferences: []}

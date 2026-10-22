@@ -3,7 +3,7 @@ import type { NativeUsage } from './usage.ts';
 import { ResponsesUsageCapture } from './usage.ts';
 import type { UsageJournal } from './usage.ts';
 import { createServer } from 'node:http';
-import { ServiceCapacityError, facadeControlRoute, inServiceLane } from './service-admission.ts';
+import { ServiceCapacityError, facadeControlRoute, facadeUsageReadRoute, inServiceLane } from './service-admission.ts';
 import type { ServiceAdmission } from './service-admission.ts';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -457,7 +457,9 @@ export function createFacade(options: FacadeOptions): Server {
     if (controlOnly && !facadeControlRoute(req.method, req.url)) {
       send(res, c.safeError, safe('invalid_request', 'not_dispatched'), 400); return;
     }
-    const selected = controlOnly ? 'control' : 'data';
+    // Analytics reads may enter the protected origin, but do not consume the
+    // admission or PostgreSQL slots reserved for proof/cleanup control work.
+    const selected = controlOnly && !facadeUsageReadRoute(req.method, req.url) ? 'control' : 'data';
     const release = admission?.reserve(selected);
     if (admission && !release) {
       res.shouldKeepAlive = false;
