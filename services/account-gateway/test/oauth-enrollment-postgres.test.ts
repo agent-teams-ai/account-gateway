@@ -100,7 +100,7 @@ function input(): OAuthBeginInput {
 }
 function sdkInput(command: OAuthBeginInput): c.OAuthBegin {
   return { operationId: command.operationId, ownerRef: command.ownerRef,
-    profileId: command.profile, displayName: command.displayName };
+    profileId: command.profile, displayName: command.displayName, ...(command.method === undefined ? {} : { method: command.method }) };
 }
 interface ConnectWire {
   operation: string; owner_ref: string; account_ref: string; generation: string;
@@ -133,6 +133,8 @@ async function fixture(options: FixtureOptions = {}) {
   const kernel = new PostgresKernel(pool), store = new PostgresManagementStore(pool, custody);
   const worker = randomUUID(); await kernel.heartbeat(context, worker);
   const rows = new Map<string, NativeReadback>(), nativeIntents = new Map<string, ConnectWire>();
+  const deviceOperations = new Set<string>(), pollRequests: ConnectWire[] = [];
+  let dropPollACK = false;
   const requests: { path: string; input: ConnectWire }[] = [], observedJournals: CandidateJournal[] = [];
   const descriptorScopes: OAuthScope[] = [];
   const cleanupRequests: { action: string; generation: string }[] = [];
@@ -183,12 +185,14 @@ async function fixture(options: FixtureOptions = {}) {
         res.end(JSON.stringify({ operation: submitted.operation, account_ref: submitted.account_ref, state: mode })); return;
       }
       if (req.method === 'POST' && (req.url === '/private/native/v1/oauth/connect' ||
-          req.url === '/private/native/v1/oauth/connect/read')) {
+          req.url === '/private/native/v1/oauth/connect/read' || req.url === '/private/native/v1/oauth/connect/poll')) {
         const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk as Buffer);
-        const submitted = JSON.parse(Buffer.concat(chunks).toString()) as ConnectWire;
+        const { method, ...submitted } = JSON.parse(Buffer.concat(chunks).toString()) as ConnectWire & { method?: string };
         assert.deepEqual(Object.keys(submitted).sort(), ['account_ref', 'generation', 'operation', 'owner_ref']);
         assert.equal(submitted.owner_ref, owner);
         const isBegin = req.url === '/private/native/v1/oauth/connect';
+        const isPoll = req.url === '/private/native/v1/oauth/connect/poll';
+        if (!isBegin) assert.equal(method, undefined, 'method cannot change on read/poll');
         requests.push({ path: req.url, input: submitted });
         if (isBegin) {
           begins++;
@@ -200,18 +204,28 @@ async function fixture(options: FixtureOptions = {}) {
           observedJournals.push(committed);
           assert.equal(nativeIntents.has(submitted.operation), false, 'one native Begin per operation');
           nativeIntents.set(submitted.operation, submitted);
+          if (method === 'device_code') deviceOperations.add(submitted.operation);
           rows.set(submitted.generation, { generation: submitted.generation, nativePhysicalIdentity: submitted.generation,
             nativeId: ++nextNativeId, createdAt: birth, state: 'inactive', ...codexOAuthProfile });
           if (options.lostACK) { req.socket.destroy(); return; }
         } else {
           assert.deepEqual(submitted, nativeIntents.get(submitted.operation), 'Read retains the entire original native intent');
         }
+        const device = deviceOperations.has(submitted.operation);
+        if (isPoll) {
+          assert.equal(device, true, 'browser operation must be rejected before native poll');
+          pollRequests.push(submitted);
+          if (dropPollACK) { req.socket.destroy(); return; }
+        }
         // Actual F3 connect wire: prepared on Begin, entered on callback entry,
         // completed with custody outcome staged. Never state:"staged" here.
         res.setHeader('content-type', 'application/json');
         res.end(JSON.stringify({ operation: submitted.operation, account_ref: submitted.account_ref, state: connectState,
           ...(connectState === 'completed' ? { outcome: 'staged' } : {}),
-          ...(isBegin && connectState === 'prepared' ? { authorize_url: responseURL } : {}),
+          ...(device ? { method: 'device_code' } : {}),
+          ...(isBegin && connectState === 'prepared' ? (device ? { device_authorization: {
+            user_code: 'ABCD-EFGH', verification_url: 'https://auth.openai.com/codex/device',
+            expires_at: '2099-01-01T00:00:00Z', interval_seconds: 5 } } : { authorize_url: responseURL }) : {}),
           ...(isBegin ? beginPatch : replyPatch) }));
         return;
       }
@@ -306,7 +320,7 @@ async function fixture(options: FixtureOptions = {}) {
   }
   let origin = await startFacade();
   const client = () => createManagementClient({ role: 'management', origin, token });
-  return { context, kernel, store, worker, oauth, native, descriptorBoundary: descriptor, rows, requests, observedJournals, descriptorScopes,
+  return { context, kernel, store, worker, oauth, native, descriptorBoundary: descriptor, rows, requests, observedJournals, descriptorScopes, pollRequests,
     client, callback, bearers, grant: () => grant(token, [owner]), refreshRequests, refreshModes, cleanupRequests, erased,
     cleanupMode(closure: 'closed' | 'unknown', droppedACK = false) { cleanupClosure = closure; loseEraseACK = droppedACK; },
     foreign: () => createManagementClient({ role: 'management', origin, token: foreignToken }),
@@ -318,6 +332,7 @@ async function fixture(options: FixtureOptions = {}) {
     descriptorWire(patch: Readonly<Record<string, unknown>>) { descriptorWirePatch = patch; },
     replies(patch: Record<string, unknown>, begin = false) { if (begin) beginPatch = patch; else replyPatch = patch; },
     url(value: string) { responseURL = value; },
+    losePollACK() { dropPollACK = true; },
     holdDescriptor() {
       descriptorBarrier = { entered: Promise.withResolvers<void>(), released: Promise.withResolvers<void>() };
       return { entered: descriptorBarrier.entered.promise, release: descriptorBarrier.released.resolve };
@@ -378,6 +393,93 @@ async function activeOAuth(f: Fixture): Promise<CandidateJournal> {
 function selectors(j: CandidateJournal): OAuthSelectors {
   return { consumerId: j.consumerId, operationId: j.operationId, accountRef: j.accountRef, generation: j.generation };
 }
+
+// Regression: implicit read polling, owner substitution, method switching or a
+// replayed handoff could consume another owner's intent or re-exchange tokens.
+test('device enrollment binds method/owner and promotes through the original qualification path', async () => {
+  const f = await fixture({ descriptor: 'qualified' });
+  const command = { ...input(), method: 'device_code' as const };
+  try {
+    const begun = await f.client().beginOAuth(sdkInput(command));
+    assert.equal(begun.operation.state, 'pending'); assert.equal(begun.operation.oauthMethod, 'device_code');
+    assert.deepEqual(begun.deviceAuthorization, { userCode: 'ABCD-EFGH', verificationURL: 'https://auth.openai.com/codex/device',
+      expiresAt: '2099-01-01T00:00:00Z', intervalSeconds: 5 });
+    assert.equal(begun.authorizationURL, undefined);
+    const j = await journal(f, command), poll = { operationId: command.operationId, ownerRef: owner };
+    const duplicate = await f.client().beginOAuth(sdkInput(command));
+    assert.deepEqual(duplicate, { operation: begun.operation });
+    await assert.rejects(f.client().beginOAuth({ ...sdkInput(command), method: 'browser' }),
+      e => e instanceof GatewayError && e.diagnostic?.code === 'conflict');
+    await assert.rejects(f.foreign().pollDeviceOAuth(poll), denied);
+    await assert.rejects(f.client().pollDeviceOAuth({ ...poll, ownerRef: 'foreign-owner' }), denied);
+    await assert.rejects(f.client().completeOAuth({ ...poll,
+      callbackURL: 'http://localhost:1455/auth/callback?state=' + 'a'.repeat(64) + '&code=fixture' }), denied);
+    assert.equal(f.pollRequests.length, 0);
+    await f.restart();
+    assert.equal((await f.client().readOAuth(command.operationId)).oauthMethod, 'device_code');
+    assert.equal(f.pollRequests.length, 0, 'read/restart never drives device polling');
+    f.bearers.replace([]);
+    await assert.rejects(f.client().pollDeviceOAuth(poll), e => e instanceof GatewayError && e.diagnostic?.code === 'unauthenticated');
+    assert.equal(f.pollRequests.length, 0, 'revoked management grant never drives native polling');
+    f.bearers.replace([f.grant()]);
+    assert.equal((await f.client().pollDeviceOAuth(poll)).state, 'pending');
+    assert.deepEqual(f.pollRequests, [wire(scope(j))]);
+    f.state('completed'); f.descriptor('pending');
+    assert.equal((await f.client().pollDeviceOAuth(poll)).state, 'pending', 'custody alone never promotes');
+    f.descriptor('qualified');
+    assert.equal((await f.client().readOAuth(command.operationId)).state, 'applied');
+    assert.equal((await f.kernel.account(f.context, j.accountRef)).state, 'active');
+    const polls = f.pollRequests.length;
+    assert.equal((await f.client().pollDeviceOAuth(poll)).state, 'applied');
+    assert.equal(f.pollRequests.length, polls, 'terminal poll cannot exchange again');
+    assert.deepEqual(await f.store.readJournal(f.context, command.operationId), j);
+    assert.equal(f.stats().begins, 1); assert.equal(f.stats().activations, 0); await f.assertHealthy();
+  } finally { await f.close(); }
+});
+
+test('browser compatibility and device reconnect preserve one method and original account', async () => {
+  const f = await fixture({ descriptor: 'qualified' }), command = input();
+  try {
+    const begun = await f.client().beginOAuth(sdkInput(command));
+    assert.ok(begun.authorizationURL); assert.equal(begun.operation.oauthMethod, undefined);
+    assert.deepEqual(await f.client().beginOAuth({ ...sdkInput(command), method: 'browser' }), { operation: begun.operation });
+    await assert.rejects(f.client().beginOAuth({ ...sdkInput(command), method: 'device_code' }),
+      e => e instanceof GatewayError && e.diagnostic?.code === 'conflict');
+    await assert.rejects(f.client().pollDeviceOAuth({ operationId: command.operationId, ownerRef: owner }), denied);
+    f.state('completed'); assert.equal((await f.client().readOAuth(command.operationId)).state, 'applied');
+    const original = await journal(f, command), account = await f.kernel.account(f.context, original.accountRef);
+    f.state('prepared');
+    const reconnect = { operationId: randomUUID(), expectedMetadataRevision: account.revision, method: 'device_code' as const };
+    const next = await f.client().beginOAuthReconnect(original.accountRef, reconnect);
+    assert.ok(next.deviceAuthorization); assert.equal(next.operation.oauthMethod, 'device_code');
+    const replacement = await f.store.readJournal(f.context, reconnect.operationId); assert.ok(replacement);
+    assert.equal(replacement.accountRef, original.accountRef); assert.notEqual(replacement.generation, original.generation);
+    assert.equal(replacement.purpose, 'reconnect');
+    await assert.rejects(f.client().beginOAuthReconnect(original.accountRef, { ...reconnect, method: 'browser' }),
+      e => e instanceof GatewayError && e.diagnostic?.code === 'conflict');
+    f.state('completed');
+    assert.equal((await f.client().pollDeviceOAuth({ operationId: reconnect.operationId, ownerRef: owner })).state, 'applied');
+    assert.equal((await f.kernel.account(f.context, original.accountRef)).revision, account.revision + 1);
+    assert.equal(f.pollRequests.length, 1); assert.deepEqual(f.pollRequests[0], wire(scope(replacement)));
+    await f.assertHealthy();
+  } finally { await f.close(); }
+});
+
+test('lost device poll acknowledgement spends authority and cannot be replayed', async () => {
+  const f = await fixture(), command = { ...input(), method: 'device_code' as const };
+  try {
+    await f.client().beginOAuth(sdkInput(command)); const j = await journal(f, command);
+    const poll = { operationId: command.operationId, ownerRef: owner };
+    f.losePollACK();
+    assert.equal((await f.client().pollDeviceOAuth(poll)).state, 'unknown');
+    assert.equal((await f.client().readOAuth(command.operationId)).state, 'unknown');
+    assert.equal((await f.client().pollDeviceOAuth(poll)).state, 'unknown');
+    assert.equal((await f.client().beginOAuth(sdkInput(command))).deviceAuthorization, undefined);
+    assert.equal(f.pollRequests.length, 1); assert.equal(f.stats().begins, 1);
+    assert.deepEqual(await f.store.readJournal(f.context, command.operationId), j);
+    assert.equal((await f.kernel.account(f.context, j.accountRef)).state, 'quarantined'); await f.assertHealthy();
+  } finally { await f.close(); }
+});
 
 // RED if cleanup needs a revoked management grant or guesses an unmapped birth,
 // promotes a disabled candidate, retries erase after a lost ACK, or closes unknown.

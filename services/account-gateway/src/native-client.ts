@@ -4,10 +4,10 @@ import type { RetainedCustodyProof } from './domain.ts';
 import type { RetainedCustodyVerifier } from './management.ts';
 import { KernelError, identifier, uuid } from './domain.ts';
 import { secretSubmission } from '@agent-teams/account-gateway/http';
-import { oauthAuthorizationURL } from '@agent-teams/account-gateway/contracts';
+import { oauthAuthorizationURL, oauthDeviceAuthorization } from '@agent-teams/account-gateway/contracts';
 import { codexOAuthProfile, codexOAuthCleanupModels, exactCandidate, physicalCandidate } from './management.ts';
 import type { CandidateJournal, CandidateMapping, CandidateNative, NativeReadback, PhysicalCandidate } from './management.ts';
-import type { OAuthScope, OAuthEnrollmentNative, OAuthReadback, OAuthBeginReadback, OAuthCallback } from './management.ts';
+import type { OAuthScope, OAuthEnrollmentNative, OAuthReadback, OAuthBeginReadback, OAuthCallback, OAuthMethod } from './management.ts';
 import type { OAuthDescriptor, OAuthDescriptorBoundary } from './management.ts';
 import type { OAuthRefreshNative, OAuthRefreshReadback } from './management.ts';
 import type { OAuthLifecycleNative, OAuthCleanupAuthority, OAuthCleanupAction, OAuthCleanupReadback } from './management.ts';
@@ -313,27 +313,48 @@ export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OA
   private ack(bytes: Buffer, scope: OAuthScope, begin: boolean): OAuthBeginReadback {
     try {
       const r = object(decode(bytes), ['operation','account_ref','state'],
-        begin ? ['outcome','authorize_url'] : ['outcome']);
+        begin ? ['outcome','authorize_url','device_authorization','method'] : ['outcome','method']);
       if (r.operation !== scope.operationId || r.account_ref !== scope.accountRef ||
           !['prepared','entered','completed','expired','unknown'].includes(r.state as string)) throw new NativeFailure('invalid_readback');
+      if (Object.hasOwn(r, 'method') && r.method !== 'device_code' && r.method !== 'browser') throw new NativeFailure('invalid_readback');
       // Native outcome is not a safe DTO or a no-effect receipt. Validate its
       // bounded primitive shape then discard; never reflect vendor diagnostics.
       if (Object.hasOwn(r, 'outcome') && (typeof r.outcome !== 'string' ||
           !/^[a-z][a-z0-9_]{0,63}$/.test(r.outcome))) throw new NativeFailure('invalid_readback');
       let authorizationURL: string | undefined;
       if (Object.hasOwn(r, 'authorize_url')) {
-        if (!begin || r.state !== 'prepared') throw new NativeFailure('invalid_readback');
+        if (!begin || r.state !== 'prepared' || r.method === 'device_code') throw new NativeFailure('invalid_readback');
         const parsed = oauthAuthorizationURL.safeParse(r.authorize_url);
         if (!parsed.success) throw new NativeFailure('invalid_readback');
         authorizationURL = parsed.data;
       }
+      let deviceAuthorization: OAuthBeginReadback['deviceAuthorization'];
+      if (Object.hasOwn(r, 'device_authorization')) {
+        if (!begin || r.state !== 'prepared' || r.method !== 'device_code' || authorizationURL !== undefined) throw new NativeFailure('invalid_readback');
+        const d = object(r.device_authorization, ['user_code','verification_url','expires_at','interval_seconds']);
+        const parsed = oauthDeviceAuthorization.safeParse({ userCode: d.user_code, verificationURL: d.verification_url,
+          expiresAt: d.expires_at, intervalSeconds: d.interval_seconds });
+        if (!parsed.success) throw new NativeFailure('invalid_readback');
+        deviceAuthorization = Object.freeze(parsed.data);
+      }
       return Object.freeze({ operationId: scope.operationId, accountRef: scope.accountRef,
-        state: r.state as OAuthReadback['state'], ...(authorizationURL === undefined ? {} : { authorizationURL }) });
+        state: r.state as OAuthReadback['state'], ...(authorizationURL === undefined ? {} : { authorizationURL }),
+        ...(deviceAuthorization === undefined ? {} : { deviceAuthorization }) });
     } catch { throw new NativeFailure('invalid_readback'); }
   }
-  async begin(input: OAuthScope): Promise<OAuthBeginReadback> {
+  async begin(input: OAuthScope, method?: OAuthMethod): Promise<OAuthBeginReadback> {
     const scope = this.capture(input);
-    return this.ack(await this.call('POST', '/private/native/v1/oauth/connect', this.wire(scope)), scope, true);
+    if (method !== undefined && method !== 'device_code' && method !== 'browser') throw new NativeFailure('denied');
+    const result = this.ack(await this.call('POST', '/private/native/v1/oauth/connect',
+      { ...this.wire(scope), ...(method === undefined ? {} : { method }) }), scope, true);
+    if (method === 'device_code' ? result.authorizationURL !== undefined : result.deviceAuthorization !== undefined)
+      throw new NativeFailure('invalid_readback');
+    return result;
+  }
+  async poll(input: OAuthScope): Promise<OAuthReadback> {
+    const scope = this.capture(input);
+    const result = this.ack(await this.call('POST', '/private/native/v1/oauth/connect/poll', this.wire(scope)), scope, false);
+    return Object.freeze({ operationId: result.operationId, accountRef: result.accountRef, state: result.state });
   }
   async complete(input: OAuthScope, callback: OAuthCallback): Promise<OAuthReadback> {
     const scope = this.capture(input), state = callback.state, code = callback.code;

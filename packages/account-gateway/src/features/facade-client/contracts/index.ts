@@ -2,6 +2,7 @@ import { z } from 'zod';
 /** Single facade v1 authority: positive allowlists; no native/product models. */
 export const reference = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/);
 export const revision = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+export const oauthMethod = z.enum(['device_code', 'browser']);
 export const deadline = z.iso.datetime({ offset: true }).max(64);
 export const protocol = z.enum(['openai-chat', 'openai-responses', 'anthropic-messages']);
 export const accountState = z.enum(['staging', 'active', 'quarantined', 'rejected', 'disabled', 'tombstoned']);
@@ -20,10 +21,10 @@ export const accounts = z.strictObject({ accounts: z.array(account).max(100), ne
 export const accountResult = z.strictObject({ kind: z.literal('account'), accountRef: reference, metadataRevision: revision, authorizationEpoch: revision });
 export const executionResult = z.strictObject({ kind: z.literal('execution'), executionRef: reference, accountRef: reference, authorizationEpoch: revision, deadline, state: executionState });
 export const operation = z.discriminatedUnion('state', [
-  z.strictObject({ operationRef: reference, state: z.literal('pending') }),
-  z.strictObject({ operationRef: reference, state: z.literal('applied'), result: z.discriminatedUnion('kind', [accountResult, executionResult]).optional() }),
-  z.strictObject({ operationRef: reference, state: z.literal('rejected'), error: safeError }),
-  z.strictObject({ operationRef: reference, state: z.literal('unknown'), error: safeError.optional() }),
+  z.strictObject({ operationRef: reference, state: z.literal('pending'), oauthMethod: oauthMethod.optional() }),
+  z.strictObject({ operationRef: reference, state: z.literal('applied'), result: z.discriminatedUnion('kind', [accountResult, executionResult]).optional(), oauthMethod: oauthMethod.optional() }),
+  z.strictObject({ operationRef: reference, state: z.literal('rejected'), error: safeError, oauthMethod: oauthMethod.optional() }),
+  z.strictObject({ operationRef: reference, state: z.literal('unknown'), error: safeError.optional(), oauthMethod: oauthMethod.optional() }),
 ]).refine(v => !('error' in v) || !v.error || (
   (v.error.operationRef === undefined || v.error.operationRef === v.operationRef) &&
   (v.state !== 'unknown' || (v.error.effect !== 'not_dispatched' && v.error.effect !== 'rejected_before_dispatch' && v.error.retry.kind !== 'after')) &&
@@ -77,10 +78,17 @@ export const policyUseClosure = z.strictObject({
     v.counts.unknownEffects <= v.counts.acknowledgedNativeTransports &&
     v.counts.acknowledgedNativeTransports + v.counts.positiveKernelNonEntryRequests === v.counts.requests));
 /** Reconnect selectors are browser-safe; account owner/profile come from the server. */
-export const oauthReconnect = z.strictObject({ operationId: reference, expectedMetadataRevision: revision });
+export const oauthReconnect = z.strictObject({ operationId: reference, expectedMetadataRevision: revision, method: oauthMethod.optional() });
 /** Enrollment carries no credential, callback, model or provider-origin input. */
 export const oauthBegin = z.strictObject({ operationId: reference, ownerRef: reference,
-  profileId: reference, displayName: z.string().min(1).max(128) });
+  profileId: reference, displayName: z.string().min(1).max(128), method: oauthMethod.optional() });
+export const oauthPoll = z.strictObject({ operationId: reference, ownerRef: reference });
+/** Temporary user handoff. No native device identifier or provider token. */
+export const oauthDeviceAuthorization = z.strictObject({
+  userCode: z.string().min(1).max(64).regex(/^[A-Za-z0-9-]+$/),
+  verificationURL: z.literal('https://auth.openai.com/codex/device'),
+  expiresAt: deadline, intervalSeconds: z.number().int().min(1).max(3600),
+});
 // This is a temporary owner capability, not safe account/operation metadata.
 // Validate it without including Zod issues or the original URL in diagnostics.
 export const oauthAuthorizationURL = z.string().min(1).max(4096).refine(value => {
@@ -115,10 +123,13 @@ export const oauthAuthorizationURL = z.string().min(1).max(4096).refine(value =>
       /^[A-Za-z0-9_-]{16,512}$/.test(url.searchParams.get('state') ?? '');
   } catch { return false; }
 });
-/** Only Begin may return a URL; every ordinary read retains the safe union. */
+/** Only fresh Begin returns a handoff; ordinary reads retain the safe union. */
 export const oauthBeginResponse = z.strictObject({ operation: accountOperation,
-  authorizationURL: oauthAuthorizationURL.optional() })
-  .refine(v => v.authorizationURL === undefined || v.operation.state === 'pending');
+  authorizationURL: oauthAuthorizationURL.optional(), deviceAuthorization: oauthDeviceAuthorization.optional() })
+  .refine(v => (v.authorizationURL === undefined || v.deviceAuthorization === undefined) &&
+    (v.authorizationURL === undefined && v.deviceAuthorization === undefined || v.operation.state === 'pending') &&
+    (v.deviceAuthorization === undefined || v.operation.oauthMethod === 'device_code') &&
+    (v.authorizationURL === undefined || v.operation.oauthMethod !== 'device_code'));
 export const preparationOperation = operation.refine(v => v.state !== 'applied' || v.result?.kind === 'execution');
 export const acknowledgementOperation = operation.refine(v => v.state !== 'applied' || !v.result);
 export const execution = z.strictObject({ executionRef: reference, accountRef: reference, authorizationEpoch: revision, profileId: reference, deadline, state: executionState });
@@ -182,6 +193,9 @@ export type Operation = z.infer<typeof operation>;
 export type OAuthReconnect = z.infer<typeof oauthReconnect>;
 export type OAuthBegin = z.infer<typeof oauthBegin>;
 export type OAuthBeginResponse = z.infer<typeof oauthBeginResponse>;
+export type OAuthMethod = z.infer<typeof oauthMethod>;
+export type OAuthPoll = z.infer<typeof oauthPoll>;
+export type OAuthDeviceAuthorization = z.infer<typeof oauthDeviceAuthorization>;
 export type Execution = z.infer<typeof execution>;
 export type RequestStatus = z.infer<typeof requestStatus>;
 export type SafeError = z.infer<typeof safeError>;

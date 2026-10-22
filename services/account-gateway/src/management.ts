@@ -47,11 +47,18 @@ export interface OAuthReadback {
 }
 export interface OAuthBeginReadback extends OAuthReadback {
   readonly authorizationURL?: string;
+  readonly deviceAuthorization?: OAuthDeviceAuthorization;
+}
+export type OAuthMethod = 'device_code' | 'browser';
+export interface OAuthDeviceAuthorization {
+  readonly userCode: string; readonly verificationURL: string;
+  readonly expiresAt: string; readonly intervalSeconds: number;
 }
 export interface OAuthEnrollmentNative {
-  begin(scope: OAuthScope): Promise<OAuthBeginReadback>;
+  begin(scope: OAuthScope, method?: OAuthMethod): Promise<OAuthBeginReadback>;
   read(scope: OAuthScope): Promise<OAuthReadback>;
   complete(scope: OAuthScope, callback: OAuthCallback): Promise<OAuthReadback>;
+  poll(scope: OAuthScope): Promise<OAuthReadback>;
 }
 export interface OAuthRefreshReadback {
   readonly operationId: string; readonly accountRef: string;
@@ -96,13 +103,21 @@ export interface OAuthCompleteInput extends OAuthCallback { readonly operationId
 export interface OAuthBeginInput {
   readonly operationId: string; readonly ownerRef: string;
   readonly profile: string; readonly displayName: string;
+  readonly method?: OAuthMethod;
 }
 export interface OAuthReconnectInput {
   readonly operationId: string; readonly accountRef: string; readonly expectedRevision: number;
+  readonly method?: OAuthMethod;
 }
+export interface OAuthPollInput { readonly operationId: string; readonly ownerRef: string }
 export interface OAuthBeginResult {
   readonly operation: OperationStatus;
   readonly authorizationURL?: string;
+  readonly deviceAuthorization?: OAuthDeviceAuthorization;
+}
+function deviceMethod(method: OAuthMethod | undefined): Pick<AccountIntent, 'oauthMethod'> {
+  if (method !== undefined && method !== 'device_code' && method !== 'browser') throw new KernelError('invalid');
+  return method === 'device_code' ? { oauthMethod: method } : {};
 }
 function oauthScope(j: CandidateJournal): OAuthScope {
   return Object.freeze({ consumerId: j.consumerId, operationId: j.operationId,
@@ -283,7 +298,7 @@ export class AccountManagement {
     // Capture primitives before any await. Owner authorization belongs to the
     // trusted facade management grant, not caller-selected native headers.
     const intent: AccountIntent = { kind: 'create', operationId: input.operationId,
-      ownerRef: input.ownerRef, profile: input.profile, displayName: input.displayName, intentDigest: '' };
+      ownerRef: input.ownerRef, profile: input.profile, displayName: input.displayName, intentDigest: '', ...deviceMethod(input.method) };
     identifier(intent.operationId); identifier(intent.ownerRef); identifier(intent.profile, 64); name(intent.displayName);
     if (!this.supportsOAuthProfile(intent.profile!)) throw new KernelError('denied');
     return this.beginOAuthIntent(ctx, intent);
@@ -291,7 +306,7 @@ export class AccountManagement {
   async beginOAuthReconnect(context: TrustedContext, input: OAuthReconnectInput): Promise<OAuthBeginResult> {
     const ctx = captureContext(context);
     const intent: AccountIntent = { kind: 'reconnect', operationId: input.operationId,
-      accountRef: input.accountRef, expectedRevision: input.expectedRevision, intentDigest: '' };
+      accountRef: input.accountRef, expectedRevision: input.expectedRevision, intentDigest: '', ...deviceMethod(input.method) };
     identifier(intent.operationId); uuid(intent.accountRef); revision(intent.expectedRevision);
     const account = await this.kernel.account(ctx, intent.accountRef!);
     if (!this.supportsOAuthProfile(account.profile)) throw new KernelError('denied');
@@ -323,7 +338,7 @@ export class AccountManagement {
       // Commit original accountRef + immutable birth UUID before the sole Begin.
       const journal = await this.store.journal(scope, permit.candidate, this.worker, this.oauth!.profile);
       let begun: OAuthBeginReadback;
-      try { begun = await this.oauth!.native.begin(oauthScope(journal)); }
+      try { begun = await this.oauth!.native.begin(oauthScope(journal), intent.oauthMethod); }
       catch { return Object.freeze({ operation: await this.oauthReadback(ctx, journal) }); }
       // Invalid ACK is ambiguous. Only Read can recover the same native intent.
       if (!exactOAuthReadback(oauthScope(journal), begun)) {
@@ -332,9 +347,11 @@ export class AccountManagement {
       const current = await this.oauthReadback(ctx, journal, begun);
       // Return only an actually received Begin capability. It is never persisted
       // or reconstructed on duplicate Begin, GET, lost ACK or worker recovery.
-      return Object.freeze({ operation: current, ...(current.state === 'pending' &&
-        begun.state === 'prepared' && begun.authorizationURL !== undefined
-        ? { authorizationURL: begun.authorizationURL } : {}) });
+      const handoff = intent.oauthMethod === 'device_code'
+        ? (begun.deviceAuthorization === undefined ? {} : { deviceAuthorization: begun.deviceAuthorization })
+        : (begun.authorizationURL === undefined ? {} : { authorizationURL: begun.authorizationURL });
+      return Object.freeze({ operation: current,
+        ...(current.state === 'pending' && begun.state === 'prepared' ? handoff : {}) });
     } catch {
       return Object.freeze({ operation: await this.kernel.unknownCandidate(ctx, intent.operationId, this.worker) });
     }
@@ -345,6 +362,7 @@ export class AccountManagement {
     identifier(operationId); identifier(ownerRef);
     if (typeof callback.state !== 'string' || typeof callback.code !== 'string') throw new KernelError('invalid');
     const operation = await this.kernel.operation(ctx, operationId);
+    if (operation.oauthMethod === 'device_code') throw new KernelError('denied');
     const journal = await this.store.readJournal(ctx, operationId);
     if (!this.oauth || !journal || journal.consumerId !== ctx.consumerId || journal.operationId !== operationId ||
         journal.ownerRef !== ownerRef || !['create','reconnect'].includes(journal.purpose) || operation.accountRef !== journal.accountRef ||
@@ -378,6 +396,32 @@ export class AccountManagement {
     // cannot cause an automatic replay of the sensitive completion body.
     if (!exactOAuthReadback(scope, completed) || completed.state === 'prepared') return this.kernel.unknownCandidate(ctx, operationId, journal.worker);
     return this.oauthReadback(ctx, journal, completed);
+  }
+  async pollDeviceOAuth(context: TrustedContext, input: OAuthPollInput): Promise<OperationStatus> {
+    const ctx = captureContext(context), operationId = input.operationId, ownerRef = input.ownerRef;
+    identifier(operationId); identifier(ownerRef);
+    const operation = await this.kernel.operation(ctx, operationId);
+    const journal = await this.store.readJournal(ctx, operationId);
+    if (!this.oauth || operation.oauthMethod !== 'device_code' || !journal || journal.consumerId !== ctx.consumerId ||
+        journal.operationId !== operationId || journal.ownerRef !== ownerRef || !['create','reconnect'].includes(journal.purpose) ||
+        operation.accountRef !== journal.accountRef || operation.executionRef || journal.profile.profile !== this.oauth.profile.profile ||
+        journal.profile.baseURL !== this.oauth.profile.baseURL || journal.profile.model !== this.oauth.profile.model ||
+        journal.profile.qualificationRef !== this.oauth.profile.qualificationRef) throw new KernelError('denied');
+    const account = await this.kernel.account(ctx, journal.accountRef);
+    if (account.ownerRef !== ownerRef || account.profile !== journal.profile.profile) throw new KernelError('denied');
+    await this.kernel.reconcile(ctx);
+    const current = await this.kernel.operation(ctx, operationId);
+    if (current.state !== 'pending' || journal.worker !== this.worker) return current;
+    // Fresh candidate authority is checked again before the explicit native mutation.
+    // Native owns the durable polling interval and sole token-exchange claim.
+    const scope = oauthScope(journal);
+    if (!this.store.pendingOAuthRefresh || !await this.store.pendingOAuthRefresh(ctx, this.worker, scope, this.oauth.profile))
+      return this.kernel.unknownCandidate(ctx, operationId, journal.worker);
+    let result: OAuthReadback;
+    try { result = await this.oauth.native.poll(scope); }
+    catch { return this.kernel.unknownCandidate(ctx, operationId, journal.worker); }
+    if (!exactOAuthReadback(scope, result)) return this.kernel.unknownCandidate(ctx, operationId, journal.worker);
+    return this.oauthReadback(ctx, journal, result);
   }
   private async oauthReadback(ctx: TrustedContext, journal: CandidateJournal,
     begin?: OAuthReadback): Promise<OperationStatus> {

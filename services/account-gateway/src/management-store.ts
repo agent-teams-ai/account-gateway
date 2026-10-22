@@ -34,7 +34,8 @@ export class IntentSecrets implements IntentCustody {
     // Fixed primitive tuple binds every accepted field, including exact submitted key.
     return createHmac('sha256', this.#hmac).update(JSON.stringify(['account-gateway/intent/v1',
       accepted.context.consumerId, i.operationId, i.kind, i.accountRef ?? null, i.expectedRevision ?? null,
-      i.ownerRef ?? null, i.profile ?? null, i.displayName ?? null, accepted.apiKey ?? null])).digest('hex');
+      i.ownerRef ?? null, i.profile ?? null, i.displayName ?? null, accepted.apiKey ?? null,
+      ...(i.oauthMethod === undefined ? [] : [i.oauthMethod])])).digest('hex');
   }
   seal(scope: CandidateScope, apiKey: string): IntentEnvelope {
     const s = scopeCopy(scope);
