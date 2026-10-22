@@ -7,7 +7,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Server } from 'node:http';
 import pg from 'pg';
@@ -191,9 +191,11 @@ async function run(): Promise<void> {
   const rrModule = process.env.AG_NATIVE_DEVICE_JOINED_RR_ACCEPTANCE_MODULE;
   if (rrModule !== undefined) {
     assert.ok(isAbsolute(rrModule) && rrModule.endsWith('.mts'), 'RR acceptance module must be an explicit absolute .mts fixture');
-    const external: unknown = await import(pathToFileURL(rrModule).href);
-    assert.ok(external && typeof external === 'object' && 'acceptAccountLimits' in external && typeof external.acceptAccountLimits === 'function');
-    await bounded(external.acceptAccountLimits({ origin, token: limitsToken, input: limitsInput }));
+    // The operator explicitly preloads its consumer fixture. The source harness
+    // keeps its dependency graph closed instead of loading arbitrary modules.
+    const accept: unknown = Reflect.get(globalThis, Symbol.for('account-limits-e2e.acceptAccountLimits'));
+    assert.equal(typeof accept, 'function', 'RR acceptance fixture must be explicitly preloaded');
+    await bounded((accept as (input: {origin: string; token: string; input: typeof limitsInput}) => Promise<void>)({ origin, token: limitsToken, input: limitsInput }));
     rrAcceptance = true;
   }
   const beforeRename = await kernel.account(context, journal.accountRef);
