@@ -7,13 +7,13 @@ import { readFile, readdir } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
 import * as c from '@agent-teams/account-gateway/contracts';
-import { createManagementClient, createExecutionClient, createConsumerControlClient, createLifecycleClient, GatewayError } from '@agent-teams/account-gateway/http';
+import { createAccountLimitsClient, createManagementClient, createExecutionClient, createConsumerControlClient, createLifecycleClient, GatewayError } from '@agent-teams/account-gateway/http';
 import { createFacade, FacadeBearers, cancelFacadeTransport } from '../src/facade.ts';
 import type { FacadeOptions, ManagementBearer, ConsumerControlBearer, NativeCallback, NativePermit, NativeTransport } from '../src/facade.ts';
 import { PostgresKernel } from '../src/postgres.ts';
 import { AccountManagement, codexOAuthProfile } from '../src/management.ts';
 import { IntentSecrets, PostgresManagementStore } from '../src/management-store.ts';
-import { NativeManagementClient, NativeOAuthEnrollmentClient } from '../src/native-client.ts';
+import { NativeAccountLimitsClient, NativeManagementClient, NativeOAuthEnrollmentClient } from '../src/native-client.ts';
 import type { NativeDispatchProof } from '../src/domain.ts';
 
 let pool: pg.Pool;
@@ -766,4 +766,85 @@ test('lifecycle off-on-off keeps v2 inventory and original operation reads while
     }
     assert.equal((await f.kernel.account(f.context, f.accountRef)).state, 'suspended');
   } finally { await f.stop(); }
+});
+
+// Regression: old quota could escape a reconnect/delete/revoke while the native
+// read is awaited. Real PG kernel+mapping and both HTTP adapters fence the result.
+test('cached native limits fence owner, epoch, pending reconnect and late revocation', async () => {
+  const context = { consumerId: 'limits-' + randomUUID() }, kernel = new PostgresKernel(pool);
+  const secrets = new IntentSecrets(randomBytes(32), randomBytes(32)), store = new PostgresManagementStore(pool, secrets);
+  const worker = randomUUID(), operationId = randomUUID();
+  const ownerRef = 'limits-owner', p = { ...codexOAuthProfile, qualificationRef: 'controlled-source-v1' };
+  await kernel.heartbeat(context, worker);
+  const created = await kernel.beginAccount(context, { operationId, kind: 'create', intentDigest: randomUUID(),
+    ownerRef, profile: p.profile, displayName: 'Limits fixture' });
+  assert.ok(created.accountRef); const accountRef = created.accountRef;
+  const permit = await kernel.startCandidate(context, operationId, worker); assert.ok(permit);
+  const generation = permit.candidate;
+  const journal = await store.journal({ ...context, operationId, accountRef, ownerRef, purpose: 'create' }, generation, worker, p);
+  await store.saveMapping({ ...journal, descriptor: { ...p, nativeId: 42, generation, nativePhysicalIdentity: generation, createdAt: '2026-10-22T00:00:00Z' } });
+  await kernel.acknowledgeCandidate(context, operationId, worker, { generation, nativePhysicalIdentity: generation, profile: p.profile });
+  const a = await kernel.account(context, accountRef);
+  const input = { accountRef, ownerRef, profileId: p.profile, expectedAuthorizationEpoch: a.epoch };
+  let entered = 0, hold: Promise<void> | undefined, onRead: (() => void) | undefined;
+  let nativeResult: c.AccountLimits = { status: 'snapshot', physicalGeneration: generation, principalVersion: 'principal-v1', revision: 1,
+    scope: 'account', windows: [{ id: 'primary', family: 'codex', durationSeconds: 18000, usedPercent: 37.5,
+      observedAt: '2026-10-22T00:00:00Z', resetAt: null, basis: 'duration' }] };
+  const native = createServer((req, res) => { void (async () => {
+    assert.equal(req.headers.authorization, 'Bearer fixture-native-limits');
+    res.setHeader('content-type', 'application/json');
+    if (req.url?.endsWith('/capabilities')) { res.end(JSON.stringify({ contract: 'account-limits/v1', cachedRead: true, quotaOnlyRefresh: false })); return; }
+    assert.equal(req.url, '/private/native/v1/account-limits/read');
+    entered++; onRead?.(); await hold; res.end(JSON.stringify(nativeResult));
+  })().catch(() => res.destroy()); });
+  const nativeOrigin = await listen(native);
+  const token = 'fixture-limits-' + randomUUID();
+  const grant: ConsumerControlBearer = { role: 'consumer-control', token, ...context, profileIds: [p.profile],
+    maxRunMs: 60_000, limits };
+  const managementToken = 'fixture-limits-management-' + randomUUID(), foreignToken = 'fixture-limits-foreign-' + randomUUID();
+  const managementGrant: ManagementBearer = { role: 'management', token: managementToken, ...context, ownerRefs: [ownerRef], profileIds: [p.profile],
+    preparation: { accountRefs: [], subjectRef: 'limits-policy', policyRevision: 1, bindingRevision: 1, profileId: profile.profile, limits, maxRunMs: 60_000 } };
+  const bearers = new FacadeBearers([grant, managementGrant, { ...managementGrant, token: foreignToken, ownerRefs: ['foreign-owner'] }]);
+  const management = new AccountManagement({ kernel, store, custody: secrets, worker, profiles: [profile],
+    native: new NativeManagementClient({ origin: nativeOrigin, consumerId: context.consumerId, controlCredential: 'fixture-native-limits' }), proof: { async verify() { return true; } } });
+  const facade = createFacade({ kernel, store, management, bearers, profiles: [{ dto: safeProfile, maxOutputTokens: 100, limits }],
+    accountLimits: new NativeAccountLimitsClient({ origin: nativeOrigin, consumerId: context.consumerId, controlCredential: 'fixture-native-limits' }),
+    intentHmacKey: randomBytes(32) });
+  const origin = await listen(facade), client = createAccountLimitsClient({ role: 'consumer-control', origin, token });
+  try {
+    assert.deepEqual(await client.readAccountLimits(input), nativeResult);
+    assert.equal(entered, 1);
+    const forManagement = (token: string) => createAccountLimitsClient({ role: 'management', origin, token });
+    assert.deepEqual(await forManagement(managementToken).readAccountLimits(input), nativeResult);
+    const beforeForeign = entered;
+    await assert.rejects(forManagement(foreignToken).readAccountLimits(input), denied());
+    assert.equal(entered, beforeForeign, 'management owner grant checked before native read');
+    const renamed = await kernel.beginAccount(context, { operationId: randomUUID(), kind: 'rename', intentDigest: randomUUID(),
+      accountRef, expectedRevision: a.revision, displayName: 'Renamed limits fixture' });
+    assert.equal(renamed.state, 'applied');
+    assert.deepEqual(await client.readAccountLimits(input), nativeResult, 'rename does not replace physical observation');
+    const readsBeforeDenied = entered;
+    for (const bad of [{ ownerRef: 'foreign-owner' }, { expectedAuthorizationEpoch: a.epoch + 1 }])
+      await assert.rejects(client.readAccountLimits({ ...input, ...bad }), denied());
+    assert.equal(entered, readsBeforeDenied, 'owner and epoch rejected before native read');
+    const response = await fetch(origin + '/v1/account-limits/read', { method: 'POST', headers: { authorization: 'Bearer ' + token,
+      'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(input) });
+    assert.equal(response.headers.get('cache-control'), 'private, no-store'); await response.arrayBuffer();
+    nativeResult = { ...nativeResult, physicalGeneration: randomUUID() };
+    await assert.rejects(client.readAccountLimits(input), denied());
+    nativeResult = { status: 'unknown' };
+    assert.deepEqual(await client.readAccountLimits(input), { status: 'unknown' });
+    let release!: () => void, observed!: () => void;
+    hold = new Promise(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { observed = resolve; }); onRead = observed;
+    const late = client.readAccountLimits(input); await waiting;
+    const pending = await kernel.beginAccount(context, { operationId: randomUUID(), kind: 'reconnect', intentDigest: randomUUID(), accountRef, expectedRevision: (await kernel.account(context, accountRef)).revision });
+    release(); await assert.rejects(late, denied());
+    const before = entered; await assert.rejects(client.readAccountLimits(input), denied()); assert.equal(entered, before);
+    await pool.query("UPDATE ag_kernel.operations SET state='rejected' WHERE consumer=$1 AND id=$2", [context.consumerId, pending.operationRef]);
+    hold = new Promise(resolve => { release = resolve; });
+    const revoked = new Promise<void>(resolve => { onRead = resolve; });
+    const lateRevoke = client.readAccountLimits(input); await revoked; bearers.replace([]); release();
+    await assert.rejects(lateRevoke, denied());
+  } finally { await stop(facade); await stop(native); }
 });

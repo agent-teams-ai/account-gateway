@@ -1,10 +1,11 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
+import type { AccountLimitsRequest, AccountLimitsCapabilities, AccountLimits } from '@agent-teams/account-gateway/contracts';
 import type { RetainedCustodyProof } from './domain.ts';
 import type { RetainedCustodyVerifier } from './management.ts';
 import { KernelError, identifier, uuid } from './domain.ts';
 import { secretSubmission } from '@agent-teams/account-gateway/http';
-import { oauthAuthorizationURL, oauthDeviceAuthorization } from '@agent-teams/account-gateway/contracts';
+import { accountLimitsRequest, accountLimitsCapabilities, accountLimits, oauthAuthorizationURL, oauthDeviceAuthorization } from '@agent-teams/account-gateway/contracts';
 import { codexOAuthProfile, codexOAuthCleanupModels, exactCandidate, physicalCandidate } from './management.ts';
 import type { CandidateJournal, CandidateMapping, CandidateNative, NativeReadback, PhysicalCandidate } from './management.ts';
 import type { OAuthScope, OAuthEnrollmentNative, OAuthReadback, OAuthBeginReadback, OAuthCallback, OAuthMethod } from './management.ts';
@@ -422,5 +423,21 @@ export class NativeOAuthLifecycleClient extends NativeControlHTTP implements OAu
       return Object.freeze({ operationId: scope.operationId, accountRef: scope.accountRef,
         credentialsErased: r.credentials_erased, closure: r.closure as OAuthCleanupReadback['closure'], ...(native ? { native } : {}) });
     } catch { throw new NativeFailure('invalid_readback'); }
+  }
+}
+
+
+/** Cached source reads only; transport never retries or calls a provider. */
+export class NativeAccountLimitsClient extends NativeControlHTTP {
+  constructor(options: NativeManagementOptions) {
+    super({ ...options, deadlineMs: 3000, bodyBytes: 262144 });
+  }
+  async getAccountLimitsCapabilities(): Promise<AccountLimitsCapabilities> {
+    try { return accountLimitsCapabilities.parse(decode(await this.call('GET', '/private/native/v1/account-limits/capabilities'))); }
+    catch { throw new NativeFailure('invalid_readback'); }
+  }
+  async readAccountLimits(input: AccountLimitsRequest): Promise<AccountLimits> {
+    try { return accountLimits.parse(decode(await this.call('POST', '/private/native/v1/account-limits/read', accountLimitsRequest.parse(input)))); }
+    catch { throw new NativeFailure('invalid_readback'); }
   }
 }

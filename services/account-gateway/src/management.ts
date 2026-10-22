@@ -791,3 +791,30 @@ export class AccountManagement {
     return result.credentialsErased && result.closure === 'closed';
   }
 }
+
+
+export interface AccountLimitsSelector {
+  readonly ownerRef: string; readonly accountRef: string; readonly profileId: string;
+  readonly expectedAuthorizationEpoch: number;
+}
+/** Trusted logical-to-physical read, with a final kernel fence after mapping I/O. */
+export async function accountLimitsTarget(kernel: Pick<DurableKernel, 'accountLimitsIdentity'>,
+  store: Pick<ManagementStore, 'mapping'>, ctx: TrustedContext, input: AccountLimitsSelector): Promise<PhysicalCandidate> {
+  if (!kernel.accountLimitsIdentity) throw new KernelError('unavailable');
+  uuid(input.accountRef); identifier(input.ownerRef); identifier(input.profileId, 64); revision(input.expectedAuthorizationEpoch);
+  const current = await kernel.accountLimitsIdentity(ctx, input.accountRef);
+  if (!['active','suspended'].includes(current.state) || current.ownerRef !== input.ownerRef ||
+      current.profile !== input.profileId || current.epoch !== input.expectedAuthorizationEpoch)
+    throw new KernelError('denied');
+  const mapping = await store.mapping(ctx, current.generation);
+  if (!mapping || mapping.consumerId !== ctx.consumerId || mapping.accountRef !== current.accountRef ||
+      mapping.ownerRef !== current.ownerRef || mapping.profile.profile !== current.profile ||
+      mapping.descriptor.nativePhysicalIdentity !== current.nativePhysicalIdentity ||
+      !exactCandidate(mapping, physicalCandidate(mapping.descriptor))) throw new KernelError('denied');
+  const after = await kernel.accountLimitsIdentity(ctx, input.accountRef);
+  if (!['active','suspended'].includes(after.state) || after.ownerRef !== current.ownerRef ||
+      after.profile !== current.profile || after.epoch !== current.epoch ||
+      after.generation !== current.generation || after.nativePhysicalIdentity !== current.nativePhysicalIdentity)
+    throw new KernelError('denied');
+  return mapping.descriptor;
+}

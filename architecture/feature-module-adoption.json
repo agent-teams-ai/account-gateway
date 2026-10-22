@@ -23,7 +23,8 @@
       "composition": "get-modular",
       "publicIndexes": [
         "contracts/index.ts",
-        "http/index.ts"
+        "http/index.ts",
+        "index.ts"
       ],
       "tests": [
         "tests/client.test.mjs",

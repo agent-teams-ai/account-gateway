@@ -11,12 +11,14 @@ if [ -e "$qualification_root" ]; then echo 'Qualification directory must be abse
 mkdir -p "$qualification_root/a" "$qualification_root/b"
 for consumer in a b; do
   cp scripts/consumer-check.mjs "$qualification_root/$consumer/consumer-check.mjs"
+  cp scripts/consumer-limits-check.mts "$qualification_root/$consumer/consumer-limits-check.mts"
   cp tests/client.test.mjs "$qualification_root/$consumer/client.test.mjs"
   (
     cd "$qualification_root/$consumer"
     "$node_executable" -e 'require("node:fs").writeFileSync("package.json",JSON.stringify({private:true,type:"module"}))'
     npm install --engine-strict --ignore-scripts --no-audit --no-fund --cache "$qualification_root/cache" "$archive" typescript@7.0.2 @types/node@24.19.1
     "$node_executable" consumer-check.mjs
+    "$node_executable" consumer-limits-check.mts
   )
 done
 # One behavioral suite is the primary owner; the second consumer is the independent

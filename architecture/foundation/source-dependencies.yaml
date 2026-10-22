@@ -25,6 +25,12 @@ boundaries:
     entrypoints: [packages/account-gateway/src/http/index.ts]
     packageExports: [./http]
     allow: {boundaries: [facade-http], packages: [], builtins: [], runtimeReferences: []}
+  - id: sdk-root
+    dependencyMode: runtime
+    roots: [packages/account-gateway/src/index.ts]
+    entrypoints: [packages/account-gateway/src/index.ts]
+    packageExports: ['.']
+    allow: {boundaries: [http, contracts], packages: [], builtins: [], runtimeReferences: []}
   - id: get-modular
     dependencyMode: runtime
     roots: [packages/account-gateway/src/get-modular]

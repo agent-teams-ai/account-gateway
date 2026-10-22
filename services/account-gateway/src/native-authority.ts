@@ -5,7 +5,7 @@ import { approvedLimits, defaults, identifier, uuid } from './domain.ts';
 import type { ApprovedLimits, DurableKernel, ExecutionRead, NativeDispatchProof, SavedExecution, TrustedContext } from './domain.ts';
 import type { FacadeBearers, NativeCallback, NativeTransport } from './facade.ts';
 import type { ManagementStore } from './management.ts';
-import { codexOAuthProfile, codexOAuthCleanupModels, exactCandidate, physicalCandidate } from './management.ts';
+import { codexOAuthProfile, codexOAuthCleanupModels, accountLimitsTarget, exactCandidate, physicalCandidate } from './management.ts';
 import { validateResponses } from './facade-ingress.ts';
 import { admission, binding, cleanup, config, denied, descriptor, instant, jsonBody, now, object,
   physicallyClosed, proof, receipt, sameAdmission, sameDescriptor, sameProof, saved, singleton } from './native-wire.ts';
@@ -26,6 +26,7 @@ export interface AuthorityOptions { readonly config: BridgeConfig; readonly kern
     readonly bearers: Pick<FacadeBearers, 'authorizesOwner'> };
   readonly oauthRefreshOwners?: { readonly store: Pick<ManagementStore, 'activeOAuthRefresh' | 'pendingOAuthRefresh'>;
     readonly bearers: Pick<FacadeBearers, 'authorizesOwner'> };
+  readonly accountLimitsOwners?: { readonly bearers: Pick<FacadeBearers, 'authorizesAccountLimits'> };
   readonly oauthCleanupOwners?: { readonly store: Pick<ManagementStore, 'oauthCleanup'> } }
 const hash = (s: string) => createHash('sha256').update(s).digest();
 const key = (ctx: TrustedContext, ref: string, id: string) => JSON.stringify([ctx.consumerId, ref, id]);
@@ -37,6 +38,7 @@ export class NativeAuthority {
   readonly kernel: DurableKernel & ExecutionRead;
   readonly #store: Pick<ManagementStore, 'mapping'>;
   readonly #owners: AuthorityOptions['oauthOwners'];
+  readonly #accountLimitsOwners: AuthorityOptions['accountLimitsOwners'];
   readonly #refreshOwners: AuthorityOptions['oauthRefreshOwners'];
   readonly #cleanupOwners: AuthorityOptions['oauthCleanupOwners'];
   readonly #limits = new Map<string, Readonly<ApprovedLimits>>();
@@ -63,6 +65,7 @@ export class NativeAuthority {
       }
     }
     this.kernel = options.kernel; this.#store = options.store; this.#owners = options.oauthOwners;
+    this.#accountLimitsOwners = options.accountLimitsOwners;
     this.#refreshOwners = options.oauthRefreshOwners;
     this.#cleanupOwners = options.oauthCleanupOwners;
     this.#callers = this.configuration.consumers.map(c => ({ hash: hash(c.callbackCredential), consumerId: c.consumerId }));
@@ -130,7 +133,18 @@ export class NativeAuthority {
     if (a.signal.aborted) return denied();
     a.descriptor = d; a.ready = true;
   }
-  // Only the native inert custody route calls this purpose-specific callback.
+  // Cached reads have separate consumer authority and permit suspended custody.
+  async #accountLimitsOwner(ctx: TrustedContext, value: unknown): Promise<unknown> {
+    const r = object(value, ['consumerId','ownerRef','accountRef','profileId','expectedAuthorizationEpoch']);
+    if (r.consumerId !== ctx.consumerId || !this.#accountLimitsOwners || r.profileId !== codexOAuthProfile.profile ||
+        !this.#accountLimitsOwners.bearers.authorizesAccountLimits(ctx, r.ownerRef as string, r.profileId)) return denied();
+    const target = await accountLimitsTarget(this.kernel, this.#store, ctx, {
+      ownerRef: r.ownerRef as string, accountRef: r.accountRef as string, profileId: r.profileId,
+      expectedAuthorizationEpoch: r.expectedAuthorizationEpoch as number,
+    });
+    if (!this.#accountLimitsOwners.bearers.authorizesAccountLimits(ctx, r.ownerRef as string, r.profileId)) return denied();
+    return { ok: true, native: descriptor(target) };
+  }
   // Enrollment and refresh keep their existing authority and reject suspended.
   async #custodyOwner(ctx: TrustedContext, value: unknown): Promise<{ ok: true; ownerRef: string }> {
     const r = object(value, ['consumerId','operationId','accountRef','generation']);
@@ -305,18 +319,20 @@ export class NativeAuthority {
       res.once('close', () => clearTimeout(timer)); res.once('finish', () => clearTimeout(timer));
       const send = (status: number, body: unknown) => { if (!res.destroyed) { res.writeHead(status, { 'content-type': 'application/json', connection: 'close' }); res.end(JSON.stringify(body)); } };
       return (async () => {
-        if (req.method !== 'POST' || !req.url || !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-custody-authority|oauth-refresh-authority|oauth-cleanup-authority)$/.test(req.url) ||
+        if (req.method !== 'POST' || !req.url || !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-custody-authority|oauth-refresh-authority|oauth-cleanup-authority|account-limits-authority)$/.test(req.url) ||
             req.rawHeaders.length > 64 || singleton(req, 'content-type') !== 'application/json' ||
             req.rawHeaders.some((h, i) => i % 2 === 0 && ['content-encoding','transfer-encoding'].includes(h.toLowerCase()))) return denied();
         const authorization = singleton(req, 'authorization');
         if (!authorization || authorization.length > 1031 || !/^Bearer [A-Za-z0-9._~+/-]{16,1024}=*$/.test(authorization)) return denied();
         const h = hash(authorization.slice(7)), caller = this.#callers.find(c => timingSafeEqual(c.hash, h));
         if (!caller) return denied();
+        const limitsLookup = req.url.endsWith('/account-limits-authority');
         const ownerLookup = req.url.endsWith('/oauth-owner-authority');
         const custodyLookup = req.url.endsWith('/oauth-custody-authority');
         const refreshLookup = req.url.endsWith('/oauth-refresh-authority');
         const cleanupLookup = req.url.endsWith('/oauth-cleanup-authority');
-        const ctx = Object.freeze({ consumerId: caller.consumerId }), body = await jsonBody(req, ownerLookup || custodyLookup || refreshLookup || cleanupLookup ? Math.min(1024, cfg.controlBytes) : cfg.controlBytes);
+        const ctx = Object.freeze({ consumerId: caller.consumerId }), body = await jsonBody(req, limitsLookup || ownerLookup || custodyLookup || refreshLookup || cleanupLookup ? Math.min(1024, cfg.controlBytes) : cfg.controlBytes);
+        if (limitsLookup) { send(200, await this.#accountLimitsOwner(ctx, body)); return; }
         if (ownerLookup) { send(200, await this.#owner(ctx, body)); return; }
         if (custodyLookup) { send(200, await this.#custodyOwner(ctx, body)); return; }
         if (refreshLookup) { send(200, await this.#refreshOwner(ctx, body)); return; }

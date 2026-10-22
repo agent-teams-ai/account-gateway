@@ -301,3 +301,22 @@ export type ManagementClient = ReturnType<typeof createManagementClient>;
 export type ExecutionClient = ReturnType<typeof createExecutionClient>;
 export type ConsumerControlClient = ReturnType<typeof createConsumerControlClient>;
 export type LifecycleClient = ReturnType<typeof createLifecycleClient>;
+
+
+const accountLimitsConfig = config.extend({ role: z.enum(['management', 'consumer-control']),
+  responseBytes: z.number().int().min(1024).max(262144).default(262144),
+  timeoutMs: z.number().int().min(1).max(3000).default(3000),
+});
+export type AccountLimitsConfig = z.input<typeof accountLimitsConfig>;
+/** Server-only cached reads. No retry, credential refresh or provider request. */
+export function createAccountLimitsClient(settings: AccountLimitsConfig) {
+  const captured = valid(accountLimitsConfig, settings);
+  const { json } = transport(captured, captured.role);
+  return Object.freeze({
+    getAccountLimitsCapabilities: (options?: CallOptions): Promise<c.AccountLimitsCapabilities> =>
+      json('/v1/capabilities/account-limits', c.accountLimitsCapabilities, 'GET', undefined, options),
+    readAccountLimits: (input: c.AccountLimitsRequest, options?: CallOptions): Promise<c.AccountLimits> =>
+      json('/v1/account-limits/read', c.accountLimits, 'POST', valid(c.accountLimitsRequest, input), options),
+  });
+}
+export type AccountLimitsClient = ReturnType<typeof createAccountLimitsClient>;

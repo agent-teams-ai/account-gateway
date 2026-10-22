@@ -7,11 +7,11 @@ import { spawn, execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Server } from 'node:http';
 import pg from 'pg';
-import { createManagementClient, GatewayError } from '@agent-teams/account-gateway/http';
+import { createAccountLimitsClient, createManagementClient, GatewayError } from '@agent-teams/account-gateway/http';
 import { PostgresKernel } from '../src/postgres.ts';
 import { IntentSecrets, PostgresManagementStore } from '../src/management-store.ts';
 import { codexOAuthProfile } from '../src/management.ts';
@@ -100,6 +100,7 @@ async function run(): Promise<void> {
   const store = new PostgresManagementStore(pool, secrets), worker = randomUUID(), context = { consumerId };
   await kernel.issuer(context); await kernel.heartbeat(context, worker);
   const limits = { requests: 4, concurrency: 1, requestBytes: 4096, outputBytes: 4096, tokens: 100 };
+  const limitsToken = randomBytes(32).toString('base64url');
   const publicToken = randomBytes(32).toString('base64url'), foreignToken = randomBytes(32).toString('base64url');
   const bearer = (token: string, owner: string) => ({ token, role: 'management' as const, consumerId,
     ownerRefs: [owner], profileIds: [codexOAuthProfile.profile], preparation: { accountRefs: [], subjectRef: 'joined-device-policy',
@@ -112,14 +113,15 @@ async function run(): Promise<void> {
       qualificationRef: 'joined-device-unused-apikey', limits, providerTokenUpperBound: 100 },
     oauthEnrollment: { enabled: true, profile: 'openai-codex-oauth-responses-v1', modelScope: ['gpt-5.6-sol'],
       qualificationRef: 'controlled-source-v1', limits, providerTokenUpperBound: 100 },
-    bearers: [bearer(publicToken, ownerRef), bearer(foreignToken, 'joined-foreign-owner')]
+    bearers: [bearer(publicToken, ownerRef), bearer(foreignToken, 'joined-foreign-owner'),
+      { token: limitsToken, role: 'consumer-control', consumerId, profileIds: [codexOAuthProfile.profile], limits, maxRunMs: 60_000 }]
   } satisfies Pick<ServiceConfig, 'native' | 'consumer' | 'profile' | 'oauthEnrollment' | 'bearers'>;
   const control = composeServiceControl(cfg, kernel, store, secrets, worker);
   const enrollment = { originRef: cfg.native.originRef, engineIncarnation: randomUUID(), worker };
   const { authority, transport } = composeServiceNative(cfg, control, kernel, store, enrollment);
   const callbackOrigin = await listen(authority.createServer());
   const origin = await listen(createFacade({ kernel, store, management: control.management, bearers: control.bearers,
-    profiles: control.catalog, enrollment, transport, intentHmacKey: randomBytes(32) }));
+    profiles: control.catalog, enrollment, transport, accountLimits: control.accountLimits, intentHmacKey: randomBytes(32) }));
   child.stdin!.write(JSON.stringify({ callbackOrigin }) + '\n'); await next('configured');
   const client = createManagementClient({ role: 'management', origin, token: publicToken });
   const foreign = createManagementClient({ role: 'management', origin, token: foreignToken });
@@ -165,6 +167,42 @@ async function run(): Promise<void> {
   const final = await stats(); assert.deepEqual(final, { starts: 1, polls: 2, exchanges: 1, checks: 1, unexpected: 0 });
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM ag_management.transient_intents WHERE consumer=$1', [consumerId])).rows[0].n, 0);
   assert.equal((await pool.query('SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1', [consumerId])).rows[0].n, 0);
+  phase = 'cached-native-account-limits';
+  const limitsClient = createAccountLimitsClient({ role: 'consumer-control', origin, token: limitsToken });
+  assert.deepEqual(await limitsClient.getAccountLimitsCapabilities(), { contract: 'account-limits/v1', cachedRead: true, quotaOnlyRefresh: false });
+  const limitsInput = { ownerRef, accountRef: journal.accountRef, profileId: codexOAuthProfile.profile,
+    expectedAuthorizationEpoch: (await kernel.account(context, journal.accountRef)).epoch };
+  assert.deepEqual(await limitsClient.readAccountLimits(limitsInput), { status: 'unknown' });
+  await assert.rejects(limitsClient.readAccountLimits({ ...limitsInput, ownerRef: 'joined-foreign-owner' }), denied);
+  const controlLimits = async (path: string): Promise<void> => {
+    const response = await fetch(ready.controllerOrigin + path, { method: 'POST', headers: {
+      authorization: 'Bearer ' + managementCredential, 'content-type': 'application/json' }, body: JSON.stringify(limitsInput), signal: AbortSignal.timeout(5000) });
+    assert.equal(response.status, 204); await response.arrayBuffer();
+  };
+  await controlLimits('/limits/seed');
+  const snapshot = await limitsClient.readAccountLimits(limitsInput);
+  assert.equal(snapshot.status, 'snapshot');
+  if (snapshot.status !== 'snapshot') throw new Error('missing controlled snapshot');
+  assert.equal(snapshot.physicalGeneration, journal.generation); assert.match(snapshot.principalVersion, /^[a-f0-9]{64}$/);
+  assert.equal(snapshot.revision, 1); assert.equal(snapshot.scope, 'account');
+  assert.deepEqual(snapshot.windows, [{ id: 'primary', family: 'codex', durationSeconds: 18000, usedPercent: 37.5,
+    observedAt: '2026-10-01T01:02:03.123456Z', resetAt: '2026-10-01T01:02:03.123456Z', basis: 'duration' }]);
+  let rrAcceptance = false;
+  const rrModule = process.env.AG_NATIVE_DEVICE_JOINED_RR_ACCEPTANCE_MODULE;
+  if (rrModule !== undefined) {
+    assert.ok(isAbsolute(rrModule) && rrModule.endsWith('.mts'), 'RR acceptance module must be an explicit absolute .mts fixture');
+    const external: unknown = await import(pathToFileURL(rrModule).href);
+    assert.ok(external && typeof external === 'object' && 'acceptAccountLimits' in external && typeof external.acceptAccountLimits === 'function');
+    await bounded(external.acceptAccountLimits({ origin, token: limitsToken, input: limitsInput }));
+    rrAcceptance = true;
+  }
+  const beforeRename = await kernel.account(context, journal.accountRef);
+  assert.equal((await client.rename(journal.accountRef, { operationId: randomUUID(), expectedMetadataRevision: beforeRename.revision,
+    displayName: 'Renamed controlled limits' })).state, 'applied');
+  assert.deepEqual(await limitsClient.readAccountLimits(limitsInput), snapshot, 'rename keeps observation and principal version');
+  await controlLimits('/limits/tombstone');
+  assert.deepEqual(await limitsClient.readAccountLimits(limitsInput), { status: 'unavailable' }, 'native tombstone cannot resurrect cached values');
+  assert.deepEqual(await stats(), final, 'all cached reads made zero provider requests');
   child.stdin!.end('stop\n'); stopped = true;
   const closed = await next('closed'); assert.equal(closed.plaintextCredentials, 0); assert.equal(closed.retainedDeviceMaterial, 0);
   assert.equal(await bounded(childExit), 0); assert.equal(diagnostic, '');
@@ -172,6 +210,8 @@ async function run(): Promise<void> {
   const receipt = { phase, contract: 'gateway-native-device-joined/v1', nativeBinarySHA256: binarySHA256, nativeHead, gatewayHead, sourceHashes,
     nativeHTTP: true, gatewayFacadeAndSDK: true, liveOwnerCallback: true, actualPostgreSQL: true,
     handoffFreshOnly: true, wrongOwnerDenied: true, account: 'active', descriptor: 'verified',
+    rrAcceptance,
+    accountLimits: { cachedRead: true, snapshotUsedPercent: 37.5, missingUnknown: true, nativeTombstoneUnavailable: true, renamePreserved: true, upstreamCalls: 0 },
     provider: final, plaintextCredentials: 0, retainedDeviceMaterial: 0, inferenceRequests: 0 };
   await writeFile(join(scratch, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n'); report({ ...receipt, receiptPath: join(scratch, 'receipt.json') });
 }

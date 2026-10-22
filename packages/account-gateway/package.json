@@ -11,6 +11,11 @@
     "node": ">=24.21.0 <25 || >=26.10.0 <27"
   },
   "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "browser": null,
+      "node": "./dist/index.js"
+    },
     "./contracts": {
       "types": "./dist/contracts/index.d.ts",
       "default": "./dist/contracts/index.js"
