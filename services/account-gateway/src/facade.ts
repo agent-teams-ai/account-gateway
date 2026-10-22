@@ -13,7 +13,7 @@ import { secretSubmission } from '@agent-teams/account-gateway/http';
 import { KernelError, identifier, uuid } from './domain.ts';
 import type { ApprovedLimits, ClaimResult, DurableKernel, ExecutionRead, NativeDispatchProof,
   OperationStatus, PrivateAdmission, RequestStatus, SavedExecution, TrustedContext, CleanupAuthority } from './domain.ts';
-import { captureContext, physicalCandidate, codexOAuthProfile } from './management.ts';
+import { accountLimitsTarget, captureContext, physicalCandidate, sameCandidate, codexOAuthProfile } from './management.ts';
 import type { AccountManagement, ManagementStore, PhysicalCandidate } from './management.ts';
 import type { AccountLifecycleReadback } from './management.ts';
 import { strictJSON, validateResponses } from './facade-ingress.ts';
@@ -167,6 +167,11 @@ export class FacadeBearers {
       (grant.role === 'consumer-control' ? grant.profileIds.includes(profileId) :
         grant.role === 'management' && permitsOwner(grant, ownerRef) && permitsOAuthProfile(grant, profileId)));
   }
+  authorizesAccountLimits(context: TrustedContext, ownerRef: string, profileId: string): boolean {
+    return this.#entries.some(({ grant }) => grant.consumerId === context.consumerId &&
+      (grant.role === 'consumer-control' ? grant.profileIds.includes(profileId) :
+        grant.role === 'management' && permitsOwner(grant, ownerRef) && permitsProfile(grant, profileId)));
+  }
   // Synchronous CAS after SQL read: identical issuance retains its token and
   // original saved tuple. No neighboring grant is replaced or evicted.
   upsertExecution(control: RunControlGrant, input: SavedExecution, original?: SavedExecution): string {
@@ -218,6 +223,10 @@ export interface NativeTransport {
   cancel?(context: TrustedContext, proof: NativeDispatchProof, cleanup: CleanupAuthority): Promise<void>;
 }
 export interface FacadeOptions {
+  readonly accountLimits?: {
+    getAccountLimitsCapabilities(): Promise<c.AccountLimitsCapabilities>;
+    readAccountLimits(input: c.AccountLimitsRequest): Promise<c.AccountLimits>;
+  };
   readonly usage?: UsageJournal;
   readonly admission?: ServiceAdmission;
   readonly controlOnly?: boolean;
@@ -297,10 +306,10 @@ async function body(req: IncomingMessage, maximum: number): Promise<Uint8Array> 
   }
   return Buffer.concat(chunks, size);
 }
-function send<T>(res: ServerResponse, schema: Pick<Schema<T>, 'parse'>, value: T, status = 200): void {
+function send<T>(res: ServerResponse, schema: Pick<Schema<T>, 'parse'>, value: T, status = 200, privateCache = false): void {
   const bytes = JSON.stringify(schema.parse(value));
   if (Buffer.byteLength(bytes) > 65_536) throw new KernelError('unavailable');
-  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'content-length': Buffer.byteLength(bytes) });
+  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': privateCache ? 'private, no-store' : 'no-store', 'content-length': Buffer.byteLength(bytes) });
   res.end(bytes);
 }
 
@@ -508,6 +517,39 @@ export function createFacade(options: FacadeOptions): Server {
       const match = /^\/v1\/executions\/([A-Za-z0-9_-]+)(?:\/(requests)(?:\/([A-Za-z0-9_-]+))?|\/(close))?$/.exec(path);
       const opMatch = /^\/v1\/operations\/([A-Za-z0-9_-]+)$/.exec(path);
       if (url.search && !((path === '/v1/accounts' || path === '/v2/accounts' || path === '/v1/usage') && method === 'GET')) throw new KernelError('invalid');
+      if (path === '/v1/capabilities/account-limits' && method === 'GET') {
+        if (grant.role !== 'consumer-control' && grant.role !== 'management') throw new KernelError('denied');
+        let capabilities: c.AccountLimitsCapabilities = { contract: c.ACCOUNT_LIMITS_CONTRACT, cachedRead: false, quotaOnlyRefresh: false };
+        try { if (options.accountLimits) capabilities = parse(c.accountLimitsCapabilities, await options.accountLimits.getAccountLimitsCapabilities()); }
+        catch { /* Missing/incompatible source never advertises a read capability. */ }
+        requireCurrent(grant);
+        send(res, c.accountLimitsCapabilities, { ...capabilities, quotaOnlyRefresh: false }, 200, true); return;
+      }
+      if (path === '/v1/account-limits/read' && method === 'POST') {
+        if (grant.role !== 'consumer-control' && grant.role !== 'management') throw new KernelError('denied');
+        const input = parse(c.accountLimitsRequest, strictJSON(await body(req, Math.min(ingressBytes, 1024)), true));
+        if (!permitsProfile(grant, input.profileId) || !permitsOwner(grant, input.ownerRef)) throw new KernelError('denied');
+        // Logical ownership must be checked even for unsupported sources.
+        const a = await kernel.account(context, input.accountRef);
+        if (a.ownerRef !== input.ownerRef || a.profile !== input.profileId || a.epoch !== input.expectedAuthorizationEpoch ||
+            !['active','suspended'].includes(a.state)) throw new KernelError('denied');
+        requireCurrent(grant);
+        if (input.profileId !== codexOAuthProfile.profile) { send(res, c.accountLimits, { status: 'unsupported' }, 200, true); return; }
+        const before = await accountLimitsTarget(kernel, store, context, input);
+        requireCurrent(grant);
+        let result: c.AccountLimits = { status: 'unavailable' };
+        try {
+          if (options.accountLimits) {
+            const capabilities = parse(c.accountLimitsCapabilities, await options.accountLimits.getAccountLimitsCapabilities());
+            if (capabilities.cachedRead) result = parse(c.accountLimits, await options.accountLimits.readAccountLimits(input));
+          }
+        } catch { /* No native/provider diagnostic crosses the safe union. */ }
+        const after = await accountLimitsTarget(kernel, store, context, input);
+        requireCurrent(grant);
+        if (!sameCandidate(before, after) || result.status === 'snapshot' && result.physicalGeneration !== after.generation)
+          throw new KernelError('denied');
+        send(res, c.accountLimits, result, 200, true); return;
+      }
       const usageMatch = /^\/v1\/usage\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/.exec(path);
       if (usageMatch && method === 'GET') {
         if (grant.role !== 'consumer-control' || !options.usage) throw new KernelError('denied');
@@ -709,7 +751,7 @@ export function createFacade(options: FacadeOptions): Server {
         return;
       }
       if (grant.role !== 'management' && grant.role !== 'consumer-control') throw new KernelError('denied');
-      const reply = <T>(schema: Pick<Schema<T>, 'parse'>, value: T, status = 200): void => {
+      const reply = <T>(schema: Pick<Schema<T>, 'parse'>, value: T, status = 200, privateCache = false): void => {
         requireCurrent(grant);
         send(res, schema, value, status);
       };

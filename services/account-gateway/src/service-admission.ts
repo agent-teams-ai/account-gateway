@@ -26,6 +26,7 @@ export function facadeUsageReadRoute(method: string | undefined, path: string | 
 }
 export function facadeControlRoute(method: string | undefined, path: string | undefined): boolean {
   if (facadeUsageReadRoute(method, path)) return true;
+  if (method === 'GET' && path === '/v1/capabilities/account-limits' || method === 'POST' && path === '/v1/account-limits/read') return true;
   if (!path || /[?#%\r\n]/.test(path)) return false;
   return method === 'POST' && (/^\/v1\/executions\/[A-Za-z0-9_-]+\/close$/.test(path) ||
     path === '/v1/policy-fences' || /^\/v2\/accounts\/[A-Za-z0-9_-]+\/(suspend|resume)$/.test(path) || /^\/v1\/accounts\/[A-Za-z0-9_-]+\/disable$/.test(path)) ||

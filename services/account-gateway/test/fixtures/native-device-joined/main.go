@@ -259,9 +259,52 @@ func run() error {
 	}) != nil {
 		return deny
 	}
+	authorizeLimits := func(ctx context.Context, in service.GatewayAccountLimitsInput) (service.GatewayNativeRoute, error) {
+		var result struct {
+			OK     bool                       `json:"ok"`
+			Native service.GatewayNativeRoute `json:"native"`
+		}
+		body, _ := json.Marshal(map[string]any{"consumerId": cfg.Consumer, "ownerRef": in.OwnerRef, "accountRef": in.AccountRef, "profileId": in.ProfileID, "expectedAuthorizationEpoch": in.ExpectedAuthorizationEpoch})
+		req, err := http.NewRequestWithContext(ctx, "POST", callback.Load().(string)+"/private/native/v1/account-limits-authority", bytes.NewReader(body))
+		if err != nil {
+			return result.Native, deny
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+cfg.Callback)
+		client := &http.Client{Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return deny }}
+		resp, err := client.Do(req)
+		if err != nil {
+			return result.Native, deny
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 || json.NewDecoder(io.LimitReader(resp.Body, 4097)).Decode(&result) != nil || !result.OK {
+			return result.Native, deny
+		}
+		return result.Native, nil
+	}
+	limitsReader, err := service.NewGatewayAccountLimitsReader(accountRepo.(service.GatewayAccountLimitsRepository), authorizeLimits)
+	if err != nil {
+		return deny
+	}
+	authorizeLimitsHTTP := func(c *gin.Context) {
+		if c.Request.Header.Get("Authorization") != "Bearer "+cfg.Control {
+			c.AbortWithStatus(403)
+			return
+		}
+		ctx, err := service.WithGatewayNativeConsumer(c.Request.Context(), cfg.Consumer)
+		if err != nil {
+			c.AbortWithStatus(403)
+			return
+		}
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+	}
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	if admin.RegisterGatewayNativeOAuthConnectRoutes(router.Group(""), connect, authorize) != nil || admin.RegisterGatewayNativeOAuthDescriptorRoute(router.Group(""), dispatch, authorize) != nil || admin.RegisterGatewayNativeOAuthRefreshRoute(router.Group(""), refreshService, authorize) != nil {
+		return deny
+	}
+	if admin.RegisterGatewayAccountLimitsRoutes(router.Group(""), limitsReader, authorizeLimitsHTTP) != nil {
 		return deny
 	}
 	native := httptest.NewServer(router)
@@ -269,6 +312,42 @@ func run() error {
 	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+cfg.Control {
 			w.WriteHeader(403)
+			return
+		}
+		if r.Method == "POST" && (r.URL.Path == "/limits/seed" || r.URL.Path == "/limits/tombstone") {
+			var in service.GatewayAccountLimitsInput
+			if json.NewDecoder(io.LimitReader(r.Body, 1025)).Decode(&in) != nil {
+				w.WriteHeader(400)
+				return
+			}
+			ctx, err := service.WithGatewayNativeConsumer(r.Context(), cfg.Consumer)
+			if err == nil {
+				ctx, err = service.WithGatewayNativeOAuthOwner(ctx, in.OwnerRef)
+			}
+			if err != nil {
+				w.WriteHeader(403)
+				return
+			}
+			route, authErr := authorizeLimits(ctx, in)
+			if authErr != nil {
+				w.WriteHeader(403)
+				return
+			}
+			if r.URL.Path == "/limits/tombstone" {
+				_, err = db.ExecContext(ctx, `UPDATE accounts SET deleted_at=clock_timestamp() WHERE id=$1 AND created_at=$2`, route.AccountID, route.CreatedAt)
+			} else {
+				physical := service.GatewayNativeOAuthPhysical{Route: route, Scope: service.GatewayNativeCredentialScope{Consumer: cfg.Consumer, Owner: in.OwnerRef, Account: in.AccountRef, Generation: route.Generation, Purpose: service.GatewayOAuthBundlePurpose}}
+				err = db.QueryRowContext(ctx, `SELECT issuer,subject,provider_account_id,operation_ref FROM gateway_oauth_profile_qualifications WHERE account_id=$1 AND native_created_at=$2 AND generation=$3`, route.AccountID, route.CreatedAt, route.Generation).Scan(&physical.Issuer, &physical.Subject, &physical.ProviderAccount, &physical.Operation)
+				observed := time.Date(2026, 10, 1, 1, 2, 3, 123456000, time.UTC)
+				if err == nil {
+					err = accountRepo.(service.GatewayAccountLimitsRepository).StoreGatewayAccountLimits(ctx, physical, service.CaptureGatewayCodexLimits(http.Header{"X-Codex-Primary-Used-Percent": {"37.5"}, "X-Codex-Primary-Window-Minutes": {"300"}, "X-Codex-Primary-Reset-After-Seconds": {"0"}}, observed), observed)
+				}
+			}
+			if err != nil {
+				w.WriteHeader(409)
+				return
+			}
+			w.WriteHeader(204)
 			return
 		}
 		if r.Method == "POST" && r.URL.Path == "/authorize" {

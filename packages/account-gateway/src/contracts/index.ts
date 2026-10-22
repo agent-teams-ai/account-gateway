@@ -13,3 +13,8 @@ export type { Profile, Account, AccountRetirement, PolicyUseClosure, Operation, 
 
 export { usageObservation, usageQuery, usagePage, usageRead } from '../features/facade-client/contracts/index.js';
 export type { UsageObservation, UsageQuery, UsagePage } from '../features/facade-client/contracts/index.js';
+
+export { ACCOUNT_LIMITS_CONTRACT, accountLimitsRequest, accountLimitsCapabilities, accountLimits } from '../features/facade-client/contracts/index.js';
+export type { AccountLimitsRequest, AccountLimitsCapabilities, AccountLimits } from '../features/facade-client/contracts/index.js';
+export { accountLimitsResult } from '../features/facade-client/contracts/index.js';
+export type { AccountLimitsResult } from '../features/facade-client/contracts/index.js';

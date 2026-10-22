@@ -229,3 +229,38 @@ export type UsageQuery = z.infer<typeof usageQuery>;
 export type UsagePage = z.infer<typeof usagePage>;
 
 export const usageRead = z.strictObject({ observation: usageObservation.nullable() });
+
+
+/** account-limits/v1 is cached native observation, independent of usage facts. */
+export const ACCOUNT_LIMITS_CONTRACT = 'account-limits/v1' as const;
+const limitsInstant = z.iso.datetime({ precision: undefined }).max(64)
+  .regex(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z$/)
+  .refine(value => !value.startsWith('0000-'));
+export const accountLimitsRequest = z.strictObject({
+  ownerRef: reference, accountRef: reference, profileId: reference, expectedAuthorizationEpoch: revision,
+});
+export const accountLimitsCapabilities = z.strictObject({
+  contract: z.literal(ACCOUNT_LIMITS_CONTRACT), cachedRead: z.boolean(), quotaOnlyRefresh: z.boolean(),
+});
+const accountLimitsWindow = z.strictObject({
+  id: reference, family: z.literal('codex'),
+  durationSeconds: z.number().finite().positive().max(Number.MAX_SAFE_INTEGER).nullable(),
+  usedPercent: z.number().finite().nonnegative().nullable(),
+  observedAt: limitsInstant.nullable(), resetAt: limitsInstant.nullable(),
+  basis: z.enum(['duration', 'legacy_alias', 'unknown']),
+  reason: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/).optional(),
+}).refine(v => (v.basis === 'duration') === (v.durationSeconds !== null));
+export const accountLimits = z.discriminatedUnion('status', [
+  z.strictObject({ status: z.literal('snapshot'), physicalGeneration: reference, principalVersion: reference,
+    revision, scope: z.enum(['account', 'subscription']), windows: z.array(accountLimitsWindow).min(1).max(8)
+      .refine(v => new Set(v.map(w => w.id)).size === v.length) }),
+  z.strictObject({ status: z.literal('unknown') }),
+  z.strictObject({ status: z.literal('unsupported') }),
+  z.strictObject({ status: z.literal('unavailable') }),
+]);
+export type AccountLimitsRequest = z.infer<typeof accountLimitsRequest>;
+export type AccountLimitsCapabilities = z.infer<typeof accountLimitsCapabilities>;
+export type AccountLimits = z.infer<typeof accountLimits>;
+
+export const accountLimitsResult = accountLimits;
+export type AccountLimitsResult = AccountLimits;

@@ -5,7 +5,7 @@ import {
 } from './domain.ts';
 import type {
   TrustedContext, DurableKernel, Bounds, DurableFactBounds, AccountIntent, AccountStatus, OperationStatus,
-  ResumeCustodyAuthority, AccountCustodyIdentity,
+  ResumeCustodyAuthority, AccountCustodyIdentity, AccountLimitsIdentity,
   ApprovedPreparation, ExecutionStatus, NativeDescriptor, NativeCreatePermit,
   PrivateAdmission, ApprovedLimits, AccountPageQuery, AccountPage, ClaimResult, RequestStatus, Effect, CleanupClaim, TransportClosure, CleanupAuthority, NativeReservation, NativeDispatchProof, NativeBinding,
 } from './domain.ts';
@@ -177,6 +177,18 @@ export class PostgresKernel implements DurableKernel {
     return this.transaction(context, async tx => {
       const r = await this.one(tx, 'SELECT * FROM accounts WHERE consumer=$1 AND ref=$2', [tx.consumer, ref]);
       return accountStatus(r);
+    });
+  }
+  // One SQL observation fences pending reconnect/delete before exposing quota.
+  async accountLimitsIdentity(context: TrustedContext, ref: string): Promise<AccountLimitsIdentity> {
+    uuid(ref);
+    return this.transaction(context, async tx => {
+      const r = await this.one(tx, `SELECT a.*,c.native_identity FROM accounts a
+        JOIN candidates c ON c.consumer=a.consumer AND c.generation=a.active_generation AND c.account_ref=a.ref
+        WHERE a.consumer=$1 AND a.ref=$2 AND a.state IN ('active','suspended') AND c.state='ready'
+          AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.consumer=a.consumer AND o.account_ref=a.ref
+            AND o.state IN ('pending','unknown') AND o.intent->>'kind' IN ('reconnect','disable'))`, [tx.consumer, ref]);
+      return { ...accountStatus(r), generation: r.active_generation, nativePhysicalIdentity: r.native_identity };
     });
   }
   async accountCustody(context: TrustedContext, ref: string): Promise<AccountCustodyIdentity> {

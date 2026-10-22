@@ -15,7 +15,7 @@ import type { CandidateJournal, CandidateNative, IntentCustody, ManagementStore,
   OAuthCleanupAuthority, OAuthCleanupAction, OAuthMethod } from './management.ts';
 import type { DurableKernel, ExecutionRead, TrustedContext } from './domain.ts';
 import { codexOAuthProfile } from './management.ts';
-import { NativeManagementClient, NativeRetainedCustodyClient, NativeOAuthEnrollmentClient, NativeOAuthLifecycleClient } from './native-client.ts';
+import { NativeAccountLimitsClient, NativeManagementClient, NativeRetainedCustodyClient, NativeOAuthEnrollmentClient, NativeOAuthLifecycleClient } from './native-client.ts';
 import { NativeAuthority } from './native-authority.ts';
 import { NativeHTTPTransport } from './native-transport.ts';
 import { createFacade, FacadeBearers, cancelFacadeTransport } from './facade.ts';
@@ -96,12 +96,12 @@ export function composeServiceControl(cfg: Pick<ServiceConfig, 'native' | 'consu
       authKinds: [p.profile === codexOAuthProfile.profile ? 'oauth' as const : 'api_key' as const] },
     maxOutputTokens: p.limits.tokens, limits: p.limits,
   })));
-  return Object.freeze({ profiles, bearers, management, catalog });
+  return Object.freeze({ profiles, bearers, management, catalog, accountLimits: new NativeAccountLimitsClient(control) });
 }
 export function composeServiceNative(cfg: Pick<ServiceConfig, 'native' | 'consumer' | 'oauthEnrollment'>,
   control: ReturnType<typeof composeServiceControl>, kernel: DurableKernel & ExecutionRead, store: ManagementStore,
   enrollment: NonNullable<FacadeOptions['enrollment']>) {
-  const authority = new NativeAuthority({ kernel, store, ...(cfg.oauthEnrollment ? {
+  const authority = new NativeAuthority({ kernel, store, accountLimitsOwners: { bearers: control.bearers }, ...(cfg.oauthEnrollment ? {
     oauthOwners: { store, bearers: control.bearers }, oauthRefreshOwners: { store, bearers: control.bearers },
     oauthCleanupOwners: { store } } : {}),
     profileLimits: control.profiles.map(p => ({ profile: p.profile, limits: p.limits })), config: { origin: cfg.native.origin,
@@ -318,7 +318,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
       }
       controlFacade.emit('request', req, res); return;
     }
-    if (req.method !== 'POST' || !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-custody-authority|oauth-refresh-authority|oauth-cleanup-authority)$/.test(req.url ?? '')) {
+    if (req.method !== 'POST' || !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-custody-authority|oauth-refresh-authority|oauth-cleanup-authority|account-limits-authority)$/.test(req.url ?? '')) {
       res.writeHead(403); res.end(); return;
     }
     // Go's first enrollment can arrive before stdout's actual starting binding.
@@ -434,7 +434,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     startupStage = 'heartbeat';
     await inServiceLane('control', () => kernel.heartbeat(ctx, worker));
     startupActive();
-    options = { admission, kernel, management, store, bearers, enrollment, transport,
+    options = { admission, kernel, management, store, bearers, enrollment, transport, accountLimits: control.accountLimits,
       usage: new PostgresUsageJournal(pool, keyBytes(cfg.keys.facadeHMAC)),
       profiles: catalog, intentHmacKey: keyBytes(cfg.keys.facadeHMAC), ingressBytes: Math.max(1024, ...profiles.map(p => p.limits.requestBytes)),
       bufferBytes: 65_536, ...(cfg.accountLifecycle ? { lifecycle: cfg.accountLifecycle } : {}) };

@@ -51,6 +51,9 @@ export interface RetainedCustodyProof {
 export interface ResumeCustodyAuthority extends RetainedCustodyProof {
   metadataRevision: number; authorizationEpoch: number;
 }
+export interface AccountLimitsIdentity extends AccountStatus {
+  generation: string; nativePhysicalIdentity: string;
+}
 export interface AccountCustodyIdentity {
   generation: string; nativePhysicalIdentity: string; revision: number; epoch: number;
 }
@@ -233,6 +236,8 @@ export function uuid(value: unknown): asserts value is string {
 export interface DurableKernel {
   issuer(context: TrustedContext): Promise<string>;
   account(context: TrustedContext, accountRef: string): Promise<AccountStatus>;
+  // Atomic current birth/epoch read; pending reconnect/delete is unavailable.
+  accountLimitsIdentity?(context: TrustedContext, accountRef: string): Promise<AccountLimitsIdentity>;
   // Optional to preserve historical in-memory test adapters; absence can never
   // grant resume. PostgreSQL exposes this only to trusted management custody.
   accountCustody?(context: TrustedContext, accountRef: string): Promise<AccountCustodyIdentity>;
