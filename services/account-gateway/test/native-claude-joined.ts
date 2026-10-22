@@ -51,13 +51,18 @@ async function run(): Promise<void> {
   assert.equal(process.env.AG_NATIVE_CLAUDE_JOINED_ALLOW, 'disposable_pg17_10');
   const nativeDSN = disposable('AG_NATIVE_CLAUDE_JOINED_NATIVE_DSN', 'native_claude_joined_');
   const kernelDSN = disposable('AG_NATIVE_CLAUDE_JOINED_KERNEL_DSN', 'ag_kernel_test_claude_joined_');
+  phase = 'native-binary-input';
   const binary = process.env.AG_NATIVE_CLAUDE_JOINED_BINARY;
   assert.ok(binary && isAbsolute(binary) && binary.includes('/tmp/native-claude-joined/'));
   const binarySHA256 = createHash('sha256').update(await readFile(binary)).digest('hex');
+  phase = 'native-build-provenance';
   const buildInfo = execFileSync(process.env.AG_NATIVE_CLAUDE_JOINED_GO ?? 'go', ['version', '-m', binary],
     { encoding: 'utf8', timeout: 5000, maxBuffer: 131072 });
   const nativeHead = /vcs\.revision=([a-f0-9]{40})/.exec(buildInfo)?.[1];
-  assert.ok(nativeHead); assert.match(buildInfo, /vcs\.modified=false/);
+  assert.ok(nativeHead);
+  phase = 'native-clean-build-provenance';
+  assert.match(buildInfo, /vcs\.modified=false/);
+  phase = 'gateway-source-provenance';
   const gatewayRoot = fileURLToPath(new URL('../../../', import.meta.url));
   const gatewayHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: gatewayRoot, encoding: 'utf8', timeout: 5000 }).trim();
   assert.match(gatewayHead, /^[a-f0-9]{40}$/);
@@ -89,13 +94,16 @@ async function run(): Promise<void> {
   for (const origin of [ready.nativeOrigin, ready.controllerOrigin]) {
     const url = new URL(origin as string); assert.equal(url.hostname, '127.0.0.1'); assert.equal(url.protocol, 'http:'); assert.ok(url.port);
   }
-  phase = 'kernel-migrations';
+  phase = 'kernel-database-guard';
   pool = new pg.Pool({ connectionString: kernelDSN, max: 8, connectionTimeoutMillis: 5000, query_timeout: 5000 });
   pool.on('error', () => undefined);
   const version = (await pool.query("SELECT current_database() AS db,current_setting('server_version') AS version")).rows[0];
   assert.equal(version.db, new URL(kernelDSN).pathname.slice(1)); assert.match(version.version, /^17\.10(?:$| )/);
   assert.equal((await pool.query("SELECT 1 FROM pg_namespace WHERE nspname IN ('ag_kernel','ag_management')")).rowCount, 0);
-  for (const name of (await readdir(new URL('../migrations/', import.meta.url))).filter(f => /^\d{3}_.*\.sql$/.test(f)).sort())
+  phase = 'kernel-migrations';
+  const migrations = (await readdir(new URL('../migrations/', import.meta.url))).filter(f => /^\d{3}_.*\.sql$/.test(f)).sort();
+  assert.ok(migrations.length > 0);
+  for (const name of migrations)
     await pool.query(await readFile(new URL('../migrations/' + name, import.meta.url), 'utf8'));
   const kernel = new PostgresKernel(pool), secrets = new IntentSecrets(randomBytes(32), randomBytes(32));
   const store = new PostgresManagementStore(pool, secrets), worker = randomUUID(), context = { consumerId };
@@ -233,10 +241,11 @@ async function run(): Promise<void> {
 }
 try { await run(); }
 catch (error) {
+  const frame = error instanceof Error ? /native-claude-joined\.ts:(\d+):(\d+)/.exec(
+    error.stack?.split('\n').slice(1).find(line => /^\s+at /.test(line) && line.includes('/native-claude-joined.ts:')) ?? '') : undefined;
   report({ phase: 'failed', at: phase, code: error instanceof assert.AssertionError ? 'assertion_failed' : 'qualification_failed',
-    ...(error instanceof assert.AssertionError ? { actual: typeof error.actual === 'string' ? error.actual.slice(0, 80) : typeof error.actual,
-      expected: typeof error.expected === 'string' ? error.expected.slice(0, 80) : typeof error.expected,
-      frame: error.stack?.split('\n').find(line => line.includes('native-claude-joined.ts'))?.trim() } : {}) });
+    ...(error instanceof assert.AssertionError ? { actualType: typeof error.actual, expectedType: typeof error.expected } : {}),
+    ...(frame ? { frame: 'native-claude-joined.ts:' + frame[1] + ':' + frame[2] } : {}) });
   process.exitCode = 1;
 } finally {
   if (child && !stopped) child.stdin!.end('stop\n');
