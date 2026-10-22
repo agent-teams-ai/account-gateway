@@ -783,7 +783,7 @@ for (const family of ['codex', 'claude'] as const) test(`cached ${family} native
   const permit = await kernel.startCandidate(context, operationId, worker); assert.ok(permit);
   const generation = permit.candidate;
   const journal = await store.journal({ ...context, operationId, accountRef, ownerRef, purpose: 'create' }, generation, worker, p);
-  await store.saveMapping({ ...journal, descriptor: { ...p, nativeId: 42, generation, nativePhysicalIdentity: generation, createdAt: '2026-10-22T00:00:00Z' } });
+  await store.saveMapping({ ...journal, descriptor: { ...p, nativeId: ++nextNativeId, generation, nativePhysicalIdentity: generation, createdAt: '2026-10-22T00:00:00Z' } });
   await kernel.acknowledgeCandidate(context, operationId, worker, { generation, nativePhysicalIdentity: generation, profile: p.profile });
   const a = await kernel.account(context, accountRef);
   const input = { accountRef, ownerRef, profileId: p.profile, expectedAuthorizationEpoch: a.epoch };
