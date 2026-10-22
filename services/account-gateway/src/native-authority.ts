@@ -1,11 +1,12 @@
+import { oauthProfileDefinition } from './oauth-profiles.ts';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { approvedLimits, defaults, identifier, uuid } from './domain.ts';
 import type { ApprovedLimits, DurableKernel, ExecutionRead, NativeDispatchProof, SavedExecution, TrustedContext } from './domain.ts';
 import type { FacadeBearers, NativeCallback, NativeTransport } from './facade.ts';
-import type { ManagementStore } from './management.ts';
-import { codexOAuthProfile, codexOAuthCleanupModels, accountLimitsTarget, exactCandidate, physicalCandidate } from './management.ts';
+import type { ManagementStore, CandidateJournal } from './management.ts';
+import { accountLimitsTarget, exactCandidate, physicalCandidate } from './management.ts';
 import { validateResponses } from './facade-ingress.ts';
 import { admission, binding, cleanup, config, denied, descriptor, instant, jsonBody, now, object,
   physicallyClosed, proof, receipt, sameAdmission, sameDescriptor, sameProof, saved, singleton } from './native-wire.ts';
@@ -24,10 +25,10 @@ export interface AuthorityOptions { readonly config: BridgeConfig; readonly kern
   readonly profileLimits?: readonly { readonly profile: string; readonly limits: Readonly<ApprovedLimits> }[];
   readonly oauthOwners?: { readonly store: Pick<ManagementStore, 'readJournal' | 'pendingOAuthRefresh'>;
     readonly bearers: Pick<FacadeBearers, 'authorizesOwner'> };
-  readonly oauthRefreshOwners?: { readonly store: Pick<ManagementStore, 'activeOAuthRefresh' | 'pendingOAuthRefresh'>;
+  readonly oauthRefreshOwners?: { readonly store: Pick<ManagementStore, 'readJournal' | 'activeOAuthRefresh' | 'pendingOAuthRefresh'>;
     readonly bearers: Pick<FacadeBearers, 'authorizesOwner'> };
   readonly accountLimitsOwners?: { readonly bearers: Pick<FacadeBearers, 'authorizesAccountLimits'> };
-  readonly oauthCleanupOwners?: { readonly store: Pick<ManagementStore, 'oauthCleanup'> } }
+  readonly oauthCleanupOwners?: { readonly store: Pick<ManagementStore, 'readJournal' | 'oauthCleanup'> } }
 const hash = (s: string) => createHash('sha256').update(s).digest();
 const key = (ctx: TrustedContext, ref: string, id: string) => JSON.stringify([ctx.consumerId, ref, id]);
 
@@ -49,7 +50,7 @@ export class NativeAuthority {
     // profile. Validate each tuple with its own receipt, retaining the original
     // enrollment ACK receipt and all shared transport/control bounds.
     const base = config({ ...options.config, profiles: options.config.profiles.slice(0, 1) });
-    if (options.config.profiles.length > 3) denied();
+    if (options.config.profiles.length > 4) denied();
     const profiles = options.config.profiles.map(p => config({ ...options.config,
       enrollment: { ...options.config.enrollment, qualificationRef: p.qualificationRef }, profiles: [p] }).profiles[0]);
     if (new Set(profiles.map(p => p.profile)).size !== profiles.length) denied();
@@ -133,10 +134,21 @@ export class NativeAuthority {
     if (a.signal.aborted) return denied();
     a.descriptor = d; a.ready = true;
   }
+  // Resolve the original source-owned tuple from durable custody, never from
+  // caller-selected provider fields or the ordering of configured profiles.
+  #oauthProfile(journal: CandidateJournal | undefined, cleanupOnly = false) {
+    if (!journal) return undefined;
+    const definition = oauthProfileDefinition(journal.profile.profile);
+    const profile = this.configuration.profiles.find(p => p.profile === journal.profile.profile);
+    if (!definition || !profile || profile.baseURL !== definition.baseURL || profile.model !== definition.model ||
+        journal.profile.baseURL !== profile.baseURL || journal.profile.qualificationRef !== profile.qualificationRef ||
+        (cleanupOnly ? !definition.cleanupModels.includes(journal.profile.model) : journal.profile.model !== profile.model)) return undefined;
+    return profile;
+  }
   // Cached reads have separate consumer authority and permit suspended custody.
   async #accountLimitsOwner(ctx: TrustedContext, value: unknown): Promise<unknown> {
     const r = object(value, ['consumerId','ownerRef','accountRef','profileId','expectedAuthorizationEpoch']);
-    if (r.consumerId !== ctx.consumerId || !this.#accountLimitsOwners || r.profileId !== codexOAuthProfile.profile ||
+    if (r.consumerId !== ctx.consumerId || !this.#accountLimitsOwners || typeof r.profileId !== 'string' || !oauthProfileDefinition(r.profileId) ||
         !this.#accountLimitsOwners.bearers.authorizesAccountLimits(ctx, r.ownerRef as string, r.profileId)) return denied();
     const target = await accountLimitsTarget(this.kernel, this.#store, ctx, {
       ownerRef: r.ownerRef as string, accountRef: r.accountRef as string, profileId: r.profileId,
@@ -151,12 +163,10 @@ export class NativeAuthority {
     if (!this.#owners || !this.kernel.accountCustody || r.consumerId !== ctx.consumerId) return denied();
     identifier(r.operationId); uuid(r.accountRef); uuid(r.generation);
     const j = await this.#owners.store.readJournal(ctx, r.operationId);
-    const p = this.configuration.profiles.find(p => p.profile === codexOAuthProfile.profile);
+    const p = this.#oauthProfile(j);
     if (!j || !p || j.consumerId !== ctx.consumerId || j.operationId !== r.operationId ||
         j.accountRef !== r.accountRef || j.generation !== r.generation || !['create','reconnect'].includes(j.purpose) ||
-        j.profile.profile !== p.profile || p.profile !== codexOAuthProfile.profile ||
-        j.profile.baseURL !== p.baseURL || p.baseURL !== codexOAuthProfile.baseURL ||
-        j.profile.model !== p.model || p.model !== codexOAuthProfile.model ||
+        j.profile.profile !== p.profile || j.profile.baseURL !== p.baseURL || j.profile.model !== p.model ||
         j.profile.qualificationRef !== p.qualificationRef) return denied();
     const op = await this.kernel.operation(ctx, j.operationId);
     const account = await this.kernel.account(ctx, j.accountRef);
@@ -177,12 +187,11 @@ export class NativeAuthority {
     if (!this.#owners || r.consumerId !== ctx.consumerId) return denied();
     identifier(r.operationId); uuid(r.accountRef); uuid(r.generation);
     const j = await this.#owners.store.readJournal(ctx, r.operationId);
-    const p = this.configuration.profiles.find(p => p.profile === codexOAuthProfile.profile);
+    const p = this.#oauthProfile(j);
     if (!j || !p || j.consumerId !== ctx.consumerId || j.operationId !== r.operationId ||
         j.accountRef !== r.accountRef || j.generation !== r.generation || !['create','reconnect'].includes(j.purpose) ||
-        j.profile.profile !== codexOAuthProfile.profile || j.profile.baseURL !== codexOAuthProfile.baseURL ||
-        j.profile.model !== codexOAuthProfile.model || j.profile.qualificationRef !== p.qualificationRef ||
-        p.baseURL !== codexOAuthProfile.baseURL || p.model !== codexOAuthProfile.model) return denied();
+        j.profile.profile !== p.profile || j.profile.baseURL !== p.baseURL ||
+        j.profile.model !== p.model || j.profile.qualificationRef !== p.qualificationRef) return denied();
     identifier(j.ownerRef);
     const op = await this.kernel.operation(ctx, j.operationId);
     const account = await this.kernel.account(ctx, j.accountRef);
@@ -211,8 +220,9 @@ export class NativeAuthority {
     const r = object(value, ['consumerId','operationId','accountRef','generation']);
     if (!this.#refreshOwners || r.consumerId !== ctx.consumerId) return denied();
     identifier(r.operationId); uuid(r.accountRef); uuid(r.generation);
-    const p = this.configuration.profiles.find(p => p.profile === codexOAuthProfile.profile);
-    if (!p || p.baseURL !== codexOAuthProfile.baseURL || p.model !== codexOAuthProfile.model) return denied();
+    const original = await this.#refreshOwners.store.readJournal(ctx, r.operationId);
+    const p = this.#oauthProfile(original);
+    if (!p) return denied();
     const selectors = { consumerId: ctx.consumerId, operationId: r.operationId,
       accountRef: r.accountRef, generation: r.generation };
     const active = await this.#refreshOwners.store.activeOAuthRefresh?.(ctx,
@@ -235,15 +245,16 @@ export class NativeAuthority {
     if (!this.#cleanupOwners?.store.oauthCleanup || r.consumerId !== ctx.consumerId ||
         (r.action !== 'read' && r.action !== 'erase')) return denied();
     identifier(r.operationId); uuid(r.accountRef); uuid(r.generation); uuid(r.cleanupRef); uuid(r.cleanupToken);
-    const p = this.configuration.profiles.find(p => p.profile === codexOAuthProfile.profile);
-    if (!p || p.baseURL !== codexOAuthProfile.baseURL || p.model !== codexOAuthProfile.model) return denied();
+    const original = await this.#cleanupOwners.store.readJournal(ctx, r.operationId);
+    const p = this.#oauthProfile(original, true);
+    if (!p) return denied();
     const owned = await this.#cleanupOwners.store.oauthCleanup(ctx, this.configuration.enrollment.worker,
       { cleanupRef: r.cleanupRef, cleanupToken: r.cleanupToken }, r.action, p,
       { consumerId: ctx.consumerId, operationId: r.operationId, accountRef: r.accountRef, generation: r.generation });
     if (!owned || owned.journal.consumerId !== ctx.consumerId || owned.journal.operationId !== r.operationId ||
         owned.journal.accountRef !== r.accountRef || owned.journal.generation !== r.generation ||
         owned.journal.profile.profile !== p.profile || owned.journal.profile.baseURL !== p.baseURL ||
-        !codexOAuthCleanupModels.includes(owned.journal.profile.model) || owned.journal.profile.qualificationRef !== p.qualificationRef ||
+        !oauthProfileDefinition(p.profile)!.cleanupModels.includes(owned.journal.profile.model) || owned.journal.profile.qualificationRef !== p.qualificationRef ||
         instant(owned.leaseExpiresAt) <= now()) return denied();
     identifier(owned.journal.ownerRef);
     const native = owned.native && physicalCandidate(owned.native);

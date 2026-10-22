@@ -1,3 +1,4 @@
+import { oauthProfileDefinition } from './oauth-profiles.ts';
 import { nativeUsage } from './usage.ts';
 import type { NativeUsage } from './usage.ts';
 import { ResponsesUsageCapture } from './usage.ts';
@@ -13,7 +14,7 @@ import { secretSubmission } from '@agent-teams/account-gateway/http';
 import { KernelError, identifier, uuid } from './domain.ts';
 import type { ApprovedLimits, ClaimResult, DurableKernel, ExecutionRead, NativeDispatchProof,
   OperationStatus, PrivateAdmission, RequestStatus, SavedExecution, TrustedContext, CleanupAuthority } from './domain.ts';
-import { accountLimitsTarget, captureContext, physicalCandidate, sameCandidate, codexOAuthProfile } from './management.ts';
+import { accountLimitsTarget, captureContext, physicalCandidate, sameCandidate } from './management.ts';
 import type { AccountManagement, ManagementStore, PhysicalCandidate } from './management.ts';
 import type { AccountLifecycleReadback } from './management.ts';
 import { strictJSON, validateResponses } from './facade-ingress.ts';
@@ -346,10 +347,10 @@ export function createFacade(options: FacadeOptions): Server {
   const profiles = new Map<string, { dto: c.Profile; maxOutputTokens: number; limits?: Readonly<ApprovedLimits> }>();
   for (const entry of options.profiles) {
     const dto = c.profile.parse(entry.dto);
-    const oauth = dto.authKinds[0] === 'oauth';
+    const oauth = dto.authKinds[0] === 'oauth', definition = oauthProfileDefinition(dto.profileId);
     if (dto.protocol !== 'openai-responses' || dto.modelIds.length !== 1 || dto.authKinds.length !== 1 ||
-        (oauth ? !management.supportsOAuthProfile(dto.profileId) || dto.profileId !== codexOAuthProfile.profile ||
-          dto.modelIds[0] !== codexOAuthProfile.model : dto.authKinds[0] !== 'api_key' || dto.profileId === codexOAuthProfile.profile) ||
+        (oauth ? !management.supportsOAuthProfile(dto.profileId) || !definition ||
+          dto.modelIds[0] !== definition.model : dto.authKinds[0] !== 'api_key' || !!definition) ||
         profiles.has(dto.profileId) || !Number.isSafeInteger(entry.maxOutputTokens) || entry.maxOutputTokens < 1 || entry.maxOutputTokens > 10_000_000) throw new KernelError('invalid');
     profiles.set(dto.profileId, { dto: Object.freeze({ ...dto, authKinds: Object.freeze([...dto.authKinds]) as unknown as c.Profile['authKinds'],
       modelIds: Object.freeze([...dto.modelIds]) as unknown as string[] }), maxOutputTokens: entry.maxOutputTokens,
@@ -534,14 +535,19 @@ export function createFacade(options: FacadeOptions): Server {
         if (a.ownerRef !== input.ownerRef || a.profile !== input.profileId || a.epoch !== input.expectedAuthorizationEpoch ||
             !['active','suspended'].includes(a.state)) throw new KernelError('denied');
         requireCurrent(grant);
-        if (input.profileId !== codexOAuthProfile.profile) { send(res, c.accountLimits, { status: 'unsupported' }, 200, true); return; }
+        const limitsProfile = oauthProfileDefinition(input.profileId);
+        if (!limitsProfile) { send(res, c.accountLimits, { status: 'unsupported' }, 200, true); return; }
         const before = await accountLimitsTarget(kernel, store, context, input);
         requireCurrent(grant);
         let result: c.AccountLimits = { status: 'unavailable' };
         try {
           if (options.accountLimits) {
             const capabilities = parse(c.accountLimitsCapabilities, await options.accountLimits.getAccountLimitsCapabilities());
-            if (capabilities.cachedRead) result = parse(c.accountLimits, await options.accountLimits.readAccountLimits(input));
+            if (capabilities.cachedRead) {
+              const observation = parse(c.accountLimits, await options.accountLimits.readAccountLimits(input));
+              if (observation.status !== 'snapshot' || observation.windows.every(window => window.family === limitsProfile.family))
+                result = observation;
+            }
           }
         } catch { /* No native/provider diagnostic crosses the safe union. */ }
         const after = await accountLimitsTarget(kernel, store, context, input);
@@ -790,7 +796,7 @@ export function createFacade(options: FacadeOptions): Server {
           if (!op.accountRef || !op.lifecycle || op.lifecycle.account.accountRef !== op.accountRef) throw new KernelError('conflict');
           const original = op.lifecycle.account;
           const account = lifecycleAccountDTO({ account: original,
-            authKind: original.profile === codexOAuthProfile.profile ? 'oauth' : 'api_key',
+            authKind: oauthProfileDefinition(original.profile) ? 'oauth' : 'api_key',
             resumeCustody: original.state === 'suspended' ? 'attention_required' : 'not_applicable' });
           const intent = { action: op.lifecycle.kind, accountRef: original.accountRef, profileId: original.profile,
             expectedMetadataRevision: op.lifecycle.expectedRevision };
@@ -881,7 +887,11 @@ export function createFacade(options: FacadeOptions): Server {
         if (account.ownerRef !== input.ownerRef || !permitsOwner(grant, account.ownerRef) ||
             !permitsOAuthProfile(grant, account.profile) ||
             !profile || profile.dto.authKinds[0] !== 'oauth' || !management.supportsOAuthProfile(account.profile)) throw new KernelError('denied');
-        const callback = secretSubmission.parseOAuthCallbackURL(input.callbackURL);
+        const definition = oauthProfileDefinition(account.profile);
+        const callback = definition?.family === 'claude'
+          ? ('authorizationCode' in input ? secretSubmission.parseClaudeOAuthAuthorizationCode(input.authorizationCode) : undefined)
+          : definition?.family === 'codex' && 'callbackURL' in input
+            ? secretSubmission.parseOAuthCallbackURL(input.callbackURL) : undefined;
         if (!callback) throw new KernelError('invalid');
         requireCurrent(grant); uncertain = true;
         const operation = await management.completeOAuth(context, { operationId: input.operationId, ownerRef: input.ownerRef, ...callback });

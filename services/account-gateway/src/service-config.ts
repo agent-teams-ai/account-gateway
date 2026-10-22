@@ -7,7 +7,7 @@ import { FacadeBearers, RUN_CONTROL_MAX_RUN_MS, lifecycleContract } from './faca
 import type { ManagementBearer, RunControlBearer, ConsumerControlBearer } from './facade.ts';
 import { strictJSON } from './facade-ingress.ts';
 import { object } from './native-wire.ts';
-import { physicalCandidate, codexOAuthProfile } from './management.ts';
+import { physicalCandidate, codexOAuthProfile, claudeOAuthProfile } from './management.ts';
 
 export class ServiceError extends Error {
   readonly code: 'config_denied' | 'startup_denied' | 'runtime_denied' | 'shutdown_pending';
@@ -29,6 +29,7 @@ export interface ServiceConfig {
   readonly keys: Readonly<{ intentAEAD: string; intentHMAC: string; facadeHMAC: string }>;
   // Explicit opt-in with its own qualification and limits, captured before IO.
   readonly oauthEnrollment?: OAuthEnrollmentConfig;
+  readonly claudeOAuthEnrollment?: ClaudeOAuthEnrollmentConfig;
   readonly accountLifecycle?: Readonly<{ contract: typeof lifecycleContract; writeGate: 'enabled' | 'disabled' }>;
 }
 export interface OAuthEnrollmentConfig {
@@ -38,6 +39,10 @@ export interface OAuthEnrollmentConfig {
   readonly qualificationRef?: string;
   readonly limits?: Readonly<ApprovedLimits>;
   readonly providerTokenUpperBound?: number;
+}
+export interface ClaudeOAuthEnrollmentConfig extends Omit<OAuthEnrollmentConfig, 'profile' | 'modelScope'> {
+  readonly profile: 'anthropic-claude-oauth-messages-v1';
+  readonly modelScope: readonly ['claude-sonnet-4-6'];
 }
 export interface ServiceProfile {
   readonly profile: string; readonly model: string; readonly baseURL: string;
@@ -78,20 +83,28 @@ function freeze<T>(v: T): T {
 }
 // No caller/provider endpoint override or inferred alias; API-key profile stays
 // the service default. Catalog evidence alone cannot enable a native account.
-export function captureOAuthEnrollmentConfig(value: unknown): OAuthEnrollmentConfig {
+function captureEnrollmentConfig(value: unknown, profile: typeof codexOAuthProfile | typeof claudeOAuthProfile) {
   try {
     const r = object(value, ['enabled','profile','modelScope'], ['qualificationRef','limits','providerTokenUpperBound']);
-    if (r.enabled !== true || r.profile !== codexOAuthProfile.profile || !Array.isArray(r.modelScope) ||
-        r.modelScope.length !== 1 || r.modelScope[0] !== codexOAuthProfile.model) return deny();
+    if (r.enabled !== true || r.profile !== profile.profile || !Array.isArray(r.modelScope) ||
+        r.modelScope.length !== 1 || r.modelScope[0] !== profile.model) return deny();
     const supplied = ['qualificationRef','limits','providerTokenUpperBound'].filter(k => Object.hasOwn(r, k));
     if (supplied.length && supplied.length !== 3) return deny();
-    const qualified = supplied.length ? captureProfile({ ...codexOAuthProfile, qualificationRef: r.qualificationRef,
+    const qualified = supplied.length ? captureProfile({ ...profile, qualificationRef: r.qualificationRef,
       limits: r.limits, providerTokenUpperBound: r.providerTokenUpperBound }) : undefined;
-    return Object.freeze({ enabled: true, profile: 'openai-codex-oauth-responses-v1',
-      modelScope: Object.freeze(['gpt-5.6-sol'] as const), ...(qualified ? {
+    return Object.freeze({ enabled: true, profile: profile.profile,
+      modelScope: Object.freeze([profile.model]), ...(qualified ? {
         qualificationRef: qualified.qualificationRef, limits: qualified.limits,
         providerTokenUpperBound: qualified.providerTokenUpperBound } : {}) });
   } catch { return deny(); }
+}
+export function captureOAuthEnrollmentConfig(value: unknown): OAuthEnrollmentConfig {
+  return captureEnrollmentConfig(value, codexOAuthProfile) as OAuthEnrollmentConfig;
+}
+export function captureClaudeOAuthEnrollmentConfig(value: unknown): ClaudeOAuthEnrollmentConfig {
+  const config = captureEnrollmentConfig(value, claudeOAuthProfile) as ClaudeOAuthEnrollmentConfig;
+  if ((config.limits?.tokens ?? 0) > 65_536 || (config.providerTokenUpperBound ?? 0) > 65_536) return deny();
+  return config;
 }
 export function captureAccountLifecycle(value: unknown): NonNullable<ServiceConfig['accountLifecycle']> {
   try {
@@ -114,7 +127,7 @@ function captureProfile(value: unknown): ServiceProfile {
 }
 // Pure server configuration capture is shared by startup and source HTTP tests.
 // The singleton stays compatible; only the optional second tuple is fixed.
-export function captureServiceProfiles(input: Pick<ServiceConfig, 'profile' | 'secondProfile' | 'oauthEnrollment'>): readonly ServiceProfile[] {
+export function captureServiceProfiles(input: Pick<ServiceConfig, 'profile' | 'secondProfile' | 'oauthEnrollment' | 'claudeOAuthEnrollment'>): readonly ServiceProfile[] {
   try {
     const first = captureProfile(input.profile);
     if (first.profile !== 'openai-responses-apikey-v1') return deny();
@@ -129,6 +142,12 @@ export function captureServiceProfiles(input: Pick<ServiceConfig, 'profile' | 's
       const o = captureOAuthEnrollmentConfig(input.oauthEnrollment);
       if (!o.limits || !o.qualificationRef || !o.providerTokenUpperBound) return deny();
       profiles.push(captureProfile({ ...codexOAuthProfile, qualificationRef: o.qualificationRef,
+        limits: o.limits, providerTokenUpperBound: o.providerTokenUpperBound }));
+    }
+    if (input.claudeOAuthEnrollment !== undefined) {
+      const o = captureClaudeOAuthEnrollmentConfig(input.claudeOAuthEnrollment);
+      if (!o.limits || !o.qualificationRef || !o.providerTokenUpperBound) return deny();
+      profiles.push(captureProfile({ ...claudeOAuthProfile, qualificationRef: o.qualificationRef,
         limits: o.limits, providerTokenUpperBound: o.providerTokenUpperBound }));
     }
     return Object.freeze(profiles);
@@ -201,9 +220,10 @@ export function loadServiceConfig(file: string): ServiceConfig {
       // readFileSync would permit growth after fstat; bounded positional read below.
       bytes = readBounded(fd, bytes);
     } finally { closeSync(fd); }
-    const r = object(strictJSON(bytes), ['kernelDSN','durableFacts','facadeOrigin','callbackOrigin','native','consumer','profile','bearers','keys'], ['oauthEnrollment','secondProfile','accountLifecycle']);
+    const r = object(strictJSON(bytes), ['kernelDSN','durableFacts','facadeOrigin','callbackOrigin','native','consumer','profile','bearers','keys'], ['oauthEnrollment','claudeOAuthEnrollment','secondProfile','accountLifecycle']);
     const accountLifecycle = r.accountLifecycle === undefined ? undefined : captureAccountLifecycle(r.accountLifecycle);
     const oauthEnrollment = Object.hasOwn(r, 'oauthEnrollment') ? captureOAuthEnrollmentConfig(r.oauthEnrollment) : undefined;
+    const claudeOAuthEnrollment = Object.hasOwn(r, 'claudeOAuthEnrollment') ? captureClaudeOAuthEnrollmentConfig(r.claudeOAuthEnrollment) : undefined;
     // Use the kernel's existing bound authority after exact protected parsing.
     // Missing, extra, nonnumeric or inconsistent values deny before startup IO.
     const durableFacts = boundedFacts(object(r.durableFacts,
@@ -220,7 +240,7 @@ export function loadServiceConfig(file: string): ServiceConfig {
       executionCredential: text(c.executionCredential), cleanupCredential: text(c.cleanupCredential), callbackCredential: text(c.callbackCredential) };
     identifier(consumer.consumerId);
     const profile = captureProfile(r.profile), secondProfile = r.secondProfile === undefined ? undefined : captureProfile(r.secondProfile);
-    const profiles = captureServiceProfiles({ profile, secondProfile, oauthEnrollment });
+    const profiles = captureServiceProfiles({ profile, secondProfile, oauthEnrollment, claudeOAuthEnrollment });
     const keys = { intentAEAD: text(k.intentAEAD), intentHMAC: text(k.intentHMAC), facadeHMAC: text(k.facadeHMAC) };
     Object.values(keys).forEach(keyBytes);
     if (new Set(Object.values(keys)).size !== 3) deny();
@@ -234,7 +254,8 @@ export function loadServiceConfig(file: string): ServiceConfig {
     return freeze({ kernelDSN, durableFacts, facadeOrigin, callbackOrigin, native, consumer, profile, bearers, keys,
       ...(secondProfile === undefined ? {} : { secondProfile }),
       ...(accountLifecycle === undefined ? {} : { accountLifecycle }),
-      ...(oauthEnrollment === undefined ? {} : { oauthEnrollment }) });
+      ...(oauthEnrollment === undefined ? {} : { oauthEnrollment }),
+      ...(claudeOAuthEnrollment === undefined ? {} : { claudeOAuthEnrollment }) });
   } catch { return deny(); }
 }
 function readBounded(fd: number, b: Buffer): Buffer {

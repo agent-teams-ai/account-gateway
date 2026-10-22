@@ -4,7 +4,8 @@ import { sharedCheckout } from './service-admission.ts';
 import type { Checkout } from './service-admission.ts';
 import { KernelError, identifier, uuid } from './domain.ts';
 import type { TrustedContext } from './domain.ts';
-import { captureContext, codexOAuthProfile, codexOAuthCleanupModels, exactCandidate, physicalCandidate } from './management.ts';
+import { captureContext, exactCandidate, physicalCandidate } from './management.ts';
+import { oauthProfileDefinition } from './oauth-profiles.ts';
 import type { AcceptedIntent, CandidateJournal, CandidateMapping, CandidateScope, IntentCustody,
   ManagedProfile, ManagementStore, OAuthSelectors, OAuthCleanupAuthority, OAuthCleanupAction, OAuthCleanupScope } from './management.ts';
 
@@ -129,8 +130,8 @@ const pendingOAuthJournal = `SELECT j.* FROM ag_kernel.accounts a
 function refreshProfile(source: ManagedProfile): ManagedProfile {
   const p = Object.freeze({ profile: source.profile, baseURL: source.baseURL,
     model: source.model, qualificationRef: source.qualificationRef });
-  if (p.profile !== codexOAuthProfile.profile || p.baseURL !== codexOAuthProfile.baseURL ||
-      p.model !== codexOAuthProfile.model) throw new KernelError('invalid');
+  const definition = oauthProfileDefinition(p.profile);
+  if (!definition || p.baseURL !== definition.baseURL || p.model !== definition.model) throw new KernelError('invalid');
   identifier(p.qualificationRef);
   return p;
 }
@@ -482,7 +483,7 @@ export class PostgresManagementStore implements ManagementStore {
           AND ($12::boolean=false OR NOT EXISTS (SELECT 1 FROM ag_kernel.requests r
             JOIN ag_kernel.executions e ON e.consumer=r.consumer AND e.ref=r.execution_ref
             WHERE r.consumer=l.consumer AND e.generation=l.generation AND r.transport_occupied))`,
-      [ctx.consumerId, authority.cleanupRef, worker, authority.cleanupToken, p.profile, p.baseURL, codexOAuthCleanupModels, p.qualificationRef,
+      [ctx.consumerId, authority.cleanupRef, worker, authority.cleanupToken, p.profile, p.baseURL, oauthProfileDefinition(p.profile)!.cleanupModels, p.qualificationRef,
         s?.operationId ?? null, s?.accountRef ?? null, s?.generation ?? null, action === 'erase'])).rows[0];
       if (!r) return undefined;
       const journal = journalRow(r);

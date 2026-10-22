@@ -42,7 +42,24 @@ export function parseOAuthCallbackURL(value: unknown): { readonly state: string;
   } catch { return undefined; }
 }
 export const oauthCallbackURL = z.string().min(1).max(8192).refine(value => parseOAuthCallbackURL(value) !== undefined);
-export const oauthComplete = z.strictObject({ operationId: c.reference, ownerRef: c.reference, callbackURL: oauthCallbackURL });
+/** The official Claude browser page returns this manual code#state value. */
+export const claudeOAuthCallbackCode = z.string().min(1).max(8192).refine(value =>
+  !/[\uD800-\uDFFF]/u.test(value) && new TextEncoder().encode(value).byteLength <= 8192 &&
+  !/[\s\u0000-\u001f\u007f-\u009f#]/u.test(value));
+export function parseClaudeOAuthAuthorizationCode(value: unknown): { readonly state: string; readonly code: string } | undefined {
+  if (typeof value !== 'string' || value.length > 8257) return undefined;
+  const [code, state, extra] = value.split('#');
+  return extra === undefined && claudeOAuthCallbackCode.safeParse(code).success && oauthCallbackState.safeParse(state).success
+    ? { code: code!, state: state! } : undefined;
+}
+export const claudeOAuthAuthorizationCode = z.string().min(1).max(8257)
+  .refine(value => parseClaudeOAuthAuthorizationCode(value) !== undefined);
+// The operation's persisted profile chooses the variant at the facade. Neither
+// shape lets the consumer choose a provider or override a redirect destination.
+export const oauthComplete = z.union([
+  z.strictObject({ operationId: c.reference, ownerRef: c.reference, callbackURL: oauthCallbackURL }),
+  z.strictObject({ operationId: c.reference, ownerRef: c.reference, authorizationCode: claudeOAuthAuthorizationCode }),
+]);
 export type OAuthComplete = z.infer<typeof oauthComplete>;
 
 /** Approved native bytes are never parsed or converted into a generic protocol DTO. */

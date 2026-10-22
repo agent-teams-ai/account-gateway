@@ -1,4 +1,6 @@
 import { KernelError, identifier, uuid, revision } from './domain.ts';
+import { oauthProfileDefinition } from './oauth-profiles.ts';
+export { codexOAuthProfile, codexOAuthCleanupModels, claudeOAuthProfile } from './oauth-profiles.ts';
 import type { AccountIntent, AccountPage, AccountPageQuery, AccountStatus, DurableKernel,
   OperationStatus, TrustedContext, CleanupClaim, AccountRetirementReadback, PolicyUseClosureReadback,
   RetainedCustodyProof, ResumeCustodyAuthority } from './domain.ts';
@@ -31,10 +33,6 @@ export interface CandidateNative {
 }
 // Consumer-owned protected enrollment ports. No SDK/vendor DTOs or token data.
 // Catalog evidence pins intent; it is never an account qualification receipt.
-export const codexOAuthProfile = Object.freeze({ profile: 'openai-codex-oauth-responses-v1',
-  baseURL: 'https://chatgpt.com/backend-api/codex', model: 'gpt-5.6-sol' });
-// Historical models authorize exact claimed-generation cleanup only.
-export const codexOAuthCleanupModels: readonly string[] = Object.freeze([codexOAuthProfile.model, 'gpt-6.1-sol']);
 export interface OAuthScope {
   readonly consumerId: string; readonly operationId: string; readonly ownerRef: string;
   readonly accountRef: string; readonly generation: string;
@@ -97,6 +95,7 @@ export interface OAuthEnrollmentOptions {
   readonly profile: ManagedProfile; readonly native: OAuthEnrollmentNative;
   readonly descriptor?: OAuthDescriptorBoundary;
   readonly lifecycle?: OAuthLifecycleNative;
+  readonly refresh?: OAuthRefreshNative;
 }
 export interface OAuthCallback { readonly state: string; readonly code: string }
 export interface OAuthCompleteInput extends OAuthCallback { readonly operationId: string; readonly ownerRef: string }
@@ -233,21 +232,25 @@ export class AccountManagement {
   private readonly retainedCustody?: RetainedCustodyVerifier;
   private readonly worker: string;
   private readonly profiles: ReadonlyMap<string, ManagedProfile>;
-  private readonly oauth?: Readonly<OAuthEnrollmentOptions>;
-  private readonly refreshNative?: OAuthRefreshNative;
-  private refreshCursor?: string;
+  private readonly oauthProviders: ReadonlyMap<string, Readonly<OAuthEnrollmentOptions>>;
+  private readonly refreshCursors = new Map<string, string>();
+  private refreshProfileCursor = 0;
   private refreshInFlight = false;
   constructor(options: { kernel: DurableKernel; store: ManagementStore; custody: IntentCustody;
     native: CandidateNative; proof: ControlledProof; worker: string; profiles: readonly ManagedProfile[];
-    oauth?: OAuthEnrollmentOptions; refresh?: OAuthRefreshNative; retainedCustody?: RetainedCustodyVerifier }) {
+    oauth?: OAuthEnrollmentOptions; oauthProviders?: readonly OAuthEnrollmentOptions[]; refresh?: OAuthRefreshNative; retainedCustody?: RetainedCustodyVerifier }) {
     uuid(options.worker);
     if (!options.profiles.length || options.profiles.length > 128) throw new KernelError('invalid');
     const profiles = new Map<string, ManagedProfile>();
-    const oauth = options.oauth && Object.freeze({ profile: Object.freeze({ ...options.oauth.profile }),
-      native: options.oauth.native, descriptor: options.oauth.descriptor, lifecycle: options.oauth.lifecycle });
-    if (oauth && (oauth.profile.profile !== codexOAuthProfile.profile ||
-        oauth.profile.baseURL !== codexOAuthProfile.baseURL || oauth.profile.model !== codexOAuthProfile.model)) throw new KernelError('invalid');
-    for (const source of [...options.profiles, ...(oauth ? [oauth.profile] : [])]) {
+    const oauthProviders = new Map<string, Readonly<OAuthEnrollmentOptions>>();
+    for (const entry of [...(options.oauth ? [{ ...options.oauth, refresh: options.refresh ?? options.oauth.refresh }] : []),
+      ...(options.oauthProviders ?? [])]) {
+      const definition = oauthProfileDefinition(entry.profile.profile);
+      if (!definition || entry.profile.baseURL !== definition.baseURL || entry.profile.model !== definition.model ||
+          oauthProviders.has(entry.profile.profile)) throw new KernelError('invalid');
+      oauthProviders.set(entry.profile.profile, Object.freeze({ ...entry, profile: Object.freeze({ ...entry.profile }) }));
+    }
+    for (const source of [...options.profiles, ...[...oauthProviders.values()].map(entry => entry.profile)]) {
       const p = Object.freeze({ profile: source.profile, baseURL: source.baseURL, model: source.model,
         qualificationRef: source.qualificationRef });
       identifier(p.profile, 64); identifier(p.qualificationRef);
@@ -256,33 +259,35 @@ export class AccountManagement {
       if (profiles.has(p.profile)) throw new KernelError('invalid');
       profiles.set(p.profile, p);
     }
-    if (profiles.size > 128 || (!oauth && profiles.has(codexOAuthProfile.profile))) throw new KernelError('invalid');
+    if (profiles.size > 128 || [...profiles.keys()].some(id => oauthProfileDefinition(id) && !oauthProviders.has(id))) throw new KernelError('invalid');
     this.kernel = options.kernel; this.store = options.store; this.custody = options.custody;
     this.native = options.native; this.proof = options.proof; this.worker = options.worker; this.profiles = profiles;
     this.retainedCustody = options.retainedCustody;
-    this.oauth = oauth;
-    this.refreshNative = options.refresh;
+    this.oauthProviders = oauthProviders;
   }
   async refreshOAuth(context: TrustedContext, cleanupAcquired = false,
     signal?: AbortSignal): Promise<'idle' | 'deferred' | 'observed'> {
     const ctx = captureContext(context);
-    if (signal?.aborted || cleanupAcquired || this.refreshInFlight || !this.oauth || !this.refreshNative ||
-        !this.store.nextOAuthRefresh) return 'idle';
+    if (signal?.aborted || cleanupAcquired || this.refreshInFlight || !this.store.nextOAuthRefresh) return 'idle';
+    const refreshable = [...this.oauthProviders.values()].filter(entry => entry.refresh);
+    if (!refreshable.length) return 'idle';
+    const oauth = refreshable[this.refreshProfileCursor++ % refreshable.length];
+    const refreshNative = oauth.refresh!;
     this.refreshInFlight = true;
     try {
-      const mapping = await this.store.nextOAuthRefresh(ctx, this.worker, this.oauth.profile, this.refreshCursor);
-      if (!mapping) { this.refreshCursor = undefined; return 'idle'; }
+      const mapping = await this.store.nextOAuthRefresh(ctx, this.worker, oauth.profile, this.refreshCursors.get(oauth.profile.profile));
+      if (!mapping) { this.refreshCursors.delete(oauth.profile.profile); return 'idle'; }
       // Advance before external await, including a dropped ACK or native UNKNOWN.
       // This hint is never an authority, retry receipt or durable refresh ledger.
-      this.refreshCursor = mapping.generation;
-      if (mapping.consumerId !== ctx.consumerId || mapping.profile.profile !== this.oauth.profile.profile ||
-          mapping.profile.baseURL !== this.oauth.profile.baseURL || mapping.profile.model !== this.oauth.profile.model ||
-          mapping.profile.qualificationRef !== this.oauth.profile.qualificationRef ||
+      this.refreshCursors.set(oauth.profile.profile, mapping.generation);
+      if (mapping.consumerId !== ctx.consumerId || mapping.profile.profile !== oauth.profile.profile ||
+          mapping.profile.baseURL !== oauth.profile.baseURL || mapping.profile.model !== oauth.profile.model ||
+          mapping.profile.qualificationRef !== oauth.profile.qualificationRef ||
           !exactCandidate(mapping, physicalCandidate(mapping.descriptor))) throw new KernelError('conflict');
       let result: OAuthRefreshReadback;
       try {
         if (signal?.aborted) return 'idle';
-        result = await this.refreshNative.refresh(oauthScope(mapping));
+        result = await refreshNative.refresh(oauthScope(mapping));
       }
       catch { return 'deferred'; }
       if (result.operationId !== mapping.operationId || result.accountRef !== mapping.accountRef ||
@@ -291,7 +296,7 @@ export class AccountManagement {
     } finally { this.refreshInFlight = false; }
   }
   supportsOAuthProfile(profile: string): boolean {
-    return this.oauth !== undefined && profile === codexOAuthProfile.profile;
+    return this.oauthProviders.has(profile);
   }
   async beginOAuth(context: TrustedContext, input: OAuthBeginInput): Promise<OAuthBeginResult> {
     const ctx = captureContext(context);
@@ -300,7 +305,7 @@ export class AccountManagement {
     const intent: AccountIntent = { kind: 'create', operationId: input.operationId,
       ownerRef: input.ownerRef, profile: input.profile, displayName: input.displayName, intentDigest: '', ...deviceMethod(input.method) };
     identifier(intent.operationId); identifier(intent.ownerRef); identifier(intent.profile, 64); name(intent.displayName);
-    if (!this.supportsOAuthProfile(intent.profile!)) throw new KernelError('denied');
+    if (!this.supportsOAuthProfile(intent.profile!) || (input.method === 'device_code' && !oauthProfileDefinition(intent.profile!)?.deviceCode)) throw new KernelError('denied');
     return this.beginOAuthIntent(ctx, intent);
   }
   async beginOAuthReconnect(context: TrustedContext, input: OAuthReconnectInput): Promise<OAuthBeginResult> {
@@ -309,7 +314,7 @@ export class AccountManagement {
       accountRef: input.accountRef, expectedRevision: input.expectedRevision, intentDigest: '', ...deviceMethod(input.method) };
     identifier(intent.operationId); uuid(intent.accountRef); revision(intent.expectedRevision);
     const account = await this.kernel.account(ctx, intent.accountRef!);
-    if (!this.supportsOAuthProfile(account.profile)) throw new KernelError('denied');
+    if (!this.supportsOAuthProfile(account.profile) || (input.method === 'device_code' && !oauthProfileDefinition(account.profile)?.deviceCode)) throw new KernelError('denied');
     return this.beginOAuthIntent(ctx, intent);
   }
   private async beginOAuthIntent(ctx: TrustedContext, intent: AccountIntent): Promise<OAuthBeginResult> {
@@ -321,6 +326,7 @@ export class AccountManagement {
     const account = await this.kernel.account(ctx, operation.accountRef);
     if (intent.kind === 'create' && (account.ownerRef !== intent.ownerRef || account.profile !== intent.profile)) throw new KernelError('conflict');
     if (!this.supportsOAuthProfile(account.profile)) throw new KernelError('denied');
+    const oauth = this.oauthProviders.get(account.profile)!;
     const old = await this.store.readJournal(ctx, intent.operationId);
     if (old) return Object.freeze({ operation: await this.oauthReadback(ctx, old) });
     const permit = await this.kernel.startCandidate(ctx, intent.operationId, this.worker);
@@ -332,13 +338,13 @@ export class AccountManagement {
         await this.kernel.operation(ctx, intent.operationId) });
     }
     try {
-      if (permit.profile !== codexOAuthProfile.profile || permit.operationRef !== intent.operationId) throw new KernelError('conflict');
+      if (permit.profile !== oauth.profile.profile || permit.operationRef !== intent.operationId) throw new KernelError('conflict');
       const scope: CandidateScope = Object.freeze({ consumerId: ctx.consumerId, operationId: intent.operationId,
         accountRef: account.accountRef, ownerRef: account.ownerRef, purpose: intent.kind === 'reconnect' ? 'reconnect' : 'create' });
       // Commit original accountRef + immutable birth UUID before the sole Begin.
-      const journal = await this.store.journal(scope, permit.candidate, this.worker, this.oauth!.profile);
+      const journal = await this.store.journal(scope, permit.candidate, this.worker, oauth.profile);
       let begun: OAuthBeginReadback;
-      try { begun = await this.oauth!.native.begin(oauthScope(journal), intent.oauthMethod); }
+      try { begun = await oauth.native.begin(oauthScope(journal), intent.oauthMethod); }
       catch { return Object.freeze({ operation: await this.oauthReadback(ctx, journal) }); }
       // Invalid ACK is ambiguous. Only Read can recover the same native intent.
       if (!exactOAuthReadback(oauthScope(journal), begun)) {
@@ -364,11 +370,12 @@ export class AccountManagement {
     const operation = await this.kernel.operation(ctx, operationId);
     if (operation.oauthMethod === 'device_code') throw new KernelError('denied');
     const journal = await this.store.readJournal(ctx, operationId);
-    if (!this.oauth || !journal || journal.consumerId !== ctx.consumerId || journal.operationId !== operationId ||
+    const oauth = journal && this.oauthProviders.get(journal.profile.profile);
+    if (!oauth || !journal || journal.consumerId !== ctx.consumerId || journal.operationId !== operationId ||
         journal.ownerRef !== ownerRef || !['create','reconnect'].includes(journal.purpose) || operation.accountRef !== journal.accountRef ||
-        operation.executionRef || journal.profile.profile !== this.oauth.profile.profile ||
-        journal.profile.baseURL !== this.oauth.profile.baseURL || journal.profile.model !== this.oauth.profile.model ||
-        journal.profile.qualificationRef !== this.oauth.profile.qualificationRef) throw new KernelError('denied');
+        operation.executionRef || journal.profile.profile !== oauth.profile.profile ||
+        journal.profile.baseURL !== oauth.profile.baseURL || journal.profile.model !== oauth.profile.model ||
+        journal.profile.qualificationRef !== oauth.profile.qualificationRef) throw new KernelError('denied');
     const account = await this.kernel.account(ctx, journal.accountRef);
     if (account.ownerRef !== ownerRef || account.profile !== journal.profile.profile) throw new KernelError('denied');
     // Reuse only this immutable create/reconnect journal. Reconciliation can permanently
@@ -376,11 +383,11 @@ export class AccountManagement {
     await this.kernel.reconcile(ctx);
     const current = await this.kernel.operation(ctx, operationId);
     if (current.state !== 'pending' || journal.worker !== this.worker) return current;
-    if (!this.store.pendingOAuthRefresh || !await this.store.pendingOAuthRefresh(ctx, this.worker, oauthScope(journal), this.oauth.profile))
+    if (!this.store.pendingOAuthRefresh || !await this.store.pendingOAuthRefresh(ctx, this.worker, oauthScope(journal), oauth.profile))
       return this.kernel.unknownCandidate(ctx, operationId, journal.worker);
     const scope = oauthScope(journal);
     let read: OAuthReadback;
-    try { read = await this.oauth.native.read(scope); }
+    try { read = await oauth.native.read(scope); }
     catch { return this.kernel.unknownCandidate(ctx, operationId, journal.worker); }
     if (!exactOAuthReadback(scope, read)) return this.kernel.unknownCandidate(ctx, operationId, journal.worker);
     // Entered/completed/expired/unknown native intents are readback only. Native
@@ -390,7 +397,7 @@ export class AccountManagement {
     if (fresh.accountRef !== journal.accountRef || fresh.executionRef) throw new KernelError('denied');
     if (fresh.state !== 'pending') return fresh;
     let completed: OAuthReadback;
-    try { completed = await this.oauth.native.complete(scope, callback); }
+    try { completed = await oauth.native.complete(scope, callback); }
     catch { return this.kernel.unknownCandidate(ctx, operationId, journal.worker); }
     // A lost/invalid ACK burns Gateway authority too; a later prepared read
     // cannot cause an automatic replay of the sensitive completion body.
@@ -402,11 +409,12 @@ export class AccountManagement {
     identifier(operationId); identifier(ownerRef);
     const operation = await this.kernel.operation(ctx, operationId);
     const journal = await this.store.readJournal(ctx, operationId);
-    if (!this.oauth || operation.oauthMethod !== 'device_code' || !journal || journal.consumerId !== ctx.consumerId ||
+    const oauth = journal && this.oauthProviders.get(journal.profile.profile);
+    if (!oauth || !oauthProfileDefinition(oauth.profile.profile)?.deviceCode || operation.oauthMethod !== 'device_code' || !journal || journal.consumerId !== ctx.consumerId ||
         journal.operationId !== operationId || journal.ownerRef !== ownerRef || !['create','reconnect'].includes(journal.purpose) ||
-        operation.accountRef !== journal.accountRef || operation.executionRef || journal.profile.profile !== this.oauth.profile.profile ||
-        journal.profile.baseURL !== this.oauth.profile.baseURL || journal.profile.model !== this.oauth.profile.model ||
-        journal.profile.qualificationRef !== this.oauth.profile.qualificationRef) throw new KernelError('denied');
+        operation.accountRef !== journal.accountRef || operation.executionRef || journal.profile.profile !== oauth.profile.profile ||
+        journal.profile.baseURL !== oauth.profile.baseURL || journal.profile.model !== oauth.profile.model ||
+        journal.profile.qualificationRef !== oauth.profile.qualificationRef) throw new KernelError('denied');
     const account = await this.kernel.account(ctx, journal.accountRef);
     if (account.ownerRef !== ownerRef || account.profile !== journal.profile.profile) throw new KernelError('denied');
     await this.kernel.reconcile(ctx);
@@ -415,20 +423,21 @@ export class AccountManagement {
     // Fresh candidate authority is checked again before the explicit native mutation.
     // Native owns the durable polling interval and sole token-exchange claim.
     const scope = oauthScope(journal);
-    if (!this.store.pendingOAuthRefresh || !await this.store.pendingOAuthRefresh(ctx, this.worker, scope, this.oauth.profile))
+    if (!this.store.pendingOAuthRefresh || !await this.store.pendingOAuthRefresh(ctx, this.worker, scope, oauth.profile))
       return this.kernel.unknownCandidate(ctx, operationId, journal.worker);
     let result: OAuthReadback;
-    try { result = await this.oauth.native.poll(scope); }
+    try { result = await oauth.native.poll(scope); }
     catch { return this.kernel.unknownCandidate(ctx, operationId, journal.worker); }
     if (!exactOAuthReadback(scope, result)) return this.kernel.unknownCandidate(ctx, operationId, journal.worker);
     return this.oauthReadback(ctx, journal, result);
   }
   private async oauthReadback(ctx: TrustedContext, journal: CandidateJournal,
-    begin?: OAuthReadback): Promise<OperationStatus> {
+    begin?: OAuthReadback, allowRefresh = true): Promise<OperationStatus> {
+    const oauth = this.oauthProviders.get(journal.profile.profile);
     try {
-      if (!this.oauth || !this.supportsOAuthProfile(journal.profile.profile) || journal.consumerId !== ctx.consumerId ||
-          journal.profile.baseURL !== codexOAuthProfile.baseURL || journal.profile.model !== codexOAuthProfile.model ||
-          journal.profile.qualificationRef !== this.oauth.profile.qualificationRef || !['create','reconnect'].includes(journal.purpose)) throw new KernelError('conflict');
+      if (!oauth || !this.supportsOAuthProfile(journal.profile.profile) || journal.consumerId !== ctx.consumerId ||
+          journal.profile.baseURL !== oauth.profile.baseURL || journal.profile.model !== oauth.profile.model ||
+          journal.profile.qualificationRef !== oauth.profile.qualificationRef || !['create','reconnect'].includes(journal.purpose)) throw new KernelError('conflict');
       await this.kernel.reconcile(ctx);
       const current = await this.kernel.operation(ctx, journal.operationId);
       if (current.operationRef !== journal.operationId || current.accountRef !== journal.accountRef) throw new KernelError('conflict');
@@ -441,7 +450,7 @@ export class AccountManagement {
       // A new worker does not take over a live creating candidate or issue Begin.
       if (current.state === 'pending' && this.worker !== journal.worker) return current;
       const scope = oauthScope(journal);
-      const result = begin ?? await this.oauth.native.read(scope);
+      const result = begin ?? await oauth.native.read(scope);
       if (!exactOAuthReadback(scope, result) || result.state === 'unknown' || result.state === 'expired') {
         // Expiry/missing/unknown cannot attest token-exchange non-entry or erase
         // an accepted effect. Retain the original spent candidate and cleanup.
@@ -452,8 +461,8 @@ export class AccountManagement {
       // Recover only the original live creating candidate through native F2.
       // Native validates completed custody and owns the durable one-use ledger;
       // an entered/unknown attempt is observed, never rearmed here.
-      if (this.refreshNative && this.store.pendingOAuthRefresh) {
-        const recovery = await this.store.pendingOAuthRefresh(ctx, this.worker, scope, this.oauth.profile);
+      if (allowRefresh && oauth.refresh && this.store.pendingOAuthRefresh) {
+        const recovery = await this.store.pendingOAuthRefresh(ctx, this.worker, scope, oauth.profile);
         if (!recovery && journal.purpose === 'reconnect') throw new KernelError('conflict');
         if (!recovery || recovery.worker !== journal.worker || recovery.ownerRef !== journal.ownerRef ||
             recovery.generation !== journal.generation || recovery.operationId !== journal.operationId ||
@@ -462,7 +471,7 @@ export class AccountManagement {
             recovery.profile.baseURL !== journal.profile.baseURL || recovery.profile.model !== journal.profile.model ||
             recovery.profile.qualificationRef !== journal.profile.qualificationRef) return current;
         let refreshed: OAuthRefreshReadback;
-        try { refreshed = await this.refreshNative.refresh(scope); }
+        try { refreshed = await oauth.refresh.refresh(scope); }
         catch { return current; } // Lost ACK observes the same native ledger next time.
         if (refreshed.operationId !== scope.operationId || refreshed.accountRef !== scope.accountRef) return current;
         if (refreshed.state === 'unknown') throw new KernelError('conflict');
@@ -470,9 +479,9 @@ export class AccountManagement {
       }
       // Completed custody (outcome "staged") still needs protected route proof.
       // An unavailable descriptor boundary preserves truthful pending.
-      if (!this.oauth.descriptor) return current;
+      if (!oauth.descriptor) return current;
       let source: OAuthDescriptor;
-      try { source = await this.oauth.descriptor.describe(scope); }
+      try { source = await oauth.descriptor.describe(scope); }
       catch { return current; } // Unavailable route proof is not a connect failure.
       if (source.operationId !== journal.operationId || source.accountRef !== journal.accountRef) throw new KernelError('conflict');
       if (source.state === 'staged' && source.qualification === 'pending') {
@@ -597,7 +606,7 @@ export class AccountManagement {
     const operation = await this.kernel.operation(ctx, operationId);
     const journal = await this.store.readJournal(ctx, operationId);
     if (!journal) return operation;
-    if (journal.profile.profile === codexOAuthProfile.profile) return this.oauthReadback(ctx, journal);
+    if (this.supportsOAuthProfile(journal.profile.profile)) return this.oauthReadback(ctx, journal);
     await this.store.eraseIntent(journal);
     await this.kernel.reconcile(ctx);
     const current = await this.kernel.operation(ctx,operationId);
@@ -644,7 +653,7 @@ export class AccountManagement {
           mapping.descriptor.nativePhysicalIdentity !== identity.nativePhysicalIdentity ||
           !exactCandidate(mapping, physicalCandidate(mapping.descriptor))) return undefined;
       const proof = await this.retainedCustody.verify(mapping);
-      const authKind = account.profile === codexOAuthProfile.profile ? 'oauth' : 'api_key';
+      const authKind = oauthProfileDefinition(account.profile) ? 'oauth' : 'api_key';
       if (!proof || proof.contract !== 'native-retained-custody/v1' ||
           proof.generation !== identity.generation ||
           proof.nativePhysicalIdentity !== identity.nativePhysicalIdentity ||
@@ -655,7 +664,7 @@ export class AccountManagement {
   async lifecycle(context: TrustedContext, accountRef: string): Promise<AccountLifecycleReadback> {
     const ctx = captureContext(context); uuid(accountRef);
     const account = await this.kernel.account(ctx, accountRef);
-    const authKind = account.profile === codexOAuthProfile.profile ? 'oauth' : 'api_key';
+    const authKind = oauthProfileDefinition(account.profile) ? 'oauth' : 'api_key';
     const proof = account.state === 'suspended' ? await this.retainedProof(ctx, account) : undefined;
     const current = await this.kernel.account(ctx, accountRef);
     return Object.freeze({ account: current, authKind, resumeCustody: current.state !== 'suspended' ? 'not_applicable' :
@@ -695,7 +704,8 @@ export class AccountManagement {
     const operation = await this.kernel.operation(ctx, id);
     if (operation.state !== 'pending' && operation.state !== 'unknown') return operation;
     const journal = await this.store.readJournal(ctx, id);
-    return journal?.profile.profile === codexOAuthProfile.profile ? this.oauthReadback(ctx, journal) : operation;
+    return journal && this.supportsOAuthProfile(journal.profile.profile) ? this.oauthReadback(ctx, journal, undefined,
+      oauthProfileDefinition(journal.profile.profile)?.family !== 'claude') : operation;
   }
   async reconcile(context: TrustedContext): Promise<void> {
     const ctx = captureContext(context);
@@ -726,8 +736,8 @@ export class AccountManagement {
     }
     let succeeded = false;
     try {
-      if (claim.scope.profile === codexOAuthProfile.profile) {
-        succeeded = await this.cleanupOAuth(ctx, claim.cleanupRef, claim.token, claim.scope.generation);
+      if (oauthProfileDefinition(claim.scope.profile)) {
+        succeeded = await this.cleanupOAuth(ctx, claim.cleanupRef, claim.token, claim.scope.generation, claim.scope.profile);
         await this.kernel.settleCleanup(ctx, claim.cleanupRef, this.worker, claim.token, succeeded);
         return succeeded ? 'erased' : 'quarantined';
       }
@@ -751,15 +761,16 @@ export class AccountManagement {
     return succeeded ? 'erased' : 'quarantined';
   }
   private async cleanupOAuth(ctx: TrustedContext, cleanupRef: string, cleanupToken: string,
-    generation: string): Promise<boolean> {
-    if (!this.oauth?.lifecycle || !this.store.oauthCleanup) return false;
+    generation: string, profile: string): Promise<boolean> {
+    const oauth = this.oauthProviders.get(profile);
+    if (!oauth?.lifecycle || !this.store.oauthCleanup) return false;
     const authority = Object.freeze({ cleanupRef, cleanupToken });
-    const owned = await this.store.oauthCleanup(ctx, this.worker, authority, 'read', this.oauth.profile);
+    const owned = await this.store.oauthCleanup(ctx, this.worker, authority, 'read', oauth.profile);
     if (!owned || owned.journal.generation !== generation) throw new KernelError('denied');
     const journal = owned.journal, scope = oauthScope(journal);
     if (journal.consumerId !== ctx.consumerId || !['create','reconnect'].includes(journal.purpose) ||
-        journal.profile.profile !== this.oauth.profile.profile || journal.profile.baseURL !== this.oauth.profile.baseURL ||
-        !codexOAuthCleanupModels.includes(journal.profile.model) || journal.profile.qualificationRef !== this.oauth.profile.qualificationRef) throw new KernelError('conflict');
+        journal.profile.profile !== oauth.profile.profile || journal.profile.baseURL !== oauth.profile.baseURL ||
+        !oauthProfileDefinition(profile)!.cleanupModels.includes(journal.profile.model) || journal.profile.qualificationRef !== oauth.profile.qualificationRef) throw new KernelError('conflict');
     const validate = (r: OAuthCleanupReadback): PhysicalCandidate | undefined => {
       if (r.operationId !== scope.operationId || r.accountRef !== scope.accountRef ||
           typeof r.credentialsErased !== 'boolean' || !['pending','closed','unknown'].includes(r.closure) ||
@@ -768,7 +779,7 @@ export class AccountManagement {
       if (d && !exactCandidate(journal, d) || owned.native && (!d || !sameCandidate(owned.native, d))) throw new KernelError('conflict');
       return d;
     };
-    let result = await this.oauth.lifecycle.cleanup(scope, authority, 'read');
+    let result = await oauth.lifecycle.cleanup(scope, authority, 'read');
     const descriptor = validate(result);
     if (descriptor) {
       await this.store.saveMapping(Object.freeze({ ...journal, descriptor }));
@@ -777,17 +788,17 @@ export class AccountManagement {
       await this.kernel.acknowledgeCandidate(ctx, journal.operationId, this.worker,
         { generation: descriptor.generation, nativePhysicalIdentity: descriptor.nativePhysicalIdentity, profile: descriptor.profile });
     }
-    const fresh = await this.store.oauthCleanup(ctx, this.worker, authority, 'erase', this.oauth.profile, scope);
+    const fresh = await this.store.oauthCleanup(ctx, this.worker, authority, 'erase', oauth.profile, scope);
     if (!fresh || (descriptor && (!fresh.native || !sameCandidate(descriptor, fresh.native)))) throw new KernelError('denied');
     if (!result.credentialsErased) {
-      try { result = await this.oauth.lifecycle.cleanup(scope, authority, 'erase'); }
-      catch { result = await this.oauth.lifecycle.cleanup(scope, authority, 'read'); } // One erase, bounded same-scope recovery.
+      try { result = await oauth.lifecycle.cleanup(scope, authority, 'erase'); }
+      catch { result = await oauth.lifecycle.cleanup(scope, authority, 'read'); } // One erase, bounded same-scope recovery.
       const erased = validate(result);
       if (descriptor && (!erased || !sameCandidate(descriptor, erased)) ||
           !descriptor && erased) return false; // Newly discovered birth needs its own proof phase.
     }
     // Final committed claim read precedes kernel settlement; no HTTP awaits follow.
-    if (!await this.store.oauthCleanup(ctx, this.worker, authority, 'erase', this.oauth.profile, scope)) return false;
+    if (!await this.store.oauthCleanup(ctx, this.worker, authority, 'erase', oauth.profile, scope)) return false;
     return result.credentialsErased && result.closure === 'closed';
   }
 }

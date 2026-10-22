@@ -60,8 +60,8 @@ boundaries:
 
   - id: native-management
     dependencyMode: runtime
-    roots: [services/account-gateway/src/management.ts]
-    entrypoints: [services/account-gateway/src/management.ts]
+    roots: [services/account-gateway/src/management.ts, services/account-gateway/src/oauth-profiles.ts]
+    entrypoints: [services/account-gateway/src/management.ts, services/account-gateway/src/oauth-profiles.ts]
     allow: {boundaries: [kernel-domain], packages: [], builtins: [], runtimeReferences: []}
   - id: native-management-postgres
     dependencyMode: runtime
@@ -105,8 +105,8 @@ boundaries:
     allow: {boundaries: [native-transport-http, kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http, private-facade, contracts, http], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs', 'node:fs/promises', 'node:http', 'node:https', 'node:child_process', 'node:readline', 'node:path'], runtimeReferences: []}
   - id: native-device-joined-test
     dependencyMode: runtime
-    roots: [services/account-gateway/test/native-device-joined.ts]
-    entrypoints: [services/account-gateway/test/native-device-joined.ts]
+    roots: [services/account-gateway/test/native-device-joined.ts, services/account-gateway/test/native-claude-joined.ts]
+    entrypoints: [services/account-gateway/test/native-device-joined.ts, services/account-gateway/test/native-claude-joined.ts]
     allow: {boundaries: [kernel-postgres, native-management, native-management-postgres, private-facade, foreground-service-entry, http], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:assert/strict', 'node:crypto', 'node:child_process', 'node:fs/promises', 'node:path', 'node:readline', 'node:timers/promises', 'node:http', 'node:util', 'node:url'], runtimeReferences: []}
   - id: foreground-service-entry
     dependencyMode: runtime

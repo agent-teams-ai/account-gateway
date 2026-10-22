@@ -63,3 +63,43 @@ test('cached limits HTTP keeps canonical partial/overage facts and rejects unsaf
   for (const changed of [{ timeoutMs: 3001 }, { responseBytes: 262145 }])
     assert.throws(() => createAccountLimitsClient({ ...cfg, ...changed }), GatewayError);
 });
+
+test('Claude cached limits preserve separate global and model windows through the public SDK', async t => {
+  const input = { ownerRef: 'claude-owner', accountRef: 'claude-account', profileId: 'anthropic-claude-oauth-messages-v1', expectedAuthorizationEpoch: 2 };
+  const base = { family: 'claude' as const, durationSeconds: 604800, observedAt: '2026-10-22T01:02:03.123456789Z', resetAt: '2026-10-29T01:02:03Z', basis: 'duration' as const };
+  const snapshot = { status: 'snapshot' as const, physicalGeneration: 'claude-birth', principalVersion: 'claude-principal', revision: 3, scope: 'subscription' as const, windows: [
+    { ...base, id: 'claude-5h', durationSeconds: 18000, usedPercent: 0 },
+    { ...base, id: 'claude-7d', usedPercent: 37.5 },
+    { ...base, id: 'claude-7d-sonnet', usedPercent: null },
+    { ...base, id: 'claude-7d-fable', usedPercent: 137.5, resetAt: null },
+  ] };
+  let result: unknown = snapshot, requests = 0;
+  const server = createServer(async (request, response) => {
+    requests++;
+    assert.equal(request.method, 'POST'); assert.equal(request.url, '/v1/account-limits/read');
+    assert.equal(request.headers.authorization, 'Bearer controlled-claude-token');
+    const chunks: Buffer[] = []; for await (const bytes of request) chunks.push(Buffer.from(bytes as Uint8Array));
+    assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString()), input);
+    response.setHeader('content-type', 'application/json'); response.end(JSON.stringify(result));
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const address = server.address(); assert.ok(address && typeof address === 'object');
+  const client = createAccountLimitsClient({ role: 'management', origin: `http://127.0.0.1:${address.port}`, token: 'controlled-claude-token' });
+  assert.deepEqual(await client.readAccountLimits(input), snapshot);
+  for (const status of ['unknown', 'unsupported', 'unavailable']) {
+    result = { status }; assert.deepEqual(await client.readAccountLimits(input), result);
+  }
+  const first = snapshot.windows[0]!;
+  for (const windows of [
+    [{ ...first, id: 'claude-7d-opus' }],
+    [first, { ...first, family: 'codex', id: 'primary' }],
+    [first, first],
+    [{ ...first, rawProviderUsage: { account_id: 'private' } }],
+    [{ ...first, usedPercent: -1 }],
+  ]) {
+    result = { ...snapshot, windows };
+    await assert.rejects(client.readAccountLimits(input), error => error instanceof GatewayError && error.code === 'invalid_response');
+  }
+  assert.equal(requests, 9, 'each explicit cached read dispatches exactly once');
+});
