@@ -183,7 +183,8 @@ async function run(): Promise<void> {
   if (access.operation.state !== 'applied' || access.operation.result?.kind !== 'execution') throw new Error('missing execution authority');
   const result = await execution.request(access.operation.result.executionRef, {
     requestId: requestRef, admission: access.admission, body: Buffer.from(JSON.stringify({ model: 'claude-sonnet-4-6', stream: true,
-      store: false, service_tier: 'default', max_output_tokens: 100, input: 'Controlled disposable fixture' })) });
+      store: false, service_tier: 'default', max_output_tokens: 100,
+      instructions: 'Controlled fixture system instructions stay at system priority.', input: 'Controlled disposable fixture' })) });
   assert.equal(result.kind, 'stream');
   if (result.kind !== 'stream') throw new Error('missing controlled stream');
   const reader = result.body.getReader(); let stream = '';

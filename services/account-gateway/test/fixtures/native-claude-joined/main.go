@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -50,6 +51,43 @@ func (u fixtureHTTP) Do(r *http.Request, _ string, _ int64, _ int) (*http.Respon
 }
 func (u fixtureHTTP) DoWithTLS(r *http.Request, p string, id int64, c int, _ *tlsfingerprint.Profile) (*http.Response, error) {
 	return u.Do(r, p, id, c)
+}
+
+// Assert the maintained OAuth wire independently of the source builder. The
+// exact caller instructions remain system text and no synthetic turns appear.
+func validClaudeOAuthWire(r *http.Request, body map[string]json.RawMessage) bool {
+	ua := r.Header.Get("User-Agent")
+	if r.URL.RawQuery != "beta=true" || !regexp.MustCompile(`^claude-cli/[0-9]+\.[0-9]+\.[0-9]+ \(external, cli\)$`).MatchString(ua) ||
+		r.Header.Get("X-App") != "cli" || r.Header.Get("X-Stainless-Lang") != "js" || r.Header.Get("X-Stainless-Runtime") != "node" || r.Header.Get("X-Stainless-Retry-Count") != "0" {
+		return false
+	}
+	betas := "," + r.Header.Get("anthropic-beta") + ","
+	for _, beta := range []string{"claude-code-20250219", "oauth-2025-04-20", "context-management-2025-06-27", "effort-2025-11-24", "extended-cache-ttl-2025-04-11"} {
+		if !strings.Contains(betas, ","+beta+",") {
+			return false
+		}
+	}
+	var system []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(body["system"], &system) != nil || len(system) != 4 {
+		return false
+	}
+	version := strings.TrimSuffix(strings.TrimPrefix(ua, "claude-cli/"), " (external, cli)")
+	if !strings.Contains(system[0].Text, "cc_version="+version+".") || !strings.Contains(system[0].Text, "cc_entrypoint=cli;") ||
+		system[1].Text != "You are Claude Code, Anthropic's official CLI for Claude." || !strings.Contains(system[2].Text, "You are an interactive agent") ||
+		system[3].Text != "Controlled fixture system instructions stay at system priority." {
+		return false
+	}
+	var messages []struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	if json.Unmarshal(body["messages"], &messages) != nil || len(messages) != 1 || messages[0].Role != "user" || messages[0].Content != "Controlled disposable fixture" {
+		return false
+	}
+	return string(body["max_tokens"]) == "100" && string(body["temperature"]) == "1" && string(body["tools"]) == "[]"
 }
 
 func main() {
@@ -130,6 +168,11 @@ func run() error {
 			messages.Add(1)
 			var body map[string]json.RawMessage
 			if r.Host != "api.anthropic.com" || r.Method != "POST" || r.Header.Get("Authorization") != "Bearer "+access || r.Header.Get("anthropic-version") != "2023-06-01" || r.Header.Get("Cookie") != "" || json.NewDecoder(r.Body).Decode(&body) != nil || string(body["model"]) != `"claude-sonnet-4-6"` || string(body["stream"]) != "true" || body["messages"] == nil || body["input"] != nil || body["store"] != nil {
+				unexpected.Add(1)
+				w.WriteHeader(400)
+				return
+			}
+			if !validClaudeOAuthWire(r, body) {
 				unexpected.Add(1)
 				w.WriteHeader(400)
 				return
