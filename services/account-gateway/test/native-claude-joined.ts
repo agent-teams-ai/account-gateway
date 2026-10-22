@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -72,7 +72,10 @@ async function run(): Promise<void> {
     sdkHTTP: await sha256(new URL(import.meta.resolve('@agent-teams/account-gateway/http'))) };
   const consumerId = 'joined-claude-' + randomUUID(), ownerRef = 'joined-claude-owner';
   const managementCredential = randomBytes(32).toString('base64url'), callbackCredential = randomBytes(32).toString('base64url');
-  const scratch = await mkdtemp(resolve(dirname(fileURLToPath(import.meta.url)), '../../../tmp/native-claude-joined-'));
+  phase = 'gateway-scratch';
+  const scratchRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../../tmp');
+  await mkdir(scratchRoot, { recursive: true });
+  const scratch = await mkdtemp(join(scratchRoot, 'native-claude-joined-'));
   const configFile = join(scratch, 'native-config.json');
   const nativeExecution = randomBytes(32).toString('base64url'), nativeCleanup = randomBytes(32).toString('base64url');
   await writeFile(configFile, JSON.stringify({ DSN: nativeDSN, Consumer: consumerId, Control: managementCredential, Callback: callbackCredential,
