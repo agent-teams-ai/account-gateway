@@ -73,6 +73,8 @@ scenarios can use the recorded environment defaults.
 The service drops the Go process to UID/GID 65534. Its executable is in a
 root-owned directory with traversable ancestors; configuration, synthetic
 credentials and private TLS material remain in separate mode-0700 directories.
+The operator explicitly makes its private executable copies root-owned because
+file copying preserves the build runner's source ownership.
 The disposable container uses normal TLS verification with its own fixture CA.
 The cloud namespace runner binds this CA only inside its private mount namespace.
 

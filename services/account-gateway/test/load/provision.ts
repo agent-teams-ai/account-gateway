@@ -183,7 +183,10 @@ async function main() {
   chmodSync(owned, 0o755); mkdirSync(root, { mode: 0o700 }); mkdirSync(artifacts, { mode: 0o700 });
   const nativeDir = join(owned, 'native'), tls = join(root, 'tls'); mkdirSync(nativeDir, { mode: 0o755 }); mkdirSync(tls, { mode: 0o700 });
   const executable = join(nativeDir, 'account-gateway'), migrator = join(owned, 'native-fixture-migrate');
-  copyFileSync(sourceBinary, executable); chmodSync(executable, 0o755); copyFileSync(sourceMigrator, migrator); chmodSync(migrator, 0o700);
+  // copyFileSync preserves the runner-owned build inputs' UID/GID. The private
+  // executable copies must instead belong to this root operator before use.
+  copyFileSync(sourceBinary, executable); chownSync(executable, 0, 0); chmodSync(executable, 0o755);
+  copyFileSync(sourceMigrator, migrator); chownSync(migrator, 0, 0); chmodSync(migrator, 0o700);
   const pgRoot = mkdtempSync('/tmp/ag_load_pg_'), data = join(pgRoot, 'data'), socket = join(pgRoot, 'socket');
   chmodSync(pgRoot, 0o755); mkdirSync(data, { mode: 0o700 }); mkdirSync(socket, { mode: 0o700 });
   chownSync(data, 65534, 65534); chownSync(socket, 65534, 65534);
