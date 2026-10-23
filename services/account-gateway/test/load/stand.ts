@@ -12,6 +12,7 @@ import { createServer } from 'node:http';
 import { connect } from 'node:net';
 import type { Socket } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import pg from 'pg';
 import { createManagementClient, createConsumerControlClient, createExecutionClient, GatewayError } from '@agent-teams/account-gateway/http';
 import type { Admission, Prepare } from '@agent-teams/account-gateway/contracts';
@@ -19,7 +20,7 @@ import { close as closeInput } from '@agent-teams/account-gateway/contracts';
 import { startService } from '../../src/service.ts';
 import type { Service } from '../../src/service.ts';
 import type { ServiceConfig } from '../../src/service-config.ts';
-import { bounds, scenarios, check, bounded, identifier, entries, reconcile, closureProjection, safeError } from './model.ts';
+import { bounds, scenarios, baselineScenarios, check, bounded, identifier, entries, reconcile, closureProjection, safeError, arrivalObservation, capacityRefusal } from './model.ts';
 import type { Attempt, LedgerEvent, Proof, Scenario, Outcome } from './model.ts';
 import { loadFixture, sourceManifest, sha256 } from './fixture.ts';
 import type { Fixture } from './fixture.ts';
@@ -34,7 +35,6 @@ interface SQLRequest { id: string; execution_ref: string; effect: string; code: 
   request_nonce: string | null; descriptor_generation: string | null }
 const workspace = fileURLToPath(new URL('../../../../', import.meta.url));
 const profileId = 'openai-responses-apikey-v1', model = 'mimo-test', consumerId = 'fullstack-load-fixture', ownerRef = 'load-fixture-owner';
-const limits = Object.freeze({ requests: 256, concurrency: 1, requestBytes: 4096, outputBytes: bounds.streamBytes, tokens: 32 });
 const token = () => randomBytes(32).toString('base64url');
 function sdkArtifactManifest() {
   const entrypoints = { http: fileURLToPath(import.meta.resolve('@agent-teams/account-gateway/http')),
@@ -100,9 +100,9 @@ function provider(f: Fixture, credential: string) {
       catch (error) { child.kill('SIGKILL'); await bounded(exited, 1000, 'provider-kill').catch(() => undefined); throw error; }
     } };
 }
-function body(runId: string, requestId: string) {
+function body(runId: string, requestId: string, paddingBytes = 0) {
   return Buffer.from(JSON.stringify({ model, stream: true, store: false, service_tier: 'default',
-    input: [{ role: 'user', content: 'load-fixture:' + runId + ':' + requestId }] }));
+    input: [{ role: 'user', content: 'load-fixture:' + runId + ':' + requestId + (paddingBytes ? '\n' + 'x'.repeat(paddingBytes) : '') }] }));
 }
 function terminal(bytes: Buffer) {
   const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes).replaceAll('\r\n', '\n');
@@ -121,10 +121,15 @@ function terminal(bytes: Buffer) {
 test('bounded actual production service, production native CLI, SDK, PG17.10 and controlled TLS load', { timeout: bounds.wallMs }, async t => {
   const manifestPath = process.env.AG_LOAD_MANIFEST; check(manifestPath, 'explicit-manifest-required');
   const f = loadFixture(manifestPath), source = sourceManifest(workspace), sdkArtifact = sdkArtifactManifest(), startedAt = Date.now();
+  const eventLoop = monitorEventLoopDelay({ resolution: 20 }); eventLoop.enable();
   const selector = process.env.AG_LOAD_SCENARIOS;
   check(!selector || scenarios.includes(selector as Scenario), 'scenario-selector');
-  const selected: readonly Scenario[] = selector ? [selector as Scenario] : scenarios;
-  let sequence = 0, totalBytes = 0, executionCount = 0, capPreparations = 0;
+  const selected: readonly Scenario[] = selector ? [selector as Scenario] : baselineScenarios;
+  const scaled = selected.some(s => ['scale-streams', 'scale-arrivals', 'large-context'].includes(s));
+  const publicMaxActive = scaled ? 1024 : 16;
+  const limits = Object.freeze({ requests: 256, concurrency: scaled ? 64 : 1,
+    requestBytes: selected.includes('large-context') ? 1_048_576 : 4096, outputBytes: bounds.streamBytes, tokens: 32 });
+  let sequence = 0, totalBytes = 0, executionCount = 0, churnPreparations = 0;
   const next = () => identifier(f.runId, f.seed, ++sequence);
   const attempts: Attempt[] = [], results: ScenarioResult[] = [], accounts: string[] = [], executions: Execution[] = [];
   const prepared: Prepared[] = [], cleanupObservations: Record<string, unknown>[] = [];
@@ -142,7 +147,7 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
   const setupDetails: Record<string, string> = {};
   const managementToken = token(), controlToken = token();
   const consumer = { consumerId, managementCredential: token(), executionCredential: token(), cleanupCredential: token(), callbackCredential: token() };
-  let facadeOrigin = '', callbackOrigin = '', nativeOrigin = '';
+  let facadeOrigin = '', callbackOrigin = '', nativeOrigin = '', inferenceOrigin = '';
   let management: ReturnType<typeof createManagementClient>, control: ReturnType<typeof createConsumerControlClient>;
   async function sample() {
     if (sampling) return;
@@ -151,6 +156,9 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
       const memory = process.memoryUsage(), cpu = process.cpuUsage(), at = Date.now();
       const observation: Record<string, unknown> = { at, phase, nodeRSS: memory.rss, nodeHeapUsed: memory.heapUsed,
         nodeExternal: memory.external, nodeCPUUserMicros: cpu.user, nodeCPUSystemMicros: cpu.system };
+      if (eventLoop.count) Object.assign(observation, { eventLoopP99Ms: eventLoop.percentile(99) / 1e6,
+        eventLoopMaxMs: eventLoop.max / 1e6 });
+      eventLoop.reset();
       if (service) {
         try {
           const binding = service.binding, stat = readFileSync('/proc/' + binding.pid + '/stat', 'utf8');
@@ -223,8 +231,8 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
     } while (Date.now() < deadline);
     throw new Error('load:exact-closure-drain');
   }
-  async function prepare(accountRef: string, cap = false): Promise<Execution> {
-    if (cap) { check(++capPreparations <= bounds.capPreparations && executionCount < 130, 'cap-preparation-bound'); }
+  async function prepare(accountRef: string, churn = false): Promise<Execution> {
+    if (churn) { check(++churnPreparations <= bounds.churnPreparations && executionCount < bounds.executions + bounds.churnPreparations, 'churn-preparation-bound'); }
     else check(executionCount < bounds.executions, 'execution-bound');
     const input: Prepare = { operationId: next(), invocationRef: next(), attemptRef: next(), accountRefs: [accountRef],
       subjectRef: 'load-subject-' + next(), policyRevision: 1, bindingRevision: 1, profileId,
@@ -298,10 +306,14 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
   async function launch(execution: Execution, scenario: Scenario, providerMode: 'complete' | 'held' = 'complete', delayMs = 0,
     offeredAt = Date.now(), signal?: AbortSignal) {
     const a = await newAttempt(execution, scenario, 'sdk', providerMode, delayMs, offeredAt);
-    const client = createExecutionClient({ role: 'execution', origin: facadeOrigin, token: execution.bearer, timeoutMs: 25_000 });
+    const client = createExecutionClient({ role: 'execution', origin: facadeOrigin, inferenceOrigin, token: execution.bearer,
+      timeoutMs: scenario === 'scale-streams' ? 300_000 : scaled ? 180_000 : 25_000 });
     const work = (async () => {
       try {
-        const response = await client.request(execution.executionRef, { requestId: a.requestId, admission: execution.admission, body: body(f.runId, a.requestId) }, { signal });
+        const payload = body(f.runId, a.requestId, scenario === 'large-context' ? 1_000_000 : 0);
+        a.startedAt = Date.now(); // Actual SDK entry, after provider arming and body construction.
+        const response = await client.request(execution.executionRef, { requestId: a.requestId, admission: execution.admission,
+          body: payload }, { signal });
         a.response = response.kind;
         if (response.kind === 'stream') {
           const claimed = await row(a.requestId); check(claimed && captureProof(claimed), 'stream-original-claim');
@@ -314,7 +326,9 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
         }
       } catch (error) {
         a.response = 'error'; a.error = safeError(error);
-        a.preclaimRefused = error instanceof GatewayError && error.code === 'safe_error' && error.effect === 'not_dispatched';
+        if (error instanceof GatewayError) a.safeCode = error.diagnostic?.code;
+        a.preclaimRefused = error instanceof GatewayError && error.code === 'safe_error' && error.effect === 'not_dispatched'
+          && error.diagnostic?.code === 'admission_limited';
       }
       a.finishedAt = Date.now(); return a;
     })();
@@ -322,7 +336,7 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
     return { attempt: a, work, client };
   }
   async function raw(execution: Execution, scenario: Scenario, mode: 'held' | 'flood') {
-    const a = await newAttempt(execution, scenario, 'raw-tcp', mode, 0), endpoint = new URL(facadeOrigin);
+    const a = await newAttempt(execution, scenario, 'raw-tcp', mode, 0), endpoint = new URL(inferenceOrigin);
     const socket = connect({ host: '127.0.0.1', port: Number(endpoint.port) }); rawSockets.add(socket);
     let first = true, header = Buffer.alloc(0), ready = false, ended = false;
     socket.on('error', () => { a.error = 'raw-socket-error'; });
@@ -341,6 +355,7 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
     });
     socket.once('connect', () => {
       const payload = body(f.runId, a.requestId);
+      a.startedAt = Date.now();
       socket.write('POST /v1/executions/' + execution.executionRef + '/requests HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ' + execution.bearer +
         '\r\nAccept: text/event-stream\r\nContent-Type: application/json\r\nX-Gateway-Request-Id: ' + a.requestId +
         '\r\nX-Gateway-Admission: ' + JSON.stringify(execution.admission) + '\r\nContent-Length: ' + payload.length + '\r\nConnection: close\r\n\r\n'); socket.write(payload);
@@ -351,7 +366,7 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
   }
   function requireCompletions(group: readonly Attempt[], expected?: number) {
     check(group.filter(a => a.effect === 'completed').length >= (expected ?? 1), 'expected-completions');
-    check(group.every(a => a.effect === 'completed' || a.effect === 'not_dispatched' || a.preclaimRefused && !a.effect), 'unexpected-load-effect');
+    check(group.every(a => a.effect === 'completed' || capacityRefusal(a)), 'unexpected-load-effect');
   }
   try {
     const state = (await kernel.query("SELECT current_database() AS db,current_setting('server_version') AS version")).rows[0];
@@ -364,7 +379,7 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
     check(migrationFiles.length >= 8, 'complete-kernel-migration-set');
     for (const name of migrationFiles) await kernel.query(readFileSync(new URL(name, directory), 'utf8'));
     const baseURL = await upstream.origin();
-    facadeOrigin = await freeOrigin(); callbackOrigin = await freeOrigin(); nativeOrigin = await freeOrigin();
+    facadeOrigin = await freeOrigin(); callbackOrigin = await freeOrigin(); nativeOrigin = await freeOrigin(); inferenceOrigin = await freeOrigin();
     mkdirSync(join(f.root, 'authority'), { mode: 0o700 });
     const profile = { profile: profileId, model, baseURL, qualificationRef: 'controlled-fullstack-load-v1', limits, providerTokenUpperBound: 100 };
     const config: ServiceConfig = { kernelDSN: f.kernelDSN, durableFacts: { maxServiceFacts: 32768, maxConsumerFacts: 16384, maxAccountFacts: 2048,
@@ -376,7 +391,8 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
       { role: 'consumer-control', token: controlToken, consumerId, profileIds: [profileId], limits, maxRunMs: bounds.wallMs }],
       keys: { intentAEAD: randomBytes(32).toString('base64'), intentHMAC: randomBytes(32).toString('base64'), facadeHMAC: randomBytes(32).toString('base64') } };
     const nativeConnection = new URL(f.nativeDSN); nativeConnection.searchParams.set('sslmode', 'disable');
-    const bootstrap = { listenAddress: new URL(nativeOrigin).host, postgresDSN: nativeConnection.href,
+    const bootstrap = { listenAddress: new URL(nativeOrigin).host, publicListenAddress: new URL(inferenceOrigin).host, publicMaxActive,
+      postgresDSN: nativeConnection.href,
       authority: { origin: callbackOrigin, credential: consumer.callbackCredential },
       custody: { activeKeyId: 'load-fixture', keys: [{ id: 'load-fixture', key: randomBytes(32).toString('base64') }] },
       peers: [{ consumerId, role: 'management', credential: consumer.managementCredential }, { consumerId, role: 'execution', credential: consumer.executionCredential },
@@ -388,7 +404,8 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
     save('source-manifest.json', { runId: f.runId, seed: f.seed, gatewayCommit: f.gatewayCommit, gateway: source,
       native: { sourceCommit: f.native.sourceCommit, sha256: f.native.sha256, migrationsSha256: f.native.migrationsSha256,
         migrationFiles: f.native.migrationFiles }, kernelMigrations: migrationFiles.map(name => ({ name, sha256: sha256(readFileSync(new URL(name, directory))) })),
-      sdkArtifact, node: process.version, network: f.network, bounds, history: 'fresh-reimplementation-no-inherited-receipts' });
+      sdkArtifact, node: process.version, network: f.network, bounds, publicMaxActive, profileLimits: limits,
+      dataRoute: 'public-native-go', history: 'fresh-reimplementation-no-inherited-receipts' });
     service = await startService(join(f.root, 'service.json'));
     sampleTimer = setInterval(() => { samplingWork = sample().catch(() => { setupFailure ??= 'resource-observer'; }); }, 250);
     management = createManagementClient({ role: 'management', origin: facadeOrigin, token: managementToken, timeoutMs: 10_000 });
@@ -405,7 +422,8 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
       const began = Date.now(), before = attempts.length, eventBefore = upstream.events.filter(e => e.event === 'entry').length;
       const details: Record<string, unknown> = {}, faults: string[] = [];
       let outcome: Outcome = 'pass';
-      await t.test(scenario, { timeout: Math.min(180_000, bounds.wallMs - (Date.now() - startedAt) - 10_000) }, async () => {
+      await t.test(scenario, { timeout: Math.min(scenario === 'scale-streams' ? 600_000 : 180_000,
+        bounds.wallMs - (Date.now() - startedAt) - 10_000) }, async () => {
         try {
           if (scenario === 'smoke') {
             for (let i = 0; i < 2; i++) { const run = await launch(executions[0], scenario); await run.work; await drain([run.attempt]); }
@@ -421,7 +439,7 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
               requireCompletions(runs.map(r => r.attempt), level <= 8 ? level : 8);
               const groups = details.achieved as { offered: number; completed: number; safeRefusals: number }[] | undefined ?? [];
               groups.push({ offered: level, completed: runs.filter(r => r.attempt.effect === 'completed').length,
-                safeRefusals: runs.filter(r => r.attempt.effect === 'not_dispatched' || r.attempt.preclaimRefused).length });
+                safeRefusals: runs.filter(r => capacityRefusal(r.attempt)).length });
               details.achieved = groups;
             }
           } else if (scenario === 'arrivals') {
@@ -469,7 +487,7 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
             const original = await row(run.attempt.requestId); check(original?.transport_occupied, 'cancel-original-occupied');
             run.socket.destroy(); await until(() => run.ended, 3000, 'raw-disconnect-close'); await drain([run.attempt]);
             check(run.attempt.effect === 'effect_unknown' && run.attempt.providerEntries === 1, 'raw-cancel-effect');
-            const client = createExecutionClient({ role: 'execution', origin: facadeOrigin, token: execution.bearer });
+            const client = createExecutionClient({ role: 'execution', origin: facadeOrigin, inferenceOrigin, token: execution.bearer });
             try {
               const duplicate = await client.request(execution.executionRef, { requestId: run.attempt.requestId, admission: execution.admission, body: body(f.runId, run.attempt.requestId) });
               check(duplicate.kind === 'status', 'cancel-duplicate-cannot-stream');
@@ -516,35 +534,90 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
             requireCompletions(held.slice(8).map(r => r.attempt), 8);
             const recovered = await launch(executions[31], scenario); await recovered.work; await drain([recovered.attempt]);
             check(recovered.attempt.effect === 'completed', 'overload-fresh-request-recovers'); details.freshRecovery = true;
-          } else if (scenario === 'bearer-cap') {
+          } else if (scenario === 'bearer-churn') {
             const beforeEntries = upstream.events.filter(e => e.event === 'entry').length, issued: Execution[] = [];
-            let denied = 0;
-            for (let i = 0; i < bounds.capPreparations; i++) {
-              try { issued.push(await prepare(accounts[i % accounts.length], true)); }
-              catch (error) {
-                check(error instanceof GatewayError && error.code === 'safe_error', 'cap-explicit-safe-refusal');
-                denied++; if (denied === 4) break;
-              }
-            }
-            check(denied === 4 && executionCount === 126, 'finite-live-bearer-cap');
+            for (let i = 0; i < bounds.churnPreparations; i++) issued.push(await prepare(accounts[i % accounts.length], true));
+            check(issued.length === 130 && executionCount > 128, 'stateless-bearer-churn');
             const durableExecutions = Number((await kernel.query('SELECT count(*)::int AS n FROM ag_kernel.executions WHERE consumer=$1', [consumerId])).rows[0].n);
-            check(durableExecutions <= 130 && durableExecutions === executionCount + denied, 'cap-bounded-durable-executions');
+            check(durableExecutions === executionCount, 'churn-exact-durable-executions');
             const original = executions[31], readback = await control.runAccess(original.prepare);
             check(readback.bearer === original.bearer && readback.operation.state === 'applied' && readback.operation.result?.kind === 'execution' &&
-              readback.operation.result.executionRef === original.executionRef, 'cap-preserves-original-bearer');
-            check(upstream.events.filter(e => e.event === 'entry').length === beforeEntries, 'cap-does-not-dispatch');
-            const deniedRefs = prepared.filter(p => p.refused).map(p => p.executionRef);
-            check(deniedRefs.length === 4 && deniedRefs.every(Boolean) &&
-              Number((await kernel.query('SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=ANY($2::uuid[])', [consumerId, deniedRefs])).rows[0].n) === 0,
-            'cap-refusals-have-no-request-effects');
+              readback.operation.result.executionRef === original.executionRef, 'churn-preserves-original-bearer');
+            check(upstream.events.filter(e => e.event === 'entry').length === beforeEntries, 'churn-preparation-does-not-dispatch');
             for (let index = 0; index < issued.length; index += 8) {
               const runs = await Promise.all(issued.slice(index, index + 8).map(execution => launch(execution, scenario)));
               await Promise.all(runs.map(r => r.work)); await drain(runs.map(r => r.attempt)); requireCompletions(runs.map(r => r.attempt), runs.length);
             }
-            details.configuredBearers = 2; details.liveExecutionBearers = executionCount; details.capPreparations = capPreparations;
-            details.explicitRefusals = denied; details.originalBearerPreserved = true;
+            details.configuredBearers = 2; details.issuedExecutionBearers = executionCount; details.churnPreparations = churnPreparations;
+            details.explicitRefusals = 0; details.originalBearerPreserved = true;
             details.durableExecutions = durableExecutions;
-            details.newBearersExecuted = issued.length; details.refusedExecutionsRemainNoEffect = true;
+            details.newBearersExecuted = issued.length;
+          } else if (scenario === 'scale-streams') {
+            const achieved: Record<string, number>[] = [];
+            for (const level of [64, 256, 512, 1024]) {
+              const held: Awaited<ReturnType<typeof launch>>[] = [], beganLevel = Date.now();
+              try {
+                // Deliberate admission pacing isolates live-stream capacity.
+                // No rejected paid request is replayed or hidden from the receipt.
+                for (let index = 0; index < level; index += 4) {
+                  const batch = await Promise.all(Array.from({ length: Math.min(4, level - index) }, (_, j) =>
+                    launch(executions[(index + j) % executions.length], scenario, 'held')));
+                  held.push(...batch);
+                  await until(() => batch.every(r => !!r.attempt.firstByteAt), 10_000, 'scale-stream-admission');
+                }
+                const occupied = Number((await kernel.query('SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1 AND transport_occupied', [consumerId])).rows[0].n);
+                check(occupied === level && held.every(r => entries(upstream.events, r.attempt.requestId) === 1), 'scale-exact-held-streams');
+                const controlAt = Date.now();
+                check((await control.get(accounts[0])).accountRef === accounts[0], 'scale-control-progress');
+                const controlMs = Date.now() - controlAt, holdMs = level === 1024 ? 60_000 : 3000;
+                let maximumControlMs = controlMs;
+                const heldAt = Date.now();
+                do {
+                  await delay(Math.min(10_000, Math.max(0, holdMs - (Date.now() - heldAt))));
+                  const progressAt = Date.now();
+                  check((await control.get(accounts[0])).accountRef === accounts[0], 'scale-held-control-progress');
+                  maximumControlMs = Math.max(maximumControlMs, Date.now() - progressAt);
+                  check(Number((await kernel.query('SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1 AND transport_occupied', [consumerId])).rows[0].n) === level,
+                    'scale-held-occupancy');
+                  await sample();
+                } while (Date.now() - heldAt < holdMs);
+                check(held.every(r => !r.attempt.finishedAt), 'scale-streams-remain-open');
+                const releaseAt = Date.now();
+                // Simultaneous completion exercises bounded settlement queuing.
+                for (const run of held) upstream.release(run.attempt.requestId);
+                await Promise.all(held.map(r => r.work)); await drain(held.map(r => r.attempt));
+                requireCompletions(held.map(r => r.attempt), level);
+                achieved.push({ streams: level, admissionMs: heldAt - beganLevel, holdMs: releaseAt - heldAt, controlMs, maximumControlMs,
+                  completionBurstMs: Date.now() - releaseAt, completed: held.filter(r => r.attempt.effect === 'completed').length });
+              } finally { for (const run of held) upstream.release(run.attempt.requestId); await Promise.all(held.map(r => r.work)); }
+            }
+            details.achieved = achieved; details.publicMaxActive = publicMaxActive; details.accountConcurrency = limits.concurrency;
+          } else if (scenario === 'scale-arrivals') {
+            const achieved: Record<string, number>[] = [];
+            for (const rate of [50, 100, 250, 500, 1000]) {
+              const runs: Promise<Awaited<ReturnType<typeof launch>>>[] = [], start = Date.now();
+              for (let i = 0; i < rate * 2; i++) {
+                const offeredAt = start + Math.floor(i * 1000 / rate); await delay(Math.max(0, offeredAt - Date.now()));
+                runs.push(launch(executions[i % executions.length], scenario, 'complete', 250, offeredAt));
+              }
+              const started = await Promise.all(runs);
+              await Promise.all(started.map(r => r.work)); await drain(started.map(r => r.attempt));
+              requireCompletions(started.map(r => r.attempt));
+              achieved.push(arrivalObservation(started.map(r => r.attempt), rate, start, Date.now()));
+            }
+            details.achieved = achieved; details.interpretation = 'arrival-overload-characterization-not-1000-rps-capacity-claim';
+          } else if (scenario === 'large-context') {
+            const achieved: Record<string, number>[] = [];
+            for (const level of [1, 8, 32, 64]) {
+              const start = Date.now(), runs = await Promise.all(Array.from({ length: level }, (_, i) =>
+                launch(executions[i % executions.length], scenario, 'complete', 250)));
+              await Promise.all(runs.map(r => r.work)); await drain(runs.map(r => r.attempt));
+              requireCompletions(runs.map(r => r.attempt));
+              achieved.push({ concurrentOffers: level, requestBodyBytes: body(f.runId, runs[0].attempt.requestId, 1_000_000).length,
+                completed: runs.filter(r => r.attempt.effect === 'completed').length,
+                safeRefusals: runs.filter(r => capacityRefusal(r.attempt)).length, elapsedMs: Date.now() - start });
+            }
+            details.achieved = achieved; details.interpretation = 'large-context-synchronized-offer-characterization';
           }
           const group = attempts.slice(before); await drain(group);
           check(!upstream.failed && !upstream.events.some(e => e.event === 'violation'), 'provider-ledger-valid');
@@ -589,7 +662,7 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
       }
       stopped = await service.stop().catch(() => 'stop-failed'); service = undefined;
     }
-    clearInterval(sampleTimer); await samplingWork;
+    clearInterval(sampleTimer); await samplingWork; eventLoop.disable();
     await upstream.stop().catch(() => { setupFailure ??= 'provider-stop'; });
     await Promise.allSettled([kernel.end(), nativeDB.end()]);
     const ledgerPath = join(f.artifacts, 'provider-ledger.ndjson');
@@ -611,7 +684,8 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
     save('summary.json', { kind: 'actual-fullstack-load-v1', runId: f.runId, seed: f.seed, outcome: pass ? 'pass' : 'fail', startedAt, finishedAt: Date.now(),
       node: process.version, sourceSha256: source.sha256, sourceUnchanged: finalSource.sha256 === source.sha256,
       sdkArtifactSha256: sdkArtifact.sha256, sdkArtifactUnchanged: finalSDKArtifact.sha256 === sdkArtifact.sha256, nativeSha256: f.native.sha256,
-      scenarios: results, expectedScenarios: selected, attempts: attempts.length, executionBearers: executionCount, capPreparations,
+      scenarios: results, expectedScenarios: selected, attempts: attempts.length, executionBearers: executionCount, churnPreparations,
+      publicMaxActive, profileLimits: limits, dataRoute: 'public-native-go',
       accounts: accounts.length, totalConsumerBytes: totalBytes, artifactBytes, ledgerMatches, stopped, setupFailure, setupDetails, terminalCounts, bounds,
       history: 'fresh-reimplementation-no-inherited-receipts' });
     check(pass, 'qualification-incomplete-or-failed');

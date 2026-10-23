@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       suite:
-        description: Smoke or all eight bounded load scenarios
+        description: Smoke or baseline plus separate stream, arrival and large-context qualifications
         required: true
         default: all
         type: choice
@@ -16,17 +16,17 @@ concurrency:
   cancel-in-progress: true
 jobs:
   fullstack_runtime:
-    name: full-stack (Node ${{ matrix.node }})
+    name: full-stack (${{ matrix.suite }}, Node ${{ matrix.node }})
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        node: ['26.11.1', '24.21.0']
+        include: ${{ fromJSON(inputs.suite == 'smoke' && '[{"node":"26.11.1","suite":"smoke","cpus":2,"memory":"4g","descriptors":4096},{"node":"24.21.0","suite":"smoke","cpus":2,"memory":"4g","descriptors":4096}]' || '[{"node":"26.11.1","suite":"all","cpus":2,"memory":"4g","descriptors":4096},{"node":"24.21.0","suite":"all","cpus":2,"memory":"4g","descriptors":4096},{"node":"26.11.1","suite":"scale-streams","cpus":4,"memory":"8g","descriptors":16384},{"node":"26.11.1","suite":"scale-arrivals","cpus":4,"memory":"8g","descriptors":16384},{"node":"26.11.1","suite":"large-context","cpus":2,"memory":"4g","descriptors":4096}]') }}
     env:
       NPM_CONFIG_ENGINE_STRICT: 'true'
-      LOAD_SUITE: ${{ inputs.suite || 'all' }}
-      NATIVE_COMMIT: b813197871c3d7a2ae07fa9cabe97b9862856653
+      LOAD_SUITE: ${{ matrix.suite }}
+      NATIVE_COMMIT: 2ca8d7bd5a7646416580eda397b7ec50c0e12055
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
       GATEWAY_LOAD_IMAGE: account-gateway-fullstack:qualified
     steps:
@@ -128,7 +128,7 @@ jobs:
         run: |
           # No --privileged, no host network, no host CA edits. Only this fresh
           # artifact directory is a writable host mount during measurement.
-          docker run --rm --network none --user 0:0 --cpus 2 --memory 4g --pids-limit 256 --ulimit nofile=4096:4096 \
+          docker run --rm --network none --user 0:0 --cpus ${{ matrix.cpus }} --memory ${{ matrix.memory }} --pids-limit 256 --ulimit nofile=${{ matrix.descriptors }}:${{ matrix.descriptors }} \
             --sysctl 'net.ipv4.tcp_rmem=4096 16384 65536' \
             --sysctl 'net.ipv4.tcp_wmem=4096 16384 65536' \
             --sysctl net.ipv4.tcp_moderate_rcvbuf=0 \
@@ -144,10 +144,33 @@ jobs:
       - name: Make safe evidence readable by the artifact uploader
         if: ${{ always() && env.GATEWAY_LOAD_ROOT != '' }}
         run: sudo chown -R "$(id -u):$(id -g)" "$GATEWAY_LOAD_ROOT/artifacts"
+      - name: Print bounded qualification results and resource scope
+        if: ${{ always() && env.GATEWAY_LOAD_ROOT != '' }}
+        run: |
+          node --input-type=module <<'JAVASCRIPT'
+          import { readFileSync, existsSync } from 'node:fs';
+          import { join } from 'node:path';
+          const root = join(process.env.GATEWAY_LOAD_ROOT, 'artifacts');
+          const read = name => existsSync(join(root, name)) ? JSON.parse(readFileSync(join(root, name), 'utf8')) : undefined;
+          const summary = read('summary.json'), resources = read('resources.json'), source = read('source-manifest.json');
+          const attempts = read('attempts.json') ?? [];
+          const samples = resources?.samples ?? [];
+          const maximum = field => Math.max(0, ...samples.map(s => Number(s[field]) || 0));
+          const percentile = (items, fraction) => items.length ? items.sort((a, b) => a - b)[Math.min(items.length - 1, Math.ceil(items.length * fraction) - 1)] : null;
+          const latency = attempts.filter(a => a.finishedAt && a.effect === 'completed').map(a => a.finishedAt - a.startedAt);
+          process.stdout.write('QUALIFICATION_RESULT ' + JSON.stringify({
+            operator: read('operator-result.json'), summary,
+            gatewayCommit: source?.gatewayCommit, nativeCommit: source?.native?.sourceCommit,
+            resources: { scope: resources?.scope, nodePeakRSS: maximum('nodeRSS'), nativePeakRSS: maximum('nativeRSS'),
+              eventLoopMaxMs: maximum('eventLoopMaxMs'), maximumSQLLockWaiters: maximum('sqlLockWaiters'),
+              maximumOccupied: maximum('sqlOccupied'), completedLatencyP50Ms: percentile([...latency], .5),
+              completedLatencyP95Ms: percentile([...latency], .95), completedLatencyP99Ms: percentile([...latency], .99) },
+          }) + '\n');
+          JAVASCRIPT
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() && env.GATEWAY_LOAD_ROOT != '' }}
         with:
-          name: fullstack-${{ matrix.node }}-${{ inputs.suite || 'all' }}
+          name: fullstack-${{ matrix.node }}-${{ matrix.suite }}
           path: |
             ${{ env.GATEWAY_LOAD_ROOT }}/artifacts/operator-result.json
             ${{ env.GATEWAY_LOAD_ROOT }}/artifacts/summary.json
@@ -166,7 +189,7 @@ jobs:
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Require both actual production runtime lanes
+      - name: Require every selected Node lane and qualification profile
         env:
           LANE_RESULT: ${{ needs.fullstack_runtime.result }}
         run: test "$LANE_RESULT" = success

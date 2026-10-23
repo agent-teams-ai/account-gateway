@@ -1,11 +1,12 @@
 // Bounded, synthetic qualification data. Never serialize credentials or bodies.
 import { createHash } from 'node:crypto';
 
-export const bounds = Object.freeze({ wallMs: 900_000, drainMs: 60_000, attempts: 2048,
-  executions: 96, capPreparations: 130, accounts: 32, streamBytes: 8_388_608,
+export const bounds = Object.freeze({ wallMs: 900_000, drainMs: 60_000, attempts: 4096,
+  executions: 96, churnPreparations: 130, accounts: 32, streamBytes: 8_388_608,
   totalBytes: 536_870_912, artifactBytes: 67_108_864 });
-export const scenarios = ['smoke', 'short-steps', 'long-steps', 'arrivals', 'slow-reader',
-  'cancellation', 'overload-recovery', 'bearer-cap'] as const;
+export const baselineScenarios = ['smoke', 'short-steps', 'long-steps', 'arrivals', 'slow-reader',
+  'cancellation', 'overload-recovery', 'bearer-churn'] as const;
+export const scenarios = [...baselineScenarios, 'scale-streams', 'scale-arrivals', 'large-context'] as const;
 export type Scenario = typeof scenarios[number];
 export type Outcome = 'pass' | 'fail' | 'inconclusive';
 export interface Attempt {
@@ -13,9 +14,28 @@ export interface Attempt {
   mode: 'sdk' | 'raw-tcp'; offeredAt: number; startedAt: number; firstByteAt?: number;
   finishedAt?: number; bytes: number; response?: 'stream' | 'status' | 'error' | 'disconnect';
   error?: string; effect?: string; sqlCode?: string; occupied?: boolean;
-  preclaimRefused?: boolean;
+  preclaimRefused?: boolean; safeCode?: string;
   intentionalCancel?: 'raw-disconnect' | 'sdk-abort' | 'sdk-close'; validatedStream?: boolean;
   nativeClosed?: boolean; nativeAcknowledged?: boolean; exactProof?: boolean; providerEntries?: number;
+}
+// Offer targets and actual SDK-call start spacing are separate measurements.
+// Queueing before SDK entry belongs in launch lag; refusal counts require
+// positive non-entry classification rather than subtracting completions.
+export function arrivalObservation(attempts: readonly Attempt[], targetRate: number, start: number, finish: number) {
+  const completed = attempts.filter(a => a.effect === 'completed').length;
+  const safeRefusals = attempts.filter(capacityRefusal).length;
+  const first = attempts.reduce((value, a) => Math.min(value, a.startedAt), Number.POSITIVE_INFINITY);
+  const last = attempts.reduce((value, a) => Math.max(value, a.startedAt), Number.NEGATIVE_INFINITY);
+  const offerWindowMs = attempts.length ? Math.max(0, last - first) : 0;
+  return { targetRate, offered: attempts.length, completed, safeRefusals,
+    unsettledOrFailed: attempts.length - completed - safeRefusals, offerWindowMs,
+    observedOfferedRate: attempts.length > 1 && offerWindowMs > 0 ? (attempts.length - 1) * 1000 / offerWindowMs : 0,
+    elapsedMs: finish - start,
+    maximumLaunchLagMs: attempts.reduce((value, a) => Math.max(value, a.startedAt - a.offeredAt), 0) };
+}
+export function capacityRefusal(attempt: Attempt): boolean {
+  return attempt.effect === 'not_dispatched' ? attempt.sqlCode === 'concurrency_limit'
+    : !attempt.effect && attempt.preclaimRefused === true && attempt.safeCode === 'admission_limited';
 }
 export interface LedgerEvent {
   event: 'entry' | 'headers' | 'blocked' | 'drain' | 'end' | 'close' | 'budget' | 'violation';
@@ -37,7 +57,9 @@ export function reconcile(attempt: Attempt, events: readonly LedgerEvent[]): str
   if (attempt.effect === 'not_dispatched' && count !== 0) faults.push('denial-entered-provider');
   if (attempt.effect === 'completed' && count !== 1) faults.push('completed-without-one-entry');
   if (count === 1 && !attempt.effect) faults.push('provider-entry-without-durable-effect');
-  if (!attempt.effect && count === 0 && !attempt.preclaimRefused) faults.push('unclassified-attempt');
+  if (attempt.preclaimRefused && attempt.safeCode !== 'admission_limited') faults.push('unexpected-preclaim-refusal');
+  if (attempt.effect === 'not_dispatched' && !capacityRefusal(attempt)) faults.push('unexpected-durable-refusal');
+  if (!attempt.effect && count === 0 && !capacityRefusal(attempt)) faults.push('unclassified-attempt');
   if (!attempt.intentionalCancel && attempt.effect && attempt.effect !== 'not_dispatched' &&
       (attempt.effect !== 'completed' || attempt.response !== 'stream' || !attempt.validatedStream)) faults.push('unexpected-effect-or-client-stream-failure');
   if (attempt.occupied) faults.push('occupied-after-drain');

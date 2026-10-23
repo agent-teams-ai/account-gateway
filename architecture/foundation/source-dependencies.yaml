@@ -167,5 +167,5 @@ boundaries:
   - id: native-client-fixture
     dependencyMode: runtime
     roots: [services/account-gateway/test/fixtures/native-cli]
-    entrypoints: [services/account-gateway/test/fixtures/native-cli/run.ts]
-    allow: {boundaries: [], packages: [], builtins: ['node:child_process', 'node:crypto', 'node:fs', 'node:net', 'node:os', 'node:path', 'node:url'], runtimeReferences: []}
+    entrypoints: [services/account-gateway/test/fixtures/native-cli/run.ts, services/account-gateway/test/fixtures/native-cli/race.ts, services/account-gateway/test/fixtures/native-cli/evidence.test.ts]
+    allow: {boundaries: [], packages: [], builtins: ['node:child_process', 'node:crypto', 'node:fs', 'node:net', 'node:os', 'node:path', 'node:url', 'node:test', 'node:assert/strict'], runtimeReferences: []}

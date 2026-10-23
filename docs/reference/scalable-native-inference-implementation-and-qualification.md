@@ -3,7 +3,7 @@ id: docs.reference.scalable-native-inference
 type: reference
 status: proposed
 owner: gateway-maintainers
-summary: Approved staged implementation, safety invariants and evidence for a Go inference path with TypeScript control.
+summary: Implemented Go inference and TypeScript control boundaries, qualification gates, rollout requirements and measured evidence.
 ---
 
 # Scalable native inference implementation and qualification
@@ -20,9 +20,11 @@ The baseline is account-gateway f3e061d and native b813197. The prior qualificat
 used an API-key controlled provider, sixteen occupied streams and brief arrival
 steps. It does not establish Codex/Claude OAuth or thousand-stream capacity.
 
-Three implementation owners cover SQL, native Claude resource lifetime, and
-public Go inference/capabilities. The integration owner maintains configuration,
-full-stack load qualification, publication and independent final review.
+Implementation is staged in [account-gateway PR 71](https://github.com/agent-teams-ai/account-gateway/pull/71)
+and [sub2api PR 64](https://github.com/agent-teams-ai/sub2api/pull/64). PR 71 depends
+on the preceding cloud-load/control-progress branch, PR 69. The expanded fixture
+pins native `2ca8d7bd5a7646416580eda397b7ec50c0e12055`; each CI receipt records the
+exact gateway/native commits, binary hashes, dependency manifests and runtimes.
 
 ## Contract
 
@@ -41,7 +43,7 @@ full-stack load qualification, publication and independent final review.
 - Historical SQL migration checksums remain unchanged. The lock-order migration
   requires old kernel writers to stop before application.
 
-### Implementation sequence
+### Approved implementation sequence
 
 1. Release Claude physical SQL guards after response headers and staged passive
    limit capture, before the SSE body pump. Preserve revision-checked cache write,
@@ -99,6 +101,145 @@ thousand streams. Neither scenario is qualified by the baseline sixteen-slot run
 
 ## Evidence status
 
-Implementation in progress. No new scale, OAuth, CLI or production capacity claim
-is made by this plan checkpoint. Final source pins, commands, results, remaining
-limits and review dispositions will replace this status as qualification lands.
+Implementation and source-level repairs are published. Both complete package and
+kernel qualification passed for gateway commit
+`a0953539921f421954749b9835785e85712ba8ad`:
+
+- [Package qualification](https://github.com/agent-teams-ai/account-gateway/actions/runs/39979996142)
+- [Kernel qualification](https://github.com/agent-teams-ai/account-gateway/actions/runs/39979996124)
+
+Fresh disposable PostgreSQL checks passed 58 kernel tests and 74 OAuth enrollment
+tests on each required Node version, without skips. Actual pinned CLI processes
+and the Claude SQL-guard regressions passed in the isolated cloud fixture.
+The expanded full-stack scale matrix and new reproducible client workflow are
+pending their first complete CI result. Only successful source-pinned receipts
+establish their corresponding load qualification; source review does not imply
+production capacity.
+
+## Implemented operator contract
+
+The TypeScript SDK and service retain account lifecycle, execution issuance,
+policy checks and durable usage. Public inference bodies, provider adaptation,
+streaming, backpressure and cancellation run in Go. TypeScript still participates
+in every request through finite metadata callbacks; SQL and callback throughput
+remain capacity limits even when Node no longer copies stream bytes.
+
+The Go public listener is disabled unless protected native bootstrap specifies
+both `publicListenAddress` and `publicMaxActive`. The address must be a separate
+loopback listener; the active-request limit is 1 through 2048. Public socket
+headroom is finite at `2 × publicMaxActive + 128`, independently of private
+control sockets. An edge may expose one external TLS origin and route inference
+and control to their respective internal listeners. Client input cannot select
+a provider or private native URL.
+
+The execution SDK accepts separate `origin` and `inferenceOrigin`. Omission of
+`inferenceOrigin` preserves existing routing. Standard Responses and native
+Anthropic Messages clients use an execution capability issued by the control
+plane; no private native credential or upstream provider credential is exposed.
+Messages preserves the native protocol, including the literal `?beta=true`
+route used by Claude Code.
+
+Protected service profiles accept an explicitly qualified per-account concurrency
+ceiling of 1 through 64. A bearer cannot raise that ceiling. The default remains
+one; 64 is an operator bound, not a provider-account entitlement. An absent
+profile in an explicit capacity map receives no capacity.
+
+Keep protected HMAC keys stable across restarts. Authenticated execution
+capabilities can be reconstructed without an accumulating process-local bearer
+registry, but current durable authority is revalidated. Changing an already
+configured key is rejected. Issuer and policy changes do not silently preserve
+obsolete execution authority.
+
+Public terminal `response.completed` and `message_stop` frames are withheld
+until the terminal effect, configured usage and exact physical closure ACK are
+durable. Finalization uses a separate bounded callback lane, with per-frame and
+aggregate held-terminal memory limits. Settlement failure retains original
+evidence and prevents a false successful terminal. Before a claim, capacity
+refusal is explicitly `admission_limited` / `not_dispatched`; authentication and
+protocol errors cannot count as successful overload handling.
+
+### Migration and retention rollout
+
+Stop every old kernel writer before migration 009: old global-budget-before-
+consumer locks and the new consumer/account-before-budget order must not coexist.
+Apply migrations in order through 011 before starting new writers. Historical
+migration checksums remain unchanged.
+
+When the runtime role differs from the migration owner, grant that specific role
+execution on `ag_kernel.open_consumer(text,bigint,bigint,bigint,integer,integer)`
+and `ag_kernel.retire_closed_request_details(text,integer)`. Their default PUBLIC
+execution privilege is revoked; retain existing restricted table/schema grants
+instead of adding a broad PUBLIC grant.
+
+`requestReadbackRetentionMs` is optional, from 1 millisecond through 365 days,
+and is captured on each newly prepared execution. Omission disables detail
+retirement for that execution. Reclamation waits until the horizon has elapsed
+after both logical closure and completed physical cleanup, and requires positive
+settled effects, exact ACKs and v2 namespace-bound native reservations.
+
+Migration 011 bounds both selected namespaces and removed request rows by the
+maintenance batch. It marks the namespace irrevocably retired before deleting
+request details and usage revisions, refunds only deleted request units, and
+excludes fully drained namespaces from future maintenance scans. Detail readback
+then becomes unknown; the permanent execution fence prevents replay.
+
+Execution/prepare, account, candidate, operation and issuer tombstones retain
+finite budgets. Legacy random-nonce requests, unknown effects and occupied
+transports remain retained. This is neither unlimited execution-creation churn
+nor an unlimited billing-history store. Choose the readback horizon to match
+audit needs before enabling it.
+
+The qualified topology has one composed owner of the native process and its
+protected authority directory. Multi-replica native ownership and horizontal
+deployment safety are not established by these changes.
+
+## Reproducible qualification matrix
+
+[Full-stack CI](../../.github/workflows/fullstack-load.yaml) provisions exact
+dependencies before measurement and runs the actual service, SDK, native binary,
+PostgreSQL and controlled TLS provider without external container networking.
+
+| Profile | Resource bound | Required evidence |
+| --- | --- | --- |
+| Baseline, Node 26 and 24 | 2 CPU, 4 GiB, 4096 descriptors | Slow reader, disconnect, close, overload recovery, 130 new execution capabilities beyond the old 128 registry limit |
+| Streams, Node 26 | 4 CPU, 8 GiB, 16384 descriptors | Exactly 64/256/512/1024 occupied streams; 1024 held for at least 60 seconds with control progress; simultaneous completion and durable settlement |
+| Arrivals, Node 26 | 4 CPU, 8 GiB, 16384 descriptors | Two-second offers at target 50/100/250/500/1000 requests per second; actual launch rate, lag, completions and safe refusals |
+| Large context, Node 26 | 2 CPU, 4 GiB, 4096 descriptors | Approximately 1 MB synthetic input at 1/8/32/64 synchronized offers; actual completions and safe refusals |
+
+Manual `smoke` runs only the two smoke Node lanes with accurate artifact names.
+The default selection requires both complete baseline lanes and all three scale
+profiles. Every attempted request is reconciled with the controlled-provider
+entry ledger, SQL effect and exact native closure/ACK. Duplicate entry, unexpected
+authentication failure, ambiguity, a broken successful-client stream, occupied
+rows after drain or missing closure evidence fails the gate. No paid-request
+replay repairs a failed workload.
+
+The stream profile paces admission to isolate live-stream capacity. At 1024 total
+streams across 32 accounts it tests 32 live streams per account; 64 is the configured
+ceiling. The arrival profile distinguishes offered and accepted rate: a nominal
+1000-per-second target is not measured completion capacity. Large-context input
+measures synthetic byte transport and validation, not model tokenization/compute.
+
+Node resource samples include the load driver and TypeScript service in one
+process. Go samples identify the exact native PID and birth. Provider/PostgreSQL
+RSS are not separately sampled; the container memory limit bounds the whole job.
+Receipts include event-loop delay, SQL waits, occupancy and completion latency.
+The 4096-entry fixture does not force receipt eviction; the independent cap-two
+unit regression proves authenticated closed/acknowledged eviction.
+
+[Pinned client CI](../../.github/workflows/native-client-qualification.yaml)
+adds race-checked public ingress/bootstrap, real PostgreSQL Claude lifecycle and
+SQL-guard regressions, and real Codex 0.164.0 and Claude Code 2.1.309 processes.
+Official archives and binaries are integrity-pinned in
+`services/account-gateway/test/fixtures/native-cli/pins.json`; installation runs
+no package scripts. The fixture requires both named client passes, zero skips,
+fresh databases, loopback-only networking, no routes, a failed external probe,
+and positive PostgreSQL shutdown. Exported test evidence excludes arbitrary
+assertion values, credentials and provider bodies, including on failure.
+
+Actual-client tests cover CLI protocol, real native OAuth account identity,
+native usage SQL, TLS and terminal ACK. Their metadata authority is a fixture
+and their upstream is controlled loopback TLS. The full-stack load fixture
+separately covers the joined TypeScript kernel and native process. These are
+not live-provider quota acceptance or a complete real-CLI-through-real-
+TypeScript-OAuth deployment test.

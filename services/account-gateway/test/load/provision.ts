@@ -9,7 +9,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connect, createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
-import { bounds, check, scenarios } from './model.ts';
+import { bounds, check, scenarios, baselineScenarios } from './model.ts';
 import { sha256 } from './fixture.ts';
 import type { Fixture } from './fixture.ts';
 import { nativeSourceCommit, migrationAdapterSource } from './build-native-fixture.ts';
@@ -239,7 +239,7 @@ async function main() {
       stage = 'summary';
       const summary = JSON.parse(readFileSync(join(artifacts, 'summary.json'), 'utf8')) as Record<string, unknown>;
       check(summary.outcome === 'pass' && summary.ledgerMatches === true && summary.sourceUnchanged === true && summary.sdkArtifactUnchanged === true && summary.stopped === 'retired' &&
-        JSON.stringify(summary.expectedScenarios) === JSON.stringify(suite === 'all' ? scenarios : [suite]), 'operator-qualification-summary');
+        JSON.stringify(summary.expectedScenarios) === JSON.stringify(suite === 'all' ? baselineScenarios : [suite]), 'operator-qualification-summary');
       success = true;
     } catch (error) {
       failureStage = stage; failure = error instanceof Error && /^load:[a-z0-9-]+$/.test(error.message) ? error.message.slice(5) : 'operator-failed';

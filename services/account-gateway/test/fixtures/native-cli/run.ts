@@ -9,6 +9,7 @@ import { connect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { clientTests, goTestEvidence, repositoryTests as repositoryTestNames } from './evidence.ts';
 
 const sha256 = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 function check(condition: unknown, code: string): asserts condition { if (!condition) throw new Error(code); }
@@ -104,8 +105,8 @@ async function main() {
         await command(join(pgBin, 'pg_ctl'), ['-D', data, 'status'], env, { uid: 65534, expected: 3 }); stopped = true;
       } catch { stopped = false; }
     }
-    writeFileSync(join(artifacts, 'test.log'), testLog, { mode: 0o600 });
-    if (repositoryTests) writeFileSync(join(artifacts, 'repository-test.log'), repositoryLog, { mode: 0o600 });
+    writeFileSync(join(artifacts, 'test.log'), JSON.stringify(goTestEvidence(testLog, clientTests), null, 2) + '\n', { mode: 0o600 });
+    if (repositoryTests) writeFileSync(join(artifacts, 'repository-test.log'), JSON.stringify(goTestEvidence(repositoryLog, repositoryTestNames), null, 2) + '\n', { mode: 0o600 });
     const result = { kind: 'gateway-native-client-qualification/v1', outcome: success && stopped ? 'pass' : 'fail', node: process.version,
       nativeCommit: args.get('--native-commit'), gatewayCommit: args.get('--gateway-commit'), testBinarySHA256: sha256(readFileSync(binary)), repositoryTestBinarySHA256: repositoryTests ? sha256(readFileSync(repositoryTests)) : undefined, pinsSHA256: sha256(pinnedBytes),
       clients: pins.clients.map((client: { id: string; version: string; binarySHA256: string }) => ({ id: client.id, version: client.version, binarySHA256: client.binarySHA256 })),

@@ -29,12 +29,13 @@ async function initialize(input: Configuration) {
     res.once('close', () => { closed = true; record('close', requestId, bytes); release.get(requestId)?.(); release.delete(requestId); });
     void (async () => {
       const chunks: Buffer[] = []; let received = 0;
-      for await (const chunk of req) { received += Buffer.byteLength(chunk); check(received <= 4096, 'provider-input-bound'); chunks.push(Buffer.from(chunk)); }
+      for await (const chunk of req) { received += Buffer.byteLength(chunk); check(received <= 1_048_576, 'provider-input-bound'); chunks.push(Buffer.from(chunk)); }
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
       const input = body.input as { role: string; content: string }[];
       check(Array.isArray(input) && input.length === 1 && input[0].role === 'user' && typeof input[0].content === 'string', 'provider-input');
       const prefix = 'load-fixture:' + cfg!.runId + ':';
-      check(input[0].content.startsWith(prefix), 'provider-run-identity'); requestId = input[0].content.slice(prefix.length);
+      check(input[0].content.startsWith(prefix), 'provider-run-identity'); requestId = input[0].content.slice(prefix.length, prefix.length + 36);
+      check(/^(?:\nx*)?$/.test(input[0].content.slice(prefix.length + 36)), 'provider-padding');
       check(/^[a-f0-9-]{36}$/.test(requestId), 'provider-request-identity');
       record('entry', requestId, 0);
       const plan = plans.get(requestId); check(plan, 'provider-unplanned-entry');
@@ -44,9 +45,8 @@ async function initialize(input: Configuration) {
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' }); res.flushHeaders();
       record('headers', requestId, bytes);
       let eventSequence = 0;
-      const frame = async (type: string, fields: object) => {
+      const writeWire = async (wire: string) => {
         if (closed) return false;
-        const wire = 'event: ' + type + '\ndata: ' + JSON.stringify({ type, sequence_number: eventSequence++, ...fields }) + '\n\n';
         const size = Buffer.byteLength(wire); bytes += size; total += size;
         check(bytes <= bounds.streamBytes && total <= bounds.totalBytes, 'provider-output-bound');
         if (!res.write(wire)) {
@@ -60,6 +60,8 @@ async function initialize(input: Configuration) {
         }
         return !closed;
       };
+      const frame = (type: string, fields: object) => writeWire('event: ' + type + '\ndata: ' +
+        JSON.stringify({ type, sequence_number: eventSequence++, ...fields }) + '\n\n');
       const text = 'controlled fixture completion', itemId = 'msg_' + requestId.replaceAll('-', '');
       const part = { type: 'output_text', text, annotations: [], logprobs: [] };
       const item = { id: itemId, type: 'message', status: 'completed', role: 'assistant', content: [part] };
@@ -81,7 +83,14 @@ async function initialize(input: Configuration) {
         return;
       }
       await frame('response.output_text.delta', { item_id: itemId, output_index: 0, content_index: 0, delta: text, logprobs: [] });
-      if (plan.mode === 'held' && !closed) await new Promise<void>(resolve => release.set(requestId, resolve));
+      if (plan.mode === 'held' && !closed) {
+        let released = false;
+        const done = new Promise<void>(resolve => release.set(requestId, () => { released = true; resolve(); }));
+        while (!closed && !released) {
+          await Promise.race([done, delay(1000)]);
+          if (!closed && !released && !await writeWire(': keepalive\n\n')) return;
+        }
+      }
       else if (plan.delayMs) await delay(plan.delayMs);
       if (closed) return;
       await frame('response.output_text.done', { item_id: itemId, output_index: 0, content_index: 0, text, logprobs: [] });

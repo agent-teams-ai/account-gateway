@@ -1,0 +1,120 @@
+name: Pinned native client and public ingress qualification
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-client-qualification-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native_clients:
+    name: native clients (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['26.11.1', '24.21.0']
+    env:
+      NATIVE_COMMIT: 2ca8d7bd5a7646416580eda397b7ec50c0e12055
+      PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Prepare exact source and pinned real clients
+        run: |
+          test "$(node --version)" = "v${{ matrix.node }}"
+          cli_root="$RUNNER_TEMP/gateway-native-clients"
+          mkdir -p "$cli_root/build" "$cli_root/container"
+          sudo mkdir -m 700 "$cli_root/artifacts"
+          echo "GATEWAY_CLIENT_ROOT=$cli_root" >> "$GITHUB_ENV"
+          echo "GATEWAY_CLIENT_NODE=$(command -v node)" >> "$GITHUB_ENV"
+          echo "GATEWAY_CLIENT_NODE_HOME=$(dirname "$(dirname "$(command -v node)")")" >> "$GITHUB_ENV"
+          echo "GOCACHE=$cli_root/go-cache" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$cli_root/go-modules" >> "$GITHUB_ENV"
+          echo "GOPATH=$cli_root/go" >> "$GITHUB_ENV"
+          git clone --no-checkout https://github.com/agent-teams-ai/sub2api.git "$cli_root/native-source"
+          git -C "$cli_root/native-source" checkout --detach "$NATIVE_COMMIT"
+          test "$(git -C "$cli_root/native-source" rev-parse HEAD)" = "$NATIVE_COMMIT"
+          test -z "$(git -C "$cli_root/native-source" status --porcelain)"
+          python3 services/account-gateway/test/fixtures/native-cli/install.py --destination "$cli_root/clients"
+      - name: Race-check the actual public ingress and bounded bootstrap
+        run: |
+          node --test services/account-gateway/test/fixtures/native-cli/evidence.test.ts
+          node services/account-gateway/test/fixtures/native-cli/race.ts \
+            "$GATEWAY_CLIENT_ROOT/native-source/backend" "$GATEWAY_CLIENT_ROOT/build"
+      - name: Build isolated real-client and PostgreSQL lifecycle test binaries
+        run: |
+          cd "$GATEWAY_CLIENT_ROOT/native-source/backend"
+          go test -tags unit,nativecli -c ./internal/gatewaytransport -o "$GATEWAY_CLIENT_ROOT/build/native-cli.test"
+          go test -c ./internal/repository -o "$GATEWAY_CLIENT_ROOT/build/native-repository.test"
+          git diff --exit-code -- go.mod go.sum
+          cat > "$GATEWAY_CLIENT_ROOT/container/Dockerfile" <<'DOCKERFILE'
+          ARG PG_IMAGE
+          FROM ${PG_IMAGE}
+          RUN . /etc/os-release && test "$VERSION_CODENAME" = trixie \
+            && apt-get update \
+            && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends --no-upgrade \
+              libatomic1=14.2.0-19 ca-certificates=20250419+deb13u1 \
+            && rm -rf /var/lib/apt/lists/*
+          DOCKERFILE
+          docker build --pull --build-arg "PG_IMAGE=$PG_IMAGE" --tag gateway-native-clients:qualified "$GATEWAY_CLIENT_ROOT/container"
+      - name: Real Codex and Claude Code through Go, OAuth and PostgreSQL without egress
+        run: |
+          docker run --rm --network none --user 0:0 --cpus 2 --memory 4g --pids-limit 256 --ulimit nofile=4096:4096 \
+            --mount "type=bind,source=$GATEWAY_CLIENT_NODE_HOME,target=$GATEWAY_CLIENT_NODE_HOME,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=$GITHUB_WORKSPACE,readonly" \
+            --mount "type=bind,source=$GATEWAY_CLIENT_ROOT,target=$GATEWAY_CLIENT_ROOT,readonly" \
+            --mount "type=bind,source=$GATEWAY_CLIENT_ROOT/artifacts,target=$GATEWAY_CLIENT_ROOT/artifacts" \
+            --entrypoint "$GATEWAY_CLIENT_NODE" gateway-native-clients:qualified \
+            "$GITHUB_WORKSPACE/services/account-gateway/test/fixtures/native-cli/run.ts" \
+            --pg-bin /usr/lib/postgresql/17/bin \
+            --test-binary "$GATEWAY_CLIENT_ROOT/build/native-cli.test" \
+            --repository-test-binary "$GATEWAY_CLIENT_ROOT/build/native-repository.test" \
+            --clients "$GATEWAY_CLIENT_ROOT/clients/clients.json" \
+            --artifacts "$GATEWAY_CLIENT_ROOT/artifacts/native-clients" \
+            --native-commit "$NATIVE_COMMIT" --gateway-commit "$(git rev-parse HEAD)"
+      - name: Expose bounded synthetic qualification evidence
+        if: ${{ always() && env.GATEWAY_CLIENT_ROOT != '' }}
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" "$GATEWAY_CLIENT_ROOT/artifacts"
+          node --input-type=module -e '
+            import { readFileSync, existsSync } from "node:fs";
+            import { join } from "node:path";
+            const root = join(process.env.GATEWAY_CLIENT_ROOT, "artifacts", "native-clients");
+            for (const file of ["result.json", "test.log", "repository-test.log"]) {
+              if (existsSync(join(root, file))) process.stdout.write(file + "\n" + readFileSync(join(root, file), "utf8") + "\n");
+            }
+          '
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() && env.GATEWAY_CLIENT_ROOT != '' }}
+        with:
+          name: native-clients-${{ matrix.node }}
+          path: |
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-clients/result.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-clients/network.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-clients/test.log
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-clients/repository-test.log
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/public-race.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/bootstrap-race.json
+          if-no-files-found: warn
+          retention-days: 14
+  native_client_gate:
+    needs: native_clients
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both client qualification lanes
+        env:
+          LANE_RESULT: ${{ needs.native_clients.result }}
+        run: test "$LANE_RESULT" = success
+
