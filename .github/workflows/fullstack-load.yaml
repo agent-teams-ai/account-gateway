@@ -54,7 +54,7 @@ jobs:
           test "$(node --version)" = "v${{ matrix.node }}"
           load_root="$RUNNER_TEMP/gateway-load"
           mkdir -p "$load_root/shim" "$load_root/tmp" "$load_root/artifacts"
-          printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$(command -v node)" "$GATEWAY_COREPACK" > "$load_root/shim/pnpm"
+          printf '#!/bin/sh\nexec "%s" "%s" pnpm "$@"\n' "$(command -v node)" "$GATEWAY_COREPACK" > "$load_root/shim/pnpm"
           chmod 755 "$load_root/shim/pnpm"
           echo "GATEWAY_LOAD_ROOT=$load_root" >> "$GITHUB_ENV"
           echo "GATEWAY_NODE=$(command -v node)" >> "$GITHUB_ENV"
