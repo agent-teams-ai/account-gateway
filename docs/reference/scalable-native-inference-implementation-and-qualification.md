@@ -108,11 +108,15 @@ kernel qualification passed for gateway commit
 - [Package qualification](https://github.com/agent-teams-ai/account-gateway/actions/runs/39979996142)
 - [Kernel qualification](https://github.com/agent-teams-ai/account-gateway/actions/runs/39979996124)
 
-Fresh disposable PostgreSQL checks passed 58 kernel tests and 74 OAuth enrollment
+Fresh disposable PostgreSQL checks passed 59 kernel tests and 74 OAuth enrollment
 tests on each required Node version, without skips. Actual pinned CLI processes
 and the Claude SQL-guard regressions passed in the isolated cloud fixture.
-The expanded full-stack scale matrix and new reproducible client workflow are
-pending their first complete CI result. Only successful source-pinned receipts
+The [reproducible client workflow](https://github.com/agent-teams-ai/account-gateway/actions/runs/39981662087)
+passed on both Node versions: all 11 public-ingress and 2 bootstrap race tests,
+both Claude PostgreSQL regressions and both actual client processes, with no
+skips, no external network, sanitized evidence and positive PostgreSQL shutdown.
+The corrected full-stack stream/arrival profiles await their complete result.
+Only successful source-pinned receipts
 establish their corresponding load qualification; source review does not imply
 production capacity.
 
@@ -162,7 +166,7 @@ protocol errors cannot count as successful overload handling.
 
 Stop every old kernel writer before migration 009: old global-budget-before-
 consumer locks and the new consumer/account-before-budget order must not coexist.
-Apply migrations in order through 011 before starting new writers. Historical
+Apply migrations in order through 012 before starting new writers. Historical
 migration checksums remain unchanged.
 
 When the runtime role differs from the migration owner, grant that specific role
@@ -177,11 +181,20 @@ retirement for that execution. Reclamation waits until the horizon has elapsed
 after both logical closure and completed physical cleanup, and requires positive
 settled effects, exact ACKs and v2 namespace-bound native reservations.
 
-Migration 011 bounds both selected namespaces and removed request rows by the
+Migrations 011–012 bound both selected namespaces and removed request rows by the
 maintenance batch. It marks the namespace irrevocably retired before deleting
 request details and usage revisions, refunds only deleted request units, and
 excludes fully drained namespaces from future maintenance scans. Detail readback
 then becomes unknown; the permanent execution fence prevents replay.
+
+Migration 012 selects the eligible batch once. With 10,000 empty closed/done
+namespaces and batch 100 on disposable PostgreSQL 17.10, repeated-selection 011
+held the consumer transaction for 2,377/2,247 ms; an otherwise identical
+once-selected prototype took 42/60 ms and retired the same 100 namespaces with
+zero refund. These are local maintenance measurements, not throughput promises.
+The physical eligibility scan can still examine the candidate set once per turn.
+The complete kernel regression suite passed 59/59 tests on both Node versions
+after the migration, including empty, partially drained and multi-account cases.
 
 Execution/prepare, account, candidate, operation and issuer tombstones retain
 finite budgets. Legacy random-nonce requests, unknown effects and occupied
@@ -202,8 +215,8 @@ PostgreSQL and controlled TLS provider without external container networking.
 | Profile | Resource bound | Required evidence |
 | --- | --- | --- |
 | Baseline, Node 26 and 24 | 2 CPU, 4 GiB, 4096 descriptors | Slow reader, disconnect, close, overload recovery, 130 new execution capabilities beyond the old 128 registry limit |
-| Streams, Node 26 | 4 CPU, 8 GiB, 16384 descriptors | Exactly 64/256/512/1024 occupied streams; 1024 held for at least 60 seconds with control progress; simultaneous completion and durable settlement |
-| Arrivals, Node 26 | 4 CPU, 8 GiB, 16384 descriptors | Two-second offers at target 50/100/250/500/1000 requests per second; actual launch rate, lag, completions and safe refusals |
+| Streams, Node 26 | 2 CPU, 4 GiB, 16384 descriptors | Exactly 64/256/512/1024 occupied streams; 1024 held for at least 60 seconds with control progress; simultaneous completion and durable settlement |
+| Arrivals, Node 26 | 2 CPU, 4 GiB, 16384 descriptors | Two-second offers at target 50/100/250/500/1000 requests per second; actual launch rate, lag, completions and safe refusals |
 | Large context, Node 26 | 2 CPU, 4 GiB, 4096 descriptors | Approximately 1 MB synthetic input at 1/8/32/64 synchronized offers; actual completions and safe refusals |
 
 Manual `smoke` runs only the two smoke Node lanes with accurate artifact names.
@@ -213,6 +226,17 @@ entry ledger, SQL effect and exact native closure/ACK. Duplicate entry, unexpect
 authentication failure, ambiguity, a broken successful-client stream, occupied
 rows after drain or missing closure evidence fails the gate. No paid-request
 replay repairs a failed workload.
+
+The first expanded run, [39981661848](https://github.com/agent-teams-ai/account-gateway/actions/runs/39981661848),
+passed both complete baseline lanes and the large-context profile. Each baseline
+had 446 attempts, 197 issued capabilities, all 130 churn executions, exact ledger
+agreement and zero final occupied/unresolved-cleanup rows. Large-context offers
+1/8/32/64 completed 1/8/28/30 requests and safely refused 0/0/4/34. The two scale
+containers did not start because their initial 4-CPU request exceeded the
+runner's actual 2 CPUs. This is preserved as infrastructure failure and provides
+no scale-capacity evidence. The matrix now explicitly uses 2 CPU and 4 GiB.
+Those first receipts identify merge checkout `57b55498117faaa1223923f29baa486862e995c4`
+for PR head `0bf0b1481e5a1e74722d73a2799de37446327c37`, with the native pin above.
 
 The stream profile paces admission to isolate live-stream capacity. At 1024 total
 streams across 32 accounts it tests 32 live streams per account; 64 is the configured
@@ -243,3 +267,10 @@ and their upstream is controlled loopback TLS. The full-stack load fixture
 separately covers the joined TypeScript kernel and native process. These are
 not live-provider quota acceptance or a complete real-CLI-through-real-
 TypeScript-OAuth deployment test.
+
+The Codex fixture uses an explicit Responses HTTP/SSE provider configuration,
+`supports_websockets=false`, and zero request/stream retries. WebSocket inference
+is outside this listener's contract. Claude Code runs one turn with tools disabled
+and a fresh isolated configuration. The process checks establish supported
+transport and terminal behavior, not arbitrary interactive/tool workflows or
+third-party client retry policies.

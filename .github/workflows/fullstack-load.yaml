@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.suite == 'smoke' && '[{"node":"26.11.1","suite":"smoke","cpus":2,"memory":"4g","descriptors":4096},{"node":"24.21.0","suite":"smoke","cpus":2,"memory":"4g","descriptors":4096}]' || '[{"node":"26.11.1","suite":"all","cpus":2,"memory":"4g","descriptors":4096},{"node":"24.21.0","suite":"all","cpus":2,"memory":"4g","descriptors":4096},{"node":"26.11.1","suite":"scale-streams","cpus":4,"memory":"8g","descriptors":16384},{"node":"26.11.1","suite":"scale-arrivals","cpus":4,"memory":"8g","descriptors":16384},{"node":"26.11.1","suite":"large-context","cpus":2,"memory":"4g","descriptors":4096}]') }}
+        include: ${{ fromJSON(inputs.suite == 'smoke' && '[{"node":"26.11.1","suite":"smoke","cpus":2,"memory":"4g","descriptors":4096},{"node":"24.21.0","suite":"smoke","cpus":2,"memory":"4g","descriptors":4096}]' || '[{"node":"26.11.1","suite":"all","cpus":2,"memory":"4g","descriptors":4096},{"node":"24.21.0","suite":"all","cpus":2,"memory":"4g","descriptors":4096},{"node":"26.11.1","suite":"scale-streams","cpus":2,"memory":"4g","descriptors":16384},{"node":"26.11.1","suite":"scale-arrivals","cpus":2,"memory":"4g","descriptors":16384},{"node":"26.11.1","suite":"large-context","cpus":2,"memory":"4g","descriptors":4096}]') }}
     env:
       NPM_CONFIG_ENGINE_STRICT: 'true'
       LOAD_SUITE: ${{ matrix.suite }}
@@ -158,13 +158,15 @@ jobs:
           const maximum = field => Math.max(0, ...samples.map(s => Number(s[field]) || 0));
           const percentile = (items, fraction) => items.length ? items.sort((a, b) => a - b)[Math.min(items.length - 1, Math.ceil(items.length * fraction) - 1)] : null;
           const latency = attempts.filter(a => a.finishedAt && a.effect === 'completed').map(a => a.finishedAt - a.startedAt);
+          const firstByte = attempts.filter(a => a.firstByteAt && a.effect === 'completed').map(a => a.firstByteAt - a.startedAt);
           process.stdout.write('QUALIFICATION_RESULT ' + JSON.stringify({
             operator: read('operator-result.json'), summary,
             gatewayCommit: source?.gatewayCommit, nativeCommit: source?.native?.sourceCommit,
             resources: { scope: resources?.scope, nodePeakRSS: maximum('nodeRSS'), nativePeakRSS: maximum('nativeRSS'),
               eventLoopMaxMs: maximum('eventLoopMaxMs'), maximumSQLLockWaiters: maximum('sqlLockWaiters'),
               maximumOccupied: maximum('sqlOccupied'), completedLatencyP50Ms: percentile([...latency], .5),
-              completedLatencyP95Ms: percentile([...latency], .95), completedLatencyP99Ms: percentile([...latency], .99) },
+              completedLatencyP95Ms: percentile([...latency], .95), completedLatencyP99Ms: percentile([...latency], .99),
+              firstByteP50Ms: percentile([...firstByte], .5), firstByteP95Ms: percentile([...firstByte], .95), firstByteP99Ms: percentile([...firstByte], .99) },
           }) + '\n');
           JAVASCRIPT
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -515,6 +515,53 @@ test('SQL011 a retirement turn reclaims multiple small namespaces within one row
     FROM ag_kernel.fact_budget`)).rows[0]; assert.equal(totals.used, totals.expected);
 });
 
+test('SQL012 once-selected retirement bounds empty namespaces and refunds only rows removed across turns', async () => {
+  const ctx = context(), kernel = new PostgresKernel(poolA, { ...defaults, maintenanceBatch: 3 }, factDefaults,
+    { requestReadbackRetentionMs: 20 });
+  const owner = await worker(ctx, kernel), account = await connected(ctx, kernel), empty: string[] = [];
+  const finish = async (ref: string) => {
+    await kernel.close(ctx, op(), ref);
+    const job = await kernel.claimCleanup(ctx, owner); assert.ok(job?.scope.kind === 'execution');
+    assert.equal(job.scope.executionRef, ref);
+    await kernel.settleCleanup(ctx, job.cleanupRef, owner, job.token, true);
+  };
+  for (let i = 0; i < 5; i++) {
+    const run = await prepared(ctx, account.accountRef!, {}, kernel);
+    empty.push(run.result.executionRef!); await finish(run.result.executionRef!);
+  }
+  const run = await prepared(ctx, account.accountRef!, {
+    limits: { requests: 8, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 5000 },
+  }, kernel), ref = run.result.executionRef!;
+  for (let i = 0; i < 5; i++) {
+    const id = 'charged-' + i;
+    const claim = await kernel.claim(ctx, ref, id, owner, run.admission, boundReservation(ctx, ref, id)); assert.ok(claim.dispatch);
+    await kernel.effect(ctx, ref, id, owner, 'response_started'); await kernel.effect(ctx, ref, id, owner, 'completed');
+    await kernel.acknowledgeTransportClosed(ctx, owner, claim.dispatch.closure);
+  }
+  await finish(ref); await delay(30);
+  const counters = async () => (await admin.query(`SELECT s.used,c.fact_used AS consumer_used,a.fact_used AS account_used
+    FROM ag_kernel.fact_budget s CROSS JOIN ag_kernel.consumers c JOIN ag_kernel.accounts a ON a.consumer=c.consumer
+    WHERE c.consumer=$1 AND a.ref=$2`, [ctx.consumerId, account.accountRef])).rows[0];
+  const before = await counters();
+  for (const [turn, removed, drained] of [[1, 0, 3], [2, 3, 5], [3, 5, 6]]) {
+    await kernel.reconcile(ctx);
+    assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.executions WHERE consumer=$1 AND request_details_drained_at IS NOT NULL', [ctx.consumerId]), drained);
+    assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.requests WHERE consumer=$1', [ctx.consumerId]), 5 - removed);
+    const after = await counters();
+    for (const key of ['used', 'consumer_used', 'account_used']) assert.equal(BigInt(after[key]), BigInt(before[key]) - BigInt(removed),
+      'turn ' + turn + ' refunds exactly deleted request units at each level');
+    if (turn === 1) {
+      assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=ANY($2::uuid[]) AND request_details_retired_at IS NOT NULL', [ctx.consumerId, empty]), 3);
+      assert.equal((await admin.query('SELECT request_details_retired_at FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2', [ctx.consumerId, ref])).rows[0].request_details_retired_at, null);
+    }
+    if (turn === 2) {
+      await assert.rejects(kernel.request(ctx, ref, 'charged-4'), isCode('unknown'));
+      await assert.rejects(kernel.claim(ctx, ref, 'new-after-retirement', owner, run.admission,
+        boundReservation(ctx, ref, 'new-after-retirement')), isCode('denied'));
+    }
+  }
+});
+
 test('trusted profile account caps admit 32 parallel requests across executions without widening default or adjacent profiles', async () => {
   const bounds = { ...defaults, maxConcurrent: 32 }, caps = [{ profile: 'mimo-test', concurrency: 32 }, { profile: 'mimo-low', concurrency: 1 }];
   const x = new PostgresKernel(poolA, bounds, factDefaults, { accountConcurrencyByProfile: caps });
