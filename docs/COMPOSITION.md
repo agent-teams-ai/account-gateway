@@ -13,9 +13,27 @@ in pnpm-lock.yaml. Registry provenance comes from the coordinator's installed
 seed and its integrity-bearing npm lock; artifact behavior still requires the
 exact packed SDK to pass the installed-consumer gate.
 
-Organization authority remains Get Modular common-assembly source contract at
-4b56072ec6ca269fb16e3fdf131d31423af804bd, full-byte digest
-33b41d5babf0a431c97e8e596a56e6ec1557ba1a0b26d39bf23e13d9a19e1fbd.
+The reviewed Get Modular Consumer Module Standard source revision is
+b70ba39304ac71964175c42a77309406a7c30ca2, full-document SHA-256
+11a389b223506dc303fa986a7a37350b847013d85beb2de9d74cb8c97363e824.
+The [pending CMS profile](../architecture/consumer-module-adoption.json) and
+[full-document delta review](../architecture/evidence/cms-pin-review.json) bind
+that exact revision to retained non-authoritative bytes. This pin update reviews
+current guidance; it does not activate CMS adoption or upgrade the installed
+Core/Assembly 0.2.0 pair. The offline topology gate rejects pin/evidence drift,
+and `pnpm test:consumer-pin` checks its TypeScript and rejecting fixtures in both
+`test:static` and `test`. These checks qualify document integrity only.
+
+Current CMS activation remains pending: accept a local adoption decision and exact
+boundary/legacy/exception inventory, qualify descriptor/module-entry/group and
+`profileId` authoring with the package upgrade, map the current layout to CMS
+rules, and add consumer conformance and independent wiring-oracle checks. The
+existing four-key `ClientCapabilities` manual map stays valid and unchanged.
+When concrete descriptor-derived feature maps are introduced, follow the pinned
+standard's complete descriptor unions and separate `CapabilitiesOf` bases; retain
+transitive and unused keys and early conflict checks. New composition work must
+resolve the profile's pending adoption before claiming current CMS conformance.
+
 Feature Module Standard v1 authority is organization .github commit
 eef92e7fd40f538b4e9ba03e01bbd4e2d23f12f2, declared full-byte digest
 851653f96643cf0466b67ab22963661976b00de44840fa3144a48a8c054f95fa.
