@@ -85,10 +85,12 @@ function savedCopy(s: SavedExecution): SavedExecution {
     admission: Object.freeze({ ...wire, executionRef: a.executionRef, issuerEpoch: a.issuerEpoch }) });
 }
 const tokenHash = (token: string) => createHash('sha256').update(token).digest();
-// One bounded server mapping. Explicit configuration replacement revokes old
-// captured authorities; run issuance only upserts its own execution entry.
+// Configured authorities are bounded. Issued execution locators retain no
+// registry entries; every use hydrates the original tuple from durable SQL.
 export class FacadeBearers {
-  #entries: readonly { hash: Buffer; grant: Grant; issuedBy?: RunControlGrant; token?: string }[] = [];
+  #entries: readonly { hash: Buffer; grant: Grant }[] = [];
+  #executionKey?: Buffer;
+  readonly #executionIssuers = new WeakMap<Grant, RunControlGrant>();
   constructor(entries: readonly ConfiguredBearer[]) { this.replace(entries); }
   replace(entries: readonly ConfiguredBearer[]): void {
     if (entries.length > 128) throw new KernelError('invalid');
@@ -160,7 +162,51 @@ export class FacadeBearers {
     for (const row of this.#entries) if (timingSafeEqual(row.hash, hash)) found = row.grant;
     return found;
   }
-  current(grant: Grant): boolean { return this.#entries.some(row => row.grant === grant); }
+  current(grant: Grant): boolean {
+    const issuer = this.#executionIssuers.get(grant);
+    return this.#entries.some(row => row.grant === (issuer ?? grant));
+  }
+  // Stable server-owned key, purpose separated from prepare intent digests.
+  // The locator contains no native peer credential, private admission or body.
+  configureExecutionKey(key: Uint8Array): void {
+    if (key.byteLength !== 32) throw new KernelError('invalid');
+    const derived = createHmac('sha256', key).update('account-gateway/execution-locator/v1').digest();
+    if (this.#executionKey && !timingSafeEqual(this.#executionKey, derived)) throw new KernelError('conflict');
+    this.#executionKey = derived;
+  }
+  #issuerFingerprint(row: { hash: Buffer; grant: Grant }): string {
+    return createHash('sha256').update(row.hash).update(JSON.stringify(row.grant)).digest('base64url');
+  }
+  #savedFingerprint(saved: SavedExecution): string {
+    return createHash('sha256').update(JSON.stringify([saved.generation, ...admissionTuple(saved.admission)])).digest('base64url');
+  }
+  async resolveExecution(token: string, kernel: ExecutionRead): Promise<Grant | undefined> {
+    const configured = this.resolve(token);
+    if (configured) return configured;
+    if (!this.#executionKey || token.length > 1024) return;
+    const parts = /^agx1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})$/.exec(token);
+    if (!parts) return;
+    const expected = createHmac('sha256', this.#executionKey).update(parts[1]).digest();
+    const signature = Buffer.from(parts[2], 'base64url');
+    if (signature.length !== expected.length || signature.toString('base64url') !== parts[2] || !timingSafeEqual(signature, expected)) return;
+    try {
+      const raw = Buffer.from(parts[1], 'base64url');
+      if (raw.toString('base64url') !== parts[1]) return;
+      const value: unknown = JSON.parse(raw.toString('utf8'));
+      if (!Array.isArray(value) || value.length !== 5 || value.some(v => typeof v !== 'string')) return;
+      const [issuer, consumerId, executionRef, savedFingerprint, expiresAt] = value as string[];
+      identifier(consumerId); uuid(executionRef);
+      if (!/^[A-Za-z0-9_-]{43}$/.test(issuer) || !/^[A-Za-z0-9_-]{43}$/.test(savedFingerprint)) return;
+      const row = this.#entries.find(row => (row.grant.role === 'run-control' || row.grant.role === 'consumer-control') &&
+        row.grant.consumerId === consumerId && this.#issuerFingerprint(row) === issuer);
+      if (!row || (row.grant.role !== 'run-control' && row.grant.role !== 'consumer-control')) return;
+      const saved = savedCopy(await kernel.savedExecution({ consumerId }, executionRef));
+      if (saved.admission.expiresAt !== expiresAt || this.#savedFingerprint(saved) !== savedFingerprint || !this.current(row.grant)) return;
+      const grant = Object.freeze({ role: 'execution' as const, consumerId, saved });
+      this.#executionIssuers.set(grant, row.grant);
+      return grant;
+    } catch { return; }
+  }
   // Protected owner lookup uses current management policy, never a raw bearer
   // or a cached consumer-to-owner association. Replacement revokes immediately.
   authorizesOwner(context: TrustedContext, ownerRef: string, profileId: string): boolean {
@@ -173,8 +219,8 @@ export class FacadeBearers {
       (grant.role === 'consumer-control' ? grant.profileIds.includes(profileId) :
         grant.role === 'management' && permitsOwner(grant, ownerRef) && permitsProfile(grant, profileId)));
   }
-  // Synchronous CAS after SQL read: identical issuance retains its token and
-  // original saved tuple. No neighboring grant is replaced or evicted.
+  // Deterministic issuance after SQL read binds the original immutable tuple.
+  // Config replacement revokes issued locators without an execution registry.
   upsertExecution(control: RunControlGrant, input: SavedExecution, original?: SavedExecution): string {
     if ((control.role !== 'run-control' && control.role !== 'consumer-control') || !this.current(control)) throw new KernelError('denied');
     const saved = savedCopy(input);
@@ -182,16 +228,14 @@ export class FacadeBearers {
     // intent check, can authorize fenced readback. POST still checks dispatch.
     const fencedOriginal = saved.state === 'fenced' && original !== undefined && sameSaved(original, saved);
     if (((!saved.dispatchAllowed || saved.state !== 'open') && !fencedOriginal) || Date.parse(saved.admission.expiresAt) <= Date.now()) throw new KernelError('denied');
-    const old = this.#entries.find(row => row.issuedBy === control && row.grant.role === 'execution' &&
-      row.grant.consumerId === control.consumerId && row.grant.saved.admission.executionRef === saved.admission.executionRef);
-    if (old) {
-      if (old.grant.role !== 'execution' || !sameSaved(old.grant.saved, saved) || !old.token) throw new KernelError('conflict');
-      return old.token;
-    }
-    if (this.#entries.length >= 128) throw new KernelError('unavailable');
-    const token = randomBytes(32).toString('base64url');
-    const grant = Object.freeze({ role: 'execution' as const, consumerId: control.consumerId, saved });
-    this.#entries = [...this.#entries, { hash: tokenHash(token), grant, issuedBy: control, token }];
+    if (!this.#executionKey) throw new KernelError('unavailable');
+    const row = this.#entries.find(row => row.grant === control);
+    if (!row) throw new KernelError('denied');
+    const payload = Buffer.from(JSON.stringify([this.#issuerFingerprint(row), control.consumerId,
+      saved.admission.executionRef, this.#savedFingerprint(saved), saved.admission.expiresAt])).toString('base64url');
+    const signature = createHmac('sha256', this.#executionKey).update(payload).digest('base64url');
+    const token = 'agx1.' + payload + '.' + signature;
+    if (token.length > 1024) throw new KernelError('invalid');
     return token;
   }
 }
@@ -344,6 +388,7 @@ export function createFacade(options: FacadeOptions): Server {
       !['enabled','disabled'].includes(options.lifecycle.writeGate) || Object.keys(options.lifecycle).sort().join(',') !== 'contract,writeGate')) throw new KernelError('invalid');
   const lifecycleWriteGate = options.lifecycle?.writeGate ?? 'disabled';
   const hmac = Buffer.from(options.intentHmacKey);
+  bearers.configureExecutionKey(hmac);
   const profiles = new Map<string, { dto: c.Profile; maxOutputTokens: number; limits?: Readonly<ApprovedLimits> }>();
   for (const entry of options.profiles) {
     const dto = c.profile.parse(entry.dto);
@@ -505,7 +550,7 @@ export function createFacade(options: FacadeOptions): Server {
       let authorization: string | undefined;
       try { authorization = singleton(req, 'authorization'); } catch { send(res, c.safeError, safe('unauthenticated', 'not_dispatched'), 401); return; }
       if (!authorization || !/^Bearer [A-Za-z0-9._~-]{16,1024}$/.test(authorization)) { send(res, c.safeError, safe('unauthenticated', 'not_dispatched'), 401); return; }
-      const grant = bearers.resolve(authorization.slice(7));
+      const grant = await bearers.resolveExecution(authorization.slice(7), kernel);
       if (!grant) { send(res, c.safeError, safe('unauthenticated', 'not_dispatched'), 401); return; }
       requireCurrent(grant); const context = captureContext(grant);
       if (!req.url || req.url.length > 2048 || !/^\/(?:v1|v2|internal\/v1)\//.test(req.url) || req.url.includes('#')) throw new KernelError('invalid');

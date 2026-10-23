@@ -4,7 +4,7 @@ import * as c from '../contracts/index.js';
 import { connect, reconnect, nativeRequest, oauthComplete } from './ingress.js';
 import type { OAuthComplete } from './ingress.js';
 export * as secretSubmission from './ingress.js';
-const config = z.strictObject({ role: z.enum(['management', 'execution', 'consumer-control']), origin: z.string().url(), token: z.string().min(1).max(16384),
+const config = z.strictObject({ role: z.enum(['management', 'execution', 'consumer-control']), origin: z.string().url(), inferenceOrigin: z.string().url().optional(), token: z.string().min(1).max(16384),
   responseBytes: z.number().int().min(1024).max(1048576).default(65536), timeoutMs: z.number().int().min(1).max(3600000).default(30000),
   bufferBytes: z.number().int().min(1024).max(1048576).default(65536) });
 export type ManagementConfig = z.input<typeof config> & { role: 'management' };
@@ -42,7 +42,11 @@ function transport(input: ManagementConfig | ExecutionConfig | ConsumerControlCo
   if (origin.username || origin.password || origin.search || origin.hash || origin.pathname !== '/' ||
     (origin.protocol !== 'https:' && !(origin.protocol === 'http:' && ['127.0.0.1', '[::1]', 'localhost'].includes(origin.hostname))))
     throw new GatewayError('invalid_input', 'not_dispatched');
-  async function enter(path: string, method: string, body: string | Uint8Array | undefined, headers: Record<string, string>, options: CallOptions, identity: Identity) {
+  const inferenceOrigin = settings.inferenceOrigin ? new URL(settings.inferenceOrigin) : origin;
+  if (settings.inferenceOrigin && role !== 'execution' || inferenceOrigin.username || inferenceOrigin.password || inferenceOrigin.search ||
+      inferenceOrigin.hash || inferenceOrigin.pathname !== '/' || (inferenceOrigin.protocol !== 'https:' && !(inferenceOrigin.protocol === 'http:' &&
+        ['127.0.0.1', '[::1]', 'localhost'].includes(inferenceOrigin.hostname)))) throw new GatewayError('invalid_input', 'not_dispatched');
+  async function enter(path: string, method: string, body: string | Uint8Array | undefined, headers: Record<string, string>, options: CallOptions, identity: Identity, targetOrigin = origin) {
     if (options.signal?.aborted) throw new GatewayError('cancelled', 'not_dispatched', identity.operationRef, identity.requestRef);
     const controller = new AbortController();
     const abort = () => controller.abort();
@@ -51,7 +55,7 @@ function transport(input: ManagementConfig | ExecutionConfig | ConsumerControlCo
     const dispose = () => { clearTimeout(timer); options.signal?.removeEventListener('abort', abort); };
     const failure = (code: 'transport' | 'invalid_response' | 'cancelled') => new GatewayError(code, 'effect_unknown', identity.operationRef, identity.requestRef);
     try {
-      const response = await fetch(new URL(path, origin), { method, redirect: 'manual', signal: controller.signal,
+      const response = await fetch(new URL(path, targetOrigin), { method, redirect: 'manual', signal: controller.signal,
         headers: { authorization: `Bearer ${settings.token}`, ...headers }, body: body as BodyInit | undefined });
       return { response, controller, dispose, failure };
     } catch { dispose(); throw failure(controller.signal.aborted ? 'cancelled' : 'transport'); }
@@ -114,7 +118,7 @@ function transport(input: ManagementConfig | ExecutionConfig | ConsumerControlCo
     const handle = await enter(`/v1/executions/${id(executionRef)}/requests`, 'POST', new Uint8Array(request.body), {
       'content-type': 'application/json', accept: 'text/event-stream', 'x-gateway-request-id': request.requestId,
       'x-gateway-admission': JSON.stringify(request.admission),
-    }, options, identity);
+    }, options, identity, inferenceOrigin);
     try {
       if (handle.response.status === 202 && handle.response.headers.get('content-type')?.split(';')[0] === 'application/json') {
         const status = c.requestStatus.safeParse(await bounded(handle.response, settings.responseBytes));

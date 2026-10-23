@@ -3,6 +3,7 @@ import * as lifecycleWire from '@agent-teams/account-gateway/contracts';
 import assert from 'node:assert/strict';
 import { createManagementClient, secretSubmission } from '@agent-teams/account-gateway/http';
 import { strictJSON, validateResponses } from '../src/facade-ingress.ts';
+import type { UsageJournal } from '../src/usage.ts';
 import { KernelError } from '../src/domain.ts';
 import type { AccountStatus, DurableKernel, ExecutionRead, NativeDispatchProof, OperationStatus, RequestStatus, SavedExecution } from '../src/domain.ts';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -82,7 +83,7 @@ test('OAuth callback ingress accepts genuine encoding and rejects aliases, malfo
 
 // Source boundary fixtures have test-owned committed state and real HTTP hops.
 // They qualify neither SQL transactions nor Go middleware/provider transport.
-async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false) {
+async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false, usage?: UsageJournal) {
   const oauthProfile = oauth === 'claude' ? claudeOAuthProfile : codexOAuthProfile;
   const oauthPath = '/private/native/v1/' + (oauth === 'claude' ? 'claude/oauth' : 'oauth');
   const consumerId = 'source-consumer', worker = randomUUID();
@@ -349,10 +350,11 @@ async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false) {
     s.closeAllConnections(); await new Promise<void>(resolve => s.close(() => resolve())); } };
   try {
   const control = composeServiceControl(cfg, kernel, store, custody, worker);
-  const { authority, transport } = composeServiceNative(cfg, control, kernel, store, enrollment);
+  const { authority, transport } = composeServiceNative(cfg, control, kernel, store, enrollment, usage);
   const callbacks = authority.createServer(); servers.push(callbacks); callbackOrigin = await listen(callbacks);
+  const intentHmacKey = randomBytes(32);
   const facade = createFacade({ kernel, store, management: control.management, bearers: control.bearers,
-    profiles: control.catalog, enrollment, transport, intentHmacKey: randomBytes(32), ingressBytes: outputEnvelope ? 1_048_576 : 4096 });
+    profiles: control.catalog, enrollment, transport, intentHmacKey, ingressBytes: outputEnvelope ? 1_048_576 : 4096 });
   servers.push(facade); const facadeOrigin = await listen(facade);
   const publicCall = (path: string, body?: unknown, token = managementGrant.token, headers: Record<string, string> = {}) =>
     fetch(facadeOrigin + path, { method: body === undefined ? 'GET' : 'POST', headers: { authorization: 'Bearer ' + token,
@@ -365,7 +367,7 @@ async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false) {
     descriptor: (value: unknown, mode: typeof descriptorMode = 'normal') => { descriptorReply = value; descriptorMode = mode; },
     responseBytes: (value: number) => { responseBytes = value; },
     close: closeServers,
-    origin, callbackOrigin, facade, facadeOrigin, nativeRows, scopeKey };
+    origin, callbackOrigin, facade, facadeOrigin, nativeRows, scopeKey, intentHmacKey };
   } catch (error) { await closeServers(); throw error; }
 }
 
@@ -753,8 +755,8 @@ test('source HTTP: same fenced original remints only scoped readback and close, 
     assert.equal(scoped.operation.operationRef, input.operationId);
     assert.deepEqual(scoped.operation.result, { kind: 'execution', executionRef: ref, accountRef,
       authorizationEpoch: original.admission.authorizationEpoch, deadline: input.deadline, state: 'fenced' });
-    assert.deepEqual(scoped.admission, run.admission); assert.notEqual(scoped.bearer, run.bearer);
-    const grant = f.control.bearers.resolve(scoped.bearer);
+    assert.deepEqual(scoped.admission, run.admission); assert.equal(scoped.bearer, run.bearer);
+    const grant = await f.control.bearers.resolveExecution(scoped.bearer, f.kernel);
     assert.ok(grant && grant.role === 'execution');
     assert.equal(grant.saved.generation, original.generation);
     assert.deepEqual(grant.saved.admission, original.admission);
@@ -1110,7 +1112,7 @@ test('source HTTP: suspended OAuth custody purpose excludes enrollment and refre
 test('v2 lifecycle readback never recovers foreign or same-owner enrollment operations', async () => {
   const f = await sourceHTTP(true);
   const facade = createFacade({ kernel: f.kernel, store: f.store, management: f.control.management,
-    bearers: f.control.bearers, profiles: f.control.catalog, intentHmacKey: randomBytes(32),
+    bearers: f.control.bearers, profiles: f.control.catalog, intentHmacKey: f.intentHmacKey,
     lifecycle: { contract: lifecycleWire.LIFECYCLE_CAPABILITY_CONTRACT, writeGate: 'enabled' } });
   try {
     const pending: CandidateJournal[] = [];
@@ -1192,5 +1194,61 @@ test('source HTTP: Claude browser completion follows saved profile and qualified
     assert.equal(JSON.stringify(applied).includes(code), false);
     f.control.bearers.replace([]);
     assert.equal((await f.callback('oauth-owner-authority', lookup)).status, 403);
+  } finally { await f.close(); }
+});
+
+// Independent HTTP callback contract: public Go requests never need a volatile
+// TS body/stream association. SQL claim/proof and positive closure remain sole
+// effect authority, including after the execution capability is revoked.
+test('source HTTP: public execution callbacks hydrate authority, claim once and settle after revoke without pending routing state', async () => {
+  let usageFault = true, recorded: lifecycleWire.UsageObservation | null = null;
+  const usage: UsageJournal = { observe: async () => recorded, append: async (_ctx, fact) => {
+    if (usageFault) throw new KernelError('unavailable'); recorded = fact;
+  }, list: async () => { throw new Error('not used'); } };
+  const f = await sourceHTTP(false, false, usage);
+  try {
+    const creationId=randomUUID();
+    const creation=await f.publicCall('/v1/accounts',{operationId:creationId,ownerRef:'owner-one',profileId:f.secondProfile.profile,
+      displayName:'Public callback fixture',credential:{kind:'api_key',value:'fixture-write-only'}});
+    assert.equal(creation.status,200);
+    const accountRef=f.journals.get(f.scopeKey(f.context,creationId))!.accountRef;
+    const access=await f.publicCall('/internal/v1/run-access',{operationId:randomUUID(),invocationRef:'public-callback',attemptRef:'attempt',
+      accountRefs:[accountRef],subjectRef:'source-subject',policyRevision:1,bindingRevision:1,profileId:f.secondProfile.profile,
+      limits:f.secondProfile.limits,deadline:new Date(Date.now()+10000).toISOString()},'source-public-run');
+    assert.equal(access.status,200);const run=await access.json() as {bearer:string;admission:Record<string,unknown>};
+    const requestRef=randomUUID(),lookup={executionBearer:run.bearer,requestRef};
+    const metadata=await f.callback('execution-authority',lookup);assert.equal(metadata.status,200);
+    const approved=await metadata.json() as {consumerId:string;requestRef:string;worker:string;admission:{executionRef:string};descriptor:unknown};
+    assert.equal(approved.consumerId,f.context.consumerId);assert.equal(approved.requestRef,requestRef);
+    assert.equal(f.forwarded.length,0);
+    const bad=await f.callback('execution-authority',{...lookup,admission:{...run.admission,bindingRevision:999}});assert.equal(bad.status,403);
+    assert.equal((await f.callback('execution-authority',{...lookup,payload:'must-not-enter-control-plane'})).status,403);
+    const enrollment=f.authority.configuration.enrollment;
+    const original=await f.kernel.savedExecution(f.context,approved.admission.executionRef);
+    const native={originRef:enrollment.originRef,engineIncarnation:enrollment.engineIncarnation,requestNonce:randomUUID(),generation:original.generation};
+    const input={...approved,native,executionBearer:run.bearer};
+    assert.equal((await f.callback('public-admit',{...input,native:{...native,generation:randomUUID()}})).status,403);
+    const admitted=await f.callback('public-admit',input);assert.equal(admitted.status,200);
+    const permit=await admitted.json() as {dispatch:{closure:NativeDispatchProof}};assert.ok(permit.dispatch);
+    const replay=await f.callback('public-admit',{...input,native:{...native,requestNonce:randomUUID()}});assert.equal(replay.status,200);
+    assert.equal('dispatch' in (await replay.json() as object),false);assert.equal(f.requests.size,1);assert.equal(f.forwarded.length,0);
+    let closures=0;f.kernel.acknowledgeTransportClosed=async()=>{closures++;};
+    const proof=permit.dispatch.closure;
+    const receipt={consumerId:f.context.consumerId,executionRef:proof.executionRef,requestRef:proof.requestRef,native:proof.native,proof,
+      phase:'closed',effect:'completed',sealed:true,acknowledged:false,lifetime:{entered:true,contextDone:true,forwardingReturned:true,
+        bodyKnown:true,bodyClosed:true,closeFailed:false,completed:true,sealed:true}};
+    f.control.bearers.replace([]);
+    assert.equal((await f.callback('execution-authority',lookup)).status,403);
+    assert.equal((await f.callback('public-admit',{...input,requestRef:randomUUID()})).status,403);
+    assert.equal((await f.callback('execution-settle',{consumerId:f.context.consumerId,proof,receipt:{...receipt,lifetime:{...receipt.lifetime,bodyClosed:false}}})).status,403);
+    assert.equal(closures,0);
+    assert.equal((await f.callback('execution-settle',{consumerId:f.context.consumerId,proof,receipt})).status,403, 'configured usage failure must retain physical closure authority');
+    assert.equal(closures,0); assert.equal(recorded,null);
+    usageFault=false;
+    assert.equal((await f.callback('execution-settle',{consumerId:f.context.consumerId,proof,receipt})).status,200);
+    assert.ok(recorded); assert.equal((recorded as lifecycleWire.UsageObservation).revision,2);
+    assert.equal((await f.kernel.request(f.context,proof.executionRef,proof.requestRef)).effect,'completed');assert.equal(closures,1);
+    assert.equal((await f.callback('execution-settle',{consumerId:f.context.consumerId,proof:{...proof,token:randomUUID()},receipt})).status,403);
+    assert.equal(closures,1);assert.equal(f.forwarded.length,0);
   } finally { await f.close(); }
 });

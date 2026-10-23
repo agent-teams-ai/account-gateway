@@ -662,7 +662,7 @@ test('consumer-control SDK admits a new opaque owner and fences profiles, consum
     const saved = await f.kernel.savedExecution(f.context, access.operation.result.executionRef);
     const { executionRef: _ref, issuerEpoch: _epoch, ...admission } = saved.admission;
     assert.deepEqual(access.admission, admission);
-    assert.deepEqual(f.bearers.resolve(access.bearer), { role: 'execution', consumerId: f.context.consumerId, saved });
+    assert.deepEqual(await f.bearers.resolveExecution(access.bearer, f.kernel), { role: 'execution', consumerId: f.context.consumerId, saved });
     assert.deepEqual(await client.runAccess(prepare), access);
     assert.deepEqual(await client.operation(prepare.operationId), access.operation);
     await assert.rejects(restricted.operation(prepare.operationId), denied());
@@ -712,7 +712,8 @@ test('consumer-control replacement during real SQL waits denies readback and iss
       const access = await client.runAccess(f.preparedInput);
       const retired = f.bearers.resolve(control.token); assert.ok(retired);
       await lock.query('BEGIN');
-      await lock.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE', [f.context.consumerId]);
+      if (mode === 'readback') await lock.query('LOCK TABLE ag_kernel.operations IN ACCESS EXCLUSIVE MODE');
+      else await lock.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE', [f.context.consumerId]);
       const pid: number = (await lock.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
       const input = { ...f.preparedInput, operationId: randomUUID(), invocationRef: 'revoked-' + randomUUID() };
       const pending = mode === 'readback' ? client.operation(f.created.operationRef) : client.runAccess(input);
@@ -727,7 +728,7 @@ test('consumer-control replacement during real SQL waits denies readback and iss
       await assert.rejects(pending, denied());
       if (mode === 'issuance') await assert.rejects(f.kernel.operation(f.context, input.operationId),
         e => e instanceof Error && 'code' in e && e.code === 'unknown');
-      assert.equal(f.bearers.current(retired), false); assert.equal(f.bearers.resolve(access.bearer), undefined);
+      assert.equal(f.bearers.current(retired), false); assert.equal(await f.bearers.resolveExecution(access.bearer, f.kernel), undefined);
       assert.equal((await f.raw('/v1/executions/' + f.executionRef, 'GET', undefined, access.bearer)).status, 401);
       assert.deepEqual(await f.client.operation(f.preparedInput.operationId), f.prepared, 'accepted preparation survives revoke');
       f.bearers.replace([f.managementGrant, control]);

@@ -1,9 +1,11 @@
+import type { UsageJournal } from './usage.ts';
+import * as c from '@agent-teams/account-gateway/contracts';
 import { oauthProfileDefinition } from './oauth-profiles.ts';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { approvedLimits, defaults, identifier, uuid } from './domain.ts';
-import type { ApprovedLimits, DurableKernel, ExecutionRead, NativeDispatchProof, SavedExecution, TrustedContext } from './domain.ts';
+import type { ApprovedLimits, DurableKernel, ExecutionRead, NativeDispatchProof, RequestStatus, SavedExecution, TrustedContext } from './domain.ts';
 import type { FacadeBearers, NativeCallback, NativeTransport } from './facade.ts';
 import type { ManagementStore, CandidateJournal } from './management.ts';
 import { accountLimitsTarget, exactCandidate, physicalCandidate } from './management.ts';
@@ -22,6 +24,7 @@ export interface Association {
 }
 export interface AuthorityOptions { readonly config: BridgeConfig; readonly kernel: DurableKernel & ExecutionRead;
   readonly store: Pick<ManagementStore, 'mapping'>;
+  readonly executionBearers?: FacadeBearers; readonly usage?: UsageJournal;
   readonly profileLimits?: readonly { readonly profile: string; readonly limits: Readonly<ApprovedLimits> }[];
   readonly oauthOwners?: { readonly store: Pick<ManagementStore, 'readJournal' | 'pendingOAuthRefresh'>;
     readonly bearers: Pick<FacadeBearers, 'authorizesOwner'> };
@@ -37,6 +40,8 @@ const key = (ctx: TrustedContext, ref: string, id: string) => JSON.stringify([ct
 export class NativeAuthority {
   readonly configuration: Configuration;
   readonly kernel: DurableKernel & ExecutionRead;
+  readonly #executionBearers?: FacadeBearers;
+  readonly #usage?: UsageJournal;
   readonly #store: Pick<ManagementStore, 'mapping'>;
   readonly #owners: AuthorityOptions['oauthOwners'];
   readonly #accountLimitsOwners: AuthorityOptions['accountLimitsOwners'];
@@ -59,12 +64,13 @@ export class NativeAuthority {
       if (options.profileLimits.length !== profiles.length) denied();
       for (const entry of options.profileLimits) {
         const p = profiles.find(p => p.profile === entry.profile);
-        const limits = Object.freeze(approvedLimits(entry.limits, defaults));
+        const limits = Object.freeze(approvedLimits(entry.limits, { ...defaults, maxConcurrent: 64 }));
         if (!p || this.#limits.has(entry.profile) || limits.requestBytes !== p.requestBytes ||
             limits.outputBytes !== p.outputBytes || limits.tokens !== p.tokens) denied();
         this.#limits.set(entry.profile, limits);
       }
     }
+    this.#executionBearers = options.executionBearers; this.#usage = options.usage;
     this.kernel = options.kernel; this.#store = options.store; this.#owners = options.oauthOwners;
     this.#accountLimitsOwners = options.accountLimitsOwners;
     this.#refreshOwners = options.oauthRefreshOwners;
@@ -273,10 +279,16 @@ export class NativeAuthority {
   async dispatch(ctx: TrustedContext, p: NativeDispatchProof, expires: unknown): Promise<void> {
     if (p.worker !== this.configuration.enrollment.worker) return denied();
     const requested = instant(expires);
-    await this.persisted(ctx, p);
-    const execution = saved(await this.kernel.savedExecution(ctx, p.executionRef));
-    const lease = instant(await this.kernel.currentWorkerLease(ctx, p.worker));
-    const status = await this.kernel.request(ctx, p.executionRef, p.requestRef);
+    this.consumer(ctx);
+    const e = this.configuration.enrollment;
+    if (p.native.originRef !== e.originRef || p.native.engineIncarnation !== e.engineIncarnation) return denied();
+    const snapshot = this.kernel.dispatchSnapshot && await this.kernel.dispatchSnapshot(ctx, p.executionRef, p.worker, p.requestRef);
+    const actual = snapshot ? snapshot.proof : await this.kernel.requestProof(ctx, p.executionRef, p.requestRef);
+    if (!actual || !sameProof(proof(actual), p)) return denied();
+    const execution = saved(snapshot ? snapshot.saved : await this.kernel.savedExecution(ctx, p.executionRef));
+    const lease = instant(snapshot ? snapshot.workerLeaseExpiresAt : await this.kernel.currentWorkerLease(ctx, p.worker));
+    const status = snapshot?.status ?? await this.kernel.request(ctx, p.executionRef, p.requestRef);
+    if (snapshot && snapshot.issuerEpoch !== execution.admission.issuerEpoch) return denied();
     if (!execution.dispatchAllowed || execution.state !== 'open' || execution.generation !== p.native.generation ||
         !['dispatch_started','response_started'].includes(status.effect) || requested <= now() || requested > lease ||
         requested > instant(execution.admission.expiresAt)) return denied();
@@ -290,6 +302,102 @@ export class NativeAuthority {
     const scoped = await this.kernel.cleanupTransports(ctx, c.cleanupRef, c.worker, c.token);
     if (actual <= now() || !scoped.some(s => s.token && s.native && sameProof(proof(s), p))) return denied();
     return c;
+  }
+  async #publicExecution(ctx: TrustedContext, value: unknown) {
+    const r = object(value, ['executionBearer','requestRef'], ['executionRef','admission']);
+    identifier(r.requestRef);
+    if (!this.#executionBearers || typeof r.executionBearer !== 'string' ||
+        !/^[A-Za-z0-9._~-]{16,1024}$/.test(r.executionBearer)) return denied();
+    const grant = await this.#executionBearers.resolveExecution(r.executionBearer, this.kernel);
+    if (!grant || grant.role !== 'execution' || grant.consumerId !== ctx.consumerId || !this.#executionBearers.current(grant)) return denied();
+    const snapshot = this.kernel.dispatchSnapshot && await this.kernel.dispatchSnapshot(ctx, grant.saved.admission.executionRef, this.configuration.enrollment.worker);
+    const fresh = saved(snapshot ? snapshot.saved : await this.kernel.savedExecution(ctx, grant.saved.admission.executionRef));
+    if (snapshot && snapshot.issuerEpoch !== fresh.admission.issuerEpoch) return denied();
+    if (!sameAdmission(fresh.admission, grant.saved.admission) || fresh.generation !== grant.saved.generation ||
+        !fresh.dispatchAllowed || fresh.state !== 'open' || instant(fresh.admission.expiresAt) <= now() ||
+        r.executionRef !== undefined && r.executionRef !== fresh.admission.executionRef) return denied();
+    if (r.admission !== undefined) {
+      const publicAdmission = c.admission.safeParse(r.admission);
+      if (!publicAdmission.success || !sameAdmission({ ...publicAdmission.data, executionRef: fresh.admission.executionRef,
+        issuerEpoch: fresh.admission.issuerEpoch }, fresh.admission)) return denied();
+    }
+    const mapping = await this.#store.mapping(ctx, fresh.generation), profile = this.configuration.profiles.find(p => p.profile === fresh.admission.profileId);
+    if (!mapping || !profile || mapping.consumerId !== ctx.consumerId || mapping.accountRef !== fresh.admission.accountRef ||
+        mapping.generation !== fresh.generation || mapping.profile.profile !== profile.profile || mapping.profile.model !== profile.model ||
+        mapping.profile.baseURL !== profile.baseURL || mapping.profile.qualificationRef !== profile.qualificationRef) return denied();
+    const d = descriptor(physicalCandidate(mapping.descriptor)), limits = this.#limits.get(profile.profile);
+    if (d.generation !== fresh.generation || mapping.descriptor.nativePhysicalIdentity !== fresh.generation || d.profile !== profile.profile ||
+        d.model !== profile.model || d.base_url !== profile.baseURL || fresh.admission.limits.requestBytes > profile.requestBytes ||
+        fresh.admission.limits.outputBytes > profile.outputBytes || fresh.admission.limits.tokens > profile.tokens ||
+        limits && (Object.keys(limits) as (keyof ApprovedLimits)[]).some(k => fresh.admission.limits[k] > limits[k])) return denied();
+    const lease = snapshot ? snapshot.workerLeaseExpiresAt : await this.kernel.currentWorkerLease(ctx, this.configuration.enrollment.worker);
+    if (!this.#executionBearers.current(grant) || instant(lease) <= now()) return denied();
+    return { grant, saved: fresh, descriptor: d, lease };
+  }
+  async #publicAuthority(ctx: TrustedContext, value: unknown): Promise<unknown> {
+    const r = object(value, ['executionBearer','requestRef'], ['executionRef','admission']);
+    const authorized = await this.#publicExecution(ctx, r);
+    return { consumerId: ctx.consumerId, requestRef: r.requestRef, worker: this.configuration.enrollment.worker,
+      admission: authorized.saved.admission, descriptor: authorized.descriptor };
+  }
+  async #publicAdmit(ctx: TrustedContext, value: unknown): Promise<unknown> {
+    const r = object(value, ['consumerId','requestRef','worker','admission','descriptor','native','executionBearer']);
+    if (r.consumerId !== ctx.consumerId) return denied();
+    const admitted = admission(r.admission), native = binding(r.native), e = this.configuration.enrollment;
+    const authorized = await this.#publicExecution(ctx, { executionBearer: r.executionBearer, requestRef: r.requestRef,
+      executionRef: admitted.executionRef });
+    if (r.worker !== e.worker || native.originRef !== e.originRef || native.engineIncarnation !== e.engineIncarnation ||
+        native.generation !== authorized.saved.generation || !sameAdmission(admitted, authorized.saved.admission) ||
+        !sameDescriptor(r.descriptor, authorized.descriptor)) return denied();
+    if (!this.#executionBearers!.current(authorized.grant)) return denied();
+    const claim = await this.kernel.claim(ctx, admitted.executionRef, r.requestRef as string, e.worker, admitted,
+      { originRef: e.originRef, engineIncarnation: e.engineIncarnation, requestNonce: native.requestNonce });
+    const reply = { consumerId: ctx.consumerId, admission: admitted, status: claim.status };
+    if (!claim.dispatch) return reply;
+    const p = proof(claim.dispatch.closure);
+    try {
+      const lease = await this.kernel.currentWorkerLease(ctx, e.worker);
+      const expires = new Date(Math.min(Date.parse(lease), Date.parse(admitted.expiresAt))).toISOString();
+      if (!this.#executionBearers!.current(authorized.grant) || !sameProof({ ...p, native }, p) ||
+          claim.dispatch.descriptor.generation !== authorized.saved.generation ||
+          claim.dispatch.descriptor.nativePhysicalIdentity !== authorized.saved.generation ||
+          claim.dispatch.descriptor.profile !== admitted.profileId) return denied();
+      await this.dispatch(ctx, p, expires);
+      await this.#recordPublicUsage(ctx, authorized.saved, r.requestRef as string, claim.status.effect).catch(() => undefined);
+      return { ...reply, dispatch: claim.dispatch, nativeDescriptor: authorized.descriptor, leaseExpiresAt: expires };
+    } catch {
+      await this.kernel.effect(ctx, admitted.executionRef, r.requestRef as string, e.worker, 'effect_unknown');
+      return denied();
+    }
+  }
+  async #recordPublicUsage(ctx: TrustedContext, execution: SavedExecution, requestRef: string,
+    effect: RequestStatus['effect'], closed?: ReturnType<typeof receipt>): Promise<void> {
+    if (!this.#usage) return;
+    const a = execution.admission, previous = await this.#usage.observe(ctx, a.executionRef, requestRef);
+    const observed = closed?.nativeUsage;
+    await this.#usage.append(ctx, { schemaVersion: 1, eventId: createHash('sha256').update(a.executionRef + ':' + requestRef).digest('hex'),
+      revision: closed ? 2 : 0, executionRef: a.executionRef, requestRef, invocationRef: a.invocationRef, attemptRef: a.attemptRef,
+      accountRef: a.accountRef, profileId: a.profileId, model: this.configuration.profiles.find(p => p.profile === a.profileId)!.model,
+      occurredAt: previous?.occurredAt ?? new Date().toISOString(), effect, completeness: observed?.state === 'complete' ? 'complete' : 'partial',
+      inputTokens: observed?.inputTokens ?? null, outputTokens: observed?.outputTokens ?? null,
+      cachedInputTokens: observed?.cachedInputTokens ?? null, reasoningTokens: observed?.reasoningOutputTokens ?? null, cost: null });
+  }
+  async #publicSettle(ctx: TrustedContext, value: unknown): Promise<void> {
+    const r = object(value, ['consumerId','proof','receipt']);
+    if (r.consumerId !== ctx.consumerId) return denied();
+    const p = proof(r.proof); await this.persisted(ctx, p);
+    const closed = receipt(r.receipt, ctx.consumerId, p);
+    if (!physicallyClosed(closed)) return denied();
+    let status = await this.kernel.request(ctx, p.executionRef, p.requestRef);
+    if (!closed.lifetime.entered) {
+      if (status.effect === 'dispatch_started') status = await this.kernel.rejectBeforeDispatch(ctx, p.worker, p, false);
+    } else if (closed.lifetime.completed && closed.effect === 'completed') {
+      if (status.effect === 'dispatch_started') status = await this.kernel.effect(ctx, p.executionRef, p.requestRef, p.worker, 'response_started');
+      if (status.effect === 'response_started') status = await this.kernel.effect(ctx, p.executionRef, p.requestRef, p.worker, 'completed');
+    } else status = await this.kernel.effect(ctx, p.executionRef, p.requestRef, p.worker, 'effect_unknown');
+    const execution = await this.kernel.savedExecution(ctx, p.executionRef);
+    await this.#recordPublicUsage(ctx, execution, p.requestRef, status.effect, closed);
+    await this.kernel.acknowledgeTransportClosed(ctx, p.worker, p);
   }
   async #admit(ctx: TrustedContext, value: unknown): Promise<unknown> {
     const r = object(value, ['consumerId','requestRef','worker','admission','descriptor','native']);
@@ -330,7 +438,7 @@ export class NativeAuthority {
       res.once('close', () => clearTimeout(timer)); res.once('finish', () => clearTimeout(timer));
       const send = (status: number, body: unknown) => { if (!res.destroyed) { res.writeHead(status, { 'content-type': 'application/json', connection: 'close' }); res.end(JSON.stringify(body)); } };
       return (async () => {
-        if (req.method !== 'POST' || !req.url || !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-custody-authority|oauth-refresh-authority|oauth-cleanup-authority|account-limits-authority)$/.test(req.url) ||
+        if (req.method !== 'POST' || !req.url || !/^\/private\/native\/v1\/(enrollment|admit|execution-authority|public-admit|execution-settle|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-custody-authority|oauth-refresh-authority|oauth-cleanup-authority|account-limits-authority)$/.test(req.url) ||
             req.rawHeaders.length > 64 || singleton(req, 'content-type') !== 'application/json' ||
             req.rawHeaders.some((h, i) => i % 2 === 0 && ['content-encoding','transfer-encoding'].includes(h.toLowerCase()))) return denied();
         const authorization = singleton(req, 'authorization');
@@ -343,6 +451,9 @@ export class NativeAuthority {
         const refreshLookup = req.url.endsWith('/oauth-refresh-authority');
         const cleanupLookup = req.url.endsWith('/oauth-cleanup-authority');
         const ctx = Object.freeze({ consumerId: caller.consumerId }), body = await jsonBody(req, limitsLookup || ownerLookup || custodyLookup || refreshLookup || cleanupLookup ? Math.min(1024, cfg.controlBytes) : cfg.controlBytes);
+        if (req.url.endsWith('/execution-authority')) { send(200, await this.#publicAuthority(ctx, body)); return; }
+        if (req.url.endsWith('/public-admit')) { send(200, await this.#publicAdmit(ctx, body)); return; }
+        if (req.url.endsWith('/execution-settle')) { await this.#publicSettle(ctx, body); send(200, { ok: true }); return; }
         if (limitsLookup) { send(200, await this.#accountLimitsOwner(ctx, body)); return; }
         if (ownerLookup) { send(200, await this.#owner(ctx, body)); return; }
         if (custodyLookup) { send(200, await this.#custodyOwner(ctx, body)); return; }

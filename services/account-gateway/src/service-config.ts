@@ -17,6 +17,9 @@ export interface ServiceConfig {
   readonly kernelDSN: string;
   // Required operator input; implementation defaults are not qualified caps.
   readonly durableFacts: Readonly<DurableFactBounds>;
+  // Opt-in request/usage readback horizon; captured on each new execution.
+  // Legacy requests and unresolved native effects are never reclaimed.
+  readonly requestReadbackRetentionMs?: number;
   readonly facadeOrigin: string;
   readonly callbackOrigin: string;
   readonly native: Readonly<{ executable: string; sha256: string; bootstrapFile: string;
@@ -116,7 +119,8 @@ export function captureAccountLifecycle(value: unknown): NonNullable<ServiceConf
 function captureProfile(value: unknown): ServiceProfile {
   const p = object(value, ['profile','model','baseURL','qualificationRef','limits','providerTokenUpperBound']);
   const profile = { profile: text(p.profile), model: text(p.model), baseURL: text(p.baseURL), qualificationRef: text(p.qualificationRef),
-    limits: approvedLimits(object(p.limits, ['requests','concurrency','requestBytes','outputBytes','tokens']) as unknown as ApprovedLimits, defaults),
+    limits: approvedLimits(object(p.limits, ['requests','concurrency','requestBytes','outputBytes','tokens']) as unknown as ApprovedLimits,
+      { ...defaults, maxConcurrent: 64 }),
     providerTokenUpperBound: p.providerTokenUpperBound as number };
   identifier(profile.qualificationRef);
   physicalCandidate({ ...profile, generation: '00000000-0000-4000-8000-000000000001',
@@ -205,6 +209,10 @@ export function captureServiceBearers(value: unknown, consumerId: string, profil
     return freeze(captured);
   } catch { return deny(); }
 }
+export function captureRequestReadbackRetention(value: unknown): number {
+  try { integer(value as number, 31_536_000_000); return value as number; }
+  catch { return deny(); }
+}
 // Sole entry: synchronous capture/validation before the first startup await.
 // No provider credential or native custody bytes are read here.
 export function loadServiceConfig(file: string): ServiceConfig {
@@ -220,7 +228,8 @@ export function loadServiceConfig(file: string): ServiceConfig {
       // readFileSync would permit growth after fstat; bounded positional read below.
       bytes = readBounded(fd, bytes);
     } finally { closeSync(fd); }
-    const r = object(strictJSON(bytes), ['kernelDSN','durableFacts','facadeOrigin','callbackOrigin','native','consumer','profile','bearers','keys'], ['oauthEnrollment','claudeOAuthEnrollment','secondProfile','accountLifecycle']);
+    const r = object(strictJSON(bytes), ['kernelDSN','durableFacts','facadeOrigin','callbackOrigin','native','consumer','profile','bearers','keys'], ['oauthEnrollment','claudeOAuthEnrollment','secondProfile','accountLifecycle','requestReadbackRetentionMs']);
+    const requestReadbackRetentionMs = Object.hasOwn(r, 'requestReadbackRetentionMs') ? captureRequestReadbackRetention(r.requestReadbackRetentionMs) : undefined;
     const accountLifecycle = r.accountLifecycle === undefined ? undefined : captureAccountLifecycle(r.accountLifecycle);
     const oauthEnrollment = Object.hasOwn(r, 'oauthEnrollment') ? captureOAuthEnrollmentConfig(r.oauthEnrollment) : undefined;
     const claudeOAuthEnrollment = Object.hasOwn(r, 'claudeOAuthEnrollment') ? captureClaudeOAuthEnrollmentConfig(r.claudeOAuthEnrollment) : undefined;
@@ -252,6 +261,7 @@ export function loadServiceConfig(file: string): ServiceConfig {
     const facadeOrigin = origin(r.facadeOrigin), callbackOrigin = origin(r.callbackOrigin);
     if (new Set([facadeOrigin, callbackOrigin, native.origin]).size !== 3) deny();
     return freeze({ kernelDSN, durableFacts, facadeOrigin, callbackOrigin, native, consumer, profile, bearers, keys,
+      ...(requestReadbackRetentionMs === undefined ? {} : { requestReadbackRetentionMs }),
       ...(secondProfile === undefined ? {} : { secondProfile }),
       ...(accountLifecycle === undefined ? {} : { accountLifecycle }),
       ...(oauthEnrollment === undefined ? {} : { oauthEnrollment }),

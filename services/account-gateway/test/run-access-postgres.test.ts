@@ -108,7 +108,7 @@ async function fixture(runControlMaxRunMs = 60_000) {
     const res = await raw(value); assert.equal(res.status, 200);
     const json = await res.json() as Record<string, unknown>;
     assert.deepEqual(Object.keys(json).sort(), ['admission', 'bearer', 'operation']);
-    assert.equal(typeof json.bearer, 'string'); assert.match(json.bearer as string, /^[A-Za-z0-9_-]{43}$/);
+    assert.equal(typeof json.bearer, 'string'); assert.match(json.bearer as string, /^agx1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/);
     const op = c.preparationOperation.parse(json.operation); assert.ok(op.state === 'applied' && op.result?.kind === 'execution');
     return { operation: op, bearer: json.bearer as string, admission: c.admission.parse(json.admission) };
   }
@@ -128,7 +128,7 @@ async function fixture(runControlMaxRunMs = 60_000) {
   async function stop() { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
   async function restart() {
     await stop();
-    // Normal restart keeps SQL/issuer/HMAC, loses all memory access grants.
+    // Stable signing configuration keeps durable execution locators across restart.
     server = createFacade({ ...options, bearers: new FacadeBearers([{ ...control,
       ownerRefs: ['workspace-fixture'], profileIds: [profile.profile], limits: { ...limits } }]),
       profiles: [{ dto: { profileId: profile.profile, protocol: 'openai-responses', modelIds: [profile.model], authKinds: ['api_key'] }, maxOutputTokens: 1000 }] });
@@ -155,7 +155,7 @@ test('HTTP control requires distinct configured consumer authority before any pr
     await denied(await f.raw(f.input(), granted.bearer));
     // Red if an untyped service composer can promote a resolved execution grant
     // through the registry's exported issuer despite the HTTP role fence.
-    const captured = f.options.bearers.resolve(granted.bearer); assert.ok(captured);
+    const captured = await f.options.bearers.resolveExecution(granted.bearer, f.kernel); assert.ok(captured);
     const saved = await f.kernel.savedExecution(f.context, f.execution(granted).ref);
     assert.throws(() => f.options.bearers.upsertExecution(captured as unknown as Omit<RunControlBearer, 'token'>, saved),
       (error: unknown) => error instanceof KernelError && error.code === 'denied');
@@ -222,7 +222,7 @@ test('parallel run issuance and same-run retry preserve independent HTTP executi
 });
 
 // Red if a lost prepare response repins after settings/metadata change, modified
-// intent silently mints, restart rearms old credentials, or scoped fenced
+// intent silently mints, restart changes original capability scope, or fenced
 // recovery bypasses SQL dispatch, close, deadline or restore issuer denial.
 test('original prepare recovery survives settings drift and preserves scoped fenced authority', async t => {
   for (const terminal of ['close', 'fence', 'reconnect', 'expiry', 'restore'] as const) await t.test(terminal, async () => {
@@ -255,9 +255,11 @@ test('original prepare recovery survives settings drift and preserves scoped fen
       const active = f.execution(recovered);
       assert.equal((await active.client.status(active.ref, requestId)).effect, 'completed');
       if (terminal === 'close') {
-        await f.restart(); await assert.rejects(f.request(recovered), forbidden);
+        await f.restart();
+        const restarted = f.execution(recovered);
+        assert.equal((await restarted.client.status(restarted.ref, requestId)).effect, 'completed');
         const reinstalled = await f.mint(value);
-        assert.notEqual(reinstalled.bearer, recovered.bearer); assert.deepEqual(reinstalled.admission, recovered.admission);
+        assert.equal(reinstalled.bearer, recovered.bearer); assert.deepEqual(reinstalled.admission, recovered.admission);
         recovered = reinstalled;
         const e = f.execution(recovered); await e.client.close(e.ref, { operationId: randomUUID(), reason: 'completed' });
       } else if (terminal === 'fence') await f.kernel.fence(f.context, randomUUID(), value.subjectRef, value.policyRevision + 1);
@@ -279,7 +281,7 @@ test('original prepare recovery survives settings drift and preserves scoped fen
         const previous = recovered;
         await f.restart();
         recovered = await f.mint(value);
-        assert.notEqual(recovered.bearer, previous.bearer);
+        assert.equal(recovered.bearer, previous.bearer);
         assert.deepEqual(recovered.admission, projection);
         assert.deepEqual(await f.mint(value), recovered);
         const e = f.execution(recovered), saved = await f.kernel.savedExecution(f.context, e.ref);
