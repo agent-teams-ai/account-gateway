@@ -39,6 +39,7 @@ unreconciled effect fail the job. The operator never converts these into skips.
 | Native target | `backend/cmd/account-gateway` |
 | PostgreSQL | 17.10; native production migrations and all gateway migrations |
 | CI PostgreSQL image | `postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317` |
+| CI runtime additions | Debian trixie `libatomic1=14.2.0-19` and `ca-certificates=20250419+deb13u1` |
 | Measured network | Loopback only, no IPv4 routes, external probe returns `ENETUNREACH` |
 | Bounded TCP profile | Private namespace `tcp_rmem` and `tcp_wmem`: `4096 16384 65536`; `tcp_moderate_rcvbuf`: `0` |
 
@@ -49,6 +50,15 @@ every applied migration checksum and emits a source migration digest. It does
 not serve requests or replace the native runtime. Its temporary source is
 removed, and the checkout must remain clean. The build receipt binds both
 executables and the embedded adapter source by SHA-256.
+
+The workflow derives its runtime image from the pinned PostgreSQL image and
+installs only the explicitly versioned [libatomic1](https://packages.debian.org/trixie/libatomic1)
+and [CA bundle](https://packages.debian.org/trixie/ca-certificates) packages before
+measurement. The base image lacks both Node 26's `libatomic.so.1` dependency and
+the CA bundle used by the fixture's trust setup. A separate network-disabled
+preflight starts the selected Node runtime and checks OpenSSL, PostgreSQL and
+the CA bundle before the expensive native build. Package installation is not
+part of the measured workload.
 
 The explicit TCP profile makes upstream backpressure observable before the
 8-MiB output bound. Default autotuned receive buffers can exceed the entire
