@@ -497,7 +497,9 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
               await until(() => held.filter(r => entries(upstream.events, r.attempt.requestId) === 1).length === 16, 10_000, 'sixteen-real-held-provider-entries');
               const controlAt = Date.now();
               const protectedControl = createConsumerControlClient({ role: 'consumer-control', origin: callbackOrigin, token: controlToken, timeoutMs: 3000 });
-              await protectedControl.list({ ownerRef, limit: 1 }); details.controlLatencyMs = Date.now() - controlAt;
+              const protectedAccount = await protectedControl.get(accounts[0]);
+              check(protectedAccount.accountRef === accounts[0], 'protected-control-original-account');
+              details.controlLatencyMs = Date.now() - controlAt;
               const overflow = await Promise.all(Array.from({ length: 32 }, (_, i) => launch(executions[(i + 16) % 32], scenario, 'complete')));
               await Promise.all(overflow.map(r => r.work));
               check(overflow.every(r => entries(upstream.events, r.attempt.requestId) === 0), 'overload-no-extra-provider-entry');

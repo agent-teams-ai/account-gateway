@@ -86,7 +86,7 @@ jobs:
         run: |
           # No --privileged, no host network, no host CA edits. Only this fresh
           # artifact directory is a writable host mount during measurement.
-          docker run --rm --network none --user 0:0 --cpus 4 --memory 4g --pids-limit 256 --ulimit nofile=4096:4096 \
+          docker run --rm --network none --user 0:0 --cpus 2 --memory 4g --pids-limit 256 --ulimit nofile=4096:4096 \
             --sysctl 'net.ipv4.tcp_rmem=4096 16384 65536' \
             --sysctl 'net.ipv4.tcp_wmem=4096 16384 65536' \
             --sysctl net.ipv4.tcp_moderate_rcvbuf=0 \

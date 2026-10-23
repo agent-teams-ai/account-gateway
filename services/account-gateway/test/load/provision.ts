@@ -33,7 +33,7 @@ const terminate = () => { requestedStop = true; for (const child of captured) ch
 process.once('SIGTERM', terminate); process.once('SIGINT', terminate);
 
 async function command(executable: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv;
-  uid?: number; gid?: number; timeout?: number; group?: boolean; log?: string } = {}): Promise<string> {
+  uid?: number; gid?: number; timeout?: number; group?: boolean; log?: string; expectedExit?: number } = {}): Promise<string> {
   check(!requestedStop, 'operator-stopping');
   const common = { cwd: options.cwd ?? '/', env: options.env ?? {}, uid: options.uid, gid: options.gid };
   const child = options.group
@@ -65,8 +65,29 @@ async function command(executable: string, args: string[], options: { cwd?: stri
     captured.delete(child);
   });
   if (options.log) writeFileSync(options.log, diagnostics, { mode: 0o600 });
-  check(code === 0 && !overflow && !requestedStop, 'operator-command-failed');
+  check(code === (options.expectedExit ?? 0) && !overflow && !requestedStop, 'operator-command-failed');
   return output.trim();
+}
+export async function stopPostgres(pgBin: string, data: string, env: NodeJS.ProcessEnv) {
+  const failures: string[] = [];
+  const options = { env, uid: 65534, gid: 65534 };
+  const stopped = async () => {
+    try {
+      // pg_ctl status exits 3 only when the original data directory has no
+      // running postmaster. A command error or unreadable directory is not proof.
+      await command(join(pgBin, 'pg_ctl'), ['-D', data, 'status'], { ...options, timeout: 5000, expectedExit: 3 });
+      return true;
+    } catch { return false; }
+  };
+  try { await command(join(pgBin, 'pg_ctl'), ['-D', data, '-m','fast','-w','stop'], { ...options, timeout: 30_000 }); }
+  catch { failures.push('postgres-fast-stop'); }
+  if (await stopped()) return { stopped: true, failures };
+  if (!failures.length) failures.push('postgres-fast-stop-unconfirmed');
+  try { await command(join(pgBin, 'pg_ctl'), ['-D', data, '-m','immediate','-w','stop'], { ...options, timeout: 10_000 }); }
+  catch { failures.push('postgres-immediate-stop'); }
+  const confirmed = await stopped();
+  if (!confirmed) failures.push('postgres-stop-unconfirmed');
+  return { stopped: confirmed, failures };
 }
 async function freePort(): Promise<number> {
   const server = createServer();
@@ -137,6 +158,8 @@ async function main() {
   const env = { PATH: pgBin + ':/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', TZ: 'UTC' };
   const caBundle = '/etc/ssl/certs/ca-certificates.crt';
   let originalCA: Buffer | undefined, mountedCA = false, pgStarted = false, success = false, failure: string | undefined, failureStage: Stage | undefined;
+  let postgresStopped = true;
+  const cleanupFailures: string[] = [];
   try {
     stage = 'tls';
     const ca = join(tls, 'server.crt'), key = join(tls, 'server.key');
@@ -185,18 +208,24 @@ async function main() {
   finally {
     requestedStop = false; // Cleanup remains required after an operator signal.
     if (pgStarted) {
-      try { await command(join(pgBin, 'pg_ctl'), ['-D', data, '-m','fast','-w','stop'], { env, uid: 65534, gid: 65534, timeout: 30_000 }); }
-      catch { success = false; failure ??= 'operator-pg-stop'; failureStage ??= 'postgres_stop'; }
+      const cleanup = await stopPostgres(pgBin, data, env);
+      postgresStopped = cleanup.stopped; cleanupFailures.push(...cleanup.failures);
+      if (cleanup.failures.length) { success = false; failure ??= 'operator-pg-stop'; failureStage ??= 'postgres_stop'; }
     }
     for (const child of captured) child.kill('SIGTERM');
     await delay(100);
     for (const child of captured) child.kill('SIGKILL');
     if (mountedCA) {
-      try { await command('/usr/bin/umount', [caBundle]); } catch { success = false; failure ??= 'operator-ca-unmount'; failureStage ??= 'trust_restore'; }
+      try { await command('/usr/bin/umount', [caBundle]); }
+      catch { cleanupFailures.push('trust-unmount'); success = false; failure ??= 'operator-ca-unmount'; failureStage ??= 'trust_restore'; }
     }
-    if (originalCA) { try { writeFileSync(caBundle, originalCA); } catch { success = false; failure ??= 'operator-ca-restore'; failureStage ??= 'trust_restore'; } }
+    if (originalCA) {
+      try { writeFileSync(caBundle, originalCA); }
+      catch { cleanupFailures.push('trust-restore'); success = false; failure ??= 'operator-ca-restore'; failureStage ??= 'trust_restore'; }
+    }
     const receipt = { kind: 'fullstack-operator-result-v1', runId, seed, node: process.version, suite, outcome: success ? 'pass' : 'fail',
-      failure, failureStage, nativeSourceCommit, nativeSha256: build.sha256, migratorSha256: build.migratorSha256,
+      failure, failureStage, cleanupFailures, postgresStopped, ...(postgresStopped ? {} : { retainedPostgresRoot: pgRoot }),
+      nativeSourceCommit, nativeSha256: build.sha256, migratorSha256: build.migratorSha256,
       migrationAdapterSha256: build.migrationAdapterSha256, gatewayCommit, network, postgresVersion: version };
     writeFileSync(join(artifacts, 'operator-result.json'), JSON.stringify(receipt, null, 2) + '\n', { mode: 0o600 });
     stage = 'artifact_copy';
@@ -204,7 +233,8 @@ async function main() {
       const path = join(artifacts, name);
       if (existsSync(path)) { check(statSync(path).isFile() && statSync(path).size <= bounds.artifactBytes, 'operator-artifact-bound'); copyFileSync(path, join(destination, name)); chmodSync(join(destination, name), 0o600); }
     }
-    rmSync(pgRoot, { recursive: true, force: true }); rmSync(owned, { recursive: true, force: true });
+    if (postgresStopped) rmSync(pgRoot, { recursive: true, force: true });
+    rmSync(owned, { recursive: true, force: true });
   }
   if (failureStage) stage = failureStage;
   check(success, 'operator-qualification-failed');

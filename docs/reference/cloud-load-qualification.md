@@ -64,6 +64,13 @@ credentials and private TLS material remain in separate mode-0700 directories.
 The disposable container uses normal TLS verification with its own fixture CA.
 The cloud namespace runner binds this CA only inside its private mount namespace.
 
+The operator stops its fresh PostgreSQL instance with a bounded fast shutdown,
+checks that the original data directory has no running postmaster, and attempts
+a bounded immediate shutdown if the stop is unconfirmed. A failed shutdown keeps
+the qualification failed even when the fallback succeeds. Unconfirmed shutdown
+preserves the data directory and records its location; the operator never deletes
+the data of a postmaster it cannot confirm has stopped.
+
 ## Production fixes
 
 The public facade and native callbacks previously competed for the same control
@@ -199,7 +206,7 @@ retains its artifacts for 14 days, including safe diagnostics from failing runs.
 Resource samples cover the Node process running both the load driver and
 `startService`, the exact live native engine PID/birth identity, SQL occupancy,
 active queries, lock waiters and observer query latency. Node CPU and RSS include
-the driver; they are not isolated service-only measurements. CI allocates four
+the driver; they are not isolated service-only measurements. CI allocates two
 CPUs and 4 GiB. This bounded synthetic qualification establishes behavior under
 the specified workload, not production throughput, a long-duration soak result,
 or external-provider latency and quota characteristics.
