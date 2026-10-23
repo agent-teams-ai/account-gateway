@@ -22,7 +22,7 @@ export interface CallOptions { signal?: AbortSignal }
 export class GatewayError extends Error {
   constructor(readonly code: 'invalid_input' | 'transport' | 'invalid_response' | 'cancelled' | 'safe_error',
     readonly effect: z.infer<typeof c.effectState>, readonly operationRef?: string, readonly requestRef?: string,
-    readonly diagnostic?: c.SafeError) { super(`Account gateway: ${code}`); this.name = 'GatewayError'; }
+    readonly diagnostic?: c.SafeError, readonly httpStatus?: number) { super(`Account gateway: ${code}`); this.name = 'GatewayError'; }
 }
 function valid<T>(schema: z.ZodType<T>, input: unknown): T {
   const result = schema.safeParse(input);
@@ -92,7 +92,7 @@ function transport(input: ManagementConfig | ExecutionConfig | ConsumerControlCo
           method === 'GET' && (/^\/v1\/accounts\/[A-Za-z0-9_-]+\/retirement\/[A-Za-z0-9_-]+$/.test(path) ||
             /^\/v1\/policy-fences\/[A-Za-z0-9_-]+\/closure$/.test(path)));
         const diagnostic: c.SafeError = readbackMissing ? { ...error.data, effect: 'effect_unknown', retry: { kind: 'readback' } } : error.data;
-        throw new GatewayError('safe_error', diagnostic.effect, identity.operationRef, identity.requestRef, diagnostic);
+        throw new GatewayError('safe_error', diagnostic.effect, identity.operationRef, identity.requestRef, diagnostic, response.status);
       }
       const result = schema.safeParse(parsed);
       if (!result.success) throw handle.failure('invalid_response');
@@ -160,6 +160,8 @@ function accountClient(settings: ManagementConfig | ConsumerControlConfig, role:
   const { json } = transport(settings, role);
   const mutate = (path: string, method: string, input: { operationId: string }, options?: CallOptions, schema = c.accountOperation) => json(path, schema, method, input, options, { operationRef: input.operationId });
   return { json, client: Object.freeze({
+    getProviderConnectionCapabilities: (options?: CallOptions): Promise<c.ProviderConnectionCapabilities> =>
+      json('/v1/provider-connection-capabilities', c.providerConnectionCapabilities, 'GET', undefined, options),
     profiles: (options?: CallOptions) => json('/v1/profiles', c.profiles, 'GET', undefined, options),
     list: (input: c.ListQuery = {}, options?: CallOptions) => {
       const query = new URLSearchParams(Object.entries(valid(c.listQuery, input)).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
@@ -320,3 +322,19 @@ export function createAccountLimitsClient(settings: AccountLimitsConfig) {
   });
 }
 export type AccountLimitsClient = ReturnType<typeof createAccountLimitsClient>;
+
+const accountLimitsV2Config = accountLimitsConfig.extend({ contract: z.literal(c.ACCOUNT_LIMITS_V2_CONTRACT) });
+export type AccountLimitsV2Config = z.input<typeof accountLimitsV2Config>;
+/** Version selected by declared capability; this client never probes v1 or retries. */
+export function createAccountLimitsV2Client(settings: AccountLimitsV2Config) {
+  const captured = valid(accountLimitsV2Config, settings);
+  const { contract: _contract, ...transportConfig } = captured;
+  const { json } = transport(transportConfig, captured.role);
+  return Object.freeze({
+    getAccountLimitsCapabilities: (options?: CallOptions): Promise<c.AccountLimitsV2Capabilities> =>
+      json('/v2/capabilities/account-limits', c.accountLimitsV2Capabilities, 'GET', undefined, options),
+    readAccountLimits: (input: c.AccountLimitsRequest, options?: CallOptions): Promise<c.AccountLimitsV2> =>
+      json('/v2/account-limits/read', c.accountLimitsV2, 'POST', valid(c.accountLimitsRequest, input), options),
+  });
+}
+export type AccountLimitsV2Client = ReturnType<typeof createAccountLimitsV2Client>;

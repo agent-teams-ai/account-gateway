@@ -152,7 +152,35 @@ export const claudeOAuthAuthorizationURL = z.string().min(1).max(4096).refine(va
       /^[0-9a-f]{64}$/.test(url.searchParams.get('state') ?? '');
   } catch { return false; }
 });
-export const oauthAuthorizationURL = z.union([codexOAuthAuthorizationURL, claudeOAuthAuthorizationURL]);
+/** Grok is subscription-only and deployment client policy is checked privately. */
+export const grokOAuthAuthorizationURL = z.string().min(1).max(4096).refine(value => {
+  try {
+    if (/[^\u0021-\u007e]/.test(value) || value.includes('\\') ||
+        !value.startsWith('https://auth.x.ai/oauth2/authorize?')) return false;
+    const url = new URL(value);
+    if (url.origin !== 'https://auth.x.ai' || url.pathname !== '/oauth2/authorize' ||
+        url.username || url.password || url.hash || value.includes('#')) return false;
+    const fixed: Readonly<Record<string, string>> = {
+      response_type: 'code', redirect_uri: 'http://127.0.0.1:56121/callback',
+      code_challenge_method: 'S256', scope: 'openid profile email offline_access grok-cli:access api:access',
+    };
+    const seen = new Set<string>();
+    for (const part of url.search.slice(1).split('&')) {
+      const equal = part.indexOf('=');
+      if (equal < 1 || /%(?![0-9a-fA-F]{2})/.test(part)) return false;
+      const key = part.slice(0, equal);
+      if (!/^[a-z_]+$/.test(key) || seen.has(key) ||
+          !(Object.hasOwn(fixed, key) || key === 'client_id' || key === 'state' || key === 'code_challenge' || key === 'nonce')) return false;
+      seen.add(key);
+    }
+    for (const [key, expected] of Object.entries(fixed)) if (url.searchParams.get(key) !== expected) return false;
+    return /^[A-Za-z0-9_-]{43}$/.test(url.searchParams.get('nonce') ?? '') &&
+      /^[A-Za-z0-9._:-]{1,256}$/.test(url.searchParams.get('client_id') ?? '') &&
+      /^[A-Za-z0-9_-]{43}$/.test(url.searchParams.get('code_challenge') ?? '') &&
+      /^[0-9a-f]{64}$/.test(url.searchParams.get('state') ?? '');
+  } catch { return false; }
+});
+export const oauthAuthorizationURL = z.union([codexOAuthAuthorizationURL, claudeOAuthAuthorizationURL, grokOAuthAuthorizationURL]);
 /** Only fresh Begin returns a handoff; ordinary reads retain the safe union. */
 export const oauthBeginResponse = z.strictObject({ operation: accountOperation,
   authorizationURL: oauthAuthorizationURL.optional(), deviceAuthorization: oauthDeviceAuthorization.optional() })
@@ -296,3 +324,124 @@ export type AccountLimits = z.infer<typeof accountLimits>;
 
 export const accountLimitsResult = accountLimits;
 export type AccountLimitsResult = AccountLimits;
+
+/** provider-connections/v1 is a projection, never the strict legacy profile DTO. */
+export const PROVIDER_CONNECTIONS_CONTRACT = 'provider-connections/v1' as const;
+export const providerIdentity = z.enum(['mimo', 'openrouter', 'openai', 'anthropic', 'kimi', 'glm', 'minimax', 'grok']);
+export const providerAuthMethod = z.enum(['api_key', 'oauth_authorization_code', 'oauth_device_code']);
+export const completionInputKind = z.enum(['none', 'callback_url', 'authorization_code']);
+export const reconnectMode = z.enum(['replace_api_key', 'oauth_reauthorize', 'none']);
+export const limitsContract = z.enum(['account-limits/v1', 'account-limits/v2', 'none']);
+const modelSetting = <T extends readonly [string, ...string[]]>(values: T) => z.strictObject({
+  allowed: z.array(z.enum(values)).min(1).max(values.length).refine(v => new Set(v).size === v.length),
+  default: z.enum(values),
+}).refine(v => v.allowed.includes(v.default));
+const qualifiedModelCapability = z.strictObject({
+  modelId: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/),
+  reasoning: modelSetting(['minimal', 'low', 'medium', 'high', 'xhigh'] as const).nullable(),
+  fast: modelSetting(['balanced', 'fast'] as const).nullable(),
+  tools: modelSetting(['none', 'function', 'function_and_custom'] as const),
+});
+export const providerConnectionCapability = z.strictObject({
+  contract: z.literal(PROVIDER_CONNECTIONS_CONTRACT),
+  profileId: reference,
+  provider: z.strictObject({ identity: providerIdentity, label: z.string().min(1).max(64) }),
+  plan: z.strictObject({ identity: z.enum(['subscription', 'coding_plan', 'm_plan', 'pay_as_you_go', 'unknown']), label: z.string().min(1).max(64) }),
+  region: z.strictObject({ identity: z.enum(['global', 'unknown']), label: z.string().min(1).max(64) }),
+  protocol,
+  modelIds: z.array(z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/)).min(1).max(128),
+  authMethods: z.array(providerAuthMethod).min(1).max(3).refine(v => new Set(v).size === v.length),
+  completionInputKind,
+  availability: z.enum(['enabled', 'deployment_configuration_required']),
+  oauthCallbackMode: z.enum(['automatic', 'manual_callback_url']).nullable(),
+  reconnect: reconnectMode,
+  limitsContract,
+  models: z.array(qualifiedModelCapability).min(1).max(128),
+}).refine(v => v.modelIds.length === v.models.length &&
+  v.modelIds.every((modelId, index) => v.models[index]?.modelId === modelId) &&
+  new Set(v.modelIds).size === v.modelIds.length);
+export const providerConnectionCapabilities = z.strictObject({
+  contract: z.literal(PROVIDER_CONNECTIONS_CONTRACT),
+  capabilities: z.array(providerConnectionCapability).max(128),
+});
+export type ProviderConnectionCapability = z.infer<typeof providerConnectionCapability>;
+export type ProviderConnectionCapabilities = z.infer<typeof providerConnectionCapabilities>;
+
+/** account-limits/v2 adds closed identities and never invents duration or units. */
+export const ACCOUNT_LIMITS_V2_CONTRACT = 'account-limits/v2' as const;
+export const accountLimitsV2Capabilities = z.strictObject({
+  contract: z.literal(ACCOUNT_LIMITS_V2_CONTRACT), cachedRead: z.boolean(), quotaOnlyRefresh: z.literal(false),
+});
+const accountLimitsV2Window = z.strictObject({
+  id: z.enum(['five_hour', 'weekly', 'monthly', 'primary', 'secondary', 'unknown', 'request_rate', 'token_rate']),
+  provider: z.enum(['kimi', 'glm', 'minimax', 'grok']),
+  dimension: z.enum(['plan_quota', 'rate_limit']),
+  unit: z.enum(['credits', 'tokens', 'requests', 'unknown']),
+  period: z.discriminatedUnion('kind', [
+    z.strictObject({ kind: z.literal('duration'), durationSeconds: z.number().finite().positive().max(Number.MAX_SAFE_INTEGER) }),
+    z.strictObject({ kind: z.literal('monthly_billing_cycle') }),
+    z.strictObject({ kind: z.literal('unknown') }),
+  ]),
+  label: z.enum(['5h', 'Week', 'Month']).nullable(),
+  usedPercent: z.number().finite().nonnegative().nullable(),
+  observedAt: limitsInstant.nullable(),
+  resetAt: limitsInstant.nullable(),
+}).refine(v => v.label !== '5h' || v.period.kind === 'duration' && v.period.durationSeconds === 18000)
+  .refine(v => v.label !== 'Week' || v.period.kind === 'duration' && v.period.durationSeconds === 604800)
+  .refine(v => v.label !== 'Month' || v.period.kind === 'monthly_billing_cycle')
+  .refine(v => v.period.kind !== 'unknown' || v.label === null);
+export const accountLimitsV2 = z.discriminatedUnion('status', [
+  z.strictObject({ status: z.literal('snapshot'), physicalGeneration: reference, principalVersion: reference,
+    revision, scope: z.enum(['account', 'subscription']), windows: z.array(accountLimitsV2Window).min(1).max(8)
+      .refine(v => new Set(v.map(w => w.provider + ':' + w.id + ':' + w.dimension + ':' + w.unit)).size === v.length) }),
+  z.strictObject({ status: z.literal('unknown') }),
+  z.strictObject({ status: z.literal('unsupported') }),
+  z.strictObject({ status: z.literal('unavailable') }),
+]);
+export type AccountLimitsV2Capabilities = z.infer<typeof accountLimitsV2Capabilities>;
+export type AccountLimitsV2 = z.infer<typeof accountLimitsV2>;
+
+/** The sole consumer-facing normalization of the v1 and v2 snapshot wires. */
+export const consumerAccountLimitsWindow = z.strictObject({
+  id: reference, provider: z.union([providerIdentity, z.literal('unknown')]),
+  dimension: z.enum(['plan_quota', 'rate_limit', 'unknown']),
+  unit: z.enum(['credits', 'tokens', 'requests', 'unknown']),
+  period: z.discriminatedUnion('kind', [
+    z.strictObject({ kind: z.literal('duration'), durationSeconds: z.number().finite().positive().max(Number.MAX_SAFE_INTEGER) }),
+    z.strictObject({ kind: z.literal('monthly_billing_cycle') }),
+    z.strictObject({ kind: z.literal('unknown') }),
+  ]),
+  label: z.enum(['5h', 'Week', 'Month']).nullable(),
+  usedPercent: z.number().finite().nonnegative().nullable(),
+  observedAt: limitsInstant.nullable(), resetAt: limitsInstant.nullable(),
+});
+export const consumerAccountLimits = z.discriminatedUnion('status', [
+  z.strictObject({ status: z.literal('snapshot'), contract: z.enum(['account-limits/v1', 'account-limits/v2']),
+    physicalGeneration: reference, principalVersion: reference, revision,
+    scope: z.enum(['account', 'subscription']), windows: z.array(consumerAccountLimitsWindow).min(1).max(8) }),
+  z.strictObject({ status: z.literal('unknown') }),
+  z.strictObject({ status: z.literal('unsupported') }),
+  z.strictObject({ status: z.literal('unavailable') }),
+]);
+export type ConsumerAccountLimitsWindow = z.infer<typeof consumerAccountLimitsWindow>;
+export type ConsumerAccountLimits = z.infer<typeof consumerAccountLimits>;
+export function adaptAccountLimits(input: AccountLimits | AccountLimitsV2, contract: 'account-limits/v1' | 'account-limits/v2'): ConsumerAccountLimits {
+  if (input.status !== 'snapshot') return input;
+  const windows = contract === 'account-limits/v2'
+    ? (input as Extract<AccountLimitsV2, { status: 'snapshot' }>).windows.map(window => ({
+    id: window.id, provider: window.provider, dimension: window.dimension, unit: window.unit,
+    period: window.period, label: window.label, usedPercent: window.usedPercent,
+    observedAt: window.observedAt, resetAt: window.resetAt,
+  }))
+    : (input as Extract<AccountLimits, { status: 'snapshot' }>).windows.map(window => ({
+    id: window.id, provider: window.family === 'codex' ? 'openai' as const : 'anthropic' as const,
+    dimension: 'unknown' as const, unit: 'unknown' as const,
+    period: window.durationSeconds === null ? { kind: 'unknown' as const } :
+      { kind: 'duration' as const, durationSeconds: window.durationSeconds },
+    label: window.id === 'claude-5h' ? '5h' as const : window.id.startsWith('claude-7d') ? 'Week' as const : null,
+    usedPercent: window.usedPercent, observedAt: window.observedAt, resetAt: window.resetAt,
+  }));
+  return consumerAccountLimits.parse({ status: 'snapshot', contract,
+    physicalGeneration: input.physicalGeneration, principalVersion: input.principalVersion,
+    revision: input.revision, scope: input.scope, windows });
+}
