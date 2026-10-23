@@ -102,6 +102,20 @@ jobs:
           pnpm --dir services/account-gateway run typecheck
           pnpm --dir services/account-gateway run test:load:unit
           git diff --exit-code -- pnpm-lock.yaml
+      - name: Check SDK and service imports inside the isolated image
+        run: |
+          docker run --rm --network none --user 0:0 \
+            --mount "type=bind,source=$GATEWAY_NODE_HOME,target=$GATEWAY_NODE_HOME,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=$GITHUB_WORKSPACE,readonly" \
+            --mount "type=bind,source=$GATEWAY_LOAD_ROOT,target=$GATEWAY_LOAD_ROOT,readonly" \
+            --workdir "$GITHUB_WORKSPACE/services/account-gateway" \
+            --entrypoint "$GATEWAY_NODE" "$GATEWAY_LOAD_IMAGE" --input-type=module -e '
+              const sdk = await import("@agent-teams/account-gateway/http");
+              const contracts = await import("@agent-teams/account-gateway/contracts");
+              const service = await import("./src/service.ts");
+              if (typeof sdk.createExecutionClient !== "function" || !contracts.close || typeof service.startService !== "function") process.exit(1);
+              process.stdout.write("Actual container SDK and service imports passed\n");
+            '
       - name: Build the exact production native CLI and production migration adapter
         run: |
           git clone --no-checkout https://github.com/agent-teams-ai/sub2api.git "$GATEWAY_LOAD_ROOT/native-source"

@@ -19,14 +19,43 @@ type Stage = 'arguments' | 'network' | 'build_receipt' | 'postgres_version' | 's
   'tls' | 'trust' | 'postgres_init' | 'postgres_start' | 'database_create' | 'native_migrations' |
   'fixture_manifest' | 'workload' | 'summary' | 'postgres_stop' | 'trust_restore' | 'artifact_copy';
 let stage: Stage = 'arguments';
+const earlyLoadCodes = new Set(['required-runtime','explicit-manifest-required','protected-path','protected-ancestor',
+  'protected-owner','protected-mode','protected-file','protected-file-race','protected-input-bound','manifest-identity',
+  'source-commits','fixture-directories','fresh-protected-root','native-image','native-image-hash','tls-input',
+  'tls-private-input','designated-disposable-database','separate-databases','native-migration-manifest',
+  'native-migrations-digest','network-attestation','external-network-disabled','normal-tls-required',
+  'source-manifest-bound','sdk-artifact-layout','sdk-artifact-bound','actual-sdk-entrypoints','scenario-selector']);
+const loaderCodes = new Set(['ERR_MODULE_NOT_FOUND','ERR_PACKAGE_PATH_NOT_EXPORTED','ERR_PACKAGE_IMPORT_NOT_DEFINED',
+  'ERR_UNSUPPORTED_DIR_IMPORT','ERR_UNKNOWN_FILE_EXTENSION','ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX',
+  'ERR_INVALID_TYPESCRIPT_SYNTAX','ERR_REQUIRE_ESM','ERR_DLOPEN_FAILED']);
+const spawnCodes = new Set(['ENOENT','EACCES','EPERM','ENOEXEC','ENOMEM','EMFILE','ENFILE','E2BIG','EAGAIN']);
+const systemCodes = new Set([...spawnCodes,'EROFS','ENOTDIR','EISDIR','ENAMETOOLONG','ELOOP','ENOSPC','EDQUOT']);
+const childSignals = new Set(['SIGTERM','SIGKILL','SIGABRT','SIGSEGV','SIGBUS','SIGILL','SIGPIPE','SIGINT','SIGHUP']);
+export function childFailureFacts(privateOutput: string, status: { exitCode: number | null; signal?: unknown;
+  spawnCode?: unknown; timedOut: boolean; outputOverflow: boolean }) {
+  const text = privateOutput.slice(0, 1_048_576);
+  const allowed = (pattern: RegExp, codes: ReadonlySet<string>) => [...new Set(Array.from(text.matchAll(pattern),
+    match => match[1]).filter(code => codes.has(code)))].slice(0, 8);
+  return { exitCode: Number.isInteger(status.exitCode) && status.exitCode! >= 0 && status.exitCode! <= 255 ? status.exitCode : null,
+    signal: typeof status.signal === 'string' && childSignals.has(status.signal) ? status.signal : null,
+    spawnCode: typeof status.spawnCode === 'string' && spawnCodes.has(status.spawnCode) ? status.spawnCode : null,
+    loadCodes: allowed(/\bload:([a-z0-9-]+)\b/g, earlyLoadCodes),
+    loaderCodes: allowed(/\b(ERR_[A-Z0-9_]+)\b/g, loaderCodes),
+    systemCodes: allowed(/\b([A-Z][A-Z0-9_]+)\b/g, systemCodes),
+    timedOut: status.timedOut === true, outputOverflow: status.outputOverflow === true };
+}
+class CommandFailure extends Error {
+  readonly facts: ReturnType<typeof childFailureFacts>;
+  constructor(facts: ReturnType<typeof childFailureFacts>) { super('load:operator-command-failed'); this.facts = facts; }
+}
 // Keep the process-group leader alive until it disposes its own group. An
 // exited leader's numeric PID is never reused as a later signal target.
 const custody = `const {spawn}=require('node:child_process');
 const dispose=()=>process.kill(-process.pid,'SIGKILL');
 process.on('SIGTERM',dispose);process.on('SIGINT',dispose);process.on('disconnect',dispose);
 const child=spawn(process.argv[1],process.argv.slice(2),{env:process.env,stdio:['ignore','inherit','inherit']});
-child.once('error',()=>process.send({kind:'result',code:1}));
-child.once('close',code=>process.send({kind:'result',code}));
+child.once('error',error=>process.send({kind:'result',code:1,spawnCode:error.code}));
+child.once('close',(code,signal)=>process.send({kind:'result',code,signal}));
 setInterval(()=>{},1000);`;
 let requestedStop = false;
 const terminate = () => { requestedStop = true; for (const child of captured) child.kill('SIGTERM'); };
@@ -40,20 +69,23 @@ async function command(executable: string, args: string[], options: { cwd?: stri
     ? spawn(process.execPath, ['-e', custody, executable, ...args], { ...common, detached: true, stdio: ['ignore','pipe','pipe','ipc'] })
     : spawn(executable, args, { ...common, detached: false, stdio: ['ignore','pipe','pipe'] });
   captured.add(child);
-  let output = '', diagnostics = '', bytes = 0, overflow = false;
+  let output = '', diagnostics = '', bytes = 0, overflow = false, timedOut = false, groupResult = false;
+  let childSignal: unknown, spawnCode: unknown;
   const collect = (data: Buffer, stdout: boolean) => {
     bytes += data.length;
     if (bytes > 1_048_576) { overflow = true; child.kill(options.group ? 'SIGTERM' : 'SIGKILL'); }
     else { const text = data.toString('utf8'); if (stdout) output += text; diagnostics += text; }
   };
   child.stdout!.on('data', data => collect(data, true)); child.stderr!.on('data', data => collect(data, false));
-  const closed = new Promise<number | null>((resolve, reject) => {
-    child.once('error', reject); child.once('close', resolve);
+  const closed = new Promise<number | null>(resolve => {
+    child.once('error', error => { spawnCode = (error as NodeJS.ErrnoException).code; resolve(null); });
+    child.once('close', (code, signal) => { if (!groupResult) childSignal = signal; resolve(code); });
   });
-  const timer = setTimeout(() => child.kill(options.group ? 'SIGTERM' : 'SIGKILL'), options.timeout ?? 60_000);
+  const timer = setTimeout(() => { timedOut = true; child.kill(options.group ? 'SIGTERM' : 'SIGKILL'); }, options.timeout ?? 60_000);
   const result = options.group ? Promise.race([closed.then(() => 1), new Promise<number | null>(resolve => {
     child.once('message', value => {
-      const message = value as { kind?: unknown; code?: unknown };
+      const message = value as { kind?: unknown; code?: unknown; signal?: unknown; spawnCode?: unknown };
+      groupResult = true; childSignal = message.signal; spawnCode = message.spawnCode;
       resolve(message.kind === 'result' && (message.code === null || Number.isInteger(message.code)) ? message.code as number | null : 1);
     });
   })]) : closed;
@@ -65,7 +97,8 @@ async function command(executable: string, args: string[], options: { cwd?: stri
     captured.delete(child);
   });
   if (options.log) writeFileSync(options.log, diagnostics, { mode: 0o600 });
-  check(code === (options.expectedExit ?? 0) && !overflow && !requestedStop, 'operator-command-failed');
+  if (code !== (options.expectedExit ?? 0) || timedOut || overflow || requestedStop) throw new CommandFailure(childFailureFacts(diagnostics,
+    { exitCode: code, signal: childSignal, spawnCode, timedOut, outputOverflow: overflow }));
   return output.trim();
 }
 export async function stopPostgres(pgBin: string, data: string, env: NodeJS.ProcessEnv) {
@@ -158,6 +191,7 @@ async function main() {
   const env = { PATH: pgBin + ':/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', TZ: 'UTC' };
   const caBundle = '/etc/ssl/certs/ca-certificates.crt';
   let originalCA: Buffer | undefined, mountedCA = false, pgStarted = false, success = false, failure: string | undefined, failureStage: Stage | undefined;
+  let commandFailure: ReturnType<typeof childFailureFacts> | undefined;
   let postgresStopped = true;
   const cleanupFailures: string[] = [];
   try {
@@ -204,7 +238,10 @@ async function main() {
     check(summary.outcome === 'pass' && summary.ledgerMatches === true && summary.sourceUnchanged === true && summary.sdkArtifactUnchanged === true && summary.stopped === 'retired' &&
       JSON.stringify(summary.expectedScenarios) === JSON.stringify(suite === 'all' ? scenarios : [suite]), 'operator-qualification-summary');
     success = true;
-  } catch (error) { failureStage = stage; failure = error instanceof Error && /^load:[a-z0-9-]+$/.test(error.message) ? error.message.slice(5) : 'operator-failed'; }
+  } catch (error) {
+    failureStage = stage; failure = error instanceof Error && /^load:[a-z0-9-]+$/.test(error.message) ? error.message.slice(5) : 'operator-failed';
+    if (error instanceof CommandFailure) commandFailure = error.facts;
+  }
   finally {
     requestedStop = false; // Cleanup remains required after an operator signal.
     if (pgStarted) {
@@ -224,7 +261,7 @@ async function main() {
       catch { cleanupFailures.push('trust-restore'); success = false; failure ??= 'operator-ca-restore'; failureStage ??= 'trust_restore'; }
     }
     const receipt = { kind: 'fullstack-operator-result-v1', runId, seed, node: process.version, suite, outcome: success ? 'pass' : 'fail',
-      failure, failureStage, cleanupFailures, postgresStopped, ...(postgresStopped ? {} : { retainedPostgresRoot: pgRoot }),
+      failure, failureStage, commandFailure, cleanupFailures, postgresStopped, ...(postgresStopped ? {} : { retainedPostgresRoot: pgRoot }),
       nativeSourceCommit, nativeSha256: build.sha256, migratorSha256: build.migratorSha256,
       migrationAdapterSha256: build.migrationAdapterSha256, gatewayCommit, network, postgresVersion: version };
     writeFileSync(join(artifacts, 'operator-result.json'), JSON.stringify(receipt, null, 2) + '\n', { mode: 0o600 });

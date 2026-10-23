@@ -57,7 +57,9 @@ and [CA bundle](https://packages.debian.org/trixie/ca-certificates) packages bef
 measurement. The base image lacks both Node 26's `libatomic.so.1` dependency and
 the CA bundle used by the fixture's trust setup. A separate network-disabled
 preflight starts the selected Node runtime and checks OpenSSL, PostgreSQL and
-the CA bundle before the expensive native build. Package installation is not
+the CA bundle. After dependency installation, another network-disabled check
+imports the actual built SDK and service composition inside that same image.
+Both checks run before the expensive native build. Package installation is not
 part of the measured workload.
 
 The explicit TCP profile makes upstream backpressure observable before the
@@ -212,6 +214,9 @@ and `preparations.json`. They contain safe identities, counters, classifications
 timings and hashes. Configuration files, bearer tokens, closure tokens, DSNs,
 private keys and provider request/response bodies are not exported. GitHub Actions
 retains its artifacts for 14 days, including safe diagnostics from failing runs.
+When a child fails before the workload can write its own summary, the operator
+records its bounded exit/signal facts and allowlisted fixture or runtime error
+codes. Private child output is never copied into the exported receipt.
 
 Resource samples cover the Node process running both the load driver and
 `startService`, the exact live native engine PID/birth identity, SQL occupancy,
