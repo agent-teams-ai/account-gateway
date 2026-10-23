@@ -717,7 +717,8 @@ export function createFacade(options: FacadeOptions): Server {
         enteredTransport = true; uncertain = true;
         try {
           const result = await transport.request({ context, saved, requestId: identity.requestRef!, body: raw, signal: controller.signal, callback: nativeCallback });
-          if (result.kind === 'status') { send(res, c.requestStatus, requestDTO(await kernel.request(context, ref, identity.requestRef!)), 202); return; }
+          if (result.kind === 'status') { send(res, c.requestStatus,
+            requestDTO(await inServiceLane('control', () => kernel.request(context, ref, identity.requestRef!))), 202); return; }
           let finished = false;
           let cancellation: Promise<void> | undefined;
           const cancel = () => cancellation ??= retain(inServiceLane('control', () => result.cancel()));
@@ -725,7 +726,7 @@ export function createFacade(options: FacadeOptions): Server {
           try {
             // Streaming data requires actual persisted callback claim, never an
             // injected response substituting for the kernel's authority.
-            const status = await kernel.request(context, ref, identity.requestRef!);
+            const status = await inServiceLane('control', () => kernel.request(context, ref, identity.requestRef!));
             if (!['dispatch_started', 'response_started', 'completed'].includes(status.effect) || controller.signal.aborted) throw new KernelError('unknown');
             res.writeHead(200, { 'content-type': 'text/event-stream', 'x-gateway-request-ref': identity.requestRef!, 'cache-control': 'no-store' });
             res.flushHeaders();
@@ -736,7 +737,8 @@ export function createFacade(options: FacadeOptions): Server {
               if (!(chunk instanceof Uint8Array) || chunk.byteLength > bufferBytes || output > saved.admission.limits.outputBytes || controller.signal.aborted) throw new KernelError('unknown');
               if (!res.write(chunk)) await once(res, 'drain', { signal: controller.signal });
             }
-            const terminal = await kernel.request(context, ref, identity.requestRef!);
+            // New data admission cannot take EOF away from an accepted effect.
+            const terminal = await inServiceLane('control', () => kernel.request(context, ref, identity.requestRef!));
             if (terminal.effect !== 'completed' || controller.signal.aborted) throw new KernelError('unknown');
             finished = true; res.end();
           } finally {

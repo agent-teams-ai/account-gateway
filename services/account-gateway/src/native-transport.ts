@@ -29,13 +29,15 @@ export class NativeHTTPTransport implements NativeTransport {
   }
   async #recover(a: Association): Promise<NativeDispatchProof | undefined> {
     if (a.proof) return a.proof;
-    const actual = await this.#authority.kernel.requestProof(a.context, a.saved.admission.executionRef, a.requestId);
-    if (actual) {
-      const p = proof(actual); await this.#authority.persisted(a.context, p);
-      if (p.native.generation !== a.saved.generation || a.native && p.native.requestNonce !== a.native.requestNonce) return denied();
-      a.proof = p;
-    }
-    return a.proof;
+    return inServiceLane('control', async () => {
+      const actual = await this.#authority.kernel.requestProof(a.context, a.saved.admission.executionRef, a.requestId);
+      if (actual) {
+        const p = proof(actual); await this.#authority.persisted(a.context, p);
+        if (p.native.generation !== a.saved.generation || a.native && p.native.requestNonce !== a.native.requestNonce) return denied();
+        a.proof = p;
+      }
+      return a.proof;
+    });
   }
   async #unknown(a: Association): Promise<void> {
     try {
@@ -89,12 +91,15 @@ export class NativeHTTPTransport implements NativeTransport {
     if (!first) {
       // Reading the original SQL status is harmless. A live or uncertain route
       // association never sends another inference POST, even under a new signal.
-      await authority.kernel.request(a.context, a.saved.admission.executionRef, a.requestId);
+      await inServiceLane('control', () => authority.kernel.request(a.context, a.saved.admission.executionRef, a.requestId));
       return { kind: 'status' };
     }
     let envelope: Buffer;
     try {
-      await authority.prepare(a, bytes);
+      // Public grant/body checks already completed at ingress. Original native
+      // mapping/lease validation is protocol work; it holds no SQL checkout
+      // across the subsequent HTTP call and cannot consume another data permit.
+      await inServiceLane('control', () => authority.prepare(a, bytes));
       envelope = Buffer.concat([Buffer.from(JSON.stringify({ requestRef: a.requestId, worker: cfg.enrollment.worker,
         admission: a.saved.admission, descriptor: a.descriptor }).slice(0, -1) + ',"payload":'), bytes, Buffer.from('}')]);
       if (a.signal.aborted || instant(a.saved.admission.expiresAt) <= now()) return denied();
@@ -144,7 +149,7 @@ export class NativeHTTPTransport implements NativeTransport {
         if (!p) {
           // A status-only admission has no dispatch proof. Verify actual SQL
           // readback; an uncertain first claim is conservatively fenced.
-          await authority.reclaimDenied(a);
+          await inServiceLane('control', () => authority.reclaimDenied(a));
         } else await inServiceLane('control', () => this.#settle(a));
         finished = true; hop.abort(); await settleRetained(); return { kind: 'status' };
       }
@@ -161,7 +166,7 @@ export class NativeHTTPTransport implements NativeTransport {
             if (size > a.saved.admission.limits.outputBytes) return denied();
             if (!started && b.byteLength) {
               started = true;
-              const current = await authority.kernel.request(a.context, a.saved.admission.executionRef, a.requestId);
+              const current = await inServiceLane('control', () => authority.kernel.request(a.context, a.saved.admission.executionRef, a.requestId));
               if (current.effect === 'dispatch_started') await a.callback.effect(a.proof!, 'response_started');
             }
             yield b; // Pull-based Node iteration preserves backpressure.

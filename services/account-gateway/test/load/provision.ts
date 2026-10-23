@@ -74,7 +74,7 @@ async function freePort(): Promise<number> {
   const address = server.address(); check(address && typeof address !== 'string', 'operator-port');
   await new Promise<void>(resolve => server.close(() => resolve())); return address.port;
 }
-async function networkEvidence(): Promise<Record<string, string | boolean | number>> {
+async function networkEvidence(requireBackpressureProfile: boolean): Promise<Record<string, string | boolean | number>> {
   const links = readFileSync('/proc/net/dev', 'utf8').trim().split('\n').slice(2).map(line => line.split(':')[0].trim());
   const routes = readFileSync('/proc/net/route', 'utf8').trim().split('\n').slice(1);
   check(links.length === 1 && links[0] === 'lo' && routes.length === 0, 'operator-network-isolation-required');
@@ -84,7 +84,16 @@ async function networkEvidence(): Promise<Record<string, string | boolean | numb
     socket.once('connect', () => { socket.destroy(); reject(new Error('load:operator-external-connectivity')); });
     socket.once('error', error => { socket.destroy(); if ('code' in error && error.code === 'ENETUNREACH') resolve(); else reject(new Error('load:operator-external-probe')); });
   });
-  return { interfaces: 'lo only', ipv4Routes: 'none', externalProbe: '192.0.2.1:443 ENETUNREACH' };
+  const tcpReceiveMemory = readFileSync('/proc/sys/net/ipv4/tcp_rmem', 'utf8').trim().split(/\s+/).join(' ');
+  const tcpSendMemory = readFileSync('/proc/sys/net/ipv4/tcp_wmem', 'utf8').trim().split(/\s+/).join(' ');
+  const tcpReceiveAutotuning = readFileSync('/proc/sys/net/ipv4/tcp_moderate_rcvbuf', 'utf8').trim();
+  // A multi-hop pipeline with a 32-MiB autotuned receiver can absorb the entire
+  // qualified 8-MiB stream. The bounded experiment needs an explicit private
+  // network-namespace profile, configured by the container operator, not here.
+  if (requireBackpressureProfile) check(tcpReceiveMemory === '4096 16384 65536' &&
+    tcpSendMemory === '4096 16384 65536' && tcpReceiveAutotuning === '0', 'operator-backpressure-profile-required');
+  return { interfaces: 'lo only', ipv4Routes: 'none', externalProbe: '192.0.2.1:443 ENETUNREACH',
+    tcpReceiveMemory, tcpSendMemory, tcpReceiveAutotuning };
 }
 
 async function main() {
@@ -98,9 +107,9 @@ async function main() {
   const suite = options.get('--suite') ?? 'smoke', trustMode = options.get('--trust-mode') ?? 'bind', seed = Number(options.get('--seed') ?? 20261023);
   check(process.platform === 'linux' && process.geteuid?.() === 0 && ['v26.11.1','v24.21.0'].includes(process.version), 'operator-runtime');
   check(repo && receiptPath && pgBin && destination && [repo, receiptPath, pgBin, destination].every(isAbsolute), 'operator-absolute-paths');
-  check(['smoke','all'].includes(suite) && ['bind','container'].includes(trustMode) && Number.isSafeInteger(seed) && seed >= 0 && seed <= 0xffffffff, 'operator-options');
+  check((suite === 'all' || scenarios.some(name => name === suite)) && ['bind','container'].includes(trustMode) && Number.isSafeInteger(seed) && seed >= 0 && seed <= 0xffffffff, 'operator-options');
   if (trustMode === 'container') check(existsSync('/.dockerenv'), 'operator-disposable-container-required');
-  stage = 'network'; const network = await networkEvidence();
+  stage = 'network'; const network = await networkEvidence(suite === 'all' || suite === 'slow-reader');
   stage = 'build_receipt';
   const build = JSON.parse(readFileSync(receiptPath, 'utf8')) as Record<string, string>;
   check(build.kind === 'native-fullstack-build-v1' && build.sourceCommit === nativeSourceCommit &&
@@ -165,12 +174,12 @@ async function main() {
     writeFileSync(join(artifacts, 'native-migrations.json'), JSON.stringify(migration, null, 2) + '\n', { mode: 0o600 });
     stage = 'workload';
     await command(process.execPath, ['--test','--test-isolation=none','--test-reporter=tap', join(repo, 'services/account-gateway/test/load/stand.ts')],
-      { cwd: repo, env: { ...env, NODE_USE_SYSTEM_CA: '1', AG_LOAD_MANIFEST: manifest, ...(suite === 'smoke' ? { AG_LOAD_SCENARIOS: 'smoke' } : {}) },
+      { cwd: repo, env: { ...env, NODE_USE_SYSTEM_CA: '1', AG_LOAD_MANIFEST: manifest, ...(suite === 'all' ? {} : { AG_LOAD_SCENARIOS: suite }) },
         group: true, timeout: bounds.wallMs + 60_000, log: join(owned, 'stand.log') });
     stage = 'summary';
     const summary = JSON.parse(readFileSync(join(artifacts, 'summary.json'), 'utf8')) as Record<string, unknown>;
     check(summary.outcome === 'pass' && summary.ledgerMatches === true && summary.sourceUnchanged === true && summary.sdkArtifactUnchanged === true && summary.stopped === 'retired' &&
-      JSON.stringify(summary.expectedScenarios) === JSON.stringify(suite === 'smoke' ? ['smoke'] : scenarios), 'operator-qualification-summary');
+      JSON.stringify(summary.expectedScenarios) === JSON.stringify(suite === 'all' ? scenarios : [suite]), 'operator-qualification-summary');
     success = true;
   } catch (error) { failureStage = stage; failure = error instanceof Error && /^load:[a-z0-9-]+$/.test(error.message) ? error.message.slice(5) : 'operator-failed'; }
   finally {

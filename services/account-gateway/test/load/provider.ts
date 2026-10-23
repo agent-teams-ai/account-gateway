@@ -74,7 +74,7 @@ async function initialize(input: Configuration) {
       if (plan.mode === 'flood') {
         // Partial stream deliberately has no terminal completion. It is canceled
         // after the actual pause/resume experiment, never called a success.
-        for (let n = 0; n < 3000 && !closed; n++) {
+        for (let n = 0; n < 4096 && !closed && bytes + 4096 <= bounds.streamBytes; n++) {
           if (!await frame('response.output_text.delta', { item_id: itemId, output_index: 0, content_index: 0, delta: 'x'.repeat(2048), logprobs: [] })) return;
         }
         if (!closed) { record('budget', requestId, bytes); await new Promise<void>(resolve => release.set(requestId, resolve)); }

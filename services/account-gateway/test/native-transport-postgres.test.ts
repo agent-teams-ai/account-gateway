@@ -16,6 +16,7 @@ import type { OAuthScope } from '../src/management.ts';
 import { createFacade, FacadeBearers } from '../src/facade.ts';
 import { NativeAuthority } from '../src/native-authority.ts';
 import { NativeHTTPTransport } from '../src/native-transport.ts';
+import { NativeControlAdmission, admitNativeCallback, inServiceLane, sharedCheckout } from '../src/service-admission.ts';
 import { KernelError } from '../src/domain.ts';
 import type { NativeDispatchProof, PrivateAdmission } from '../src/domain.ts';
 import type { Descriptor, Receipt } from '../src/native-wire.ts';
@@ -280,7 +281,8 @@ async function fixture(mode: Mode = 'complete', options: { maxPending?: number; 
     enrollment: { originRef: 'protected-origin', engineIncarnation: incarnation, worker, qualificationRef: profile.qualificationRef },
     consumers: [{ consumerId: context.consumerId, ...credentials }], profiles: [{ ...profile, requestBytes: 4096, outputBytes: 4096, tokens: 100, providerTokenUpperBound: 1000 }],
     timeoutMs: options.timeoutMs ?? (mode === 'early-ack' ? 5000 : 1000), closureWaitMs: 50, maxPending: options.maxPending } });
-  const callbacks = authority.createServer(); callbackOrigin = await listen(callbacks);
+  const callbackBudget = new NativeControlAdmission(8, 22);
+  const callbacks = authority.createServer((req, res, work) => admitNativeCallback(callbackBudget, req, res, work)); callbackOrigin = await listen(callbacks);
   const callbackServers = [callbacks];
   const enrollment = await call('enrollment', { originRef: 'protected-origin', engineIncarnation: incarnation, qualificationRef: profile.qualificationRef });
   assert.equal(enrollment.status, 200); assert.deepEqual(await enrollment.json(), { ok: true });
@@ -316,13 +318,54 @@ async function fixture(mode: Mode = 'complete', options: { maxPending?: number; 
     delegate: async (worker: string) => {
       const delegateAuthority = new NativeAuthority({ kernel, store, config: { ...authority.configuration,
         enrollment: { ...authority.configuration.enrollment, worker } } });
-      const listener = delegateAuthority.createServer(); callbackServers.push(listener); callbackOrigin = await listen(listener);
+      const listener = delegateAuthority.createServer((req, res, work) => admitNativeCallback(callbackBudget, req, res, work));
+      callbackServers.push(listener); callbackOrigin = await listen(listener);
       return new NativeHTTPTransport(delegateAuthority);
     },
     stats: () => ({ posts, entries, permits, ackCalls }), stop: async () => {
-      barrier?.release.resolve(); await stop(facade); for (const listener of callbackServers) await stop(listener); await stop(peer);
+      barrier?.release.resolve(); await stop(facade); for (const listener of callbackServers) await stop(listener); await stop(peer); await callbackBudget.stop();
     } };
 }
+
+test('synthetic TCP/SQL: trusted preparation, first byte and terminal EOF survive a saturated data checkout lane', { timeout: 15_000 }, async () => {
+  const f = await fixture('held', { timeoutMs: 5000 }), reached = latch(), resume = latch();
+  const savedExecution = f.kernel.savedExecution.bind(f.kernel);
+  let initial = true;
+  f.kernel.savedExecution = async (...args: Parameters<typeof savedExecution>) => {
+    const saved = await savedExecution(...args);
+    // Pause only after the real ingress transaction has released its checkout.
+    // NativeAuthority must still perform its independent original validation.
+    if (initial) { initial = false; reached.resolve(); await resume.promise; }
+    return saved;
+  };
+  const requestId = randomUUID(), request = f.request(requestId);
+  void request.catch(() => undefined);
+  const held: pg.PoolClient[] = [], waiting: Promise<void>[] = [];
+  try {
+    await waitFor(reached.promise);
+    const checkout = sharedCheckout(pool);
+    held.push(...await Promise.all(Array.from({ length: 6 }, () => inServiceLane('data', checkout))));
+    const backends = await Promise.all(held.map(client => client.query('SELECT pg_backend_pid() AS pid')));
+    assert.equal(new Set(backends.map(result => result.rows[0].pid)).size, 6, 'six real physical data clients');
+    for (let n = 0; n < 8; n++) {
+      const pending = inServiceLane('data', checkout).then(client => client.release());
+      void pending.catch(() => undefined); waiting.push(pending);
+    }
+    await assert.rejects(inServiceLane('data', checkout), (error: unknown) => error instanceof KernelError && error.code === 'unavailable');
+    resume.resolve(); await waitFor(f.entered);
+    f.releaseHeld();
+    const result = await request;
+    assert.equal(result.response.status, 200); assert.equal(result.failed, false, 'HTTP EOF arrives while data checkouts remain saturated');
+    assert.equal((await inServiceLane('control', () => f.kernel.request(f.context, f.saved.admission.executionRef, requestId))).effect, 'completed');
+    assert.equal(await f.occupied(requestId), false);
+    const receipt = f.records.get(requestId); assert.ok(receipt);
+    assert.equal(receipt.phase, 'closed'); assert.equal(receipt.acknowledged, true);
+    assert.deepEqual(f.stats(), { posts: 1, entries: 1, permits: 1, ackCalls: 1 });
+  } finally {
+    resume.resolve(); held.forEach(client => client.release());
+    await Promise.allSettled(waiting); await f.stop(); await request.catch(() => undefined);
+  }
+});
 
 test('synthetic TCP/SQL: positive owner closure releases concurrency1 for two requests in the SAME OPEN execution', async () => {
   const f = await fixture(); try {

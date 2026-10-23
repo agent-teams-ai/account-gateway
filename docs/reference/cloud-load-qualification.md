@@ -22,7 +22,7 @@ describe only executions produced by this implementation; historical reports
 are not imported as passing evidence.
 
 The workflow [Production full-stack E2E and bounded load](../../.github/workflows/fullstack-load.yaml)
-runs smoke on every pull request for both Node runtimes. Its `workflow_dispatch`
+runs all eight scenarios on every pull request for both Node runtimes. Its `workflow_dispatch`
 input selects smoke or all eight scenarios. Missing prerequisites, missing
 scenarios, an inconclusive backpressure experiment, a nonzero test exit, or an
 unreconciled effect fail the job. The operator never converts these into skips.
@@ -40,6 +40,7 @@ unreconciled effect fail the job. The operator never converts these into skips.
 | PostgreSQL | 17.10; native production migrations and all gateway migrations |
 | CI PostgreSQL image | `postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317` |
 | Measured network | Loopback only, no IPv4 routes, external probe returns `ENETUNREACH` |
+| Bounded TCP profile | Private namespace `tcp_rmem` and `tcp_wmem`: `4096 16384 65536`; `tcp_moderate_rcvbuf`: `0` |
 
 `build-native-fixture.ts` verifies a clean native checkout and its exact commit,
 builds the production executable, then generates a temporary Go adapter that
@@ -48,6 +49,14 @@ every applied migration checksum and emits a source migration digest. It does
 not serve requests or replace the native runtime. Its temporary source is
 removed, and the checkout must remain clean. The build receipt binds both
 executables and the embedded adapter source by SHA-256.
+
+The explicit TCP profile makes upstream backpressure observable before the
+8-MiB output bound. Default autotuned receive buffers can exceed the entire
+fixture output, producing an inconclusive slow-reader experiment. The workflow
+sets these values only in its disposable container's network namespace; the
+operator records the actual readbacks and requires this profile for `all` and
+`slow-reader`. Host TCP settings remain unchanged. Focused non-backpressure
+scenarios can use the recorded environment defaults.
 
 The service drops the Go process to UID/GID 65534. Its executable is in a
 root-owned directory with traversable ancestors; configuration, synthetic
@@ -75,6 +84,17 @@ direct control traffic. A request's existing deadline covers both waiting and
 wire time. Cancellation, queue overflow and expiry before admission perform no
 HTTP request. The active permit is retained through physical socket closure.
 There is no inference retry or failover.
+
+Pressure qualification also reproduced a completed provider response whose HTTP
+stream lost EOF: after native completion and acknowledgement, the facade's
+terminal SQL read still competed with new data admission. Trusted native
+preparation, original proof recovery, first-byte status and terminal stream
+readback now use the reserved control SQL lane. Initial public grant/body
+validation remains in the data lane. No SQL checkout is retained across a native
+HTTP wait, and exceptions still preserve ambiguous effects. A real HTTP and
+PostgreSQL regression holds all six data clients and eight SQL waiters while
+verifying native preparation, completion, acknowledgement and successful client
+EOF through the control reserve.
 
 Cleanup previously attempted one durable job per cleanup turn. A successful
 turn now settles at most eight jobs and stops starting new work after one
@@ -201,8 +221,9 @@ node services/account-gateway/test/load/build-native-fixture.ts \
   --output /absolute/disposable/native-build
 ```
 
-Inside a disposable root container with `--network none`, PostgreSQL 17.10,
-OpenSSL, the selected Node runtime and read-only source/build mounts:
+Inside a disposable root container with `--network none`, the three TCP
+`--sysctl` settings from the workflow, PostgreSQL 17.10, OpenSSL, the selected
+Node runtime and read-only source/build mounts:
 
 ```sh
 node /absolute/account-gateway/services/account-gateway/test/load/provision.ts \
@@ -216,12 +237,14 @@ node /absolute/account-gateway/services/account-gateway/test/load/provision.ts \
 
 The checked-in workflow contains the complete mount, toolchain and invocation
 recipe. Select **Run workflow → suite: all** for the full matrix on both Node
-versions. Pull requests run `suite: smoke` automatically. The namespace runner
+versions. Pull requests run `suite: all` automatically; `suite: smoke` remains an
+explicit manual option. The namespace runner
 uses `--trust-mode bind` only inside a separately established private mount and
 network namespace. Directly running the operator on an ordinary host network is
 rejected.
 
-For targeted diagnosis with an already provisioned private manifest,
-`AG_LOAD_SCENARIOS` selects exactly one of the eight scenario names. Omitting it
-selects the full matrix; an unknown name is rejected. Targeted runs do not replace
-the full matrix's evidence, and edited source requires a fresh qualification.
+For targeted diagnosis, the operator also accepts an individual scenario name
+as `--suite`. With an already provisioned private manifest, `AG_LOAD_SCENARIOS`
+selects one of the same eight names. Omitting that variable selects the full
+matrix; an unknown name is rejected. Targeted runs do not replace the full
+matrix's evidence, and edited source requires a fresh qualification.
