@@ -1,8 +1,10 @@
 import type { PoolClient } from 'pg';
 
-// IDs have no time namespace. Replay hashes, issuer history, the full approved
-// readback tuple, unknown invocation fences and exact native proofs are retained
-// indefinitely. Saturation bounds their growth; compaction never refunds facts.
+// Execution/prepare tombstones remain permanent replay namespaces. Request
+// details only expire for explicitly opted-in executions with bound v2 native
+// nonces, positive terminal effects, exact ACKs and completed cleanup. Legacy,
+// uncertain and occupied evidence never retires. Expired detail readback is
+// unknown; the irreversible namespace marker denies every future claim.
 //
 // Redundant JSON intent expires at the numeric approved deadline, conditional on
 // a non-open execution, positive terminal effects, exact closure and durable done
@@ -32,4 +34,8 @@ export async function compactSafePayloads(db: PoolClient, consumer: string, batc
         AND o.state IN ('applied','rejected') AND o.intent IS NOT NULL RETURNING o.id
     ) UPDATE executions e SET intent=NULL FROM safe s WHERE e.consumer=$1 AND e.ref=s.ref AND e.intent IS NOT NULL`,
   [consumer, batch]);
+  // SQL marks one eligible namespace irreversibly, then removes at most batch
+  // request rows and their usage revisions. It refunds only those request units
+  // under consumer/account -> service-budget order. Other tombstones stay charged.
+  await db.query('SELECT retire_closed_request_details($1,$2)', [consumer, batch]);
 }

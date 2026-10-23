@@ -6,6 +6,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { execFileSync } from 'node:child_process';
 import pg from 'pg';
 import { PostgresKernel } from '../src/postgres.ts';
+import { requestBoundNonce } from '../src/native-reservation.ts';
+import { PostgresUsageJournal } from '../src/usage.ts';
 import * as serviceComposition from '../src/service.ts';
 import { KernelError, defaults, factDefaults } from '../src/domain.ts';
 import type { TrustedContext, AccountIntent, ApprovedPreparation, OperationStatus, PrivateAdmission, CleanupClaim, TransportClosure, NativeReservation, NativeDispatchProof } from '../src/domain.ts';
@@ -168,6 +170,9 @@ after(async () => {
 const reservation = (): NativeReservation => ({
   originRef: 'sandbox-native-origin', engineIncarnation: randomUUID(), requestNonce: randomUUID(),
 });
+const boundReservation = (ctx: TrustedContext, ref: string, id: string): NativeReservation => {
+  const native = reservation(); return { ...native, requestNonce: requestBoundNonce(ctx, native, ref, id) };
+};
 const nativeLegacy = { ctx: { consumerId: 'native-legacy-' + randomUUID() },
   account: '', execution: '', worker: '', generation: '', token: randomUUID() };
 const context = (): TrustedContext => ({ consumerId: 'test-' + randomUUID() });
@@ -360,6 +365,154 @@ test('SQL009 simultaneous direct bootstrap charges one consumer exactly once', a
   const after = (await admin.query('SELECT used FROM ag_kernel.fact_budget')).rows[0].used;
   assert.equal(BigInt(after) - BigInt(before), BigInt(row.fact_used));
   assert.equal(BigInt(row.fact_used), 1n + BigInt(factDefaults.workerSlots + factDefaults.issuerSlots));
+});
+
+test('SQL010 SQL and native v2 nonce derivation share an exact binding vector', async () => {
+  const ctx = { consumerId: 'fixture-consumer' }, native = { originRef: 'sandbox-native-origin',
+    engineIncarnation: '11111111-1111-4111-8111-111111111111' };
+  const ref = '22222222-2222-4222-8222-222222222222', id = 'request-A';
+  const expected = '207e4967-3dea-824e-abbe-b2bcb615b123';
+  assert.equal(requestBoundNonce(ctx, native, ref, id), expected);
+  assert.equal((await admin.query('SELECT ag_kernel.request_bound_nonce($1,$2,$3,$4,$5) AS nonce',
+    [ctx.consumerId, native.originRef, native.engineIncarnation, ref, id])).rows[0].nonce, expected);
+  assert.notEqual(requestBoundNonce(ctx, native, ref, id + '-new'), expected);
+  assert.notEqual(requestBoundNonce({ consumerId: 'other' }, native, ref, id), expected);
+  const actual = context(), account = await connected(actual), owner = await worker(actual), run = await prepared(actual, account.accountRef!);
+  const binding = boundReservation(actual, run.result.executionRef!, 'original-binding');
+  const before = (await admin.query('SELECT used FROM ag_kernel.fact_budget')).rows[0].used;
+  let code: unknown;
+  try {
+    await admin.query(`INSERT INTO ag_kernel.requests(consumer,execution_ref,id,effect,worker,transport_occupied,
+      closure_token,native_origin_ref,engine_incarnation,request_nonce,descriptor_generation)
+      VALUES($1,$2,'moved-binding','dispatch_started',$3,true,$4,$5,$6,$7,$8)`,
+    [actual.consumerId, run.result.executionRef, owner, randomUUID(), binding.originRef, binding.engineIncarnation,
+      binding.requestNonce, (await a.savedExecution(actual, run.result.executionRef!)).generation]);
+  } catch (error) { code = (error as { code?: unknown }).code; }
+  assert.equal(code, '23514', 'SQL independently rejects moving a v2 nonce to a different request');
+  assert.equal((await admin.query('SELECT used FROM ag_kernel.fact_budget')).rows[0].used, before);
+});
+
+test('SQL010 explicit settled readback expires in bounded batches without reviving its namespace', async () => {
+  const ctx = context(), owner = await worker(ctx), retention = { requestReadbackRetentionMs: 300 };
+  const kernel = new PostgresKernel(poolA, { ...defaults, maxConcurrent: 3, maintenanceBatch: 2 }, factDefaults, retention);
+  retention.requestReadbackRetentionMs = 1; // Accepted policy was captured at construction.
+  const account = await connected(ctx, kernel), run = await prepared(ctx, account.accountRef!, {
+    limits: { requests: 4, concurrency: 3, requestBytes: 4096, outputBytes: 8192, tokens: 5000 },
+  }, kernel);
+  const ref = run.result.executionRef!, journal = new PostgresUsageJournal(poolB, Buffer.alloc(32, 7));
+  const proofs = new Map<string, NativeDispatchProof>();
+  for (const id of ['detail-a', 'detail-b', 'detail-c']) {
+    const claim = await kernel.claim(ctx, ref, id, owner, run.admission, boundReservation(ctx, ref, id));
+    assert.ok(claim.dispatch); proofs.set(id, claim.dispatch.closure);
+    await kernel.effect(ctx, ref, id, owner, 'response_started'); await kernel.effect(ctx, ref, id, owner, 'completed');
+    await journal.append(ctx, { schemaVersion: 1, eventId: id, revision: 2, executionRef: ref, requestRef: id,
+      invocationRef: run.input.invocationRef, attemptRef: run.input.attemptRef, accountRef: account.accountRef!,
+      profileId: run.input.profile, model: 'synthetic-model', occurredAt: new Date().toISOString(), effect: 'completed',
+      completeness: 'partial', inputTokens: 3, outputTokens: 2, cachedInputTokens: null, reasoningTokens: null, cost: null });
+  }
+  await kernel.close(ctx, op(), ref);
+  await delay(350); // The logical close is older than the accepted readback window.
+  await kernel.reconcile(ctx);
+  assert.equal((await kernel.request(ctx, ref, 'detail-a')).effect, 'completed', 'occupied transports retain readback');
+  for (const proof of proofs.values()) await kernel.acknowledgeTransportClosed(ctx, owner, proof);
+  const job = await kernel.claimCleanup(ctx, owner); assert.ok(job?.scope.kind === 'execution');
+  await kernel.settleCleanup(ctx, job.cleanupRef, owner, job.token, true);
+  const before = (await admin.query(`SELECT c.fact_used AS consumer,a.fact_used AS account,b.used AS service,
+    e.request_readback_retention_ms AS retention,e.deadline FROM ag_kernel.executions e
+    JOIN ag_kernel.consumers c ON c.consumer=e.consumer JOIN ag_kernel.accounts a ON a.consumer=e.consumer AND a.ref=e.account_ref
+    CROSS JOIN ag_kernel.fact_budget b WHERE e.consumer=$1 AND e.ref=$2`, [ctx.consumerId, ref])).rows[0];
+  assert.equal(Number(before.retention), 300);
+  assert.ok(before.deadline.getTime() > Date.now() + 30_000, 'the original run deadline is still in the future');
+  await kernel.reconcile(ctx);
+  assert.equal((await kernel.request(ctx, ref, 'detail-a')).effect, 'completed', 'full window follows completed physical cleanup');
+  await delay(350);
+  await kernel.reconcile(ctx);
+  const retained = (await admin.query('SELECT id FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 ORDER BY id',
+    [ctx.consumerId, ref])).rows;
+  assert.deepEqual(retained, [{ id: 'detail-c' }], 'physical deletion is bounded by maintenanceBatch');
+  await assert.rejects(kernel.request(ctx, ref, 'detail-c'), isCode('unknown'), 'marker expires all namespace readback at once');
+  await assert.rejects(kernel.requestProof(ctx, ref, 'detail-c'), isCode('unknown'));
+  await assert.rejects(kernel.dispatchSnapshot(ctx, ref, owner, 'detail-c'), isCode('unknown'));
+  await assert.rejects(kernel.claim(ctx, ref, 'detail-a', owner, run.admission, boundReservation(ctx, ref, 'detail-a')), isCode('denied'));
+  await assert.rejects(kernel.claim(ctx, ref, 'fresh-after-retirement', owner, run.admission,
+    boundReservation(ctx, ref, 'fresh-after-retirement')), isCode('denied'));
+  const newer = await prepared(ctx, account.accountRef!, {}, kernel), spent = proofs.get('detail-a')!.native;
+  await assert.rejects(kernel.claim(ctx, newer.result.executionRef!, 'moved-nonce', owner, newer.admission, spent), isCode('denied'));
+  await kernel.reconcile(ctx); await kernel.reconcile(ctx);
+  assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2', [ctx.consumerId, ref]), 0);
+  assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.usage_observations WHERE consumer=$1 AND execution_ref=$2', [ctx.consumerId, ref]), 0);
+  const after = (await admin.query(`SELECT c.fact_used AS consumer,a.fact_used AS account,b.used AS service
+    FROM ag_kernel.consumers c JOIN ag_kernel.accounts a ON a.consumer=c.consumer CROSS JOIN ag_kernel.fact_budget b
+    WHERE c.consumer=$1 AND a.ref=$2`, [ctx.consumerId, account.accountRef])).rows[0];
+  // The new execution/prepare adds four retained units; expired request details release three.
+  for (const scope of ['consumer', 'account', 'service']) assert.equal(BigInt(after[scope]), BigInt(before[scope]) + 1n);
+  assert.deepEqual(await kernel.prepare(ctx, run.input), run.result);
+  assert.deepEqual(await kernel.operation(ctx, run.input.operationId), run.result);
+  assert.deepEqual((await kernel.savedExecution(ctx, ref)).admission, run.admission);
+  assert.equal((await kernel.savedExecution(ctx, ref)).dispatchAllowed, false);
+  const totals = (await admin.query(`SELECT used,(SELECT 1+sum(fact_used) FROM ag_kernel.consumers) AS expected
+    FROM ag_kernel.fact_budget`)).rows[0]; assert.equal(totals.used, totals.expected);
+  let code: unknown;
+  try { await admin.query("UPDATE ag_kernel.executions SET state='open' WHERE consumer=$1 AND ref=$2", [ctx.consumerId, ref]); }
+  catch (error) { code = (error as { code?: unknown }).code; }
+  assert.equal(code, '23514', 'retired execution cannot reopen even through direct SQL');
+  code = undefined;
+  try { await admin.query('UPDATE ag_kernel.executions SET request_details_retired_at=NULL WHERE consumer=$1 AND ref=$2', [ctx.consumerId, ref]); }
+  catch (error) { code = (error as { code?: unknown }).code; }
+  assert.equal(code, '23514', 'retirement marker is irreversible');
+});
+
+test('SQL010 retirement retains unknown, occupied, uncleaned, legacy and disabled request details', async () => {
+  const ctx = context(), owner = await worker(ctx);
+  const kernel = new PostgresKernel(poolA, defaults, factDefaults, { requestReadbackRetentionMs: 20 });
+  for (const kind of ['unknown', 'occupied', 'uncleaned', 'legacy', 'disabled'] as const) {
+    const selected = kind === 'disabled' ? a : kernel;
+    const account = await connected(ctx, selected), run = await prepared(ctx, account.accountRef!, {}, selected), ref = run.result.executionRef!;
+    const native = kind === 'legacy' ? reservation() : boundReservation(ctx, ref, kind);
+    const claim = await selected.claim(ctx, ref, kind, owner, run.admission, native); assert.ok(claim.dispatch);
+    if (kind === 'unknown') await selected.effect(ctx, ref, kind, owner, 'effect_unknown');
+    else { await selected.effect(ctx, ref, kind, owner, 'response_started'); await selected.effect(ctx, ref, kind, owner, 'completed'); }
+    if (kind !== 'occupied') await selected.acknowledgeTransportClosed(ctx, owner, claim.dispatch.closure);
+    await selected.close(ctx, op(), ref);
+    const job = await selected.claimCleanup(ctx, owner); assert.ok(job?.scope.kind === 'execution');
+    if (kind !== 'occupied' && kind !== 'uncleaned') await selected.settleCleanup(ctx, job.cleanupRef, owner, job.token, true);
+    await delay(30); await selected.reconcile(ctx);
+    assert.equal((await selected.request(ctx, ref, kind)).effect, kind === 'unknown' ? 'effect_unknown' : 'completed');
+    assert.deepEqual(await selected.requestProof(ctx, ref, kind), claim.dispatch.closure);
+    assert.equal((await admin.query('SELECT request_details_retired_at FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2',
+      [ctx.consumerId, ref])).rows[0].request_details_retired_at, null);
+  }
+});
+
+test('trusted profile account caps admit 32 parallel requests across executions without widening default or adjacent profiles', async () => {
+  const bounds = { ...defaults, maxConcurrent: 32 }, caps = [{ profile: 'mimo-test', concurrency: 32 }, { profile: 'mimo-low', concurrency: 1 }];
+  const x = new PostgresKernel(poolA, bounds, factDefaults, { accountConcurrencyByProfile: caps });
+  const y = new PostgresKernel(poolB, bounds, factDefaults, { accountConcurrencyByProfile: caps });
+  caps[0].concurrency = 64; caps[1].concurrency = 32;
+  const ctx = context(), owner = await worker(ctx, x), account = await connected(ctx, x);
+  const limits = { requests: 64, concurrency: 32, requestBytes: 4096, outputBytes: 8192, tokens: 5000 };
+  const left = await prepared(ctx, account.accountRef!, { limits }, x), right = await prepared(ctx, account.accountRef!, { limits }, x);
+  for (let i = 0; i < 16; i++) {
+    const pair = await Promise.all([x.claim(ctx, left.result.executionRef!, 'left-' + i, owner, left.admission, reservation()),
+      y.claim(ctx, right.result.executionRef!, 'right-' + i, owner, right.admission, reservation())]);
+    assert.equal(pair.every(result => !!result.dispatch), true);
+  }
+  assert.equal(await occupancy(ctx, account.accountRef!), 32);
+  const overflow = await y.claim(ctx, right.result.executionRef!, 'account-overflow', owner, right.admission, reservation());
+  assert.equal(overflow.dispatch, undefined); assert.equal(overflow.status.code, 'concurrency_limit');
+  const stagedLow = await staged(ctx, { profile: 'mimo-low' }, x), candidate = await x.startCandidate(ctx, stagedLow.operationRef, owner); assert.ok(candidate);
+  const low = await x.acknowledgeCandidate(ctx, stagedLow.operationRef, owner,
+    { generation: candidate.candidate, nativePhysicalIdentity: randomUUID(), profile: candidate.profile });
+  const first = await prepared(ctx, low.accountRef!, { profile: 'mimo-low' }, x), second = await prepared(ctx, low.accountRef!, { profile: 'mimo-low' }, x);
+  assert.ok((await x.claim(ctx, first.result.executionRef!, 'low-first', owner, first.admission, reservation())).dispatch);
+  const denied = await y.claim(ctx, second.result.executionRef!, 'low-second', owner, second.admission, reservation());
+  assert.equal(denied.dispatch, undefined); assert.equal(denied.status.code, 'concurrency_limit');
+  const escalated = await y.claim(ctx, second.result.executionRef!, 'caller-escalation', owner,
+    { ...second.admission, limits: { ...second.admission.limits, concurrency: 2 } }, reservation());
+  assert.equal(escalated.dispatch, undefined); assert.equal(escalated.status.code, 'fenced');
+  assert.equal(defaults.maxConcurrent, 1);
+  assert.throws(() => new PostgresKernel(poolA, { ...defaults, maxConcurrent: 128 }, factDefaults,
+    { accountConcurrencyByProfile: [{ profile: 'mimo-test', concurrency: 65 }] }), isCode('invalid'));
 });
 async function count(sql: string, values: unknown[]) {
   const n = Number((await admin.query(sql, values)).rows[0].n);
