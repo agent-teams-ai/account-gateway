@@ -117,6 +117,14 @@ PostgreSQL regression holds all six data clients and eight SQL waiters while
 verifying native preparation, completion, acknowledgement and successful client
 EOF through the control reserve.
 
+The slow-reader run also exposed a valid stream being canceled on Node 24:
+HTTP iterator reads coalesced above 64 KiB, exceeding the facade's per-chunk
+bound even though the complete response remained within its approved limit.
+The native adapter now delivers ordered copies of at most 64 KiB on demand and
+checks cancellation between slices. The facade bound, aggregate output limit,
+first-byte effect transition and exact EOF/closure checks remain in force.
+The same slow-reader workload and its backpressure oracle qualify this fix.
+
 Cleanup previously attempted one durable job per cleanup turn. A successful
 turn now settles at most eight jobs and stops starting new work after one
 second. The first unresolved job ends that turn. OAuth still receives the next

@@ -5,8 +5,10 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { Server, ServerResponse } from 'node:http';
+import { once } from 'node:events';
 import { connect } from 'node:net';
 import { readFile, readdir } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
 import { PostgresKernel } from '../src/postgres.ts';
 import { AccountManagement } from '../src/management.ts';
@@ -14,6 +16,7 @@ import { IntentSecrets, PostgresManagementStore } from '../src/management-store.
 import { NativeManagementClient, NativeOAuthEnrollmentClient, NativeFailure } from '../src/native-client.ts';
 import type { OAuthScope } from '../src/management.ts';
 import { createFacade, FacadeBearers } from '../src/facade.ts';
+import type { NativeTransport } from '../src/facade.ts';
 import { NativeAuthority } from '../src/native-authority.ts';
 import { NativeHTTPTransport } from '../src/native-transport.ts';
 import { NativeControlAdmission, admitNativeCallback, inServiceLane, sharedCheckout } from '../src/service-admission.ts';
@@ -116,7 +119,7 @@ test('private refresh HTTP: original four fields, finite safe ACK and one capped
     if (fixtureError) throw fixtureError;
   } finally { await stop(peer); }
 });
-type Mode = 'complete' | 'unclosed' | 'closeFailed' | 'partial' | 'overflow' | 'noentry' | 'lost-admit-ack' | 'redirect' | 'held' | 'early-ack';
+type Mode = 'complete' | 'unclosed' | 'closeFailed' | 'partial' | 'overflow' | 'noentry' | 'lost-admit-ack' | 'redirect' | 'held' | 'early-ack' | 'large';
 interface NativeInput { requestRef: string; worker: string; admission: PrivateAdmission; descriptor: Descriptor }
 function latch() {
   let resolve!: () => void;
@@ -136,6 +139,11 @@ async function waitFor(promise: Promise<void>): Promise<void> {
 }
 
 async function fixture(mode: Mode = 'complete', options: { maxPending?: number; timeoutMs?: number } = {}) {
+  const executionLimits = mode === 'large' ? { ...limits, outputBytes: 1_048_576 } : limits;
+  const streamFrames = mode === 'large' ? Array.from({ length: 256 }, () => Buffer.from('data: ' +
+    JSON.stringify({ type: 'response.output_text.delta', delta: 'x'.repeat(2197) }) + '\n\n')) : [];
+  const expectedStream = Buffer.concat([Buffer.from('data: fixture\n\n'), ...streamFrames]);
+  const transportChunkSizes: number[] = [];
   const context = { consumerId: 'native-' + randomUUID() }, worker = randomUUID(), incarnation = randomUUID();
   const kernel = new PostgresKernel(pool), store = new PostgresManagementStore(pool, new IntentSecrets(randomBytes(32), randomBytes(32)));
   await kernel.heartbeat(context, worker);
@@ -153,7 +161,7 @@ async function fixture(mode: Mode = 'complete', options: { maxPending?: number; 
   const prepared = await kernel.prepare(context, { operationId: randomUUID(), intentDigest: 'synthetic-approval',
     invocationRef: 'invocation-' + randomUUID(), attemptRef: 'opaque-attempt', permittedAccounts: [account.accountRef],
     profile: profile.profile, policySubject: 'binding-fixture', policyRevision: 2, bindingRevision: 3,
-    issuerEpoch: await kernel.issuer(context), deadline: new Date(Date.now() + 45_000), limits });
+    issuerEpoch: await kernel.issuer(context), deadline: new Date(Date.now() + 45_000), limits: executionLimits });
   assert.ok(prepared.executionRef);
   const saved = await kernel.savedExecution(context, prepared.executionRef);
   let barrier: ReturnType<typeof admissionBarrier> | undefined;
@@ -246,6 +254,16 @@ async function fixture(mode: Mode = 'complete', options: { maxPending?: number; 
         if (mode === 'held') { heldResponse = res; heldReceipt = r; return; }
         if (mode === 'partial') { res.flushHeaders(); setTimeout(() => res.destroy(), 10); return; }
         if (mode === 'overflow') res.write(Buffer.alloc(limits.outputBytes + 1, 0x20));
+        if (mode === 'large') {
+          const closed = new AbortController(), onClose = () => closed.abort();
+          res.once('close', onClose);
+          try {
+            for (const frame of streamFrames) {
+              if (res.destroyed) return;
+              if (!res.write(frame)) await once(res, 'drain', { signal: closed.signal });
+            }
+          } finally { res.removeListener('close', onClose); }
+        }
         res.end(); return;
       }
       const input = JSON.parse(raw.toString()) as { proof: NativeDispatchProof; cleanup?: unknown }, p = input.proof;
@@ -279,7 +297,7 @@ async function fixture(mode: Mode = 'complete', options: { maxPending?: number; 
   const nativeOrigin = await listen(peer);
   const authority = new NativeAuthority({ kernel, store, config: { origin: nativeOrigin,
     enrollment: { originRef: 'protected-origin', engineIncarnation: incarnation, worker, qualificationRef: profile.qualificationRef },
-    consumers: [{ consumerId: context.consumerId, ...credentials }], profiles: [{ ...profile, requestBytes: 4096, outputBytes: 4096, tokens: 100, providerTokenUpperBound: 1000 }],
+    consumers: [{ consumerId: context.consumerId, ...credentials }], profiles: [{ ...profile, requestBytes: 4096, outputBytes: executionLimits.outputBytes, tokens: 100, providerTokenUpperBound: 1000 }],
     timeoutMs: options.timeoutMs ?? (mode === 'early-ack' ? 5000 : 1000), closureWaitMs: 50, maxPending: options.maxPending } });
   const callbackBudget = new NativeControlAdmission(8, 22);
   const callbacks = authority.createServer((req, res, work) => admitNativeCallback(callbackBudget, req, res, work)); callbackOrigin = await listen(callbacks);
@@ -287,11 +305,24 @@ async function fixture(mode: Mode = 'complete', options: { maxPending?: number; 
   const enrollment = await call('enrollment', { originRef: 'protected-origin', engineIncarnation: incarnation, qualificationRef: profile.qualificationRef });
   assert.equal(enrollment.status, 200); assert.deepEqual(await enrollment.json(), { ok: true });
   const transport = new NativeHTTPTransport(authority);
+  const facadeTransport: NativeTransport = mode === 'large' ? {
+    request: async input => {
+      const response = await transport.request(input);
+      if (response.kind !== 'stream') return response;
+      return { ...response, body: (async function* () {
+        // Real native HTTP has already arrived while the consumer is paused.
+        // Node 24 may coalesce multiple reads beyond its 64-KiB high-water mark.
+        await delay(30);
+        for await (const chunk of response.body) { transportChunkSizes.push(chunk.byteLength); yield chunk; }
+      })() };
+    },
+    cancel: transport.cancel.bind(transport)
+  } : transport;
   const management = new AccountManagement({ kernel, store, worker, custody: new IntentSecrets(randomBytes(32), randomBytes(32)), profiles: [profile],
     native: new NativeManagementClient({ origin: nativeOrigin, consumerId: context.consumerId, controlCredential: 'test-fixture-literal' }),
     proof: { async verify() { return true; } } });
   const bearer = 'test-fixture-literal-facade';
-  const facade = createFacade({ kernel, management, store, transport, enrollment: authority.configuration.enrollment,
+  const facade = createFacade({ kernel, management, store, transport: facadeTransport, enrollment: authority.configuration.enrollment,
     bearers: new FacadeBearers([{ role: 'execution', consumerId: context.consumerId, token: bearer, saved }]),
     profiles: [{ dto: { profileId: profile.profile, protocol: 'openai-responses', modelIds: [profile.model], authKinds: ['api_key'] }, maxOutputTokens: 1000 }],
     intentHmacKey: randomBytes(32), timeoutMs: Math.max(5000, options.timeoutMs ?? 0) });
@@ -302,11 +333,13 @@ async function fixture(mode: Mode = 'complete', options: { maxPending?: number; 
       method: 'POST', headers: { authorization: 'Bearer ' + bearer, 'content-type': 'application/json', accept: 'text/event-stream',
         'x-gateway-request-id': requestId, 'x-gateway-admission': JSON.stringify(publicAdmission) }, body: Buffer.from(body), signal });
     let failed = response.status !== 200 && response.status !== 202;
-    try { await response.arrayBuffer(); } catch { failed = true; }
-    return { requestId, response, failed };
+    let bytes: Buffer | undefined;
+    try { bytes = Buffer.from(await response.arrayBuffer()); } catch { failed = true; }
+    return { requestId, response, failed, bytes };
   };
   const occupied = async (requestId: string) => (await pool.query('SELECT transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND id=$2', [context.consumerId, requestId])).rows[0].transport_occupied as boolean;
   return { context, kernel, store, worker, saved, authority, transport, call, callbackOrigin, records, raws, request, occupied, entered,
+    expectedStream, transportChunkSizes,
     armBarrier: (id: string) => { barrier = admissionBarrier(id); return barrier; },
     releaseHeld: () => {
       assert.ok(heldResponse && heldReceipt);
@@ -326,6 +359,27 @@ async function fixture(mode: Mode = 'complete', options: { maxPending?: number; 
       barrier?.release.resolve(); await stop(facade); for (const listener of callbackServers) await stop(listener); await stop(peer); await callbackBudget.stop();
     } };
 }
+
+test('synthetic TCP/SQL: coalesced native HTTP reads preserve bounded delivery, exact bytes and acknowledged EOF', { timeout: 15_000 }, async () => {
+  const f = await fixture('large', { timeoutMs: 5000 });
+  try {
+    const result = await f.request();
+    assert.equal(result.response.status, 200);
+    assert.equal(result.failed, false, 'a valid accepted stream must reach client EOF after delayed initial reading');
+    assert.ok(result.bytes);
+    assert.ok(result.bytes.byteLength > 65_536, 'the real TCP stream exceeds one delivery buffer');
+    assert.equal(Buffer.compare(result.bytes, f.expectedStream), 0, 'every original stream byte arrives in order');
+    assert.ok(f.transportChunkSizes.length > 1);
+    assert.ok(f.transportChunkSizes.every(size => size > 0 && size <= 65_536), 'every actual transport yield respects the existing facade buffer bound');
+    assert.equal(f.transportChunkSizes.reduce((sum, size) => sum + size, 0), f.expectedStream.byteLength);
+    assert.equal((await f.kernel.request(f.context, f.saved.admission.executionRef, result.requestId)).effect, 'completed');
+    assert.equal(await f.occupied(result.requestId), false);
+    const receipt = f.records.get(result.requestId); assert.ok(receipt);
+    assert.equal(receipt.phase, 'closed'); assert.equal(receipt.acknowledged, true);
+    assert.deepEqual(receipt.proof, await f.kernel.requestProof(f.context, f.saved.admission.executionRef, result.requestId));
+    assert.deepEqual(f.stats(), { posts: 1, entries: 1, permits: 1, ackCalls: 1 });
+  } finally { await f.stop(); }
+});
 
 test('synthetic TCP/SQL: trusted preparation, first byte and terminal EOF survive a saturated data checkout lane', { timeout: 15_000 }, async () => {
   const f = await fixture('held', { timeoutMs: 5000 }), reached = latch(), resume = latch();

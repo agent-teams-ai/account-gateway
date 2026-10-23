@@ -11,6 +11,7 @@ import { denied, instant, jsonBody, now, physicallyClosed, post, proof, receipt,
 import type { CleanupLease, Receipt } from './native-wire.ts';
 
 const path = '/private/native/v1/transports';
+const streamChunkBytes = 65_536;
 export class NativeHTTPTransport implements NativeTransport {
   readonly #authority: NativeAuthority;
   readonly #controls?: NativeControlAdmission;
@@ -162,14 +163,20 @@ export class NativeHTTPTransport implements NativeTransport {
         try {
           for await (const chunk of response) {
             if (a.signal.aborted || cancellation) return denied();
-            const b = new Uint8Array(chunk as Uint8Array); size += b.byteLength;
+            if (!(chunk instanceof Uint8Array)) return denied();
+            size += chunk.byteLength;
             if (size > a.saved.admission.limits.outputBytes) return denied();
-            if (!started && b.byteLength) {
+            if (!started && chunk.byteLength) {
               started = true;
               const current = await inServiceLane('control', () => authority.kernel.request(a.context, a.saved.admission.executionRef, a.requestId));
               if (current.effect === 'dispatch_started') await a.callback.effect(a.proof!, 'response_started');
             }
-            yield b; // Pull-based Node iteration preserves backpressure.
+            // IncomingMessage iteration may coalesce reads beyond its high-water
+            // mark. Deliver bounded copies only as the facade pulls each slice.
+            for (let offset = 0; offset < chunk.byteLength; offset += streamChunkBytes) {
+              if (a.signal.aborted || cancellation) return denied();
+              yield new Uint8Array(chunk.subarray(offset, offset + streamChunkBytes));
+            }
           }
           if (!response.complete || a.signal.aborted || cancellation) return denied();
           await inServiceLane('control', () => transport.#settle(a));
