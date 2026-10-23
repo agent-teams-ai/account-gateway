@@ -309,13 +309,15 @@ async function fixture(options: FixtureOptions = {}) {
       profiles: [{ ...oauthProfile, requestBytes: bounds.requestBytes, outputBytes: bounds.outputBytes,
         tokens: bounds.tokens, providerTokenUpperBound: 1000 }], timeoutMs: 5000 } });
   const callbackServer = authority.createServer(); callbackOrigin = await listen(callbackServer);
+  // Restart reconstructs adapters while retaining the protected service key.
+  const intentHmacKey = randomBytes(32);
   async function startFacade(): Promise<string> {
     facade = createFacade({ kernel: new PostgresKernel(pool), management, store, bearers,
       profiles: [{ dto: { profileId: oauthProfile.profile, protocol: 'openai-responses',
         modelIds: [oauthProfile.model], authKinds: ['oauth'] }, maxOutputTokens: 1000 },
       { dto: { profileId: apiProfile.profile, protocol: 'openai-responses',
         modelIds: [apiProfile.model], authKinds: ['api_key'] }, maxOutputTokens: 1000 }],
-      intentHmacKey: randomBytes(32) });
+      intentHmacKey });
     return listen(facade);
   }
   let origin = await startFacade();

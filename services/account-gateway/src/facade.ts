@@ -205,7 +205,10 @@ export class FacadeBearers {
       const grant = Object.freeze({ role: 'execution' as const, consumerId, saved });
       this.#executionIssuers.set(grant, row.grant);
       return grant;
-    } catch { return; }
+    } catch (error) {
+      if (error instanceof KernelError && error.code === 'unavailable') throw error;
+      return;
+    }
   }
   // Protected owner lookup uses current management policy, never a raw bearer
   // or a cached consumer-to-owner association. Replacement revokes immediately.

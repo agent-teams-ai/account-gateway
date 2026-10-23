@@ -1217,6 +1217,11 @@ test('source HTTP: public execution callbacks hydrate authority, claim once and 
       limits:f.secondProfile.limits,deadline:new Date(Date.now()+10000).toISOString()},'source-public-run');
     assert.equal(access.status,200);const run=await access.json() as {bearer:string;admission:Record<string,unknown>};
     const requestRef=randomUUID(),lookup={executionBearer:run.bearer,requestRef};
+    const savedRead=f.kernel.savedExecution;
+    f.kernel.savedExecution=async()=>{throw new KernelError('unavailable');};
+    assert.equal((await f.callback('execution-authority',lookup)).status,503, 'preclaim SQL outage is unavailable rather than credential rejection');
+    assert.equal(f.requests.size,0);assert.equal(f.forwarded.length,0);
+    f.kernel.savedExecution=savedRead;
     const metadata=await f.callback('execution-authority',lookup);assert.equal(metadata.status,200);
     const approved=await metadata.json() as {consumerId:string;requestRef:string;worker:string;admission:{executionRef:string};descriptor:unknown};
     assert.equal(approved.consumerId,f.context.consumerId);assert.equal(approved.requestRef,requestRef);

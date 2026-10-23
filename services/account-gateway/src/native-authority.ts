@@ -4,7 +4,7 @@ import { oauthProfileDefinition } from './oauth-profiles.ts';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { approvedLimits, defaults, identifier, uuid } from './domain.ts';
+import { KernelError, approvedLimits, defaults, identifier, uuid } from './domain.ts';
 import type { ApprovedLimits, DurableKernel, ExecutionRead, NativeDispatchProof, RequestStatus, SavedExecution, TrustedContext } from './domain.ts';
 import type { FacadeBearers, NativeCallback, NativeTransport } from './facade.ts';
 import type { ManagementStore, CandidateJournal } from './management.ts';
@@ -494,7 +494,10 @@ export class NativeAuthority {
           }
         }
         send(200, { ok: true });
-      })().catch(() => send(403, { code: 'denied' })).finally(() => clearTimeout(timer));
+      })().catch(error => {
+        if (req.url === '/private/native/v1/execution-authority' && error instanceof KernelError && error.code === 'unavailable') send(503, { code: 'unavailable' });
+        else send(403, { code: 'denied' });
+      }).finally(() => clearTimeout(timer));
       };
       if (admit) admit(req, res, work); else void work();
     });
