@@ -42,11 +42,18 @@ boundaries:
     roots: [services/account-gateway/src/domain.ts]
     entrypoints: [services/account-gateway/src/domain.ts]
     allow: {boundaries: [], packages: [], builtins: [], runtimeReferences: []}
+  # Admission owns callback/HTTP lifetimes as well as the shared SQL checkout;
+  # concrete adapters depend on this boundary without gaining database policy.
+  - id: service-admission
+    dependencyMode: runtime
+    roots: [services/account-gateway/src/service-admission.ts]
+    entrypoints: [services/account-gateway/src/service-admission.ts]
+    allow: {boundaries: [kernel-domain], packages: [pg], builtins: ['node:async_hooks', 'node:http'], runtimeReferences: []}
   - id: kernel-postgres
     dependencyMode: runtime
-    roots: [services/account-gateway/src/postgres.ts, services/account-gateway/src/retention.ts, services/account-gateway/src/service-admission.ts]
-    entrypoints: [services/account-gateway/src/postgres.ts, services/account-gateway/src/retention.ts, services/account-gateway/src/service-admission.ts]
-    allow: {boundaries: [kernel-domain], packages: [pg], builtins: ['node:crypto', 'node:async_hooks'], runtimeReferences: []}
+    roots: [services/account-gateway/src/postgres.ts, services/account-gateway/src/retention.ts]
+    entrypoints: [services/account-gateway/src/postgres.ts, services/account-gateway/src/retention.ts]
+    allow: {boundaries: [service-admission, kernel-domain], packages: [pg], builtins: ['node:crypto'], runtimeReferences: []}
   - id: kernel-composition
     dependencyMode: runtime
     roots: [services/account-gateway/src/composition.ts]
@@ -56,7 +63,7 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/test/domain.test.ts, services/account-gateway/test/postgres.test.ts, services/account-gateway/test/postgres-client-error.test.ts, services/account-gateway/test/service-admission.test.ts]
     entrypoints: [services/account-gateway/test/domain.test.ts, services/account-gateway/test/postgres.test.ts, services/account-gateway/test/postgres-client-error.test.ts, services/account-gateway/test/service-admission.test.ts]
-    allow: {boundaries: [kernel-domain, kernel-postgres, foreground-service-entry], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:timers/promises', 'node:child_process', 'node:util'], runtimeReferences: []}
+    allow: {boundaries: [service-admission, kernel-domain, kernel-postgres, foreground-service-entry], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:timers/promises', 'node:child_process', 'node:util'], runtimeReferences: []}
 
   - id: native-management
     dependencyMode: runtime
@@ -67,12 +74,12 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/src/management-store.ts]
     entrypoints: [services/account-gateway/src/management-store.ts]
-    allow: {boundaries: [kernel-domain, kernel-postgres, native-management], packages: [pg], builtins: ['node:crypto'], runtimeReferences: []}
+    allow: {boundaries: [service-admission, kernel-domain, kernel-postgres, native-management], packages: [pg], builtins: ['node:crypto'], runtimeReferences: []}
   - id: native-management-http
     dependencyMode: runtime
     roots: [services/account-gateway/src/native-client.ts]
     entrypoints: [services/account-gateway/src/native-client.ts]
-    allow: {boundaries: [kernel-domain, native-management, contracts], packages: ['@agent-teams/account-gateway'], builtins: ['node:http', 'node:https'], runtimeReferences: []}
+    allow: {boundaries: [service-admission, kernel-domain, native-management, contracts], packages: ['@agent-teams/account-gateway'], builtins: ['node:http', 'node:https'], runtimeReferences: []}
   - id: native-management-tests
     dependencyMode: runtime
     roots: [services/account-gateway/test/management.test.ts, services/account-gateway/test/management-postgres.test.ts]
@@ -82,7 +89,7 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/src/facade.ts, services/account-gateway/src/facade-ingress.ts]
     entrypoints: [services/account-gateway/src/facade.ts, services/account-gateway/src/facade-ingress.ts]
-    allow: {boundaries: [kernel-domain, kernel-postgres, native-management, contracts, http, usage-journal], packages: ['@agent-teams/account-gateway'], builtins: ['node:http', 'node:crypto', 'node:events'], runtimeReferences: []}
+    allow: {boundaries: [service-admission, kernel-domain, kernel-postgres, native-management, contracts, http, usage-journal], packages: ['@agent-teams/account-gateway'], builtins: ['node:http', 'node:crypto', 'node:events'], runtimeReferences: []}
   - id: private-facade-tests
     dependencyMode: runtime
     roots: [services/account-gateway/test/facade-ingress.test.ts, services/account-gateway/test/facade-postgres.test.ts, services/account-gateway/test/run-access-postgres.test.ts, services/account-gateway/test/oauth-enrollment-postgres.test.ts, services/account-gateway/test/native-retained-custody-joined.ts]
@@ -92,12 +99,12 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/src/native-transport.ts, services/account-gateway/src/native-authority.ts, services/account-gateway/src/native-wire.ts, services/account-gateway/src/native-response-diagnostics.ts]
     entrypoints: [services/account-gateway/src/native-transport.ts, services/account-gateway/src/native-authority.ts, services/account-gateway/src/native-wire.ts, services/account-gateway/src/native-response-diagnostics.ts]
-    allow: {boundaries: [kernel-domain, kernel-postgres, native-management, private-facade, usage-journal], packages: [], builtins: ['node:http', 'node:https', 'node:crypto', 'node:timers/promises'], runtimeReferences: []}
+    allow: {boundaries: [service-admission, kernel-domain, kernel-postgres, native-management, private-facade, usage-journal], packages: [], builtins: ['node:http', 'node:https', 'node:crypto', 'node:timers/promises'], runtimeReferences: []}
   - id: native-transport-tests
     dependencyMode: runtime
     roots: [services/account-gateway/test/native-transport-postgres.test.ts, services/account-gateway/test/native-wire.test.ts, services/account-gateway/test/native-control-admission.test.ts, services/account-gateway/test/native-response-diagnostics.test.ts]
     entrypoints: [services/account-gateway/test/native-transport-postgres.test.ts, services/account-gateway/test/native-wire.test.ts, services/account-gateway/test/native-control-admission.test.ts, services/account-gateway/test/native-response-diagnostics.test.ts]
-    allow: {boundaries: [native-transport-http, kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http, private-facade], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:http', 'node:net', 'node:fs/promises', 'node:timers/promises'], runtimeReferences: []}
+    allow: {boundaries: [service-admission, native-transport-http, kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http, private-facade], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:http', 'node:net', 'node:fs/promises', 'node:timers/promises'], runtimeReferences: []}
   - id: native-runtime-assembly-tests
     dependencyMode: runtime
     roots: [services/account-gateway/test/native-runtime-assembly.test.ts]
@@ -112,7 +119,7 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/src/service.ts, services/account-gateway/src/service-config.ts, services/account-gateway/src/serve.ts]
     entrypoints: [services/account-gateway/src/serve.ts, services/account-gateway/src/service.ts, services/account-gateway/src/service-config.ts]
-    allow: {boundaries: [kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http, native-transport-http, private-facade, usage-journal], packages: [pg], builtins: ['node:child_process', 'node:crypto', 'node:http', 'node:fs', 'node:path'], runtimeReferences: []}
+    allow: {boundaries: [service-admission, kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http, native-transport-http, private-facade, usage-journal], packages: [pg], builtins: ['node:child_process', 'node:crypto', 'node:http', 'node:fs', 'node:path'], runtimeReferences: []}
   - id: foreground-service-runtime-test
     dependencyMode: runtime
     roots: [services/account-gateway/test/service-runtime.test.ts]
@@ -128,7 +135,7 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/src/usage.ts]
     entrypoints: [services/account-gateway/src/usage.ts]
-    allow: {boundaries: [kernel-domain, kernel-postgres, contracts], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:crypto'], runtimeReferences: []}
+    allow: {boundaries: [service-admission, kernel-domain, kernel-postgres, contracts], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:crypto'], runtimeReferences: []}
   - id: usage-tests
     dependencyMode: runtime
     roots: [services/account-gateway/test/usage.test.ts, services/account-gateway/test/usage-postgres.test.ts, services/account-gateway/test/usage-checkout.test.ts]
@@ -139,10 +146,16 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/test/usage-capacity-postgres.test.ts]
     entrypoints: [services/account-gateway/test/usage-capacity-postgres.test.ts]
-    allow: {boundaries: [usage-journal, kernel-domain, kernel-postgres, private-facade, native-management, native-management-postgres, native-management-http], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:timers/promises'], runtimeReferences: []}
+    allow: {boundaries: [service-admission, usage-journal, kernel-domain, kernel-postgres, private-facade, native-management, native-management-postgres, native-management-http], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:timers/promises'], runtimeReferences: []}
 
   - id: service-usage-runtime-test
     dependencyMode: runtime
     roots: [services/account-gateway/test/service-usage-runtime.test.ts]
     entrypoints: [services/account-gateway/test/service-usage-runtime.test.ts]
     allow: {boundaries: [foreground-service-entry, contracts, http], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:http', 'node:https', 'node:timers/promises'], runtimeReferences: []}
+
+  - id: fullstack-load-test
+    dependencyMode: runtime
+    roots: [services/account-gateway/test/load]
+    entrypoints: [services/account-gateway/test/load/stand.ts, services/account-gateway/test/load/provider.ts, services/account-gateway/test/load/model.test.ts, services/account-gateway/test/load/provision.ts, services/account-gateway/test/load/build-native-fixture.ts]
+    allow: {boundaries: [foreground-service-entry, contracts, http], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs', 'node:path', 'node:url', 'node:child_process', 'node:readline', 'node:http', 'node:https', 'node:net', 'node:timers/promises'], runtimeReferences: []}

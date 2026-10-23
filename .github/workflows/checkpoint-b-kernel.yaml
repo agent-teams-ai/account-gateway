@@ -56,6 +56,7 @@ jobs:
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run build
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run typecheck
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run test:domain
+      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run test:load:unit
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir services/account-gateway run test:management
       - name: Focused retirement readback and source catalog checks
         run: node --test --test-name-pattern='retirement readback|source catalog' services/account-gateway/test/service-runtime.test.ts
