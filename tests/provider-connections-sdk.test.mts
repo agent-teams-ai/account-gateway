@@ -59,7 +59,7 @@ test('capability client never converts 401, 403 or unsupported-contract into leg
   }
 });
 
-test('account-limits/v2 keeps closed units and periods and adapts through one consumer projection', async t => {
+test('account-limits/v2 keeps closed units and periods in the validated wire contract', async t => {
   const input = { ownerRef: 'owner-a', accountRef: 'account-a', profileId: 'glm-coding-global-responses-apikey-v1', expectedAuthorizationEpoch: 3 };
   const snapshot = { status: 'snapshot' as const, physicalGeneration: 'birth-a', principalVersion: 'principal-a', revision: 2,
     scope: 'subscription' as const, windows: [

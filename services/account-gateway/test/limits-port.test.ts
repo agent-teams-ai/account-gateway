@@ -11,9 +11,9 @@ const snapshot = { status: 'snapshot' as const, physicalGeneration: 'generation-
     observedAt: null, resetAt: '2026-10-23T12:00:00Z' }] };
 
 test('cached limits compares physical identity across the source await', async () => {
-  let identity = 'generation-a';
-  await assert.rejects(readCachedAccountLimits({ authorize: async () => true, currentIdentity: async () => ({ generation: identity }) },
-    { contract: 'account-limits/v2', read: async () => { identity = 'generation-b'; return snapshot; } }, input, expected),
+  let identity = 'physical-a';
+  await assert.rejects(readCachedAccountLimits({ authorize: async () => true, currentIdentity: async () => ({ generation: 'generation-a', nativePhysicalIdentity: identity }) },
+    { contract: 'account-limits/v2', read: async () => { identity = 'physical-b'; return snapshot; } }, input, expected),
   error => error instanceof KernelError && error.code === 'denied');
 });
 test('cached limits reauthorizes even after an unavailable source result', async () => {

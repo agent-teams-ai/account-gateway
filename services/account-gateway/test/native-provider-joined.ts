@@ -62,6 +62,7 @@ async function run(): Promise<void> {
     { encoding: 'utf8', timeout: 5000, maxBuffer: 131072 });
   const nativeHead = /vcs\.revision=([a-f0-9]{40})/.exec(buildInfo)?.[1];
   assert.ok(nativeHead);
+  assert.match(buildInfo, /(?:^|\s)vcs\.modified=false(?:\s|$)/, 'native binary must come from clean committed source');
   phase = 'gateway-source-provenance';
   const gatewayRoot = fileURLToPath(new URL('../../../', import.meta.url));
   const gatewayHead = process.env.AG_NATIVE_PROVIDER_JOINED_GATEWAY_BASE_SHA ?? execFileSync('git', ['rev-parse', 'HEAD'],
@@ -157,7 +158,8 @@ async function run(): Promise<void> {
   const foreign = createManagementClient({ role: 'management', origin, token: foreignToken });
   const consumer = createConsumerControlClient({ role: 'consumer-control', origin, token: consumerToken });
   const limitsClient = createAccountLimitsV2Client({ role: 'consumer-control', origin, token: consumerToken, contract: 'account-limits/v2' });
-  type ProviderStats = { dispatches: number; quotaGets: number; exchanges?: number; refreshes?: number };
+  type ProviderStats = { dispatches: number; quotaGets: number; exchanges?: number; refreshes?: number;
+    functionCalls: number; functionOutputs: number; customCalls: number; customOutputs: number };
   type Stats = Record<'kimi' | 'glm' | 'minimax' | 'grok', ProviderStats> & { unexpected: number };
   const controller = async (path: string, value?: unknown): Promise<Response> => fetch(ready.controllerOrigin + path, {
     method: value === undefined ? 'GET' : 'POST', headers: { authorization: 'Bearer ' + managementCredential,
@@ -266,6 +268,10 @@ async function run(): Promise<void> {
       await execution.close(executionRef, { operationId: randomUUID(), reason: 'completed' });
     }
     const after = await stats(); assert.equal(after[provider].dispatches - before[provider].dispatches, 2);
+    assert.equal(after[provider].functionCalls - before[provider].functionCalls, 1);
+    assert.equal(after[provider].functionOutputs - before[provider].functionOutputs, 1, 'native accepted the actual function continuation');
+    assert.equal(after[provider].customOutputs - before[provider].customOutputs,
+      after[provider].customCalls - before[provider].customCalls, 'every emitted custom call has a native-accepted output');
     assert.equal(after.unexpected, 0);
     phase = provider + '-read-only-quota-collector';
     const collect = await controller('/quotas/collect', limitsInput); assert.equal(collect.status, 204); await collect.arrayBuffer();

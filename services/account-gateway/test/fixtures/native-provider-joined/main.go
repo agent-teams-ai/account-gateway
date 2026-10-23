@@ -55,7 +55,64 @@ type counts struct {
 	FunctionOutputs int64 `json:"functionOutputs"`
 	CustomOutputs   int64 `json:"customOutputs"`
 }
-type counters struct{ dispatches, exchanges, refreshes, quotaGets, functionCalls, customCalls, functionOutputs, customOutputs atomic.Int64 }
+type counters struct {
+	dispatches, exchanges, refreshes, quotaGets, functionCalls, customCalls, functionOutputs, customOutputs atomic.Int64
+	toolMu                                                                                                  sync.Mutex
+	pendingTools                                                                                            *toolContinuation
+}
+
+type toolContinuation struct{ custom bool }
+
+// A provider may finish a tool turn only after consuming exactly the calls it
+// actually issued. Tool declarations on the continuation cannot change this.
+// The provider handler holds toolMu across validation and response emission.
+func (c *counters) consumeToolContinuation(raw json.RawMessage) (bool, error) {
+	var input []struct {
+		Type   string `json:"type"`
+		CallID string `json:"call_id"`
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(raw, &input); err != nil {
+		var initialText string
+		if c.pendingTools != nil || json.Unmarshal(raw, &initialText) != nil {
+			return false, deny
+		}
+		return false, nil
+	}
+	outputs := map[string]string{}
+	for _, item := range input {
+		// Custom calls are lowered to function calls on this provider wire.
+		if item.Type == "custom_tool_call_output" {
+			return false, deny
+		}
+		if item.Type != "function_call_output" {
+			continue
+		}
+		if item.CallID != "joined-call-1" && item.CallID != "joined-call-custom" || item.Output == "" {
+			return false, deny
+		}
+		if _, duplicate := outputs[item.CallID]; duplicate {
+			return false, deny
+		}
+		outputs[item.CallID] = item.Output
+	}
+	if c.pendingTools == nil {
+		if len(outputs) != 0 {
+			return false, deny
+		}
+		return false, nil
+	}
+	custom := c.pendingTools.custom
+	if outputs["joined-call-1"] == "" || custom && outputs["joined-call-custom"] == "" || !custom && outputs["joined-call-custom"] != "" {
+		return false, deny
+	}
+	c.pendingTools = nil
+	c.functionOutputs.Add(1)
+	if custom {
+		c.customOutputs.Add(1)
+	}
+	return true, nil
+}
 
 func (c *counters) snapshot() counts {
 	return counts{c.dispatches.Load(), c.exchanges.Load(), c.refreshes.Load(), c.quotaGets.Load(), c.functionCalls.Load(), c.customCalls.Load(), c.functionOutputs.Load(), c.customOutputs.Load()}
@@ -310,11 +367,6 @@ func run() error {
 			Type, Name string
 			Parameters json.RawMessage `json:"parameters"`
 		}
-		var input []struct {
-			Type   string `json:"type"`
-			CallID string `json:"call_id"`
-			Output string `json:"output"`
-		}
 		if body["tools"] != nil && json.Unmarshal(body["tools"], &tools) != nil {
 			reject()
 			return
@@ -350,33 +402,12 @@ func run() error {
 				break
 			}
 		}
-		outputs := map[string]string{}
-		if json.Unmarshal(body["input"], &input) == nil {
-			for _, item := range input {
-				if item.Type != "function_call_output" {
-					continue
-				}
-				if item.CallID != "joined-call-1" && item.CallID != "joined-call-custom" || item.Output == "" {
-					reject()
-					return
-				}
-				if _, duplicate := outputs[item.CallID]; duplicate {
-					reject()
-					return
-				}
-				outputs[item.CallID] = item.Output
-			}
-		}
-		continuation := len(outputs) > 0
-		if continuation {
-			if outputs["joined-call-1"] == "" || customIndex >= 0 && outputs["joined-call-custom"] == "" || customIndex < 0 && outputs["joined-call-custom"] != "" {
-				reject()
-				return
-			}
-			c.functionOutputs.Add(1)
-			if customIndex >= 0 {
-				c.customOutputs.Add(1)
-			}
+		c.toolMu.Lock()
+		defer c.toolMu.Unlock()
+		continuation, err := c.consumeToolContinuation(body["input"])
+		if err != nil {
+			reject()
+			return
 		}
 
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -462,6 +493,7 @@ func run() error {
 				emit(map[string]any{"type": "response.output_item.done", "output_index": index, "item": item})
 				return item
 			}
+			c.pendingTools = &toolContinuation{custom: customIndex >= 0}
 			output = []any{emitCall(0, "joined-item-1", "joined-call-1", tool.Name, arguments)}
 			c.functionCalls.Add(1)
 			if customIndex >= 0 {

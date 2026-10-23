@@ -3,9 +3,9 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { writeSync } from 'node:fs';
 import { createServer } from 'node:http';
-import type { Server } from 'node:http';
+import type { IncomingMessage, ServerResponse, Server } from 'node:http';
 import pg from 'pg';
-import { ServiceAdmission, facadeControlRoute, facadeUsageReadRoute, inServiceLane } from './service-admission.ts';
+import { ServiceAdmission, facadeControlRoute, facadeBoundedReadRoute, inServiceLane } from './service-admission.ts';
 import { KernelError, defaults, uuid } from './domain.ts';
 import type { Bounds } from './domain.ts';
 import { PostgresKernel } from './postgres.ts';
@@ -46,6 +46,19 @@ export function composeServiceCleanupClaim(kernel: Pick<DurableKernel, 'claimCle
     const claim = await kernel.claimCleanup(ctx, worker);
     refreshTurn = claim !== undefined;
     return claim;
+  };
+}
+
+// One shared socket budget leaves two of the protected listener's eight sockets
+// available for native authority and cleanup callbacks while reads await them.
+export function protectedReadSockets(): (req: IncomingMessage, res: ServerResponse) => boolean {
+  let occupied = 0;
+  return (req, res) => {
+    if (!facadeBoundedReadRoute(req.method, req.url)) return true;
+    if (occupied >= 6) { res.writeHead(503, { connection: 'close' }); res.end(); return false; }
+    occupied++;
+    req.socket.once('close', () => { occupied--; });
+    return true;
   };
 }
 
@@ -315,19 +328,14 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     invalid = true; denyAdmission(); pulse(); void stop();
     if (report) writeRuntimeFailureDiagnostic(cause, error, cause === 'maintenance_failed' ? maintenancePhase : undefined);
   }
-  let usageCallbacks = 0;
+  const reserveReadSocket = protectedReadSockets();
   const callback = createServer({ maxHeaderSize: 16_384, headersTimeout: 5000, requestTimeout: 5000,
     keepAliveTimeout: 1000, connectionsCheckingInterval: 100 }, (req, res) => {
     const timer = setTimeout(() => { res.destroy(); req.destroy(); }, 5000);
     res.once('close', () => clearTimeout(timer));
     if (facadeControlRoute(req.method, req.url)) {
       if (!controlFacade || stopping || invalid) { res.writeHead(503); res.end(); return; }
-      // Analytics shares this protected listener with native proof/cleanup.
-      // Keep two of its eight sockets available for the control protocol.
-      if (facadeUsageReadRoute(req.method, req.url)) {
-        if (usageCallbacks >= 6) { res.writeHead(503, { connection: 'close' }); res.end(); return; }
-        usageCallbacks++; req.socket.once('close', () => { usageCallbacks--; });
-      }
+      if (!reserveReadSocket(req, res)) return;
       controlFacade.emit('request', req, res); return;
     }
     if (req.method !== 'POST' || !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-custody-authority|oauth-refresh-authority|oauth-cleanup-authority|account-limits-authority)$/.test(req.url ?? '')) {
