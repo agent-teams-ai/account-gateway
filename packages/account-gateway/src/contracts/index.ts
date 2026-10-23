@@ -14,9 +14,12 @@ export type { Profile, Account, AccountRetirement, PolicyUseClosure, Operation, 
 export { usageObservation, usageQuery, usagePage, usageRead } from '../features/facade-client/contracts/index.js';
 export type { UsageObservation, UsageQuery, UsagePage } from '../features/facade-client/contracts/index.js';
 
-export { ACCOUNT_LIMITS_CONTRACT, accountLimitsRequest, accountLimitsCapabilities, accountLimits } from '../features/facade-client/contracts/index.js';
-export type { AccountLimitsRequest, AccountLimitsCapabilities, AccountLimits } from '../features/facade-client/contracts/index.js';
+export { ACCOUNT_LIMITS_CONTRACT, accountLimitsRequest, accountLimitsCapabilities, accountLimits,
+ PROVIDER_CONNECTIONS_CONTRACT, providerConnectionCapability, providerConnectionCapabilities,
+ ACCOUNT_LIMITS_V2_CONTRACT, accountLimitsV2Capabilities, accountLimitsV2 } from '../features/facade-client/contracts/index.js';
+export type { AccountLimitsRequest, AccountLimitsCapabilities, AccountLimits,
+ ProviderConnectionCapability, ProviderConnectionCapabilities, AccountLimitsV2Capabilities, AccountLimitsV2 } from '../features/facade-client/contracts/index.js';
 export { accountLimitsResult } from '../features/facade-client/contracts/index.js';
 export type { AccountLimitsResult } from '../features/facade-client/contracts/index.js';
 
-export { codexOAuthAuthorizationURL, claudeOAuthAuthorizationURL } from '../features/facade-client/contracts/index.js';
+export { codexOAuthAuthorizationURL, claudeOAuthAuthorizationURL, grokOAuthAuthorizationURL } from '../features/facade-client/contracts/index.js';

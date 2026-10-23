@@ -1,11 +1,12 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
-import type { AccountLimitsRequest, AccountLimitsCapabilities, AccountLimits } from '@agent-teams/account-gateway/contracts';
+import type { AccountLimitsRequest, AccountLimitsCapabilities, AccountLimits, AccountLimitsV2, AccountLimitsV2Capabilities } from '@agent-teams/account-gateway/contracts';
 import type { RetainedCustodyProof } from './domain.ts';
 import type { RetainedCustodyVerifier } from './management.ts';
 import { KernelError, identifier, uuid } from './domain.ts';
 import { secretSubmission } from '@agent-teams/account-gateway/http';
-import { accountLimitsRequest, accountLimitsCapabilities, accountLimits, codexOAuthAuthorizationURL, claudeOAuthAuthorizationURL, oauthDeviceAuthorization } from '@agent-teams/account-gateway/contracts';
+import { accountLimitsRequest, accountLimitsCapabilities, accountLimits, accountLimitsV2, accountLimitsV2Capabilities, codexOAuthAuthorizationURL,
+ claudeOAuthAuthorizationURL, grokOAuthAuthorizationURL, oauthDeviceAuthorization } from '@agent-teams/account-gateway/contracts';
 import { codexOAuthProfile, exactCandidate, physicalCandidate } from './management.ts';
 import { oauthProfileDefinition, type OAuthProfileDefinition } from './oauth-profiles.ts';
 import type { CandidateJournal, CandidateMapping, CandidateNative, NativeReadback, PhysicalCandidate } from './management.ts';
@@ -300,13 +301,19 @@ export class NativeManagementClient extends NativeControlHTTP implements Candida
 export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OAuthEnrollmentNative, OAuthDescriptorBoundary, OAuthRefreshNative {
   readonly #owner: string;
   readonly #definition: OAuthProfileDefinition;
-  constructor(options: NativeManagementOptions & { readonly ownerRef: string; readonly profileId?: string }) {
+  readonly #grokBrowserPolicy?: { readonly clientId: string; readonly redirectURI: string };
+  constructor(options: NativeManagementOptions & { readonly ownerRef: string; readonly profileId?: string;
+    readonly grokBrowserPolicy?: { readonly clientId: string; readonly redirectURI: string } }) {
     super(options);
     identifier(options.ownerRef);
     this.#owner = options.ownerRef;
     const definition = oauthProfileDefinition(options.profileId ?? codexOAuthProfile.profile);
     if (!definition) throw new KernelError('invalid');
     this.#definition = definition;
+    if (definition.family === 'grok') {
+      if (!options.grokBrowserPolicy) throw new KernelError('invalid');
+      this.#grokBrowserPolicy = Object.freeze({ ...options.grokBrowserPolicy });
+    }
   }
   private capture(input: OAuthScope): OAuthScope {
     const scope = Object.freeze({ consumerId: input.consumerId, operationId: input.operationId,
@@ -337,8 +344,15 @@ export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OA
       let authorizationURL: string | undefined;
       if (Object.hasOwn(r, 'authorize_url')) {
         if (!begin || r.state !== 'prepared' || r.method === 'device_code') throw new NativeFailure('invalid_readback');
-        const parsed = (this.#definition.family === 'claude' ? claudeOAuthAuthorizationURL : codexOAuthAuthorizationURL).safeParse(r.authorize_url);
+        const schema = this.#definition.family === 'claude' ? claudeOAuthAuthorizationURL :
+          this.#definition.family === 'grok' ? grokOAuthAuthorizationURL : codexOAuthAuthorizationURL;
+        const parsed = schema.safeParse(r.authorize_url);
         if (!parsed.success) throw new NativeFailure('invalid_readback');
+        if (this.#grokBrowserPolicy) {
+          const url = new URL(parsed.data);
+          if (url.searchParams.get('client_id') !== this.#grokBrowserPolicy.clientId ||
+              url.searchParams.get('redirect_uri') !== this.#grokBrowserPolicy.redirectURI) throw new NativeFailure('invalid_readback');
+        }
         authorizationURL = parsed.data;
       }
       let deviceAuthorization: OAuthBeginReadback['deviceAuthorization'];
@@ -373,6 +387,7 @@ export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OA
   }
   async complete(input: OAuthScope, callback: OAuthCallback): Promise<OAuthReadback> {
     const scope = this.capture(input), state = callback.state, code = callback.code;
+    if (this.#definition.family === 'grok' && /[#?&]/.test(code)) throw new NativeFailure('bounded');
     if (!secretSubmission.oauthCallbackState.safeParse(state).success ||
         !(this.#definition.family === 'claude' ? secretSubmission.claudeOAuthCallbackCode : secretSubmission.oauthCallbackCode).safeParse(code).success) throw new NativeFailure('bounded');
     const result = this.ack(await this.call('POST', oauthEndpoint(this.#definition, 'complete'),
@@ -418,7 +433,9 @@ export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OA
 export class NativeOAuthLifecycleClient extends NativeControlHTTP implements OAuthLifecycleNative {
   readonly #owner: string;
   readonly #definition: OAuthProfileDefinition;
-  constructor(options: NativeManagementOptions & { readonly ownerRef: string; readonly profileId?: string }) {
+  readonly #grokBrowserPolicy?: { readonly clientId: string; readonly redirectURI: string };
+  constructor(options: NativeManagementOptions & { readonly ownerRef: string; readonly profileId?: string;
+    readonly grokBrowserPolicy?: { readonly clientId: string; readonly redirectURI: string } }) {
     super(options); identifier(options.ownerRef); this.#owner = options.ownerRef;
     const definition = oauthProfileDefinition(options.profileId ?? codexOAuthProfile.profile);
     if (!definition) throw new KernelError('invalid');
@@ -456,6 +473,21 @@ export class NativeAccountLimitsClient extends NativeControlHTTP {
   }
   async readAccountLimits(input: AccountLimitsRequest): Promise<AccountLimits> {
     try { return accountLimits.parse(decode(await this.call('POST', '/private/native/v1/account-limits/read', accountLimitsRequest.parse(input)))); }
+    catch { throw new NativeFailure('invalid_readback'); }
+  }
+}
+
+/** v2 is selected by declared capability and is never probed alongside v1. */
+export class NativeAccountLimitsV2Client extends NativeControlHTTP {
+  constructor(options: NativeManagementOptions) {
+    super({ ...options, deadlineMs: 3000, bodyBytes: 262144 });
+  }
+  async getAccountLimitsCapabilities(): Promise<AccountLimitsV2Capabilities> {
+    try { return accountLimitsV2Capabilities.parse(decode(await this.call('GET', '/private/native/v2/account-limits/capabilities'))); }
+    catch { throw new NativeFailure('invalid_readback'); }
+  }
+  async readAccountLimits(input: AccountLimitsRequest): Promise<AccountLimitsV2> {
+    try { return accountLimitsV2.parse(decode(await this.call('POST', '/private/native/v2/account-limits/read', accountLimitsRequest.parse(input)))); }
     catch { throw new NativeFailure('invalid_readback'); }
   }
 }

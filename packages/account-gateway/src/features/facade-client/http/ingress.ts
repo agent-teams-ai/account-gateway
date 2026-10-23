@@ -42,6 +42,26 @@ export function parseOAuthCallbackURL(value: unknown): { readonly state: string;
   } catch { return undefined; }
 }
 export const oauthCallbackURL = z.string().min(1).max(8192).refine(value => parseOAuthCallbackURL(value) !== undefined);
+export function parseGrokManualCallbackURL(value: unknown): { readonly state: string; readonly code: string } | undefined {
+  try {
+    const prefix = 'http://127.0.0.1:56121/callback?';
+    if (typeof value !== 'string' || value.length > 8192 || new TextEncoder().encode(value).byteLength > 8192 ||
+        !value.startsWith(prefix) || /[\u0000-\u0020\u007f-\u009f#\\]/u.test(value)) return undefined;
+    const fields = new Map<string, string>();
+    for (const part of value.slice(prefix.length).split('&')) {
+      const equal = part.indexOf('=');
+      if (equal < 1) return undefined;
+      const key = part.slice(0, equal);
+      if (!['code', 'state', 'scope'].includes(key) || fields.has(key)) return undefined;
+      fields.set(key, decodeURIComponent(part.slice(equal + 1).replace(/\+/g, ' ')));
+    }
+    const code = fields.get('code'), state = fields.get('state'), scope = fields.get('scope');
+    if (!code || /[#?&]/.test(code) || !state || !oauthCallbackState.safeParse(state).success || !oauthCallbackCode.safeParse(code).success ||
+        (scope !== undefined && new TextEncoder().encode(scope).byteLength > 1024)) return undefined;
+    return { code, state };
+  } catch { return undefined; }
+}
+export const grokOAuthCallbackURL = z.string().min(1).max(8192).refine(value => parseGrokManualCallbackURL(value) !== undefined);
 /** The official Claude browser page returns this manual code#state value. */
 export const claudeOAuthCallbackCode = z.string().min(1).max(8192).refine(value =>
   !/[\uD800-\uDFFF]/u.test(value) && new TextEncoder().encode(value).byteLength <= 8192 &&
@@ -59,6 +79,7 @@ export const claudeOAuthAuthorizationCode = z.string().min(1).max(8257)
 export const oauthComplete = z.union([
   z.strictObject({ operationId: c.reference, ownerRef: c.reference, callbackURL: oauthCallbackURL }),
   z.strictObject({ operationId: c.reference, ownerRef: c.reference, authorizationCode: claudeOAuthAuthorizationCode }),
+  z.strictObject({ operationId: c.reference, ownerRef: c.reference, callbackURL: grokOAuthCallbackURL }),
 ]);
 export type OAuthComplete = z.infer<typeof oauthComplete>;
 

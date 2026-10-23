@@ -24,9 +24,15 @@ export function facadeUsageReadRoute(method: string | undefined, path: string | 
     return match[1] === 'limit' ? /^[1-9][0-9]{0,2}$/.test(match[2]) : match[2].length <= 512;
   });
 }
+export function facadeBoundedReadRoute(method: string | undefined, path: string | undefined): boolean {
+  return facadeUsageReadRoute(method, path) || method === 'POST' &&
+    (path === '/v1/account-limits/read' || path === '/v2/account-limits/read');
+}
 export function facadeControlRoute(method: string | undefined, path: string | undefined): boolean {
   if (facadeUsageReadRoute(method, path)) return true;
-  if (method === 'GET' && path === '/v1/capabilities/account-limits' || method === 'POST' && path === '/v1/account-limits/read') return true;
+  if (method === 'GET' && (path === '/v1/capabilities/account-limits' || path === '/v2/capabilities/account-limits' ||
+      path === '/v1/provider-connection-capabilities') ||
+      method === 'POST' && (path === '/v1/account-limits/read' || path === '/v2/account-limits/read')) return true;
   if (!path || /[?#%\r\n]/.test(path)) return false;
   return method === 'POST' && (/^\/v1\/executions\/[A-Za-z0-9_-]+\/close$/.test(path) ||
     path === '/v1/policy-fences' || /^\/v2\/accounts\/[A-Za-z0-9_-]+\/(suspend|resume)$/.test(path) || /^\/v1\/accounts\/[A-Za-z0-9_-]+\/disable$/.test(path)) ||

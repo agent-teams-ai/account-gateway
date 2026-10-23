@@ -1,10 +1,32 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
-import { createAccountLimitsClient, secretSubmission } from '@agent-teams/account-gateway/http';
-import { accountLimitsCapabilities, accountLimitsRequest, accountLimitsResult } from '@agent-teams/account-gateway/contracts';
+import { createAccountLimitsClient, createAccountLimitsV2Client, createConsumerControlClient, secretSubmission } from '@agent-teams/account-gateway/http';
+import { accountLimitsCapabilities, accountLimitsRequest, accountLimitsResult, accountLimitsV2, providerConnectionCapabilities, codexOAuthAuthorizationURL, claudeOAuthAuthorizationURL, grokOAuthAuthorizationURL } from '@agent-teams/account-gateway/contracts';
 
+const browserState = 'a'.repeat(64), browserChallenge = 'b'.repeat(43);
+const codexHandoff = 'https://auth.openai.com/oauth/authorize?' + new URLSearchParams({
+ client_id: 'app_EMoamEEZ73f0CkXaXp7hrann', response_type: 'code', redirect_uri: 'http://localhost:1455/auth/callback',
+ scope: 'openid profile email offline_access', code_challenge_method: 'S256', code_challenge: browserChallenge, state: browserState });
+assert.equal(codexOAuthAuthorizationURL.safeParse(codexHandoff).success, true);
+const claudeHandoff = 'https://claude.com/cai/oauth/authorize?' + new URLSearchParams({ code: 'true',
+ client_id: '9d1c250a-e61b-44d9-88ed-5944d1962f5e', response_type: 'code', redirect_uri: 'https://platform.claude.com/oauth/code/callback',
+ scope: 'user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload',
+ code_challenge_method: 'S256', code_challenge: browserChallenge, state: browserState });
+assert.equal(claudeOAuthAuthorizationURL.safeParse(claudeHandoff).success, true);
+assert.equal(grokOAuthAuthorizationURL.safeParse(codexHandoff).success, false);
+assert.equal(grokOAuthAuthorizationURL.safeParse(claudeHandoff).success, false);
 assert.equal(typeof createAccountLimitsClient, 'function');
+assert.equal(typeof createAccountLimitsV2Client, 'function');
+assert.equal((await import('@agent-teams/account-gateway')).createAccountLimitsV2Client, createAccountLimitsV2Client);
+assert.equal(typeof createConsumerControlClient({ role: 'consumer-control', origin: 'http://127.0.0.1:43123', token: 'fixture-token' }).getProviderConnectionCapabilities, 'function');
+assert.deepEqual(providerConnectionCapabilities.parse({ contract: 'provider-connections/v1', capabilities: [] }), { contract: 'provider-connections/v1', capabilities: [] });
+assert.deepEqual(accountLimitsV2.parse({ status: 'unknown' }), { status: 'unknown' });
+const grokState = 'a'.repeat(64);
+assert.deepEqual(secretSubmission.parseGrokManualCallbackURL('http://127.0.0.1:56121/callback?code=fixture&state=' + grokState), { code: 'fixture', state: grokState });
+for (const code of ['fixture%23fragment', 'fixture%3Fquery', 'fixture%26field']) {
+ assert.equal(secretSubmission.parseGrokManualCallbackURL('http://127.0.0.1:56121/callback?code=' + code + '&state=' + grokState), undefined);
+}
 const authorizationCode = 'fixture-code#' + 'a'.repeat(64);
 assert.deepEqual(secretSubmission.parseClaudeOAuthAuthorizationCode(authorizationCode), { code: 'fixture-code', state: 'a'.repeat(64) });
 assert.equal(secretSubmission.oauthComplete.safeParse({ operationId: 'fixture-op', ownerRef: 'fixture-owner', authorizationCode }).success, true);
@@ -26,9 +48,9 @@ const claude = { ...snapshot, windows: [
 assert.deepEqual(accountLimitsResult.parse(claude), claude);
 assert.equal(accountLimitsResult.safeParse({ ...claude, windows: [{ ...claude.windows[0], id: 'claude-7d-opus' }] }).success, false);
 assert.equal(accountLimitsResult.safeParse({ ...claude, windows: [...claude.windows, snapshot.windows[0]] }).success, false);
-writeFileSync('limits-closure.mts', `import {createAccountLimitsClient,createManagementClient} from '@agent-teams/account-gateway/http';
-import type {AccountLimitsClient,AccountLimitsConfig} from '@agent-teams/account-gateway/http';
-import type {AccountLimitsRequest,AccountLimitsResult,AccountLimitsCapabilities} from '@agent-teams/account-gateway/contracts';
+writeFileSync('limits-closure.mts', `import {createAccountLimitsClient,createAccountLimitsV2Client,createManagementClient,createConsumerControlClient} from '@agent-teams/account-gateway/http';
+import type {AccountLimitsClient,AccountLimitsConfig,AccountLimitsV2Client,AccountLimitsV2Config} from '@agent-teams/account-gateway/http';
+import type {AccountLimitsRequest,AccountLimitsResult,AccountLimitsCapabilities,AccountLimitsV2,ProviderConnectionCapabilities} from '@agent-teams/account-gateway/contracts';
 export function read(config:AccountLimitsConfig,input:AccountLimitsRequest):Promise<AccountLimitsResult> {
  const client:AccountLimitsClient=createAccountLimitsClient(config);
  return client.readAccountLimits(input);
@@ -37,6 +59,12 @@ export function capabilities(client:AccountLimitsClient):Promise<AccountLimitsCa
 export function complete(config:AccountLimitsConfig,authorizationCode:string) {
  const client=createManagementClient({...config,role:'management'});
  return client.completeOAuth({operationId:'fixture-op',ownerRef:'fixture-owner',authorizationCode});
+}
+export function readV2(config:AccountLimitsV2Config,input:AccountLimitsRequest):Promise<AccountLimitsV2> {
+ const client:AccountLimitsV2Client=createAccountLimitsV2Client(config);return client.readAccountLimits(input);
+}
+export function providerCapabilities(config:AccountLimitsConfig):Promise<ProviderConnectionCapabilities> {
+ return createConsumerControlClient({...config,role:'consumer-control'}).getProviderConnectionCapabilities();
 }
 export function windows(value:AccountLimitsResult):number|null {
  return value.status==='snapshot' ? value.windows[0]?.usedPercent ?? null : null;

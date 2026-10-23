@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { captureServiceBearers, captureServiceProfiles, ServiceError } from '../src/service-config.ts';
+import { captureServiceBearers, captureServiceProfiles, glmProfile, kimiProfile, minimaxProfile, captureGrokOAuthEnrollmentConfig, ServiceError } from '../src/service-config.ts';
 
 const serviceProfile = (requests: number) => ({ profile: 'openai-responses-apikey-v1', model: 'gpt-5.4-mini',
   baseURL: 'https://api.openai.com/v1', qualificationRef: 'qualification-a',
@@ -8,6 +8,27 @@ const serviceProfile = (requests: number) => ({ profile: 'openai-responses-apike
   providerTokenUpperBound: 100_000 });
 const denied = (body: () => unknown) =>
   assert.throws(body, e => e instanceof ServiceError && e.code === 'config_denied');
+
+test('new keyed profiles accept only immutable provider tuples and GLM owner policy is not config-selectable', () => {
+  const limits = { requests: 2, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 1000 };
+  for (const tuple of [kimiProfile, glmProfile, minimaxProfile]) {
+    const selected = { ...tuple, qualificationRef: 'source-provider', limits, providerTokenUpperBound: 1000 };
+    assert.deepEqual(captureServiceProfiles({ profile: selected }), [selected]);
+    denied(() => captureServiceProfiles({ profile: { ...selected, model: 'unqualified-model' } }));
+    denied(() => captureServiceProfiles({ profile: { ...selected, baseURL: 'https://provider.example' } }));
+    denied(() => captureServiceProfiles({ profile: { ...selected, profile: 'different-profile' } }));
+  }
+});
+
+test('all keyed provider leaves coexist and duplicate or invented leaves deny', () => {
+  const limits = { requests: 2, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 1000 };
+  const providerProfiles = [kimiProfile, glmProfile, minimaxProfile].map(tuple => ({ ...tuple,
+    qualificationRef: 'source-provider', limits, providerTokenUpperBound: 1000 }));
+  const profile = serviceProfile(2);
+  assert.equal(captureServiceProfiles({ profile, providerProfiles }).length, 4);
+  denied(() => captureServiceProfiles({ profile, providerProfiles: [providerProfiles[0], providerProfiles[0]] }));
+  denied(() => captureServiceProfiles({ profile, providerProfiles: [{ ...providerProfiles[0], profile: 'other-profile' }] }));
+});
 
 // Red if raising the run budget needs a code change again: the operational knob is the service
 // profile, the code keeps only the acceptance ceiling.
@@ -79,4 +100,18 @@ test('Claude enrollment captures only the fixed qualified tuple alongside Codex'
   for (const patch of [{ profile: oauthEnrollment.profile }, { modelScope: ['other'] }, { baseURL: 'https://fixture.invalid' },
     { qualificationRef: undefined }, { limits: undefined }])
     denied(() => captureServiceProfiles({ profile, claudeOAuthEnrollment: { ...claudeOAuthEnrollment, ...patch } as typeof claudeOAuthEnrollment }));
+});
+
+
+test('Grok needs explicit deployment qualification and cannot bypass it through the key profile', () => {
+  const limits = { requests: 2, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 1000 };
+  const grok = { enabled: true, profile: 'grok-subscription-responses-oauth-v1', modelScope: ['grok-4.7'],
+    qualificationRef: 'source-provider', limits, providerTokenUpperBound: 1000, deploymentQualified: true,
+    clientId: 'qualified-client', authorizationOrigin: 'https://auth.x.ai', redirectPolicy: 'manual_loopback',
+    redirectURI: 'http://127.0.0.1:56121/callback' };
+  assert.deepEqual(captureGrokOAuthEnrollmentConfig(grok), grok);
+  denied(() => captureGrokOAuthEnrollmentConfig({ ...grok, deploymentQualified: false }));
+  denied(() => captureGrokOAuthEnrollmentConfig({ ...grok, profile: 'wrong-profile' }));
+  denied(() => captureServiceProfiles({ profile: { profile: grok.profile, model: 'grok-4.7',
+    baseURL: 'https://cli-chat-proxy.grok.com', qualificationRef: 'source-provider', limits, providerTokenUpperBound: 1000 } }));
 });

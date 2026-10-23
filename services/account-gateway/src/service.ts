@@ -3,9 +3,9 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { writeSync } from 'node:fs';
 import { createServer } from 'node:http';
-import type { Server } from 'node:http';
+import type { IncomingMessage, ServerResponse, Server } from 'node:http';
 import pg from 'pg';
-import { ServiceAdmission, facadeControlRoute, facadeUsageReadRoute, inServiceLane } from './service-admission.ts';
+import { ServiceAdmission, facadeControlRoute, facadeBoundedReadRoute, inServiceLane } from './service-admission.ts';
 import { KernelError, defaults, uuid } from './domain.ts';
 import type { Bounds } from './domain.ts';
 import { PostgresKernel } from './postgres.ts';
@@ -15,7 +15,8 @@ import type { CandidateJournal, CandidateNative, IntentCustody, ManagementStore,
   OAuthCleanupAuthority, OAuthCleanupAction, OAuthMethod } from './management.ts';
 import type { DurableKernel, ExecutionRead, TrustedContext } from './domain.ts';
 import { oauthProfileDefinition } from './oauth-profiles.ts';
-import { NativeAccountLimitsClient, NativeManagementClient, NativeRetainedCustodyClient, NativeOAuthEnrollmentClient, NativeOAuthLifecycleClient } from './native-client.ts';
+import { providerConnectionDefinition } from './provider-connections.ts';
+import { NativeAccountLimitsClient, NativeAccountLimitsV2Client, NativeManagementClient, NativeRetainedCustodyClient, NativeOAuthEnrollmentClient, NativeOAuthLifecycleClient } from './native-client.ts';
 import { NativeAuthority } from './native-authority.ts';
 import { NativeHTTPTransport } from './native-transport.ts';
 import { createFacade, FacadeBearers, cancelFacadeTransport } from './facade.ts';
@@ -48,10 +49,23 @@ export function composeServiceCleanupClaim(kernel: Pick<DurableKernel, 'claimCle
   };
 }
 
+// One shared socket budget leaves two of the protected listener's eight sockets
+// available for native authority and cleanup callbacks while reads await them.
+export function protectedReadSockets(): (req: IncomingMessage, res: ServerResponse) => boolean {
+  let occupied = 0;
+  return (req, res) => {
+    if (!facadeBoundedReadRoute(req.method, req.url)) return true;
+    if (occupied >= 6) { res.writeHead(503, { connection: 'close' }); res.end(); return false; }
+    occupied++;
+    req.socket.once('close', () => { occupied--; });
+    return true;
+  };
+}
+
 // Trusted composition only: AccountManagement reconstructs OAuthScope from its
 // committed original journal. Each call binds a fresh fixed-owner client; no
 // owner cache, caller factory, callback URL or bearer transfer is introduced.
-export function composeServiceControl(cfg: Pick<ServiceConfig, 'native' | 'consumer' | 'profile' | 'secondProfile' | 'oauthEnrollment' | 'claudeOAuthEnrollment' | 'bearers'>,
+export function composeServiceControl(cfg: Pick<ServiceConfig, 'native' | 'consumer' | 'profile' | 'secondProfile' | 'providerProfiles' | 'oauthEnrollment' | 'claudeOAuthEnrollment' | 'grokOAuthEnrollment' | 'bearers'>,
   kernel: DurableKernel & ExecutionRead, store: ManagementStore, custody: IntentCustody, worker: string) {
   const profiles = captureServiceProfiles(cfg);
   const consumerId = cfg.consumer.consumerId;
@@ -72,7 +86,9 @@ export function composeServiceControl(cfg: Pick<ServiceConfig, 'native' | 'consu
   };
   const oauthProviders = profiles.filter(p => oauthProfileDefinition(p.profile)).map(profile => {
     const forScope = (scope: OAuthScope) => new NativeOAuthEnrollmentClient({ ...control,
-      ownerRef: scope.ownerRef, profileId: profile.profile });
+      ownerRef: scope.ownerRef, profileId: profile.profile,
+      ...(profile.profile === cfg.grokOAuthEnrollment?.profile ? { grokBrowserPolicy: {
+        clientId: cfg.grokOAuthEnrollment.clientId, redirectURI: cfg.grokOAuthEnrollment.redirectURI } } : {}) });
     return { profile, native: {
       begin: (scope: OAuthScope, method?: OAuthMethod) => forScope(scope).begin(scope, method),
       read: (scope: OAuthScope) => forScope(scope).read(scope),
@@ -95,16 +111,22 @@ export function composeServiceControl(cfg: Pick<ServiceConfig, 'native' | 'consu
         j.profile.baseURL === p.baseURL && j.profile.qualificationRef === p.qualificationRef;
     } } });
   const catalog: FacadeOptions['profiles'] = Object.freeze(profiles.map(p => ({
-    dto: { profileId: p.profile, protocol: 'openai-responses' as const, modelIds: [p.model],
+    dto: { profileId: p.profile, protocol: providerConnectionDefinition(p.profile)?.protocol ?? 'openai-responses' as const, modelIds: [p.model],
       authKinds: [oauthProfileDefinition(p.profile) ? 'oauth' as const : 'api_key' as const] },
     maxOutputTokens: p.limits.tokens, limits: p.limits,
   })));
-  return Object.freeze({ profiles, bearers, management, catalog, accountLimits: new NativeAccountLimitsClient(control) });
+  return Object.freeze({ profiles, bearers, management, catalog, accountLimits: new NativeAccountLimitsClient(control),
+    accountLimitsV2: new NativeAccountLimitsV2Client(control) });
 }
-export function composeServiceNative(cfg: Pick<ServiceConfig, 'native' | 'consumer' | 'oauthEnrollment' | 'claudeOAuthEnrollment'>,
+/** Both facades and joined callers use the production cached-read wiring. */
+export function composeServiceCachedLimits(control: Pick<ReturnType<typeof composeServiceControl>, 'accountLimits' | 'accountLimitsV2'>):
+  Pick<FacadeOptions, 'accountLimits' | 'accountLimitsV2'> {
+  return { accountLimits: control.accountLimits, accountLimitsV2: control.accountLimitsV2 };
+}
+export function composeServiceNative(cfg: Pick<ServiceConfig, 'native' | 'consumer' | 'oauthEnrollment' | 'claudeOAuthEnrollment' | 'grokOAuthEnrollment'>,
   control: ReturnType<typeof composeServiceControl>, kernel: DurableKernel & ExecutionRead, store: ManagementStore,
   enrollment: NonNullable<FacadeOptions['enrollment']>) {
-  const authority = new NativeAuthority({ kernel, store, accountLimitsOwners: { bearers: control.bearers }, ...((cfg.oauthEnrollment || cfg.claudeOAuthEnrollment) ? {
+  const authority = new NativeAuthority({ kernel, store, accountLimitsOwners: { bearers: control.bearers }, ...((cfg.oauthEnrollment || cfg.claudeOAuthEnrollment || cfg.grokOAuthEnrollment) ? {
     oauthOwners: { store, bearers: control.bearers }, oauthRefreshOwners: { store, bearers: control.bearers },
     oauthCleanupOwners: { store } } : {}),
     profileLimits: control.profiles.map(p => ({ profile: p.profile, limits: p.limits })), config: { origin: cfg.native.origin,
@@ -306,19 +328,14 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     invalid = true; denyAdmission(); pulse(); void stop();
     if (report) writeRuntimeFailureDiagnostic(cause, error, cause === 'maintenance_failed' ? maintenancePhase : undefined);
   }
-  let usageCallbacks = 0;
+  const reserveReadSocket = protectedReadSockets();
   const callback = createServer({ maxHeaderSize: 16_384, headersTimeout: 5000, requestTimeout: 5000,
     keepAliveTimeout: 1000, connectionsCheckingInterval: 100 }, (req, res) => {
     const timer = setTimeout(() => { res.destroy(); req.destroy(); }, 5000);
     res.once('close', () => clearTimeout(timer));
     if (facadeControlRoute(req.method, req.url)) {
       if (!controlFacade || stopping || invalid) { res.writeHead(503); res.end(); return; }
-      // Analytics shares this protected listener with native proof/cleanup.
-      // Keep two of its eight sockets available for the control protocol.
-      if (facadeUsageReadRoute(req.method, req.url)) {
-        if (usageCallbacks >= 6) { res.writeHead(503, { connection: 'close' }); res.end(); return; }
-        usageCallbacks++; req.socket.once('close', () => { usageCallbacks--; });
-      }
+      if (!reserveReadSocket(req, res)) return;
       controlFacade.emit('request', req, res); return;
     }
     if (req.method !== 'POST' || !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-custody-authority|oauth-refresh-authority|oauth-cleanup-authority|account-limits-authority)$/.test(req.url ?? '')) {
@@ -437,7 +454,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     startupStage = 'heartbeat';
     await inServiceLane('control', () => kernel.heartbeat(ctx, worker));
     startupActive();
-    options = { admission, kernel, management, store, bearers, enrollment, transport, accountLimits: control.accountLimits,
+    options = { admission, kernel, management, store, bearers, enrollment, transport, ...composeServiceCachedLimits(control),
       usage: new PostgresUsageJournal(pool, keyBytes(cfg.keys.facadeHMAC)),
       profiles: catalog, intentHmacKey: keyBytes(cfg.keys.facadeHMAC), ingressBytes: Math.max(1024, ...profiles.map(p => p.limits.requestBytes)),
       bufferBytes: 65_536, ...(cfg.accountLifecycle ? { lifecycle: cfg.accountLifecycle } : {}) };

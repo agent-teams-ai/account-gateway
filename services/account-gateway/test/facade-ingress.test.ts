@@ -8,17 +8,39 @@ import type { AccountStatus, DurableKernel, ExecutionRead, NativeDispatchProof, 
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer, request } from 'node:http';
 import type { Server } from 'node:http';
+import { facadeControlRoute, facadeBoundedReadRoute } from '../src/service-admission.ts';
 import { createFacade, FacadeBearers } from '../src/facade.ts';
 import type { ManagementBearer } from '../src/facade.ts';
 import { IntentSecrets } from '../src/management-store.ts';
 import { codexOAuthProfile, claudeOAuthProfile } from '../src/management.ts';
 import type { CandidateJournal, CandidateMapping, ManagementStore, PhysicalCandidate } from '../src/management.ts';
 import { NativeFailure, NativeOAuthEnrollmentClient } from '../src/native-client.ts';
-import { composeServiceControl, composeServiceNative } from '../src/service.ts';
-import { openRouterProfile, captureServiceBearers, captureServiceProfiles, ServiceError } from '../src/service-config.ts';
+import { composeServiceControl, composeServiceNative, composeServiceCachedLimits, protectedReadSockets } from '../src/service.ts';
+import { openRouterProfile, kimiProfile, captureServiceBearers, captureServiceProfiles, ServiceError } from '../src/service-config.ts';
+import { providerConnectionDefinition, providerConnectionRegistry } from '../src/provider-connections.ts';
+import { projectProviderConnections } from '../src/provider-connection-capabilities.ts';
 const bytes = (text: string) => Buffer.from(text);
 const valid = { model: 'fixture-model', stream: true, store: false, service_tier: 'default', input: 'fixture' };
 const invalid = (fn: () => unknown) => assert.throws(fn, e => e instanceof KernelError && e.code === 'invalid');
+test('capability projection omits new profiles without configuration and does not invent model settings', () => {
+  const configured = [{ profileId: 'openai-responses-apikey-v1', protocol: 'openai-responses' as const, modelIds: ['fixture-model'] }];
+  const projection = projectProviderConnections(configured);
+  assert.equal(projection.capabilities.length, 1);
+  assert.equal(projection.capabilities.some(value => value.profileId === 'glm-coding-global-responses-apikey-v1'), false);
+  const glm = providerConnectionDefinition('glm-coding-global-responses-apikey-v1');
+  assert.equal(glm?.models[0].modelId, 'glm-5.3-flash');
+  assert.equal(glm?.models[0].reasoning, null);
+});
+test('Grok manual callback grammar is profile-owned and cannot select another provider', () => {
+  const state = 'a'.repeat(64);
+  assert.deepEqual(secretSubmission.parseGrokManualCallbackURL(`http://127.0.0.1:56121/callback?code=fixture&state=${state}`),
+    { code: 'fixture', state });
+  for (const value of [`http://localhost:56121/callback?code=fixture&state=${state}`,
+    `http://127.0.0.1:56121/callback?code=fixture&state=${state}&provider=claude`,
+    `http://127.0.0.1:56121/callback?code=fixture%23fragment&state=${state}`,
+    `http://127.0.0.1:56121/callback?code=fixture&state=${state}&state=${state}`])
+    assert.equal(secretSubmission.parseGrokManualCallbackURL(value), undefined);
+});
 test('decoded duplicate names, malformed UTF-8 and bounded nesting deny ingress', () => {
   invalid(() => strictJSON(bytes('{"model":"a","\\u006dodel":"b"}')));
   invalid(() => strictJSON(bytes('{"outer":{"key":1,"\\u006bey":2}}')));
@@ -26,6 +48,30 @@ test('decoded duplicate names, malformed UTF-8 and bounded nesting deny ingress'
   invalid(() => strictJSON(bytes('['.repeat(66) + '0' + ']'.repeat(66))));
   assert.deepEqual(strictJSON(bytes('{"\\u006bey":1,"value":"literal \\\"key\\\""}')), { key: 1, value: 'literal "key"' });
 });
+test('Responses permits the provider default when no service tier is requested', () => {
+  const { service_tier: _tier, ...request } = valid;
+  assert.equal(validateResponses(bytes(JSON.stringify(request)), ['fixture-model'], 100), 'fixture-model');
+  for (const service_tier of [null, false, 'auto', 'priority', 'flex'])
+    invalid(() => validateResponses(bytes(JSON.stringify({ ...request, service_tier })), ['fixture-model'], 100));
+});
+
+test('source-qualified model capabilities reject configured reasoning for the four new profiles', () => {
+  const profiles = providerConnectionRegistry.filter(profile => profile.limitsContract === 'account-limits/v2');
+  assert.equal(profiles.length, 4);
+  for (const profile of profiles) {
+    const model = profile.models[0];
+    const request = { ...valid, model: model.modelId };
+    for (const reasoning of [undefined, null])
+      assert.equal(validateResponses(bytes(JSON.stringify({ ...request, reasoning })), [model.modelId], 100, profile.models), model.modelId);
+    for (const reasoning of [{ effort: 'xhigh' }, {}, false, 'high'])
+      invalid(() => validateResponses(bytes(JSON.stringify({ ...request, reasoning })), [model.modelId], 100, profile.models));
+    invalid(() => validateResponses(bytes(JSON.stringify({ ...request, service_tier: 'priority' })), [model.modelId], 100, profile.models));
+  }
+  for (const profile of providerConnectionRegistry.filter(profile => profile.limitsContract === 'account-limits/v1'))
+    assert.equal(validateResponses(bytes(JSON.stringify({ ...valid, model: profile.models[0].modelId, reasoning: { effort: 'high' } })),
+      [profile.models[0].modelId], 100, profile.models), profile.models[0].modelId);
+});
+
 test('Responses policy rejects critical aliases and unsafe provider options before transport', () => {
   for (const patch of [{ store: true }, { stream: false }, { service_tier: 'priority' }, { previous_response_id: 'old' },
     { model: 'unqualified' }, { MAX_OUTPUT_TOKENS: 20 }, { '\uff33tore': false }]) {
@@ -82,7 +128,7 @@ test('OAuth callback ingress accepts genuine encoding and rejects aliases, malfo
 
 // Source boundary fixtures have test-owned committed state and real HTTP hops.
 // They qualify neither SQL transactions nor Go middleware/provider transport.
-async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false) {
+async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false, limitsRead?: { contract: 'v1' | 'v2'; enter(): Promise<void> }) {
   const oauthProfile = oauth === 'claude' ? claudeOAuthProfile : codexOAuthProfile;
   const oauthPath = '/private/native/v1/' + (oauth === 'claude' ? 'claude/oauth' : 'oauth');
   const consumerId = 'source-consumer', worker = randomUUID();
@@ -248,6 +294,19 @@ async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false) {
       const tuple = chunks.length ? strictJSON(Buffer.concat(chunks)) as Record<string, unknown> : {};
       const path = req.url!; seen.push({ path: req.method + ' ' + path, tuple });
       const reply = (body: unknown, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
+      if (req.method === 'GET' && path === '/private/native/v1/account-limits/capabilities') {
+        reply({ contract: 'account-limits/v1', cachedRead: true, quotaOnlyRefresh: false }); return;
+      }
+      if (req.method === 'POST' && path === '/private/native/' + limitsRead?.contract + '/account-limits/read' && limitsRead) {
+        await limitsRead.enter();
+        const grant = await callback('account-limits-authority', { consumerId, ...tuple });
+        assert.equal(grant.status, 200);
+        reply({ status: 'unknown' }); return;
+      }
+      if (req.method === 'GET' && path === '/private/native/v2/account-limits/capabilities') {
+        assert.equal(req.headers.authorization, 'Bearer ' + consumer.managementCredential);
+        reply({ contract: 'account-limits/v2', cachedRead: true, quotaOnlyRefresh: false }); return;
+      }
       if (path === oauthPath + '/refresh') {
         assert.equal(req.method, 'POST'); assert.equal(req.headers.authorization, 'Bearer ' + consumer.managementCredential);
         const grant = await callback('oauth-refresh-authority', { consumerId, operationId: tuple.operation,
@@ -339,7 +398,7 @@ async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false) {
     { token: 'source-public-run', role: 'run-control' as const, consumerId, ownerRefs: managementGrant.ownerRefs,
       profileIds: [profile.profile, secondProfile.profile], limits: secondProfile.limits, maxRunMs: 20_000 }];
   const cfg = { native: { executable: '/unused', sha256: 'unused', bootstrapFile: '/unused', authorityDir: '/unused', origin, originRef: enrollment.originRef, uid: 1, gid: 1 },
-    consumer, profile, secondProfile, bearers, ...(oauth === 'claude' ? { claudeOAuthEnrollment: { enabled: true as const,
+    consumer, profile, secondProfile, bearers, ...(limitsRead?.contract === 'v2' ? { providerProfiles: [{ ...kimiProfile, qualificationRef: 'source-kimi', limits, providerTokenUpperBound: 1000 }] } : {}), ...(oauth === 'claude' ? { claudeOAuthEnrollment: { enabled: true as const,
       profile: 'anthropic-claude-oauth-messages-v1' as const, modelScope: ['claude-sonnet-4-6'] as const,
       qualificationRef: 'source-claude', limits, providerTokenUpperBound: 1000 } } : oauth ? { oauthEnrollment: { enabled: true as const,
       profile: 'openai-codex-oauth-responses-v1' as const, modelScope: ['gpt-5.6-sol'] as const,
@@ -352,7 +411,7 @@ async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false) {
   const { authority, transport } = composeServiceNative(cfg, control, kernel, store, enrollment);
   const callbacks = authority.createServer(); servers.push(callbacks); callbackOrigin = await listen(callbacks);
   const facade = createFacade({ kernel, store, management: control.management, bearers: control.bearers,
-    profiles: control.catalog, enrollment, transport, intentHmacKey: randomBytes(32), ingressBytes: outputEnvelope ? 1_048_576 : 4096 });
+    profiles: control.catalog, enrollment, transport, ...composeServiceCachedLimits(control), intentHmacKey: randomBytes(32), ingressBytes: outputEnvelope ? 1_048_576 : 4096 });
   servers.push(facade); const facadeOrigin = await listen(facade);
   const publicCall = (path: string, body?: unknown, token = managementGrant.token, headers: Record<string, string> = {}) =>
     fetch(facadeOrigin + path, { method: body === undefined ? 'GET' : 'POST', headers: { authorization: 'Bearer ' + token,
@@ -365,7 +424,8 @@ async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false) {
     descriptor: (value: unknown, mode: typeof descriptorMode = 'normal') => { descriptorReply = value; descriptorMode = mode; },
     responseBytes: (value: number) => { responseBytes = value; },
     close: closeServers,
-    origin, callbackOrigin, facade, facadeOrigin, nativeRows, scopeKey };
+    origin, callbackOrigin, facade, facadeOrigin, nativeRows, scopeKey,
+    callbackOriginTo: (origin: string) => { callbackOrigin = origin; } };
   } catch (error) { await closeServers(); throw error; }
 }
 
@@ -1193,4 +1253,82 @@ test('source HTTP: Claude browser completion follows saved profile and qualified
     f.control.bearers.replace([]);
     assert.equal((await f.callback('oauth-owner-authority', lookup)).status, 403);
   } finally { await f.close(); }
+});
+
+
+test('production cached-read composition advertises native v2 through the real facade and native HTTP client', async () => {
+  const f = await sourceHTTP(false);
+  try {
+    const response = await f.publicCall('/v2/capabilities/account-limits');
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { contract: 'account-limits/v2', cachedRead: true, quotaOnlyRefresh: false });
+    assert.equal(f.seen.filter(entry => entry.path === 'GET /private/native/v2/account-limits/capabilities').length, 1);
+    assert.equal(f.forwarded.length, 0); assert.equal(f.begins(), 0); assert.equal(f.completions(), 0);
+  } finally { await f.close(); }
+});
+
+
+for (const contract of ['v1', 'v2'] as const) test('protected concurrent ' + contract + ' limits reads reserve sockets for real native authority and control callbacks', { timeout: 10_000 }, async () => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let entered = 0, seventhEntered!: () => void, sixEntered!: () => void;
+  const six = new Promise<void>(resolve => { sixEntered = resolve; });
+  const seventh = new Promise<'entered'>(resolve => { seventhEntered = () => resolve('entered'); });
+  const f = await sourceHTTP(true, false, { contract, enter: async () => {
+    entered++; if (entered === 6) sixEntered(); if (entered === 7) seventhEntered();
+    await gate;
+  } });
+  const reserve = protectedReadSockets();
+  let authorityCalls = 0;
+  const callbackHandler = f.authority.createServer();
+  const listener = createServer((req, res) => {
+    if (facadeControlRoute(req.method, req.url)) {
+      if (reserve(req, res)) f.facade.emit('request', req, res);
+      return;
+    }
+    authorityCalls++; callbackHandler.emit('request', req, res);
+  });
+  listener.maxConnections = 8; listener.maxRequestsPerSocket = 1;
+  const pending: Promise<Response>[] = [];
+  try {
+    await new Promise<void>(resolve => listener.listen(0, '127.0.0.1', resolve));
+    const address = listener.address(); assert.ok(address && typeof address === 'object');
+    const origin = 'http://127.0.0.1:' + address.port; f.callbackOriginTo(origin);
+    const accountRef = randomUUID(), generation = randomUUID(), operationId = randomUUID();
+    const profile = { ...(contract === 'v1' ? codexOAuthProfile : kimiProfile), qualificationRef: 'source-limits', limits: f.profile.limits, providerTokenUpperBound: 1000 };
+    const account: AccountStatus = { accountRef, ownerRef: 'owner-one', profile: profile.profile,
+      displayName: 'Cached read fixture', state: 'active', revision: 1, epoch: 1 };
+    f.accounts.set(f.scopeKey(f.context, accountRef), account);
+    f.mappings.set(f.scopeKey(f.context, generation), { consumerId: f.context.consumerId, operationId, accountRef,
+      ownerRef: account.ownerRef, purpose: 'create', generation, worker: randomUUID(), profile,
+      descriptor: { generation, nativePhysicalIdentity: generation, nativeId: 42, createdAt: '2026-10-06T01:02:03Z', ...profile } });
+    f.kernel.accountLimitsIdentity = async () => ({ ...account, generation, nativePhysicalIdentity: generation });
+    const input = { accountRef, ownerRef: account.ownerRef, profileId: profile.profile, expectedAuthorizationEpoch: 1 };
+    const read = () => fetch(origin + '/' + contract + '/account-limits/read', { method: 'POST', headers: {
+      authorization: 'Bearer source-public-management', 'content-type': 'application/json', accept: 'application/json', connection: 'close' }, body: JSON.stringify(input) });
+    for (let i = 0; i < 6; i++) pending.push(read());
+    await Promise.race([six, Promise.all(pending).then(responses => {
+      throw new Error('cached reads returned before native gate: ' + responses.map(response => response.status).join(','));
+    })]);
+    const overflow = read(); pending.push(overflow);
+    const outcome = await Promise.race([overflow.then(response => response.status), seventh]);
+    assert.equal(outcome, 503, 'seventh cached read must not occupy a native callback socket');
+    // A separate protected control request still enters while six public reads
+    // are waiting on native HTTP; their native owner callbacks then enter too.
+    const capabilities = await fetch(origin + '/v2/capabilities/account-limits', { headers: {
+      authorization: 'Bearer source-public-management', 'content-type': 'application/json', accept: 'application/json', connection: 'close' } });
+    assert.equal(capabilities.status, 200); await capabilities.arrayBuffer();
+    release();
+    const responses = await Promise.all(pending.slice(0, 6));
+    for (const response of responses) { assert.equal(response.status, 200); assert.deepEqual(await response.json(), { status: 'unknown' }); }
+    assert.equal(entered, 6); assert.equal(authorityCalls, 6); assert.equal(f.forwarded.length, 0);
+    for (const path of ['/' + contract + '/account-limits/read?extra=1', '/' + contract + '/account-limits/read/extra',
+      '/' + contract + '/account-limits/%72ead']) assert.equal(facadeBoundedReadRoute('POST', path), false);
+    assert.equal(facadeBoundedReadRoute('GET', '/' + contract + '/account-limits/read'), false);
+    assert.equal(facadeBoundedReadRoute('GET', '/v2/capabilities/account-limits'), false);
+  } finally {
+    release(); await Promise.allSettled(pending);
+    listener.closeAllConnections(); await new Promise<void>(resolve => listener.close(() => resolve()));
+    callbackHandler.closeAllConnections(); await f.close();
+  }
 });

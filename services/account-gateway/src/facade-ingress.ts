@@ -55,7 +55,7 @@ export function strictJSON(bytes: Uint8Array, integersOnly = false): unknown {
   try { return JSON.parse(text) as unknown; } catch { return bad(); }
 }
 
-export function validateResponses(bytes: Uint8Array, models: readonly string[], tokenMaximum: number): string {
+export function validateResponses(bytes: Uint8Array, models: readonly string[], tokenMaximum: number, modelPolicies?: readonly { readonly modelId: string; readonly reasoning: object | null }[]): string {
   const input = strictJSON(bytes);
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new KernelError('invalid');
   const p = input as Record<string, unknown>;
@@ -66,9 +66,11 @@ export function validateResponses(bytes: Uint8Array, models: readonly string[], 
     if (critical.includes(canonical) && key !== canonical) throw new KernelError('invalid');
   }
   if (typeof p.model !== 'string' || !models.includes(p.model) || p.stream !== true || p.store !== false ||
-      p.service_tier !== 'default' || Object.hasOwn(p, 'previous_response_id') ||
+      (Object.hasOwn(p, 'service_tier') && p.service_tier !== 'default') || Object.hasOwn(p, 'previous_response_id') ||
       (Object.hasOwn(p, 'max_output_tokens') && (!Number.isSafeInteger(p.max_output_tokens) ||
         (p.max_output_tokens as number) < 1 || (p.max_output_tokens as number) > tokenMaximum))) throw new KernelError('invalid');
+  const policy = modelPolicies?.find(model => model.modelId === p.model);
+  if (policy?.reasoning === null && p.reasoning !== undefined && p.reasoning !== null) throw new KernelError('invalid');
   // Validated request selection, not an observation of the provider response model.
   return p.model;
 }
