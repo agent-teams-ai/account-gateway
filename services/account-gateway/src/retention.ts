@@ -34,7 +34,7 @@ export async function compactSafePayloads(db: PoolClient, consumer: string, batc
         AND o.state IN ('applied','rejected') AND o.intent IS NOT NULL RETURNING o.id
     ) UPDATE executions e SET intent=NULL FROM safe s WHERE e.consumer=$1 AND e.ref=s.ref AND e.intent IS NOT NULL`,
   [consumer, batch]);
-  // SQL marks one eligible namespace irreversibly, then removes at most batch
+  // SQL visits at most batch eligible namespaces and removes at most batch
   // request rows and their usage revisions. It refunds only those request units
   // under consumer/account -> service-budget order. Other tombstones stay charged.
   await db.query('SELECT retire_closed_request_details($1,$2)', [consumer, batch]);

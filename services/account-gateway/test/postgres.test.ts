@@ -484,6 +484,37 @@ test('SQL010 retirement retains unknown, occupied, uncleaned, legacy and disable
   }
 });
 
+test('SQL011 a retirement turn reclaims multiple small namespaces within one row and namespace budget', async () => {
+  const ctx = context(), kernel = new PostgresKernel(poolA, { ...defaults, maintenanceBatch: 3 }, factDefaults,
+    { requestReadbackRetentionMs: 20 });
+  const owner = await worker(ctx, kernel);
+  for (let i = 0; i < 5; i++) {
+    const account = await connected(ctx, kernel);
+    const run = await prepared(ctx, account.accountRef!, {}, kernel), ref = run.result.executionRef!, id = 'small-' + i;
+    const claim = await kernel.claim(ctx, ref, id, owner, run.admission, boundReservation(ctx, ref, id)); assert.ok(claim.dispatch);
+    await kernel.effect(ctx, ref, id, owner, 'response_started'); await kernel.effect(ctx, ref, id, owner, 'completed');
+    await kernel.acknowledgeTransportClosed(ctx, owner, claim.dispatch.closure); await kernel.close(ctx, op(), ref);
+    const job = await kernel.claimCleanup(ctx, owner); assert.ok(job?.scope.kind === 'execution');
+    await kernel.settleCleanup(ctx, job.cleanupRef, owner, job.token, true);
+  }
+  await delay(30);
+  const before = await count('SELECT fact_used AS n FROM ag_kernel.consumers WHERE consumer=$1', [ctx.consumerId]);
+  const accountBefore = (await admin.query('SELECT ref,fact_used FROM ag_kernel.accounts WHERE consumer=$1', [ctx.consumerId])).rows;
+  await kernel.reconcile(ctx);
+  assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.requests WHERE consumer=$1', [ctx.consumerId]), 2);
+  assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.executions WHERE consumer=$1 AND request_details_drained_at IS NOT NULL', [ctx.consumerId]), 3);
+  assert.equal(await count('SELECT fact_used AS n FROM ag_kernel.consumers WHERE consumer=$1', [ctx.consumerId]), before - 3);
+  await kernel.reconcile(ctx);
+  assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.requests WHERE consumer=$1', [ctx.consumerId]), 0);
+  assert.equal(await count('SELECT count(*) AS n FROM ag_kernel.executions WHERE consumer=$1 AND request_details_drained_at IS NOT NULL', [ctx.consumerId]), 5);
+  assert.equal(await count('SELECT fact_used AS n FROM ag_kernel.consumers WHERE consumer=$1', [ctx.consumerId]), before - 5);
+  const accountAfter = (await admin.query('SELECT ref,fact_used FROM ag_kernel.accounts WHERE consumer=$1', [ctx.consumerId])).rows;
+  for (const account of accountAfter) assert.equal(BigInt(account.fact_used),
+    BigInt(accountBefore.find(row => row.ref === account.ref)!.fact_used) - 1n);
+  const totals = (await admin.query(`SELECT used,(SELECT 1+sum(fact_used) FROM ag_kernel.consumers) AS expected
+    FROM ag_kernel.fact_budget`)).rows[0]; assert.equal(totals.used, totals.expected);
+});
+
 test('trusted profile account caps admit 32 parallel requests across executions without widening default or adjacent profiles', async () => {
   const bounds = { ...defaults, maxConcurrent: 32 }, caps = [{ profile: 'mimo-test', concurrency: 32 }, { profile: 'mimo-low', concurrency: 1 }];
   const x = new PostgresKernel(poolA, bounds, factDefaults, { accountConcurrencyByProfile: caps });
