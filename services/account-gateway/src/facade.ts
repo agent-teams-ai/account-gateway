@@ -15,9 +15,12 @@ import { KernelError, identifier, uuid } from './domain.ts';
 import type { ApprovedLimits, ClaimResult, DurableKernel, ExecutionRead, NativeDispatchProof,
   OperationStatus, PrivateAdmission, RequestStatus, SavedExecution, TrustedContext, CleanupAuthority } from './domain.ts';
 import { accountLimitsTarget, captureContext, physicalCandidate, sameCandidate } from './management.ts';
+import { providerConnectionDefinition } from './provider-connections.ts';
+import { projectProviderConnections } from './provider-connection-capabilities.ts';
 import type { AccountManagement, ManagementStore, PhysicalCandidate } from './management.ts';
 import type { AccountLifecycleReadback } from './management.ts';
 import { strictJSON, validateResponses } from './facade-ingress.ts';
+import { readCachedAccountLimits } from './limits-port.ts';
 
 // Re-export the single wire authority to private composition/configuration.
 export const lifecycleContract = c.LIFECYCLE_CAPABILITY_CONTRACT;
@@ -227,6 +230,10 @@ export interface FacadeOptions {
   readonly accountLimits?: {
     getAccountLimitsCapabilities(): Promise<c.AccountLimitsCapabilities>;
     readAccountLimits(input: c.AccountLimitsRequest): Promise<c.AccountLimits>;
+  };
+  readonly accountLimitsV2?: {
+    getAccountLimitsCapabilities(): Promise<c.AccountLimitsV2Capabilities>;
+    readAccountLimits(input: c.AccountLimitsRequest): Promise<c.AccountLimitsV2>;
   };
   readonly usage?: UsageJournal;
   readonly admission?: ServiceAdmission;
@@ -526,35 +533,68 @@ export function createFacade(options: FacadeOptions): Server {
         requireCurrent(grant);
         send(res, c.accountLimitsCapabilities, { ...capabilities, quotaOnlyRefresh: false }, 200, true); return;
       }
+      if (path === '/v2/capabilities/account-limits' && method === 'GET') {
+        if (grant.role !== 'consumer-control' && grant.role !== 'management') throw new KernelError('denied');
+        let capabilities: c.AccountLimitsV2Capabilities = { contract: c.ACCOUNT_LIMITS_V2_CONTRACT, cachedRead: false, quotaOnlyRefresh: false };
+        try { if (options.accountLimitsV2) capabilities = parse(c.accountLimitsV2Capabilities, await options.accountLimitsV2.getAccountLimitsCapabilities()); }
+        catch { /* Missing/incompatible source never advertises a read capability. */ }
+        requireCurrent(grant);
+        send(res, c.accountLimitsV2Capabilities, { ...capabilities, quotaOnlyRefresh: false }, 200, true); return;
+      }
+      const limitsRead = async (contract: 'account-limits/v1' | 'account-limits/v2') => {
+        const input = parse(c.accountLimitsRequest, strictJSON(await body(req, Math.min(ingressBytes, 1024)), true));
+        const definition = providerConnectionDefinition(input.profileId);
+        if (grant.role !== 'management' && grant.role !== 'consumer-control') throw new KernelError('denied');
+        if (!permitsProfile(grant, input.profileId) || !permitsOwner(grant, input.ownerRef)) throw new KernelError('denied');
+        const selectedAccount = await kernel.account(context, input.accountRef);
+        if (selectedAccount.ownerRef !== input.ownerRef || selectedAccount.profile !== input.profileId ||
+            selectedAccount.epoch !== input.expectedAuthorizationEpoch || !['active', 'suspended'].includes(selectedAccount.state)) throw new KernelError('denied');
+        requireCurrent(grant);
+        if (!definition || definition.limitsContract !== contract) return { input, result: { status: 'unsupported' as const } };
+        const before: { value?: PhysicalCandidate } = {};
+        const authority = {
+          authorize: async (selector: c.AccountLimitsRequest) => {
+            const a = await kernel.account(context, selector.accountRef);
+            return a.ownerRef === selector.ownerRef && a.profile === selector.profileId &&
+              a.epoch === selector.expectedAuthorizationEpoch && ['active', 'suspended'].includes(a.state);
+          },
+          currentIdentity: async (selector: c.AccountLimitsRequest) => {
+            const current = await accountLimitsTarget(kernel, store, context, selector);
+            if (before.value && !sameCandidate(before.value, current)) throw new KernelError('denied');
+            before.value = current;
+            return current;
+          },
+        };
+        const source = contract === 'account-limits/v1' ? {
+          contract: 'account-limits/v1' as const,
+          read: async (selector: c.AccountLimitsRequest): Promise<c.AccountLimits> => {
+            if (!options.accountLimits) return { status: 'unavailable' };
+            const capabilities = parse(c.accountLimitsCapabilities, await options.accountLimits.getAccountLimitsCapabilities());
+            return capabilities.cachedRead ? options.accountLimits.readAccountLimits(selector) : { status: 'unavailable' };
+          },
+        } : {
+          contract: 'account-limits/v2' as const,
+          read: async (selector: c.AccountLimitsRequest): Promise<c.AccountLimitsV2> => {
+            if (!options.accountLimitsV2) return { status: 'unavailable' };
+            const capabilities = parse(c.accountLimitsV2Capabilities, await options.accountLimitsV2.getAccountLimitsCapabilities());
+            return capabilities.cachedRead ? options.accountLimitsV2.readAccountLimits(selector) : { status: 'unavailable' };
+          },
+        };
+        const result = await readCachedAccountLimits(authority, source, input,
+          { contract, provider: definition.provider.identity });
+        requireCurrent(grant);
+        if (result.wire.status === 'snapshot' && result.wire.physicalGeneration !== before.value?.generation) throw new KernelError('denied');
+        return { input, result: result.wire };
+      };
       if (path === '/v1/account-limits/read' && method === 'POST') {
         if (grant.role !== 'consumer-control' && grant.role !== 'management') throw new KernelError('denied');
-        const input = parse(c.accountLimitsRequest, strictJSON(await body(req, Math.min(ingressBytes, 1024)), true));
-        if (!permitsProfile(grant, input.profileId) || !permitsOwner(grant, input.ownerRef)) throw new KernelError('denied');
-        // Logical ownership must be checked even for unsupported sources.
-        const a = await kernel.account(context, input.accountRef);
-        if (a.ownerRef !== input.ownerRef || a.profile !== input.profileId || a.epoch !== input.expectedAuthorizationEpoch ||
-            !['active','suspended'].includes(a.state)) throw new KernelError('denied');
-        requireCurrent(grant);
-        const limitsProfile = oauthProfileDefinition(input.profileId);
-        if (!limitsProfile) { send(res, c.accountLimits, { status: 'unsupported' }, 200, true); return; }
-        const before = await accountLimitsTarget(kernel, store, context, input);
-        requireCurrent(grant);
-        let result: c.AccountLimits = { status: 'unavailable' };
-        try {
-          if (options.accountLimits) {
-            const capabilities = parse(c.accountLimitsCapabilities, await options.accountLimits.getAccountLimitsCapabilities());
-            if (capabilities.cachedRead) {
-              const observation = parse(c.accountLimits, await options.accountLimits.readAccountLimits(input));
-              if (observation.status !== 'snapshot' || observation.windows.every(window => window.family === limitsProfile.family))
-                result = observation;
-            }
-          }
-        } catch { /* No native/provider diagnostic crosses the safe union. */ }
-        const after = await accountLimitsTarget(kernel, store, context, input);
-        requireCurrent(grant);
-        if (!sameCandidate(before, after) || result.status === 'snapshot' && result.physicalGeneration !== after.generation)
-          throw new KernelError('denied');
-        send(res, c.accountLimits, result, 200, true); return;
+        const { result } = await limitsRead('account-limits/v1');
+        send(res, c.accountLimits, result as c.AccountLimits, 200, true); return;
+      }
+      if (path === '/v2/account-limits/read' && method === 'POST') {
+        if (grant.role !== 'consumer-control' && grant.role !== 'management') throw new KernelError('denied');
+        const { result } = await limitsRead('account-limits/v2');
+        send(res, c.accountLimitsV2, result as c.AccountLimitsV2, 200, true); return;
       }
       const usageMatch = /^\/v1\/usage\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/.exec(path);
       if (usageMatch && method === 'GET') {
@@ -598,7 +638,8 @@ export function createFacade(options: FacadeOptions): Server {
         // Ownership only: never derive original admission/epoch from Account GET.
         for (const ref of input.accountRefs) {
           const account = await management.account(context, ref);
-          if ((grant.role === 'run-control' && !grant.ownerRefs.includes(account.ownerRef)) || account.profile !== input.profileId) throw new KernelError('denied');
+          if ((grant.role === 'run-control' && !grant.ownerRefs.includes(account.ownerRef)) ||
+              account.profile !== input.profileId) throw new KernelError('denied');
         }
         if ((!original && Date.parse(input.deadline) <= Date.now()) ||
             Date.parse(input.deadline) - Date.now() > grant.maxRunMs) throw new KernelError('denied');
@@ -683,7 +724,8 @@ export function createFacade(options: FacadeOptions): Server {
         if (!profile || !withinProfile(saved.admission.profileId, saved.admission.limits) || saved.admission.limits.requestBytes > ingressBytes) throw new KernelError('denied');
         const raw = await body(req, Math.min(ingressBytes, saved.admission.limits.requestBytes));
         parse(secretSubmission.nativeRequest, { requestId: identity.requestRef, admission, body: raw });
-        const requestedModel = validateResponses(raw, profile.dto.modelIds, profile.maxOutputTokens);
+        const requestedModel = validateResponses(raw, profile.dto.modelIds, profile.maxOutputTokens,
+          providerConnectionDefinition(saved.admission.profileId)?.models);
         requireCurrent(grant);
         if (!transport || !enrollment) throw new KernelError('unavailable');
         const remainingMs = Date.parse(saved.admission.expiresAt) - Date.now();
@@ -763,6 +805,10 @@ export function createFacade(options: FacadeOptions): Server {
       };
       if (path === '/v1/profiles' && method === 'GET') {
         reply(c.profiles, { profiles: [...profiles.values()].filter(p => permitsProfile(grant, p.dto.profileId)).map(p => p.dto) }); return;
+      }
+      if (path === '/v1/provider-connection-capabilities' && method === 'GET') {
+        const visible = [...profiles.values()].filter(p => permitsProfile(grant, p.dto.profileId)).map(p => p.dto);
+        reply(c.providerConnectionCapabilities, projectProviderConnections(visible)); return;
       }
       const lifecycleGate = singleton(req, c.LIFECYCLE_CAPABILITY_HEADER, false) === c.LIFECYCLE_CAPABILITY_CONTRACT &&
         singleton(req, c.LIFECYCLE_CLIENT_HEADER, false) === c.LIFECYCLE_CLIENT_CONTRACT;
@@ -890,8 +936,10 @@ export function createFacade(options: FacadeOptions): Server {
         const definition = oauthProfileDefinition(account.profile);
         const callback = definition?.family === 'claude'
           ? ('authorizationCode' in input ? secretSubmission.parseClaudeOAuthAuthorizationCode(input.authorizationCode) : undefined)
-          : definition?.family === 'codex' && 'callbackURL' in input
-            ? secretSubmission.parseOAuthCallbackURL(input.callbackURL) : undefined;
+          : definition?.family === 'grok' && 'callbackURL' in input
+            ? secretSubmission.parseGrokManualCallbackURL(input.callbackURL)
+            : definition?.family === 'codex' && 'callbackURL' in input
+              ? secretSubmission.parseOAuthCallbackURL(input.callbackURL) : undefined;
         if (!callback) throw new KernelError('invalid');
         requireCurrent(grant); uncertain = true;
         const operation = await management.completeOAuth(context, { operationId: input.operationId, ownerRef: input.ownerRef, ...callback });

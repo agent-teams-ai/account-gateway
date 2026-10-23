@@ -14,11 +14,32 @@ import { IntentSecrets } from '../src/management-store.ts';
 import { codexOAuthProfile, claudeOAuthProfile } from '../src/management.ts';
 import type { CandidateJournal, CandidateMapping, ManagementStore, PhysicalCandidate } from '../src/management.ts';
 import { NativeFailure, NativeOAuthEnrollmentClient } from '../src/native-client.ts';
-import { composeServiceControl, composeServiceNative } from '../src/service.ts';
+import { composeServiceControl, composeServiceNative, composeServiceCachedLimits } from '../src/service.ts';
 import { openRouterProfile, captureServiceBearers, captureServiceProfiles, ServiceError } from '../src/service-config.ts';
+import { providerConnectionDefinition, providerConnectionRegistry } from '../src/provider-connections.ts';
+import { projectProviderConnections } from '../src/provider-connection-capabilities.ts';
 const bytes = (text: string) => Buffer.from(text);
 const valid = { model: 'fixture-model', stream: true, store: false, service_tier: 'default', input: 'fixture' };
 const invalid = (fn: () => unknown) => assert.throws(fn, e => e instanceof KernelError && e.code === 'invalid');
+test('capability projection omits new profiles without configuration and does not invent model settings', () => {
+  const configured = [{ profileId: 'openai-responses-apikey-v1', protocol: 'openai-responses' as const, modelIds: ['fixture-model'] }];
+  const projection = projectProviderConnections(configured);
+  assert.equal(projection.capabilities.length, 1);
+  assert.equal(projection.capabilities.some(value => value.profileId === 'glm-coding-global-responses-apikey-v1'), false);
+  const glm = providerConnectionDefinition('glm-coding-global-responses-apikey-v1');
+  assert.equal(glm?.models[0].modelId, 'glm-5.3-flash');
+  assert.equal(glm?.models[0].reasoning, null);
+});
+test('Grok manual callback grammar is profile-owned and cannot select another provider', () => {
+  const state = 'a'.repeat(64);
+  assert.deepEqual(secretSubmission.parseGrokManualCallbackURL(`http://127.0.0.1:56121/callback?code=fixture&state=${state}`),
+    { code: 'fixture', state });
+  for (const value of [`http://localhost:56121/callback?code=fixture&state=${state}`,
+    `http://127.0.0.1:56121/callback?code=fixture&state=${state}&provider=claude`,
+    `http://127.0.0.1:56121/callback?code=fixture%23fragment&state=${state}`,
+    `http://127.0.0.1:56121/callback?code=fixture&state=${state}&state=${state}`])
+    assert.equal(secretSubmission.parseGrokManualCallbackURL(value), undefined);
+});
 test('decoded duplicate names, malformed UTF-8 and bounded nesting deny ingress', () => {
   invalid(() => strictJSON(bytes('{"model":"a","\\u006dodel":"b"}')));
   invalid(() => strictJSON(bytes('{"outer":{"key":1,"\\u006bey":2}}')));
@@ -26,6 +47,30 @@ test('decoded duplicate names, malformed UTF-8 and bounded nesting deny ingress'
   invalid(() => strictJSON(bytes('['.repeat(66) + '0' + ']'.repeat(66))));
   assert.deepEqual(strictJSON(bytes('{"\\u006bey":1,"value":"literal \\\"key\\\""}')), { key: 1, value: 'literal "key"' });
 });
+test('Responses permits the provider default when no service tier is requested', () => {
+  const { service_tier: _tier, ...request } = valid;
+  assert.equal(validateResponses(bytes(JSON.stringify(request)), ['fixture-model'], 100), 'fixture-model');
+  for (const service_tier of [null, false, 'auto', 'priority', 'flex'])
+    invalid(() => validateResponses(bytes(JSON.stringify({ ...request, service_tier })), ['fixture-model'], 100));
+});
+
+test('source-qualified model capabilities reject configured reasoning for the four new profiles', () => {
+  const profiles = providerConnectionRegistry.filter(profile => profile.limitsContract === 'account-limits/v2');
+  assert.equal(profiles.length, 4);
+  for (const profile of profiles) {
+    const model = profile.models[0];
+    const request = { ...valid, model: model.modelId };
+    for (const reasoning of [undefined, null])
+      assert.equal(validateResponses(bytes(JSON.stringify({ ...request, reasoning })), [model.modelId], 100, profile.models), model.modelId);
+    for (const reasoning of [{ effort: 'xhigh' }, {}, false, 'high'])
+      invalid(() => validateResponses(bytes(JSON.stringify({ ...request, reasoning })), [model.modelId], 100, profile.models));
+    invalid(() => validateResponses(bytes(JSON.stringify({ ...request, service_tier: 'priority' })), [model.modelId], 100, profile.models));
+  }
+  for (const profile of providerConnectionRegistry.filter(profile => profile.limitsContract === 'account-limits/v1'))
+    assert.equal(validateResponses(bytes(JSON.stringify({ ...valid, model: profile.models[0].modelId, reasoning: { effort: 'xhigh' } })),
+      [profile.models[0].modelId], 100, profile.models), profile.models[0].modelId);
+});
+
 test('Responses policy rejects critical aliases and unsafe provider options before transport', () => {
   for (const patch of [{ store: true }, { stream: false }, { service_tier: 'priority' }, { previous_response_id: 'old' },
     { model: 'unqualified' }, { MAX_OUTPUT_TOKENS: 20 }, { '\uff33tore': false }]) {
@@ -248,6 +293,10 @@ async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false) {
       const tuple = chunks.length ? strictJSON(Buffer.concat(chunks)) as Record<string, unknown> : {};
       const path = req.url!; seen.push({ path: req.method + ' ' + path, tuple });
       const reply = (body: unknown, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
+      if (req.method === 'GET' && path === '/private/native/v2/account-limits/capabilities') {
+        assert.equal(req.headers.authorization, 'Bearer ' + consumer.managementCredential);
+        reply({ contract: 'account-limits/v2', cachedRead: true, quotaOnlyRefresh: false }); return;
+      }
       if (path === oauthPath + '/refresh') {
         assert.equal(req.method, 'POST'); assert.equal(req.headers.authorization, 'Bearer ' + consumer.managementCredential);
         const grant = await callback('oauth-refresh-authority', { consumerId, operationId: tuple.operation,
@@ -352,7 +401,7 @@ async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false) {
   const { authority, transport } = composeServiceNative(cfg, control, kernel, store, enrollment);
   const callbacks = authority.createServer(); servers.push(callbacks); callbackOrigin = await listen(callbacks);
   const facade = createFacade({ kernel, store, management: control.management, bearers: control.bearers,
-    profiles: control.catalog, enrollment, transport, intentHmacKey: randomBytes(32), ingressBytes: outputEnvelope ? 1_048_576 : 4096 });
+    profiles: control.catalog, enrollment, transport, ...composeServiceCachedLimits(control), intentHmacKey: randomBytes(32), ingressBytes: outputEnvelope ? 1_048_576 : 4096 });
   servers.push(facade); const facadeOrigin = await listen(facade);
   const publicCall = (path: string, body?: unknown, token = managementGrant.token, headers: Record<string, string> = {}) =>
     fetch(facadeOrigin + path, { method: body === undefined ? 'GET' : 'POST', headers: { authorization: 'Bearer ' + token,
@@ -1192,5 +1241,17 @@ test('source HTTP: Claude browser completion follows saved profile and qualified
     assert.equal(JSON.stringify(applied).includes(code), false);
     f.control.bearers.replace([]);
     assert.equal((await f.callback('oauth-owner-authority', lookup)).status, 403);
+  } finally { await f.close(); }
+});
+
+
+test('production cached-read composition advertises native v2 through the real facade and native HTTP client', async () => {
+  const f = await sourceHTTP(false);
+  try {
+    const response = await f.publicCall('/v2/capabilities/account-limits');
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { contract: 'account-limits/v2', cachedRead: true, quotaOnlyRefresh: false });
+    assert.equal(f.seen.filter(entry => entry.path === 'GET /private/native/v2/account-limits/capabilities').length, 1);
+    assert.equal(f.forwarded.length, 0); assert.equal(f.begins(), 0); assert.equal(f.completions(), 0);
   } finally { await f.close(); }
 });

@@ -1,4 +1,5 @@
 import { oauthProfileDefinition } from './oauth-profiles.ts';
+import { providerConnectionDefinition, providerConnectionRegistry } from './provider-connections.ts';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
@@ -50,7 +51,7 @@ export class NativeAuthority {
     // profile. Validate each tuple with its own receipt, retaining the original
     // enrollment ACK receipt and all shared transport/control bounds.
     const base = config({ ...options.config, profiles: options.config.profiles.slice(0, 1) });
-    if (options.config.profiles.length > 4) denied();
+    if (options.config.profiles.length > providerConnectionRegistry.length) denied();
     const profiles = options.config.profiles.map(p => config({ ...options.config,
       enrollment: { ...options.config.enrollment, qualificationRef: p.qualificationRef }, profiles: [p] }).profiles[0]);
     if (new Set(profiles.map(p => p.profile)).size !== profiles.length) denied();
@@ -148,7 +149,8 @@ export class NativeAuthority {
   // Cached reads have separate consumer authority and permit suspended custody.
   async #accountLimitsOwner(ctx: TrustedContext, value: unknown): Promise<unknown> {
     const r = object(value, ['consumerId','ownerRef','accountRef','profileId','expectedAuthorizationEpoch']);
-    if (r.consumerId !== ctx.consumerId || !this.#accountLimitsOwners || typeof r.profileId !== 'string' || !oauthProfileDefinition(r.profileId) ||
+    if (r.consumerId !== ctx.consumerId || !this.#accountLimitsOwners || typeof r.profileId !== 'string' ||
+        (!providerConnectionDefinition(r.profileId) || providerConnectionDefinition(r.profileId)?.limitsContract === 'none') ||
         !this.#accountLimitsOwners.bearers.authorizesAccountLimits(ctx, r.ownerRef as string, r.profileId)) return denied();
     const target = await accountLimitsTarget(this.kernel, this.#store, ctx, {
       ownerRef: r.ownerRef as string, accountRef: r.accountRef as string, profileId: r.profileId,
