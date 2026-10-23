@@ -23,6 +23,7 @@ current guidance; it does not activate CMS adoption or upgrade the installed
 Core/Assembly 0.2.0 pair. The offline topology gate rejects pin/evidence drift,
 and `pnpm test:consumer-pin` checks its TypeScript and rejecting fixtures in both
 `test:static` and `test`. These checks qualify document integrity only.
+The gate owns the approved revision tuple in code; changing it requires a reviewed pin update.
 
 Current CMS activation remains pending: accept a local adoption decision and exact
 boundary/legacy/exception inventory, qualify descriptor/module-entry/group and

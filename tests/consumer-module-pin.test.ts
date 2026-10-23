@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 // Regression: a pin or retained document changes without its reviewed migration,
 // or pending qualification is silently promoted to a CMS conformance claim.
@@ -32,6 +33,23 @@ test('consumer pin rejects unreviewed identities, retained-byte drift and adopti
     const drift = check();
     assert.equal(drift.status, 1);
     assert.match(drift.stderr, /cms\.pin\.document-drift/);
+    const replacement = Buffer.from('coordinated unreviewed document\n');
+    const identities = {
+      commit: '1'.repeat(40),
+      sha256: createHash('sha256').update(replacement).digest('hex'),
+      gitBlob: createHash('sha1').update(`blob ${replacement.length}\0`).update(replacement).digest('hex'),
+    };
+    const reviewPath = root + '/architecture/evidence/cms-pin-review.json';
+    const profile = JSON.parse(original) as { standard: Record<string, string> };
+    const review = JSON.parse(await readFile(reviewPath, 'utf8')) as typeof profile;
+    Object.assign(profile.standard, identities);
+    Object.assign(review.standard, identities);
+    await writeFile(profilePath, JSON.stringify(profile));
+    await writeFile(reviewPath, JSON.stringify(review));
+    await writeFile(root + '/architecture/evidence/common-assembly.md', replacement);
+    const coordinated = check();
+    assert.equal(coordinated.status, 1, coordinated.stdout + coordinated.stderr);
+    assert.match(coordinated.stderr, /cms\.pin\.unreviewed-identity/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
