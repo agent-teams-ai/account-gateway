@@ -24,7 +24,7 @@ test('borrowed client fatal error is unavailable, discards the client and cannot
             const result = sql.startsWith('SELECT issuer') ? { rows: [{ issuer }] }
               : sql.startsWith('SELECT lease_until') ? { rows: [{ lease_until: lease }] }
               : { rows: [] };
-            if (mode === 'query-reject' && sql.startsWith('INSERT INTO issuer_epochs') ||
+            if (mode === 'query-reject' && sql.startsWith('SELECT lease_until') ||
                 mode === 'body-resolve' && sql.startsWith('SELECT lease_until')) {
               return new Promise((resolve, reject) => setImmediate(() => {
                 const error = new Error('Connection terminated unexpectedly');

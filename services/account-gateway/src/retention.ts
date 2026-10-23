@@ -8,7 +8,7 @@ import type { PoolClient } from 'pg';
 // a non-open execution, positive terminal effects, exact closure and durable done
 // cleanup. Pending recovery has no finite TTL. In particular maxRunMs alone is
 // not a deletion horizon, and lease expiry is never evidence of closure.
-// Caller holds the kernel budget + consumer transaction locks. All mutation is
+// Caller holds the kernel consumer transaction lock. All mutation is
 // within that transaction, so a fence/restore/claim cannot race the safety test.
 export async function compactSafePayloads(db: PoolClient, consumer: string, batch: number): Promise<void> {
   await db.query(`WITH safe AS MATERIALIZED (

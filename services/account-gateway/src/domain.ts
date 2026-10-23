@@ -123,7 +123,17 @@ export interface SavedExecution {
   readonly state: ExecutionStatus['state'];
   readonly dispatchAllowed: boolean;
 }
+// A single committed SQL observation for the native boundary. This is read
+// authority only: a claim still grants the sole first-dispatch permission.
+export interface DispatchSnapshot {
+  readonly saved: SavedExecution;
+  readonly issuerEpoch: string;
+  readonly workerLeaseExpiresAt: string;
+  readonly proof?: NativeDispatchProof;
+  readonly status?: RequestStatus;
+}
 export interface ExecutionRead {
+  dispatchSnapshot?(context: TrustedContext, executionRef: string, worker: string, requestId?: string): Promise<DispatchSnapshot>;
   savedExecution(context: TrustedContext, executionRef: string): Promise<SavedExecution>;
   currentWorkerLease(context: TrustedContext, worker: string): Promise<string>;
   // Read an already claimed execution cleanup lease, without renewal/creation.

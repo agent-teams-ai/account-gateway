@@ -250,6 +250,117 @@ async function mutateAtConsumerLock<T>(ctx: TrustedContext, action: () => Promis
     return outcome.value;
   } finally { await gate.query('ROLLBACK'); gate.release(); }
 }
+
+test('SQL009 snapshots do not create unknown consumers or spend facts', async () => {
+  const ctx = context(), ref = randomUUID(), owner = randomUUID();
+  const before = (await admin.query('SELECT used FROM ag_kernel.fact_budget')).rows[0].used;
+  assert.deepEqual(await a.accounts(ctx), { accounts: [] });
+  for (const read of [() => a.account(ctx, ref), () => a.operation(ctx, op()),
+    () => a.execution(ctx, ref), () => a.savedExecution(ctx, ref),
+    () => a.currentWorkerLease(ctx, owner), () => a.dispatchSnapshot(ctx, ref, owner)]) {
+    await assert.rejects(read(), isCode('unknown'));
+  }
+  assert.equal((await admin.query('SELECT count(*)::integer AS n FROM ag_kernel.consumers WHERE consumer=$1',
+    [ctx.consumerId])).rows[0].n, 0);
+  assert.equal((await admin.query('SELECT used FROM ag_kernel.fact_budget')).rows[0].used, before);
+  const issuer = await a.issuer(ctx);
+  assert.equal(await b.issuer(ctx), issuer);
+  assert.deepEqual(await b.accounts(ctx), { accounts: [] });
+});
+
+test('SQL009 blocked consumer mutation permits unrelated charging and snapshots', { timeout: 25_000 }, async () => {
+  const blocked = context(), unrelated = context();
+  const account = await connected(blocked);
+  await b.issuer(unrelated);
+  const before = (await admin.query('SELECT used FROM ag_kernel.fact_budget')).rows[0].used;
+  const gate = await admin.connect();
+  let pending: Promise<PromiseSettledResult<OperationStatus>[]> | undefined;
+  try {
+    await gate.query('BEGIN');
+    await gate.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE', [blocked.consumerId]);
+    pending = Promise.allSettled([staged(blocked)]);
+    assert.equal(await waitForLocks(gate, [pids[0]]), true);
+    // Old SQL005 took the shared budget before waiting for this consumer row,
+    // preventing the second consumer from charging its entirely separate work.
+    const timeout = AbortSignal.timeout(2_000);
+    const progress = Promise.all([staged(unrelated, {}, b), b.account(blocked, account.accountRef!)]);
+    const result = await Promise.race([progress, new Promise<never>((_, reject) =>
+      timeout.addEventListener('abort', () => reject(new Error('unrelated SQL work blocked')), { once: true }))]);
+    assert.equal(result[0].state, 'pending');
+    assert.equal(result[1].accountRef, account.accountRef);
+    assert.equal((await gate.query('SELECT used FROM ag_kernel.fact_budget')).rows[0].used, String(BigInt(before) + 8n));
+    await gate.query('COMMIT');
+    const [settled] = await pending;
+    assert.equal(settled.status, 'fulfilled');
+    const totals = (await admin.query(`SELECT b.used,1+sum(c.fact_used) AS expected
+      FROM ag_kernel.fact_budget b CROSS JOIN ag_kernel.consumers c GROUP BY b.used`)).rows[0];
+    assert.equal(totals.used, totals.expected);
+    assert.equal(totals.used, String(BigInt(before) + 16n));
+  } finally {
+    await gate.query('ROLLBACK'); gate.release();
+    await pending;
+  }
+});
+
+test('SQL009 noncharging mutations and saved authority progress while the service budget is locked', { timeout: 25_000 }, async () => {
+  const ctx = context(), account = await connected(ctx), owner = await worker(ctx);
+  const execution = await prepared(ctx, account.accountRef!);
+  const claim = await a.claim(ctx, execution.result.executionRef!, 'snapshot-request', owner, execution.admission, reservation());
+  assert.ok(claim.dispatch);
+  const before = (await admin.query('SELECT used FROM ag_kernel.fact_budget')).rows[0].used;
+  const gate = await admin.connect();
+  try {
+    await gate.query('BEGIN');
+    await gate.query('SELECT singleton FROM ag_kernel.fact_budget WHERE singleton FOR UPDATE');
+    const timeout = AbortSignal.timeout(2_000);
+    const progress = (async () => {
+      const snapshot = await b.dispatchSnapshot(ctx, execution.result.executionRef!, owner, 'snapshot-request');
+      assert.equal(snapshot.saved.dispatchAllowed, true);
+      assert.equal(snapshot.issuerEpoch, execution.admission.issuerEpoch);
+      assert.deepEqual(snapshot.saved.admission, execution.admission);
+      assert.deepEqual(snapshot.proof, claim.dispatch.closure);
+      assert.equal(snapshot.status?.effect, 'dispatch_started');
+      await b.effect(ctx, execution.result.executionRef!, 'snapshot-request', owner, 'response_started');
+      await b.effect(ctx, execution.result.executionRef!, 'snapshot-request', owner, 'completed');
+      await b.heartbeat(ctx, owner);
+      await b.reconcile(ctx);
+    })();
+    await Promise.race([progress, new Promise<never>((_, reject) =>
+      timeout.addEventListener('abort', () => reject(new Error('noncharging SQL work blocked')), { once: true }))]);
+    await gate.query('COMMIT');
+    assert.equal((await admin.query('SELECT used FROM ag_kernel.fact_budget')).rows[0].used, before);
+    await a.fence(ctx, op(), execution.input.policySubject, execution.input.policyRevision);
+    const fenced = await b.dispatchSnapshot(ctx, execution.result.executionRef!, owner, 'snapshot-request');
+    assert.deepEqual(fenced.saved.admission, execution.admission);
+    assert.equal(fenced.saved.dispatchAllowed, false);
+    assert.equal(fenced.status?.effect, 'completed');
+    assert.deepEqual(fenced.proof, claim.dispatch.closure);
+  } finally { await gate.query('ROLLBACK'); gate.release(); }
+});
+
+test('SQL009 simultaneous direct bootstrap charges one consumer exactly once', async () => {
+  const ctx = context();
+  const before = (await admin.query('SELECT used FROM ag_kernel.fact_budget')).rows[0].used;
+  const gate = await admin.connect();
+  let insertions: Promise<PromiseSettledResult<pg.QueryResult>[]> | undefined;
+  try {
+    await gate.query('BEGIN');
+    await gate.query('SELECT singleton FROM ag_kernel.fact_budget WHERE singleton FOR UPDATE');
+    insertions = Promise.allSettled([poolA, poolB].map(pool => pool.query(`INSERT INTO ag_kernel.consumers(consumer)
+      VALUES($1) ON CONFLICT DO NOTHING`, [ctx.consumerId])));
+    assert.equal(await waitForLocks(gate, pids), true, 'both direct inserts must reach the bootstrap barrier');
+    await gate.query('COMMIT');
+    const results = await insertions;
+    assert.equal(results.every(result => result.status === 'fulfilled'), true);
+  } finally {
+    await gate.query('ROLLBACK'); gate.release();
+    await insertions;
+  }
+  const row = (await admin.query('SELECT fact_used FROM ag_kernel.consumers WHERE consumer=$1', [ctx.consumerId])).rows[0];
+  const after = (await admin.query('SELECT used FROM ag_kernel.fact_budget')).rows[0].used;
+  assert.equal(BigInt(after) - BigInt(before), BigInt(row.fact_used));
+  assert.equal(BigInt(row.fact_used), 1n + BigInt(factDefaults.workerSlots + factDefaults.issuerSlots));
+});
 async function count(sql: string, values: unknown[]) {
   const n = Number((await admin.query(sql, values)).rows[0].n);
   assert.ok(Number.isSafeInteger(n) && n >= 0);
