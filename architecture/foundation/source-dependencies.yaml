@@ -96,7 +96,7 @@ boundaries:
     roots: [services/account-gateway/test/facade-ingress.test.ts, services/account-gateway/test/execution-capability.test.ts, services/account-gateway/test/facade-postgres.test.ts, services/account-gateway/test/run-access-postgres.test.ts, services/account-gateway/test/oauth-enrollment-postgres.test.ts, services/account-gateway/test/native-retained-custody-joined.ts]
     entrypoints: [services/account-gateway/test/facade-ingress.test.ts, services/account-gateway/test/execution-capability.test.ts, services/account-gateway/test/facade-postgres.test.ts, services/account-gateway/test/run-access-postgres.test.ts, services/account-gateway/test/oauth-enrollment-postgres.test.ts, services/account-gateway/test/native-retained-custody-joined.ts]
     # Fault injection verifies that terminal success cannot outrun usage settlement.
-    allow: {boundaries: [private-facade, contracts, http, kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http, foreground-service-entry, native-transport-http, usage-journal], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:http', 'node:net', 'node:fs/promises', 'node:timers/promises', 'node:path', 'node:readline'], runtimeReferences: []}
+    allow: {boundaries: [service-admission, private-facade, contracts, http, kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http, foreground-service-entry, native-transport-http, usage-journal], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:http', 'node:net', 'node:fs/promises', 'node:timers/promises', 'node:path', 'node:readline'], runtimeReferences: []}
   - id: native-transport-http
     dependencyMode: runtime
     roots: [services/account-gateway/src/native-transport.ts, services/account-gateway/src/native-authority.ts, services/account-gateway/src/native-wire.ts, services/account-gateway/src/native-response-diagnostics.ts]
@@ -117,7 +117,7 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/test/native-device-joined.ts, services/account-gateway/test/native-claude-joined.ts]
     entrypoints: [services/account-gateway/test/native-device-joined.ts, services/account-gateway/test/native-claude-joined.ts]
-    allow: {boundaries: [kernel-postgres, native-management, native-management-postgres, private-facade, foreground-service-entry, http], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:assert/strict', 'node:crypto', 'node:child_process', 'node:fs/promises', 'node:path', 'node:readline', 'node:timers/promises', 'node:http', 'node:util', 'node:url'], runtimeReferences: []}
+    allow: {boundaries: [kernel-postgres, native-management, native-management-postgres, private-facade, foreground-service-entry, native-transport-http, http, usage-journal], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:assert/strict', 'node:crypto', 'node:child_process', 'node:fs/promises', 'node:path', 'node:readline', 'node:timers/promises', 'node:http', 'node:util', 'node:url'], runtimeReferences: []}
   - id: foreground-service-entry
     dependencyMode: runtime
     roots: [services/account-gateway/src/service.ts, services/account-gateway/src/service-config.ts, services/account-gateway/src/serve.ts]
@@ -167,5 +167,5 @@ boundaries:
   - id: native-client-fixture
     dependencyMode: runtime
     roots: [services/account-gateway/test/fixtures/native-cli]
-    entrypoints: [services/account-gateway/test/fixtures/native-cli/run.ts, services/account-gateway/test/fixtures/native-cli/race.ts, services/account-gateway/test/fixtures/native-cli/evidence.test.ts]
+    entrypoints: [services/account-gateway/test/fixtures/native-cli/run.ts, services/account-gateway/test/fixtures/native-cli/race.ts, services/account-gateway/test/fixtures/native-cli/evidence.test.ts, services/account-gateway/test/fixtures/native-cli/build-joined.ts, services/account-gateway/test/fixtures/native-cli/joined.ts, services/account-gateway/test/fixtures/native-cli/joined-evidence.test.ts]
     allow: {boundaries: [], packages: [], builtins: ['node:child_process', 'node:crypto', 'node:fs', 'node:net', 'node:os', 'node:path', 'node:url', 'node:test', 'node:assert/strict'], runtimeReferences: []}

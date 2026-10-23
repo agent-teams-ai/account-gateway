@@ -23,8 +23,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/gatewaytransport"
 	"github.com/Wei-Shaw/sub2api/internal/handler/admin"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/Wei-Shaw/sub2api/internal/repository"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -33,7 +36,10 @@ import (
 	_ "github.com/lib/pq"
 )
 
-type configuration struct{ DSN, Consumer, Control, Callback string }
+type configuration struct {
+	DSN, Consumer, Control, Callback, Execution, Cleanup string
+	CLI                                                  bool
+}
 type counters struct {
 	Starts     int64 `json:"starts"`
 	Polls      int64 `json:"polls"`
@@ -43,6 +49,15 @@ type counters struct {
 }
 
 var deny = errors.New("joined fixture refused")
+
+type fixtureHTTP struct{ client *http.Client }
+
+func (u fixtureHTTP) Do(r *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+	return u.client.Do(r)
+}
+func (u fixtureHTTP) DoWithTLS(r *http.Request, p string, id int64, c int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.Do(r, p, id, c)
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -60,6 +75,9 @@ func run() error {
 	}
 	var cfg configuration
 	if json.Unmarshal(raw, &cfg) != nil || !strings.HasPrefix(cfg.Consumer, "joined-device-") || len(cfg.Control) < 32 || len(cfg.Callback) < 32 {
+		return deny
+	}
+	if cfg.CLI && (len(cfg.Execution) < 32 || len(cfg.Cleanup) < 32) {
 		return deny
 	}
 	u, err := url.Parse(cfg.DSN)
@@ -96,7 +114,7 @@ func run() error {
 	access, refresh := "joined-fake-access-"+uuid.NewString(), "joined-fake-refresh-"+uuid.NewString()
 	verifier := strings.Repeat("v", 64)
 	providerAccount := uuid.NewString()
-	var starts, polls, exchanges, checks, unexpected atomic.Int64
+	var starts, polls, exchanges, checks, unexpected, inferenceEntries atomic.Int64
 	var authorized atomic.Bool
 	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -141,6 +159,21 @@ func run() error {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"accounts": map[string]any{"fixture": map[string]any{"account": map[string]any{"account_id": providerAccount, "is_default": true}, "entitlement": map[string]any{"expires_at": time.Now().Add(time.Hour).Format(time.RFC3339Nano)}}}})
+		case "/backend-api/codex/responses":
+			inferenceEntries.Add(1)
+			body, readErr := io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
+			var input struct {
+				Model  string `json:"model"`
+				Stream bool   `json:"stream"`
+			}
+			if !cfg.CLI || r.Host != "chatgpt.com" || r.Method != "POST" || r.Header.Get("Authorization") != "Bearer "+access || r.Header.Get("ChatGPT-Account-Id") != providerAccount ||
+				readErr != nil || len(body) > 1<<20 || json.Unmarshal(body, &input) != nil || input.Model != service.GatewayCodexOAuthModel || !input.Stream {
+				unexpected.Add(1)
+				w.WriteHeader(400)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, codexCLISSE())
 		default:
 			unexpected.Add(1)
 			w.WriteHeader(404)
@@ -149,6 +182,7 @@ func run() error {
 	defer provider.Close()
 	transport := provider.Client().Transport.(*http.Transport).Clone()
 	defer transport.CloseIdleConnections()
+	transport.Proxy = nil
 	transport.TLSClientConfig.ServerName = "example.com"
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		if address != "auth.openai.com:443" && address != "chatgpt.com:443" {
@@ -307,11 +341,27 @@ func run() error {
 	if admin.RegisterGatewayAccountLimitsRoutes(router.Group(""), limitsReader, authorizeLimitsHTTP) != nil {
 		return deny
 	}
-	native := httptest.NewServer(router)
+	var private atomic.Pointer[gatewaytransport.Handler]
+	native := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if cfg.CLI && strings.HasPrefix(r.URL.Path, "/private/native/v1/transports") {
+			handler := private.Load()
+			if handler == nil {
+				w.WriteHeader(503)
+				return
+			}
+			handler.ServeHTTP(w, r)
+			return
+		}
+		router.ServeHTTP(w, r)
+	}))
 	defer native.Close()
 	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+cfg.Control {
 			w.WriteHeader(403)
+			return
+		}
+		if cfg.CLI && r.Method == "GET" && r.URL.Path == "/inference-stats" {
+			_ = json.NewEncoder(w).Encode(map[string]int64{"entries": inferenceEntries.Load()})
 			return
 		}
 		if r.Method == "POST" && (r.URL.Path == "/limits/seed" || r.URL.Path == "/limits/tombstone") {
@@ -365,7 +415,10 @@ func run() error {
 		return deny
 	}
 	var command struct {
-		CallbackOrigin string `json:"callbackOrigin"`
+		CallbackOrigin    string `json:"callbackOrigin"`
+		OriginRef         string `json:"originRef"`
+		EngineIncarnation string `json:"engineIncarnation"`
+		QualificationRef  string `json:"qualificationRef"`
 	}
 	if json.Unmarshal(scan.Bytes(), &command) != nil {
 		return deny
@@ -375,7 +428,85 @@ func run() error {
 		return deny
 	}
 	callback.Store(command.CallbackOrigin)
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"event": "configured"})
+	configured := map[string]string{"event": "configured"}
+	if cfg.CLI {
+		post := func(ctx context.Context, path string, value any) error {
+			body, err := json.Marshal(value)
+			if err != nil || len(body) > 16384 {
+				return deny
+			}
+			req, err := http.NewRequestWithContext(ctx, "POST", command.CallbackOrigin+"/private/native/v1/"+path, bytes.NewReader(body))
+			if err != nil {
+				return deny
+			}
+			req.Header.Set("Authorization", "Bearer "+cfg.Callback)
+			req.Header.Set("Content-Type", "application/json")
+			client := &http.Client{Timeout: 4 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return deny }}
+			response, err := client.Do(req)
+			if err != nil {
+				return deny
+			}
+			defer response.Body.Close()
+			var reply struct {
+				OK bool `json:"ok"`
+			}
+			if response.StatusCode != 200 || json.NewDecoder(io.LimitReader(response.Body, 16385)).Decode(&reply) != nil || !reply.OK {
+				return deny
+			}
+			return nil
+		}
+		upstream, err := service.NewGatewayNativeLifetimeUpstream(fixtureHTTP{&http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return deny }}})
+		if err != nil {
+			return deny
+		}
+		gateway := service.NewOpenAIGatewayService(accountRepo, nil, nil, nil, nil, nil, nil, &config.Config{}, nil, nil, nil, nil, nil, upstream, nil, nil, nil, nil, nil, nil, nil, nil)
+		primary := gatewaytransport.QualifiedProfile{Profile: service.GatewayMiMoResponsesProfile, Model: "fixture-unused", BaseURL: "https://api.openai.com/v1", QualificationRef: command.QualificationRef, RequestBytes: 1 << 20, OutputBytes: 1 << 20, Tokens: 65536, ProviderTokenUpperBound: 65536}
+		qualified := gatewaytransport.QualifiedProfile{Profile: service.GatewayCodexOAuthResponsesProfile, Model: service.GatewayCodexOAuthModel, BaseURL: service.GatewayCodexOAuthBaseURL, QualificationRef: "controlled-source-v1", RequestBytes: 1 << 20, OutputBytes: 1 << 20, Tokens: 65536, ProviderTokenUpperBound: 65536}
+		handler, err := gatewaytransport.New(context.Background(), gatewaytransport.Config{Gateway: gateway, Custody: custody, OAuth: dispatch, Codex: &qualified, Profile: primary,
+			Enrollment:     gatewaytransport.Enrollment{OriginRef: command.OriginRef, EngineIncarnation: command.EngineIncarnation, QualificationRef: command.QualificationRef},
+			CallbackOrigin: command.CallbackOrigin, CallbackCredential: cfg.Callback, CallbackTimeout: 4 * time.Second, IOTimeout: 15 * time.Second, ProviderReadIdle: 15 * time.Second, CleanupTimeout: 4 * time.Second, MaxEntries: 8, EnvelopeBytes: 2 << 20, CallbackBytes: 65536,
+			Authorize: func(r *http.Request) (gatewaytransport.Peer, error) {
+				switch r.Header.Get("Authorization") {
+				case "Bearer " + cfg.Execution:
+					return gatewaytransport.Peer{ConsumerID: cfg.Consumer, Role: "execution"}, nil
+				case "Bearer " + cfg.Cleanup:
+					return gatewaytransport.Peer{ConsumerID: cfg.Consumer, Role: "cleanup"}, nil
+				}
+				return gatewaytransport.Peer{}, deny
+			},
+			VerifyEnrollment: func(ctx context.Context, e gatewaytransport.Enrollment) error {
+				return post(ctx, "enrollment", map[string]string{"originRef": e.OriginRef, "engineIncarnation": e.EngineIncarnation, "qualificationRef": e.QualificationRef})
+			},
+			VerifyDispatch: func(ctx context.Context, consumer string, p gatewaytransport.Proof, lease time.Time) error {
+				return post(ctx, "dispatch-proof", map[string]any{"consumerId": consumer, "proof": p, "leaseExpiresAt": lease.UTC().Format(time.RFC3339Nano)})
+			},
+			AuthorizeCleanup: func(ctx context.Context, consumer string, p gatewaytransport.Proof, l gatewaytransport.CleanupLease) error {
+				return post(ctx, "cleanup-authority", map[string]any{"consumerId": consumer, "proof": p, "cleanup": l})
+			},
+			AcknowledgeClosure: func(ctx context.Context, consumer string, p gatewaytransport.Proof, l gatewaytransport.CleanupLease, r gatewaytransport.Receipt) error {
+				return post(ctx, "closure-ack", map[string]any{"consumerId": consumer, "proof": p, "cleanup": l, "receipt": r})
+			},
+			AuthorizeOwnerClosure: func(ctx context.Context, consumer string, p gatewaytransport.Proof) error {
+				return post(ctx, "owner-closure-authority", map[string]any{"consumerId": consumer, "proof": p})
+			},
+			AcknowledgeOwnerClosure: func(ctx context.Context, consumer string, p gatewaytransport.Proof, r gatewaytransport.Receipt) error {
+				return post(ctx, "closure-ack", map[string]any{"consumerId": consumer, "proof": p, "receipt": r})
+			},
+		})
+		if err != nil {
+			return deny
+		}
+		private.Store(handler)
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = handler.Stop(ctx)
+		}()
+		public := httptest.NewServer(handler.PublicHandler(2))
+		defer public.Close()
+		configured["inferenceOrigin"] = public.URL
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(configured)
 	if !scan.Scan() || scan.Text() != "stop" {
 		return deny
 	}
@@ -385,4 +516,16 @@ func run() error {
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"event": "closed", "counts": counters{starts.Load(), polls.Load(), exchanges.Load(), checks.Load(), unexpected.Load()}, "plaintextCredentials": credentials, "retainedDeviceMaterial": material})
 	return nil
+}
+
+func codexCLISSE() string {
+	item := map[string]any{"id": "msg_codex_fixture", "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": "Controlled local fixture reply.", "annotations": []any{}}}}
+	response := map[string]any{"id": "resp_codex_fixture", "object": "response", "created_at": 1792782000, "status": "completed", "model": service.GatewayCodexOAuthModel, "output": []any{item}, "usage": map[string]any{"input_tokens": 7, "output_tokens": 3, "total_tokens": 10, "input_tokens_details": map[string]int{"cached_tokens": 0}, "output_tokens_details": map[string]int{"reasoning_tokens": 0}}}
+	events := []map[string]any{{"type": "response.created", "response": map[string]any{"id": "resp_codex_fixture", "status": "in_progress", "output": []any{}}}, {"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"id": "msg_codex_fixture", "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}}}, {"type": "response.output_text.delta", "output_index": 0, "item_id": "msg_codex_fixture", "content_index": 0, "delta": "Controlled local fixture reply."}, {"type": "response.output_item.done", "output_index": 0, "item": item}, {"type": "response.completed", "response": response}}
+	var out strings.Builder
+	for _, event := range events {
+		raw, _ := json.Marshal(event)
+		out.WriteString("event: " + event["type"].(string) + "\ndata: " + string(raw) + "\n\n")
+	}
+	return out.String()
 }

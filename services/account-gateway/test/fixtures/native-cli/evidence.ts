@@ -8,8 +8,23 @@ export const publicTests = ['TestPublicIngressStreamsReplaysEvictsAndPreservesPr
   'TestPublicTerminalBurstPacesTwelveCallbacksAndRetainsAbortedQueuedOwner', 'TestPublicTerminalAggregateBudgetWithholdsOnSaturationAndReleases',
   'TestPublicPreclaimAuthorityCapacityIsDistinctFromAuthenticationAndProtocolFailure', 'TestPublicNativeMessagesPreserveProtocolAndExecutionAuthority',
   'TestPublicPreworkRefusalIsExactNonceBoundAndNeverReplaysAmbiguousAdmission',
+  'TestPublicPostclaimVerificationFailureRetainsProofForIndependentNoEntrySettlement',
+  'TestPublicPreclaimRPCProducersWaitBoundedlyWithoutBlockingCriticalCallbacks',
+  'TestPublicLateClaimReplyCannotOverwriteRecoveredOriginalProof',
+  'TestPublicTerminalQueueWaitHasIndependentActiveBudgetAndFourOwners',
+  'TestPublicTerminalQueueExpiryRetainsEvidenceWithoutCallbackOrReplay',
+  'TestPublicTerminalDeliveryRefreshesOnlyWriteDeadlineAfterDurableSettlement',
   'TestClaudePrivateHTTPRejectsLossyPayloadBeforeAdmission'] as const;
 export const bootstrapTests = ['TestPublicListenerSaturatedRequestsReturnSafeAdmissionRefusal', 'TestPublicInferenceConfigurationIsExplicitAndBounded'] as const;
+export const reservationTests = [
+  'TestNEWTESTConcurrentReservationsOneHTTPCallback', 'TestNEWTESTSaturationBeforeHTTPCallbackAndChangedIntent',
+  'TestNEWTESTHeldAndLostAdmitACKNeverRearms', 'TestNEWTESTCallbackFullBindingMutationsDeny',
+  'TestNEWTESTReadbackCallbackNoPermission', 'TestNEWTESTCleanupRecoveredOriginalProofRepeatedReceipt',
+  'TestNEWTESTPrivateHTTPConcurrentDuplicatesAndConsumerBodyRejected', 'TestNEWTESTDuplicateCallbackInvocationNoSecondPermission',
+  'TestNEWTESTCallbackAmbiguousBytesAndBoundedFailure', 'TestNEWTESTConstructorAbsentAuthorityDenied',
+  'TestNEWTESTContextCancellationSealVisibleAndProofRecoverable', 'TestNEWTESTCleanupLostACKRetainsExactReceipt',
+  'TestGatewayNativeUsageReceipt', 'TestGatewayNativeOwnerHTTPClosureOnActualCompletedTransport',
+] as const;
 
 export function goTestEvidence(raw: string, allowed: readonly string[]) {
   const names = new Set(allowed);

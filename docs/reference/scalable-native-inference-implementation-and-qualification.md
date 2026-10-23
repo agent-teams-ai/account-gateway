@@ -23,7 +23,7 @@ steps. It does not establish Codex/Claude OAuth or thousand-stream capacity.
 Implementation is staged in [account-gateway PR 71](https://github.com/agent-teams-ai/account-gateway/pull/71)
 and [sub2api PR 64](https://github.com/agent-teams-ai/sub2api/pull/64). PR 71 depends
 on the preceding cloud-load/control-progress branch, PR 69. The expanded fixture
-pins native `b48f89102e0ed8375cdc1838d2701718aae76bb1`; each CI receipt records the
+pins native `654594451d1951f2f85c2d3e4011b000a9e68bdd`; each CI receipt records the
 exact gateway/native commits, binary hashes, dependency manifests and runtimes.
 
 ## Contract
@@ -165,7 +165,13 @@ obsolete execution authority.
 Public terminal `response.completed` and `message_stop` frames are withheld
 until the terminal effect, configured usage and exact physical closure ACK are
 durable. Finalization uses a separate bounded callback lane, with per-frame and
-aggregate held-terminal memory limits. Settlement failure retains original
+aggregate held-terminal memory limits. Its four callback owners have a finite
+20-second queue wait and a fresh 10-second active settlement budget; each wire
+callback remains bounded by the existing five-second timeout. Waiting consumes
+no SQL checkout or callback socket, and the public-handler bound limits waiters.
+The terminal write receives one fresh I/O deadline only after physical completion
+and durable ACK. This does not extend provider execution or allow replay.
+Settlement failure retains original
 evidence and prevents a false successful terminal. Before a claim, capacity
 refusal is explicitly `admission_limited` / `not_dispatched`; authentication and
 protocol errors cannot count as successful overload handling.
@@ -176,6 +182,14 @@ Go's original reservation nonce. Only this strictly validated receipt permits
 Go to report a safe pre-claim capacity refusal and discard its unentered local
 reservation. A generic 503, lost callback reply, malformed or mismatched receipt,
 or failure after admission work starts remains ambiguous and retained.
+
+Pre-claim metadata has a separate finite callback lane from dispatch, owner and
+cleanup checks for already accepted work. Go bounds pre-claim callback producers
+before they open callback sockets, retaining the original callback timeout and
+independent terminal lane. Structurally exact SQL ownership evidence is retained
+before subsequent live dispatch verification; retaining proof does not grant
+dispatch permission. If that later check fails, the original proof remains
+available for independent no-entry settlement and exact closure acknowledgment.
 
 ### Migration and retention rollout
 
@@ -265,8 +279,8 @@ cleanup counts were zero, all 32 executions closed and PostgreSQL stopped.
 Sampled Node and Go peaks were 433,332,224 and 253,444,096 bytes respectively;
 first-byte p50/p95/p99 were 81/109/138 ms. Those latency percentiles cover paced
 admission; completed latency includes the deliberate stream hold and is not an
-ordinary provider-response benchmark. The ten-second per-finalizer deadline
-includes its four-slot queue wait. The aggregate release duration does not expose
+ordinary provider-response benchmark. That revision's ten-second per-finalizer deadline
+included its four-slot queue wait. The aggregate release duration does not expose
 individual finalizer margin; this run establishes successful closure, not robust
 headroom for a larger or more variable simultaneous terminal burst.
 
@@ -280,6 +294,25 @@ These failures remain recorded; they establish no higher arrival-rate capacity.
 This run used merge checkout `bb09c6e79617c92b1286f43b659bc2feaf2faf82` for PR head
 `d371dc530e9fb4420c0d616890c6c3e9676927e5` and native
 `2ca8d7bd5a7646416580eda397b7ec50c0e12055`.
+
+The subsequent [39987501598 run](https://github.com/agent-teams-ai/account-gateway/actions/runs/39987501598)
+at gateway head `98bb5f523f11a6b4fdf01b95dd85c2993e8774cd` and native
+`b48f89102e0ed8375cdc1838d2701718aae76bb1` exposed two additional limits. New
+pre-claim offers could saturate callbacks needed to verify accepted claims; an
+exact claim proof was retained too late to settle the resulting no-entry attempt.
+Separate callback purposes and earlier retention of structurally exact proof
+address that path without granting dispatch permission or weakening ambiguity.
+
+The same run reached all 1856 controlled provider entries in the stream ladder,
+but 353 client streams failed terminal delivery. All had exact proof and positive
+physical native closure without acknowledgment; their provider-end-to-client
+failure durations clustered at 10.030–10.197 seconds. Successful deliveries ended
+by 9.929 seconds. Sustained arrivals independently showed the same ten-second
+cutoff. This is failed qualification, not successful overload handling. The
+measured queue-aging defect is why finalization now gives finite queue waiting
+and active settlement separate budgets. Its four owners, SQL limits, terminal
+durability checks and no-replay rule are unchanged. New source-pinned receipts
+must qualify the correction; the historical passing run does not replace them.
 
 The stream profile paces admission to isolate live-stream capacity. At 1024 total
 streams across 32 accounts it tests 32 live streams per account; 64 is the configured
@@ -303,6 +336,9 @@ unit regression proves authenticated closed/acknowledged eviction.
 [Pinned client CI](../../.github/workflows/native-client-qualification.yaml)
 adds race-checked public ingress/bootstrap, real PostgreSQL Claude lifecycle and
 SQL-guard regressions, and real Codex 0.164.0 and Claude Code 2.1.309 processes.
+The reservation race lane also requires every original registry regression and
+the actual private HTTP closure suite, covering the private path shared by proof
+retention changes.
 Official archives and binaries are integrity-pinned in
 `services/account-gateway/test/fixtures/native-cli/pins.json`; installation runs
 no package scripts. The fixture requires both named client passes, zero skips,
@@ -310,12 +346,25 @@ fresh databases, loopback-only networking, no routes, a failed external probe,
 and positive PostgreSQL shutdown. Exported test evidence excludes arbitrary
 assertion values, credentials and provider bodies, including on failure.
 
-Actual-client tests cover CLI protocol, real native OAuth account identity,
-native usage SQL, TLS and terminal ACK. Their metadata authority is a fixture
-and their upstream is controlled loopback TLS. The full-stack load fixture
-separately covers the joined TypeScript kernel and native process. These are
-not live-provider quota acceptance or a complete real-CLI-through-real-
-TypeScript-OAuth deployment test.
+The protocol-focused actual-client tests cover real native OAuth account
+identity, native usage SQL, TLS and terminal ACK using a fixture metadata
+authority. A second required lane joins each actual client to the real TypeScript
+management, execution capability, kernel, usage journal and native authority,
+then the real Go OAuth transport, PostgreSQL and controlled loopback TLS provider.
+Claude uses the browser OAuth enrollment flow and Codex uses device enrollment.
+Both execute exactly one inference and close their original execution.
+
+The joined lane deliberately blocks the real terminal usage append. During the
+block, SQL has the completed effect but retains transport occupancy and lacks
+its closure ACK; the actual CLI must not report success or exit. Releasing the
+append must produce complete usage, the unchanged original ownership proof,
+physical native closure and ACK before client success, followed by completed
+execution cleanup. No callback or usage authority is substituted in this lane.
+Build and runtime receipts bind both source commits, fixture and runtime source
+hashes, the exact Go binaries and pinned CLI binaries. The runner requires
+loopback-only networking and positive PostgreSQL shutdown, and exports only a
+fixed proof projection, including on failure. These checks do not establish
+live-provider quota acceptance or production deployment capacity.
 
 The Codex fixture uses an explicit Responses HTTP/SSE provider configuration,
 `supports_websockets=false`, and zero request/stream retries. WebSocket inference

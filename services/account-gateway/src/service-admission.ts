@@ -21,6 +21,14 @@ export const nativeCallbackCapacity = Object.freeze({ active: serviceCapacity.co
   sockets: serviceCapacity.dataActive + nativeControlCapacity.active + nativeControlCapacity.headroom +
     serviceCapacity.controlActive + 6 });
 
+// Accepted dispatch/closure callbacks keep their own finite share of the
+// existing four general owners. New inference offers cannot consume it.
+export function nativeCallbackPurpose(path: string | undefined): 'preclaim' | 'critical' | 'settlement' {
+  if (path === '/private/native/v1/execution-settle') return 'settlement';
+  return path === '/private/native/v1/execution-authority' || path === '/private/native/v1/public-admit' ||
+    path === '/private/native/v1/admit' ? 'preclaim' : 'critical';
+}
+
 // A permit is physical ownership: a timeout can remove a waiter, but cannot
 // release a started operation. Its owner releases only after physical disposal.
 export class NativeControlAdmission {

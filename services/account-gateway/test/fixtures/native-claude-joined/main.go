@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -34,7 +35,10 @@ import (
 	_ "github.com/lib/pq"
 )
 
-type configuration struct{ DSN, Consumer, Control, Callback, Execution, Cleanup string }
+type configuration struct {
+	DSN, Consumer, Control, Callback, Execution, Cleanup string
+	CLI                                                  bool
+}
 type counts struct {
 	Exchanges  int64 `json:"exchanges"`
 	Refreshes  int64 `json:"refreshes"`
@@ -55,7 +59,7 @@ func (u fixtureHTTP) DoWithTLS(r *http.Request, p string, id int64, c int, _ *tl
 
 // Assert the maintained OAuth wire independently of the source builder. The
 // exact caller instructions remain system text and no synthetic turns appear.
-func validClaudeOAuthWire(r *http.Request, body map[string]json.RawMessage) bool {
+func validClaudeOAuthHeaders(r *http.Request) bool {
 	ua := r.Header.Get("User-Agent")
 	if r.URL.RawQuery != "beta=true" || !regexp.MustCompile(`^claude-cli/[0-9]+\.[0-9]+\.[0-9]+ \(external, cli\)$`).MatchString(ua) ||
 		r.Header.Get("X-App") != "cli" || r.Header.Get("X-Stainless-Lang") != "js" || r.Header.Get("X-Stainless-Runtime") != "node" || r.Header.Get("X-Stainless-Retry-Count") != "0" {
@@ -67,6 +71,14 @@ func validClaudeOAuthWire(r *http.Request, body map[string]json.RawMessage) bool
 			return false
 		}
 	}
+	return true
+}
+
+func validClaudeOAuthWire(r *http.Request, body map[string]json.RawMessage) bool {
+	if !validClaudeOAuthHeaders(r) {
+		return false
+	}
+	ua := r.Header.Get("User-Agent")
 	var system []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
@@ -90,6 +102,29 @@ func validClaudeOAuthWire(r *http.Request, body map[string]json.RawMessage) bool
 	return string(body["max_tokens"]) == "100" && string(body["temperature"]) == "1" && string(body["tools"]) == "[]"
 }
 
+func validClaudeCLIWire(r *http.Request, raw []byte, body map[string]json.RawMessage) bool {
+	if !validClaudeOAuthHeaders(r) || service.ValidateGatewayNativeClaudeMessagesBounded(raw, 1<<20, 65536) != nil ||
+		string(body["max_tokens"]) != "32000" || string(body["tools"]) != "[]" {
+		return false
+	}
+	var messages []struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(body["messages"], &messages) != nil || len(messages) != 1 || messages[0].Role != "user" {
+		return false
+	}
+	var text string
+	if json.Unmarshal(messages[0].Content, &text) == nil {
+		return text == "Return the local fixture answer."
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	return json.Unmarshal(messages[0].Content, &blocks) == nil && len(blocks) == 1 && blocks[0].Type == "text" && blocks[0].Text == "Return the local fixture answer."
+}
+
 func main() {
 	if run() != nil {
 		_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"event": "failed"})
@@ -108,6 +143,24 @@ func run() error {
 	if json.Unmarshal(raw, &cfg) != nil || !strings.HasPrefix(cfg.Consumer, "joined-claude-") || len(cfg.Control) < 32 || len(cfg.Callback) < 32 || len(cfg.Execution) < 32 || len(cfg.Cleanup) < 32 {
 		return deny
 	}
+	if cfg.CLI {
+		interfaces, err := net.Interfaces()
+		if err != nil || len(interfaces) != 1 || interfaces[0].Name != "lo" {
+			return deny
+		}
+		routes, err := os.ReadFile("/proc/net/route")
+		if err != nil || len(strings.Split(strings.TrimSpace(string(routes)), "\n")) != 1 {
+			return deny
+		}
+		probe, err := net.DialTimeout("tcp", "192.0.2.1:443", 500*time.Millisecond)
+		if probe != nil {
+			_ = probe.Close()
+			return deny
+		}
+		if !errors.Is(err, syscall.ENETUNREACH) {
+			return deny
+		}
+	}
 	dsn, err := url.Parse(cfg.DSN)
 	if err != nil || dsn.Hostname() != "127.0.0.1" || dsn.Port() == "" || !strings.HasPrefix(dsn.Path, "/native_claude_joined_") || dsn.RawQuery != "sslmode=disable" || dsn.User == nil || dsn.User.Username() != "postgres" {
 		return deny
@@ -118,6 +171,9 @@ func run() error {
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(8)
+	if cfg.CLI {
+		db.SetMaxOpenConns(4)
+	}
 	var version string
 	var count int
 	if db.QueryRow(`SELECT current_setting('server_version')`).Scan(&version) != nil || !strings.HasPrefix(version, "17.10") || db.QueryRow(`SELECT count(*) FROM pg_class WHERE relnamespace='public'::regnamespace`).Scan(&count) != nil || count != 0 {
@@ -166,13 +222,14 @@ func run() error {
 			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": access, "refresh_token": refresh, "token_type": "Bearer", "expires_in": 3600, "scope": "user:inference user:profile", "account": map[string]string{"uuid": account}, "organization": map[string]string{"uuid": organization}})
 		case "/v1/messages":
 			messages.Add(1)
+			raw, readErr := io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
 			var body map[string]json.RawMessage
-			if r.Host != "api.anthropic.com" || r.Method != "POST" || r.Header.Get("Authorization") != "Bearer "+access || r.Header.Get("anthropic-version") != "2023-06-01" || r.Header.Get("Cookie") != "" || json.NewDecoder(r.Body).Decode(&body) != nil || string(body["model"]) != `"claude-sonnet-4-6"` || string(body["stream"]) != "true" || body["messages"] == nil || body["input"] != nil || body["store"] != nil {
+			if readErr != nil || len(raw) > 1<<20 || r.Host != "api.anthropic.com" || r.Method != "POST" || r.Header.Get("Authorization") != "Bearer "+access || r.Header.Get("X-Api-Key") != "" || r.Header.Get("anthropic-version") != "2023-06-01" || r.Header.Get("Cookie") != "" || json.Unmarshal(raw, &body) != nil || string(body["model"]) != `"claude-sonnet-4-6"` || string(body["stream"]) != "true" || body["messages"] == nil || body["input"] != nil || body["store"] != nil {
 				unexpected.Add(1)
 				w.WriteHeader(400)
 				return
 			}
-			if !validClaudeOAuthWire(r, body) {
+			if cfg.CLI && !validClaudeCLIWire(r, raw, body) || !cfg.CLI && !validClaudeOAuthWire(r, body) {
 				unexpected.Add(1)
 				w.WriteHeader(400)
 				return
@@ -449,6 +506,9 @@ func run() error {
 	}
 	primary := gatewaytransport.QualifiedProfile{Profile: service.GatewayMiMoResponsesProfile, Model: "fixture-unused", BaseURL: "https://api.openai.com/v1", QualificationRef: command.QualificationRef, RequestBytes: 4096, OutputBytes: 4096, Tokens: 100, ProviderTokenUpperBound: 100}
 	qualified := gatewaytransport.QualifiedProfile{Profile: service.GatewayClaudeOAuthMessagesProfile, Model: service.GatewayClaudeOAuthModel, BaseURL: service.GatewayClaudeOAuthBaseURL, QualificationRef: "controlled-source-v1", RequestBytes: 4096, OutputBytes: 4096, Tokens: 100, ProviderTokenUpperBound: 100}
+	if cfg.CLI {
+		qualified.RequestBytes, qualified.OutputBytes, qualified.Tokens, qualified.ProviderTokenUpperBound = 1<<20, 1<<20, 65536, 65536
+	}
 	tcfg := gatewaytransport.Config{Gateway: gateway, Custody: custody, ClaudeOAuth: claude, Claude: &qualified, Profile: primary, Enrollment: gatewaytransport.Enrollment{OriginRef: command.OriginRef, EngineIncarnation: command.EngineIncarnation, QualificationRef: primary.QualificationRef}, CallbackOrigin: command.CallbackOrigin, CallbackCredential: cfg.Callback, CallbackTimeout: 4 * time.Second, IOTimeout: 5 * time.Second, ProviderReadIdle: 5 * time.Second, CleanupTimeout: 4 * time.Second, MaxEntries: 8, EnvelopeBytes: 8192, CallbackBytes: 16384,
 		Authorize: func(r *http.Request) (gatewaytransport.Peer, error) {
 			token := r.Header.Get("Authorization")
@@ -484,17 +544,29 @@ func run() error {
 		return deny
 	}
 	private.Store(handler)
+	var public *httptest.Server
+	if cfg.CLI {
+		public = httptest.NewServer(handler.PublicHandler(2))
+		defer public.Close()
+	}
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = handler.Stop(ctx)
 	}()
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"event": "configured"})
+	configured := map[string]string{"event": "configured"}
+	if public != nil {
+		configured["inferenceOrigin"] = public.URL
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(configured)
 	if !scan.Scan() || scan.Text() != "stop" {
 		return deny
 	}
 	var material, credentials int
 	if db.QueryRow(`SELECT count(*) FROM gateway_claude_connect_intents WHERE material_envelope<>''`).Scan(&material) != nil || db.QueryRow(`SELECT count(*) FROM accounts WHERE credentials::text LIKE $1 OR credentials::text LIKE $2`, "%"+access+"%", "%"+refresh+"%").Scan(&credentials) != nil || material != 0 || credentials != 0 {
+		return deny
+	}
+	if cfg.CLI && (db.Stats().InUse != 0 || stats().Messages != 1 || stats().Unexpected != 0) {
 		return deny
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"event": "closed", "counts": stats(), "plaintextCredentials": credentials, "retainedOAuthMaterial": material})

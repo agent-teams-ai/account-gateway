@@ -5,7 +5,7 @@ import { writeSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import pg from 'pg';
-import { ServiceAdmission, NativeControlAdmission, admitNativeCallback, nativeCallbackCapacity,
+import { ServiceAdmission, NativeControlAdmission, admitNativeCallback, nativeCallbackCapacity, nativeCallbackPurpose,
   facadeControlRoute, facadeUsageReadRoute, inServiceLane } from './service-admission.ts';
 import { KernelError, defaults, uuid } from './domain.ts';
 import type { Bounds } from './domain.ts';
@@ -268,7 +268,8 @@ export function writeRuntimeFailureDiagnostic(cause: RuntimeFailureCause, error?
 export async function startService(configFile: string, signal?: AbortSignal): Promise<Service> {
   const admission = new ServiceAdmission();
   const nativeControls = new NativeControlAdmission();
-  const nativeCallbacks = new NativeControlAdmission(4, nativeCallbackCapacity.waiting);
+  const nativePreclaims = new NativeControlAdmission(2, Math.floor(nativeCallbackCapacity.waiting / 2));
+  const nativeCritical = new NativeControlAdmission(2, Math.ceil(nativeCallbackCapacity.waiting / 2));
   const nativeSettlements = new NativeControlAdmission(4, 4);
   const cfg = loadServiceConfig(configFile); // Fully frozen before any await.
   const pool = new pg.Pool({ connectionString: cfg.kernelDSN, max: 8, connectionTimeoutMillis: 5000,
@@ -366,7 +367,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   function stop(): Promise<'retired' | 'pending'> {
     if (stopWork) return stopWork;
     if (stopping) return stopped;
-    stopping = true; const handlersSettled = Promise.all([admission.stop(), nativeControls.stop(), Promise.all([nativeCallbacks.stop(), nativeSettlements.stop()]).then(() => undefined)]);
+    stopping = true; const handlersSettled = Promise.all([admission.stop(), nativeControls.stop(), Promise.all([nativePreclaims.stop(), nativeCritical.stop(), nativeSettlements.stop()]).then(() => undefined)]);
     readbackAbort.abort(); denyAdmission(); install(); pulse(); wakeSleep?.();
     // Signal only the original ChildProcess handle. The protected Go parent
     // alone decides exact-engine retirement and retains launcher disk evidence.
@@ -449,7 +450,9 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     const binding = original!;
     const enrollment = Object.freeze({ originRef: binding.originRef, engineIncarnation: binding.incarnation, worker });
     const { authority, transport } = composeServiceNative(cfg, control, kernel, store, enrollment, usage);
-    handler = authority.createServer((req, res, work, refusedBeforeWork) => admitNativeCallback(req.url === '/private/native/v1/execution-settle' ? nativeSettlements : nativeCallbacks, req, res, work, refusedBeforeWork)); install();
+    handler = authority.createServer((req, res, work, refusedBeforeWork) => admitNativeCallback(
+      nativeCallbackPurpose(req.url) === 'settlement' ? nativeSettlements : nativeCallbackPurpose(req.url) === 'preclaim' ? nativePreclaims : nativeCritical,
+      req, res, work, refusedBeforeWork)); install();
     startupStage = 'ready';
     await waitFor(() => ready, 10_000);
     startupActive();
