@@ -1,10 +1,10 @@
-// Disposable root operator. Network isolation is an independently checked
-// prerequisite; workload and assertion authority remain in stand.ts.
+// Disposable-container root operator. The external Docker recipe provides
+// isolation; the marker below is a misuse guard, not a sandbox for this code.
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, chownSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync,
-  readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+  rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connect, createServer } from 'node:net';
@@ -13,6 +13,7 @@ import { bounds, check, scenarios } from './model.ts';
 import { sha256 } from './fixture.ts';
 import type { Fixture } from './fixture.ts';
 import { nativeSourceCommit, migrationAdapterSource } from './build-native-fixture.ts';
+import { artifactNames, openArtifactExport } from './artifact-export.ts';
 
 const captured = new Set<ChildProcess>();
 type Stage = 'arguments' | 'network' | 'build_receipt' | 'postgres_version' | 'source' | 'layout' |
@@ -158,11 +159,12 @@ async function main() {
     options.set(key, value);
   }
   const repo = options.get('--repo'), receiptPath = options.get('--build-receipt'), pgBin = options.get('--pg-bin'), destination = options.get('--artifacts');
-  const suite = options.get('--suite') ?? 'smoke', trustMode = options.get('--trust-mode') ?? 'bind', seed = Number(options.get('--seed') ?? 20261023);
+  const suite = options.get('--suite') ?? 'smoke', trustMode = options.get('--trust-mode') ?? 'container', seed = Number(options.get('--seed') ?? 20261023);
+  check(trustMode === 'container', 'operator-container-only');
   check(process.platform === 'linux' && process.geteuid?.() === 0 && ['v26.11.1','v24.21.0'].includes(process.version), 'operator-runtime');
   check(repo && receiptPath && pgBin && destination && [repo, receiptPath, pgBin, destination].every(isAbsolute), 'operator-absolute-paths');
-  check((suite === 'all' || scenarios.some(name => name === suite)) && ['bind','container'].includes(trustMode) && Number.isSafeInteger(seed) && seed >= 0 && seed <= 0xffffffff, 'operator-options');
-  if (trustMode === 'container') check(existsSync('/.dockerenv'), 'operator-disposable-container-required');
+  check((suite === 'all' || scenarios.some(name => name === suite)) && Number.isSafeInteger(seed) && seed >= 0 && seed <= 0xffffffff, 'operator-options');
+  check(existsSync('/.dockerenv'), 'operator-disposable-container-required');
   stage = 'network'; const network = await networkEvidence(suite === 'all' || suite === 'slow-reader');
   stage = 'build_receipt';
   const build = JSON.parse(readFileSync(receiptPath, 'utf8')) as Record<string, string>;
@@ -176,109 +178,106 @@ async function main() {
   const gatewayCommit = options.get('--gateway-commit') ?? await command('/usr/bin/git', ['-C', repo, 'rev-parse', 'HEAD']);
   check(/^[a-f0-9]{40}$/.test(gatewayCommit), 'operator-gateway-commit');
   stage = 'layout';
-  mkdirSync(destination, { recursive: true, mode: 0o700 }); check(readdirSync(destination).length === 0, 'operator-fresh-artifacts');
-  // Go drops UID before exec: its root-owned image needs traversable ancestors.
-  // Bootstrap, authority, TLS keys and evidence remain in private sibling dirs.
-  const runId = randomUUID(), owned = mkdtempSync('/opt/ag_load_operator_'), root = join(owned, 'fixture'), artifacts = join(owned, 'artifacts');
-  chmodSync(owned, 0o755); mkdirSync(root, { mode: 0o700 }); mkdirSync(artifacts, { mode: 0o700 });
-  const nativeDir = join(owned, 'native'), tls = join(root, 'tls'); mkdirSync(nativeDir, { mode: 0o755 }); mkdirSync(tls, { mode: 0o700 });
-  const executable = join(nativeDir, 'account-gateway'), migrator = join(owned, 'native-fixture-migrate');
-  // copyFileSync preserves the runner-owned build inputs' UID/GID. The private
-  // executable copies must instead belong to this root operator before use.
-  copyFileSync(sourceBinary, executable); chownSync(executable, 0, 0); chmodSync(executable, 0o755);
-  copyFileSync(sourceMigrator, migrator); chownSync(migrator, 0, 0); chmodSync(migrator, 0o700);
-  const pgRoot = mkdtempSync('/tmp/ag_load_pg_'), data = join(pgRoot, 'data'), socket = join(pgRoot, 'socket');
-  chmodSync(pgRoot, 0o755); mkdirSync(data, { mode: 0o700 }); mkdirSync(socket, { mode: 0o700 });
-  chownSync(data, 65534, 65534); chownSync(socket, 65534, 65534);
-  const pgLog = join(pgRoot, 'postgres.log'); writeFileSync(pgLog, '', { mode: 0o600 }); chownSync(pgLog, 65534, 65534);
-  const env = { PATH: pgBin + ':/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', TZ: 'UTC' };
-  const caBundle = '/etc/ssl/certs/ca-certificates.crt';
-  let originalCA: Buffer | undefined, mountedCA = false, pgStarted = false, success = false, failure: string | undefined, failureStage: Stage | undefined;
-  let commandFailure: ReturnType<typeof childFailureFacts> | undefined;
-  let postgresStopped = true;
-  const cleanupFailures: string[] = [];
+  const output = openArtifactExport(destination);
   try {
-    stage = 'tls';
-    const ca = join(tls, 'server.crt'), key = join(tls, 'server.key');
-    await command('/usr/bin/openssl', ['req','-x509','-newkey','rsa:2048','-nodes','-days','1','-keyout', key,
-      '-out', ca, '-subj','/CN=127.0.0.1','-addext','subjectAltName=IP:127.0.0.1','-addext','basicConstraints=critical,CA:TRUE']);
-    chmodSync(ca, 0o644); chmodSync(key, 0o600);
-    stage = 'trust';
-    if (trustMode === 'bind') {
-      await command('/usr/bin/mount', ['--bind', ca, caBundle]); mountedCA = true;
-      await command('/usr/bin/mount', ['-o','remount,bind,ro', ca, caBundle]);
-    } else { originalCA = readFileSync(caBundle); writeFileSync(caBundle, readFileSync(ca)); }
-    stage = 'postgres_init';
-    await command(join(pgBin, 'initdb'), ['-D', data, '--username=postgres','--auth=trust','--no-locale','--encoding=UTF8'], { env, uid: 65534, gid: 65534 });
-    const port = await freePort();
-    writeFileSync(join(data, 'postgresql.auto.conf'), `listen_addresses='127.0.0.1'\nport=${port}\nunix_socket_directories='${socket}'\nmax_connections=200\nshared_buffers='128MB'\nfsync=on\nsynchronous_commit=on\nfull_page_writes=on\ntimezone='UTC'\n`, { mode: 0o600 });
-    chownSync(join(data, 'postgresql.auto.conf'), 65534, 65534);
-    stage = 'postgres_start'; pgStarted = true; // A failed/aborted start may still have created PostgreSQL.
-    await command(join(pgBin, 'pg_ctl'), ['-D', data, '-l', pgLog, '-w','start'], { env, uid: 65534, gid: 65534 });
-    stage = 'database_create';
-    const kernelName = 'ag_load_kernel_' + randomUUID().replaceAll('-', ''), nativeName = 'ag_load_native_' + randomUUID().replaceAll('-', '');
-    for (const name of [kernelName, nativeName]) await command(join(pgBin, 'createdb'), ['-h','127.0.0.1','-p', String(port), '-U','postgres', name], { env });
-    const kernelDSN = `postgresql://postgres@127.0.0.1:${port}/${kernelName}`, nativeDSN = `postgresql://postgres@127.0.0.1:${port}/${nativeName}`;
-    stage = 'native_migrations';
-    const migration = JSON.parse(await command(migrator, [nativeDSN + '?sslmode=disable'], { env, timeout: 240_000 })) as {
-      kind: string; sourceCommit: string; postgresVersion: string; accounts: number; migrationsSha256: string;
-      migrations: { filename: string; sha256: string }[] };
-    check(migration.kind === 'production-native-migration-receipt-v1' && migration.sourceCommit === nativeSourceCommit &&
-      migration.postgresVersion.startsWith('17.10') && migration.accounts === 0, 'operator-native-migrations');
-    stage = 'fixture_manifest';
-    const fixture: Fixture = { kind: 'account-gateway-fullstack-fixture-v1', runId, seed, root, artifacts, kernelDSN, nativeDSN: nativeDSN + '?sslmode=disable', gatewayCommit,
-      native: { executable, sha256: build.sha256, sourceCommit: nativeSourceCommit, migrationsSha256: migration.migrationsSha256,
-        migrationFiles: migration.migrations.map(x => ({ name: x.filename, sha256: x.sha256 })) },
-      tls: { ca, cert: ca, key }, network: { externalDisabled: true, evidence: network } };
-    const manifest = join(root, 'fixture.json'); writeFileSync(manifest, JSON.stringify(fixture), { mode: 0o600, flag: 'wx' });
-    writeFileSync(join(artifacts, 'native-migrations.json'), JSON.stringify(migration, null, 2) + '\n', { mode: 0o600 });
-    stage = 'workload';
-    await command(process.execPath, ['--test','--test-isolation=none','--test-reporter=tap', join(repo, 'services/account-gateway/test/load/stand.ts')],
-      { cwd: repo, env: { ...env, NODE_USE_SYSTEM_CA: '1', AG_LOAD_MANIFEST: manifest, ...(suite === 'all' ? {} : { AG_LOAD_SCENARIOS: suite }) },
-        group: true, timeout: bounds.wallMs + 60_000, log: join(owned, 'stand.log') });
-    stage = 'summary';
-    const summary = JSON.parse(readFileSync(join(artifacts, 'summary.json'), 'utf8')) as Record<string, unknown>;
-    check(summary.outcome === 'pass' && summary.ledgerMatches === true && summary.sourceUnchanged === true && summary.sdkArtifactUnchanged === true && summary.stopped === 'retired' &&
-      JSON.stringify(summary.expectedScenarios) === JSON.stringify(suite === 'all' ? scenarios : [suite]), 'operator-qualification-summary');
-    success = true;
-  } catch (error) {
-    failureStage = stage; failure = error instanceof Error && /^load:[a-z0-9-]+$/.test(error.message) ? error.message.slice(5) : 'operator-failed';
-    if (error instanceof CommandFailure) commandFailure = error.facts;
-  }
-  finally {
-    requestedStop = false; // Cleanup remains required after an operator signal.
-    if (pgStarted) {
-      const cleanup = await stopPostgres(pgBin, data, env);
-      postgresStopped = cleanup.stopped; cleanupFailures.push(...cleanup.failures);
-      if (cleanup.failures.length) { success = false; failure ??= 'operator-pg-stop'; failureStage ??= 'postgres_stop'; }
+    // Go drops UID before exec: its root-owned image needs traversable ancestors.
+    // Bootstrap, authority, TLS keys and evidence remain in private sibling dirs.
+    const runId = randomUUID(), owned = mkdtempSync('/opt/ag_load_operator_'), root = join(owned, 'fixture'), artifacts = join(owned, 'artifacts');
+    chmodSync(owned, 0o755); mkdirSync(root, { mode: 0o700 }); mkdirSync(artifacts, { mode: 0o700 });
+    const nativeDir = join(owned, 'native'), tls = join(root, 'tls'); mkdirSync(nativeDir, { mode: 0o755 }); mkdirSync(tls, { mode: 0o700 });
+    const executable = join(nativeDir, 'account-gateway'), migrator = join(owned, 'native-fixture-migrate');
+    // copyFileSync preserves the runner-owned build inputs' UID/GID. The private
+    // executable copies must instead belong to this root operator before use.
+    copyFileSync(sourceBinary, executable); chownSync(executable, 0, 0); chmodSync(executable, 0o755);
+    copyFileSync(sourceMigrator, migrator); chownSync(migrator, 0, 0); chmodSync(migrator, 0o700);
+    const pgRoot = mkdtempSync('/tmp/ag_load_pg_'), data = join(pgRoot, 'data'), socket = join(pgRoot, 'socket');
+    chmodSync(pgRoot, 0o755); mkdirSync(data, { mode: 0o700 }); mkdirSync(socket, { mode: 0o700 });
+    chownSync(data, 65534, 65534); chownSync(socket, 65534, 65534);
+    const pgLog = join(pgRoot, 'postgres.log'); writeFileSync(pgLog, '', { mode: 0o600 }); chownSync(pgLog, 65534, 65534);
+    const env = { PATH: pgBin + ':/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', TZ: 'UTC' };
+    const caBundle = '/etc/ssl/certs/ca-certificates.crt';
+    let originalCA: Buffer | undefined, pgStarted = false, success = false, failure: string | undefined, failureStage: Stage | undefined;
+    let commandFailure: ReturnType<typeof childFailureFacts> | undefined;
+    let postgresStopped = true;
+    const cleanupFailures: string[] = [];
+    try {
+      stage = 'tls';
+      const ca = join(tls, 'server.crt'), key = join(tls, 'server.key');
+      await command('/usr/bin/openssl', ['req','-x509','-newkey','rsa:2048','-nodes','-days','1','-keyout', key,
+        '-out', ca, '-subj','/CN=127.0.0.1','-addext','subjectAltName=IP:127.0.0.1','-addext','basicConstraints=critical,CA:TRUE']);
+      chmodSync(ca, 0o644); chmodSync(key, 0o600);
+      stage = 'trust';
+      originalCA = readFileSync(caBundle); writeFileSync(caBundle, readFileSync(ca));
+      stage = 'postgres_init';
+      await command(join(pgBin, 'initdb'), ['-D', data, '--username=postgres','--auth=trust','--no-locale','--encoding=UTF8'], { env, uid: 65534, gid: 65534 });
+      const port = await freePort();
+      writeFileSync(join(data, 'postgresql.auto.conf'), `listen_addresses='127.0.0.1'\nport=${port}\nunix_socket_directories='${socket}'\nmax_connections=200\nshared_buffers='128MB'\nfsync=on\nsynchronous_commit=on\nfull_page_writes=on\ntimezone='UTC'\n`, { mode: 0o600 });
+      chownSync(join(data, 'postgresql.auto.conf'), 65534, 65534);
+      stage = 'postgres_start'; pgStarted = true; // A failed/aborted start may still have created PostgreSQL.
+      await command(join(pgBin, 'pg_ctl'), ['-D', data, '-l', pgLog, '-w','start'], { env, uid: 65534, gid: 65534 });
+      stage = 'database_create';
+      const kernelName = 'ag_load_kernel_' + randomUUID().replaceAll('-', ''), nativeName = 'ag_load_native_' + randomUUID().replaceAll('-', '');
+      for (const name of [kernelName, nativeName]) await command(join(pgBin, 'createdb'), ['-h','127.0.0.1','-p', String(port), '-U','postgres', name], { env });
+      const kernelDSN = `postgresql://postgres@127.0.0.1:${port}/${kernelName}`, nativeDSN = `postgresql://postgres@127.0.0.1:${port}/${nativeName}`;
+      stage = 'native_migrations';
+      const migration = JSON.parse(await command(migrator, [nativeDSN + '?sslmode=disable'], { env, timeout: 240_000 })) as {
+        kind: string; sourceCommit: string; postgresVersion: string; accounts: number; migrationsSha256: string;
+        migrations: { filename: string; sha256: string }[] };
+      check(migration.kind === 'production-native-migration-receipt-v1' && migration.sourceCommit === nativeSourceCommit &&
+        migration.postgresVersion.startsWith('17.10') && migration.accounts === 0, 'operator-native-migrations');
+      stage = 'fixture_manifest';
+      const fixture: Fixture = { kind: 'account-gateway-fullstack-fixture-v1', runId, seed, root, artifacts, kernelDSN, nativeDSN: nativeDSN + '?sslmode=disable', gatewayCommit,
+        native: { executable, sha256: build.sha256, sourceCommit: nativeSourceCommit, migrationsSha256: migration.migrationsSha256,
+          migrationFiles: migration.migrations.map(x => ({ name: x.filename, sha256: x.sha256 })) },
+        tls: { ca, cert: ca, key }, network: { externalDisabled: true, evidence: network } };
+      const manifest = join(root, 'fixture.json'); writeFileSync(manifest, JSON.stringify(fixture), { mode: 0o600, flag: 'wx' });
+      writeFileSync(join(artifacts, 'native-migrations.json'), JSON.stringify(migration, null, 2) + '\n', { mode: 0o600 });
+      stage = 'workload';
+      await command(process.execPath, ['--test','--test-isolation=none','--test-reporter=tap', join(repo, 'services/account-gateway/test/load/stand.ts')],
+        { cwd: repo, env: { ...env, NODE_USE_SYSTEM_CA: '1', AG_LOAD_MANIFEST: manifest, ...(suite === 'all' ? {} : { AG_LOAD_SCENARIOS: suite }) },
+          group: true, timeout: bounds.wallMs + 60_000, log: join(owned, 'stand.log') });
+      stage = 'summary';
+      const summary = JSON.parse(readFileSync(join(artifacts, 'summary.json'), 'utf8')) as Record<string, unknown>;
+      check(summary.outcome === 'pass' && summary.ledgerMatches === true && summary.sourceUnchanged === true && summary.sdkArtifactUnchanged === true && summary.stopped === 'retired' &&
+        JSON.stringify(summary.expectedScenarios) === JSON.stringify(suite === 'all' ? scenarios : [suite]), 'operator-qualification-summary');
+      success = true;
+    } catch (error) {
+      failureStage = stage; failure = error instanceof Error && /^load:[a-z0-9-]+$/.test(error.message) ? error.message.slice(5) : 'operator-failed';
+      if (error instanceof CommandFailure) commandFailure = error.facts;
     }
-    for (const child of captured) child.kill('SIGTERM');
-    await delay(100);
-    for (const child of captured) child.kill('SIGKILL');
-    if (mountedCA) {
-      try { await command('/usr/bin/umount', [caBundle]); }
-      catch { cleanupFailures.push('trust-unmount'); success = false; failure ??= 'operator-ca-unmount'; failureStage ??= 'trust_restore'; }
+    finally {
+      requestedStop = false; // Cleanup remains required after an operator signal.
+      if (pgStarted) {
+        const cleanup = await stopPostgres(pgBin, data, env);
+        postgresStopped = cleanup.stopped; cleanupFailures.push(...cleanup.failures);
+        if (cleanup.failures.length) { success = false; failure ??= 'operator-pg-stop'; failureStage ??= 'postgres_stop'; }
+      }
+      for (const child of captured) child.kill('SIGTERM');
+      await delay(100);
+      for (const child of captured) child.kill('SIGKILL');
+      if (originalCA) {
+        try { writeFileSync(caBundle, originalCA); }
+        catch { cleanupFailures.push('trust-restore'); success = false; failure ??= 'operator-ca-restore'; failureStage ??= 'trust_restore'; }
+      }
+      const receipt = { kind: 'fullstack-operator-result-v1', runId, seed, node: process.version, suite, outcome: success ? 'pass' : 'fail',
+        failure, failureStage, commandFailure, cleanupFailures, postgresStopped, ...(postgresStopped ? {} : { retainedPostgresRoot: pgRoot }),
+        nativeSourceCommit, nativeSha256: build.sha256, migratorSha256: build.migratorSha256,
+        migrationAdapterSha256: build.migrationAdapterSha256, gatewayCommit, network, postgresVersion: version };
+      try {
+        writeFileSync(join(artifacts, 'operator-result.json'), JSON.stringify(receipt, null, 2) + '\n', { mode: 0o600 });
+        stage = 'artifact_copy';
+        for (const name of artifactNames) {
+          if (existsSync(join(artifacts, name))) output.copy(artifacts, name);
+        }
+      } finally {
+        if (postgresStopped) rmSync(pgRoot, { recursive: true, force: true });
+        rmSync(owned, { recursive: true, force: true });
+      }
     }
-    if (originalCA) {
-      try { writeFileSync(caBundle, originalCA); }
-      catch { cleanupFailures.push('trust-restore'); success = false; failure ??= 'operator-ca-restore'; failureStage ??= 'trust_restore'; }
-    }
-    const receipt = { kind: 'fullstack-operator-result-v1', runId, seed, node: process.version, suite, outcome: success ? 'pass' : 'fail',
-      failure, failureStage, commandFailure, cleanupFailures, postgresStopped, ...(postgresStopped ? {} : { retainedPostgresRoot: pgRoot }),
-      nativeSourceCommit, nativeSha256: build.sha256, migratorSha256: build.migratorSha256,
-      migrationAdapterSha256: build.migrationAdapterSha256, gatewayCommit, network, postgresVersion: version };
-    writeFileSync(join(artifacts, 'operator-result.json'), JSON.stringify(receipt, null, 2) + '\n', { mode: 0o600 });
-    stage = 'artifact_copy';
-    for (const name of ['operator-result.json','summary.json','source-manifest.json','native-migrations.json','attempts.json','preparations.json','cleanup.json','scenarios.json','provider-ledger.ndjson','resources.json']) {
-      const path = join(artifacts, name);
-      if (existsSync(path)) { check(statSync(path).isFile() && statSync(path).size <= bounds.artifactBytes, 'operator-artifact-bound'); copyFileSync(path, join(destination, name)); chmodSync(join(destination, name), 0o600); }
-    }
-    if (postgresStopped) rmSync(pgRoot, { recursive: true, force: true });
-    rmSync(owned, { recursive: true, force: true });
-  }
-  if (failureStage) stage = failureStage;
-  check(success, 'operator-qualification-failed');
-  process.stdout.write(JSON.stringify({ outcome: 'pass', runId, suite, node: process.version, artifacts: destination }) + '\n');
+    if (failureStage) stage = failureStage;
+    check(success, 'operator-qualification-failed');
+    process.stdout.write(JSON.stringify({ outcome: 'pass', runId, suite, node: process.version, artifacts: destination }) + '\n');
+  } finally { output.close(); }
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch(error => {

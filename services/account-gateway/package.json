@@ -11,7 +11,7 @@
     "typecheck": "tsc --project tsconfig.json",
     "test:domain": "node --test test/domain.test.ts test/facade-ingress.test.ts test/native-wire.test.ts test/native-control-admission.test.ts test/native-response-diagnostics.test.ts test/postgres-client-error.test.ts test/service-admission.test.ts test/service-config.test.ts test/usage.test.ts test/usage-checkout.test.ts",
     "qualify:retained-custody": "node test/native-retained-custody-joined.ts",
-    "test:load:unit": "node --test --test-isolation=none test/load/model.test.ts",
+    "test:load:unit": "node --test --test-isolation=none test/load/model.test.ts test/load/artifact-export.test.ts test/load/provision-guards.test.ts",
     "qualify:load": "node test/load/provision.ts",
     "test:management": "node --test test/management.test.ts",
     "test:pg": "node --test --test-concurrency=1 test/postgres.test.ts test/management-postgres.test.ts test/facade-postgres.test.ts test/native-transport-postgres.test.ts",

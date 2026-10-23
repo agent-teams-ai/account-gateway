@@ -54,7 +54,10 @@ jobs:
         run: |
           test "$(node --version)" = "v${{ matrix.node }}"
           load_root="$RUNNER_TEMP/gateway-load"
-          mkdir -p "$load_root/shim" "$load_root/tmp" "$load_root/artifacts"
+          mkdir -p "$load_root/shim" "$load_root/tmp"
+          # The root operator accepts only a fresh private directory owned by
+          # its own UID; never claim an existing caller-writable destination.
+          sudo mkdir -m 700 "$load_root/artifacts"
           printf '#!/bin/sh\nexec "%s" "%s" pnpm "$@"\n' "$(command -v node)" "$GATEWAY_COREPACK" > "$load_root/shim/pnpm"
           chmod 755 "$load_root/shim/pnpm"
           echo "GATEWAY_LOAD_ROOT=$load_root" >> "$GITHUB_ENV"

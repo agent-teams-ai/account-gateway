@@ -76,7 +76,24 @@ credentials and private TLS material remain in separate mode-0700 directories.
 The operator explicitly makes its private executable copies root-owned because
 file copying preserves the build runner's source ownership.
 The disposable container uses normal TLS verification with its own fixture CA.
-The cloud namespace runner binds this CA only inside its private mount namespace.
+The operator supports only the supplied disposable Docker recipe. Its default
+trust mode is `container`; the previous standalone `bind` mode is rejected before
+provisioning. The container marker is a misuse guard, not proof that arbitrary
+repository code is sandboxed. The external Docker invocation provides isolation:
+no external network or privileged mode, read-only source/build mounts, and only
+the fresh artifact directory writable on the host.
+
+The workflow creates a fresh root-owned mode-0700 artifact destination before
+the operator runs. The operator rejects a destination with another owner,
+broader permissions, existing entries, or a symlink as its final component.
+It pins the directory with an open file descriptor before provisioning and
+exports only the ten allowlisted evidence files through exclusive, no-follow
+file opens relative to that descriptor. Bytes and mode-0600 permissions are
+written through the resulting file descriptors. Replacing the destination or
+an ancestor cannot redirect an export; a preexisting file or symlink fails
+without overwriting or changing its target's permissions. Exported files must
+be regular, single-link files, bounded to 64 MiB in total. Raw private logs and
+fixture credentials are not exported.
 
 The operator stops its fresh PostgreSQL instance with a bounded fast shutdown,
 checks that the original data directory has no running postmaster, and attempts
@@ -255,7 +272,9 @@ node services/account-gateway/test/load/build-native-fixture.ts \
 
 Inside a disposable root container with `--network none`, the three TCP
 `--sysctl` settings from the workflow, PostgreSQL 17.10, OpenSSL, the selected
-Node runtime and read-only source/build mounts:
+Node runtime and read-only source/build mounts, bind-mount a freshly created
+root-owned mode-0700 artifact directory as the only writable host mount. The
+operator requires that directory to exist and be empty:
 
 ```sh
 node /absolute/account-gateway/services/account-gateway/test/load/provision.ts \
@@ -270,10 +289,10 @@ node /absolute/account-gateway/services/account-gateway/test/load/provision.ts \
 The checked-in workflow contains the complete mount, toolchain and invocation
 recipe. Select **Run workflow → suite: all** for the full matrix on both Node
 versions. Pull requests run `suite: all` automatically; `suite: smoke` remains an
-explicit manual option. The namespace runner
-uses `--trust-mode bind` only inside a separately established private mount and
-network namespace. Directly running the operator on an ordinary host network is
-rejected.
+explicit manual option. Only `--trust-mode container` is supported. The container
+marker check runs before provisioning, and the operator independently rejects
+networking beyond loopback. Do not run the operator directly on an ordinary host;
+repository code is loaded before its runtime misuse guards can execute.
 
 For targeted diagnosis, the operator also accepts an individual scenario name
 as `--suite`. With an already provisioned private manifest, `AG_LOAD_SCENARIOS`
