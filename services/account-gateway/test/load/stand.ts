@@ -125,7 +125,7 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
   const selector = process.env.AG_LOAD_SCENARIOS;
   check(!selector || scenarios.includes(selector as Scenario), 'scenario-selector');
   const selected: readonly Scenario[] = selector ? [selector as Scenario] : baselineScenarios;
-  const scaled = selected.some(s => ['scale-streams', 'scale-arrivals', 'large-context'].includes(s));
+  const scaled = selected.some(s => ['scale-streams', 'scale-arrivals', 'sustained-arrivals', 'large-context'].includes(s));
   const publicMaxActive = scaled ? 1024 : 16;
   const limits = Object.freeze({ requests: 256, concurrency: scaled ? 64 : 1,
     requestBytes: selected.includes('large-context') ? 1_048_576 : 4096, outputBytes: bounds.streamBytes, tokens: 32 });
@@ -592,20 +592,46 @@ test('bounded actual production service, production native CLI, SDK, PG17.10 and
               } finally { for (const run of held) upstream.release(run.attempt.requestId); await Promise.all(held.map(r => r.work)); }
             }
             details.achieved = achieved; details.publicMaxActive = publicMaxActive; details.accountConcurrency = limits.concurrency;
-          } else if (scenario === 'scale-arrivals') {
+          } else if (scenario === 'scale-arrivals' || scenario === 'sustained-arrivals') {
             const achieved: Record<string, number>[] = [];
-            for (const rate of [50, 100, 250, 500, 1000]) {
+            const sustained = scenario === 'sustained-arrivals', controlSamples: number[] = [];
+            const steps = sustained ? [{ rate: 50, durationMs: 60_000 }]
+              : [50, 100, 250, 500, 1000].map(rate => ({ rate, durationMs: 2000 }));
+            for (const { rate, durationMs } of steps) {
               const runs: Promise<Awaited<ReturnType<typeof launch>>>[] = [], start = Date.now();
-              for (let i = 0; i < rate * 2; i++) {
+              for (let i = 0; i < rate * durationMs / 1000; i++) {
                 const offeredAt = start + Math.floor(i * 1000 / rate); await delay(Math.max(0, offeredAt - Date.now()));
+                if (sustained && i > 0 && i % (rate * 10) === 0) {
+                  const controlAt = Date.now();
+                  check((await control.get(accounts[0])).accountRef === accounts[0], 'sustained-control-progress');
+                  controlSamples.push(Date.now() - controlAt);
+                }
                 runs.push(launch(executions[i % executions.length], scenario, 'complete', 250, offeredAt));
               }
               const started = await Promise.all(runs);
               await Promise.all(started.map(r => r.work)); await drain(started.map(r => r.attempt));
               requireCompletions(started.map(r => r.attempt));
               achieved.push(arrivalObservation(started.map(r => r.attempt), rate, start, Date.now()));
+              if (sustained) {
+                const windows: Record<string, number>[] = [];
+                for (let offset = 0; offset < durationMs; offset += 10_000) {
+                  const group = started.slice(rate * offset / 1000, rate * (offset + 10_000) / 1000).map(r => r.attempt);
+                  requireCompletions(group);
+                  // Eventual cohort completion cannot prove continuity: count
+                  // successful terminal delivery inside the actual wall interval.
+                  const completedDuringWindow = started.filter(({ attempt: a }) => a.effect === 'completed' && a.validatedStream &&
+                    a.finishedAt !== undefined && a.finishedAt >= start + offset && a.finishedAt < start + offset + 10_000).length;
+                  check(completedDuringWindow > 0, 'sustained-window-durable-progress');
+                  windows.push({ windowStartMs: offset, completedDuringWindow, ...arrivalObservation(group, rate, start + offset,
+                    Math.max(start + offset + 10_000, ...group.map(a => a.finishedAt ?? Date.now()))) });
+                }
+                details.windows = windows; details.maximumControlMs = Math.max(0, ...controlSamples);
+                details.controlChecks = controlSamples.length;
+              }
             }
-            details.achieved = achieved; details.interpretation = 'arrival-overload-characterization-not-1000-rps-capacity-claim';
+            details.achieved = achieved;
+            details.interpretation = sustained ? 'one-minute-continuity-with-measured-completions-and-safe-refusals'
+              : 'arrival-overload-characterization-not-1000-rps-capacity-claim';
           } else if (scenario === 'large-context') {
             const achieved: Record<string, number>[] = [];
             for (const level of [1, 8, 32, 64]) {

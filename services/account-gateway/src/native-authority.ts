@@ -429,15 +429,15 @@ export class NativeAuthority {
     return { consumerId: ctx.consumerId, admission: a.saved.admission, status: permit.claim.status,
       dispatch: d, nativeDescriptor: a.descriptor, leaseExpiresAt: permit.permitExpiresAt };
   }
-  createServer(admit?: (req: IncomingMessage, res: ServerResponse, work: () => Promise<void>) => void): Server {
+  createServer(admit?: (req: IncomingMessage, res: ServerResponse, work: () => Promise<void>, refusedBeforeWork?: () => void) => void): Server {
     const cfg = this.configuration;
     const server = createServer({ maxHeaderSize: 16_384, headersTimeout: cfg.timeoutMs, requestTimeout: cfg.timeoutMs,
       keepAliveTimeout: 1000, connectionsCheckingInterval: 100 }, (req, res) => {
-      const work = () => {
-      const timer = setTimeout(() => { req.destroy(); res.destroy(); }, cfg.timeoutMs);
-      res.once('close', () => clearTimeout(timer)); res.once('finish', () => clearTimeout(timer));
       const send = (status: number, body: unknown) => { if (!res.destroyed) { res.writeHead(status, { 'content-type': 'application/json', connection: 'close' }); res.end(JSON.stringify(body)); } };
-      return (async () => {
+      // Authenticate before scheduling. Only a fixed private caller can receive
+      // the purpose-specific, nonce-bound proof that claim work never began.
+      let consumerId: string, reservationNonce: string | undefined;
+      try {
         if (req.method !== 'POST' || !req.url || !/^\/private\/native\/v1\/(enrollment|admit|execution-authority|public-admit|execution-settle|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-custody-authority|oauth-refresh-authority|oauth-cleanup-authority|account-limits-authority)$/.test(req.url) ||
             req.rawHeaders.length > 64 || singleton(req, 'content-type') !== 'application/json' ||
             req.rawHeaders.some((h, i) => i % 2 === 0 && ['content-encoding','transfer-encoding'].includes(h.toLowerCase()))) return denied();
@@ -445,29 +445,42 @@ export class NativeAuthority {
         if (!authorization || authorization.length > 1031 || !/^Bearer [A-Za-z0-9._~+/-]{16,1024}=*$/.test(authorization)) return denied();
         const h = hash(authorization.slice(7)), caller = this.#callers.find(c => timingSafeEqual(c.hash, h));
         if (!caller) return denied();
-        const limitsLookup = req.url.endsWith('/account-limits-authority');
-        const ownerLookup = req.url.endsWith('/oauth-owner-authority');
-        const custodyLookup = req.url.endsWith('/oauth-custody-authority');
-        const refreshLookup = req.url.endsWith('/oauth-refresh-authority');
-        const cleanupLookup = req.url.endsWith('/oauth-cleanup-authority');
-        const ctx = Object.freeze({ consumerId: caller.consumerId }), body = await jsonBody(req, limitsLookup || ownerLookup || custodyLookup || refreshLookup || cleanupLookup ? Math.min(1024, cfg.controlBytes) : cfg.controlBytes);
-        if (req.url.endsWith('/execution-authority')) { send(200, await this.#publicAuthority(ctx, body)); return; }
-        if (req.url.endsWith('/public-admit')) { send(200, await this.#publicAdmit(ctx, body)); return; }
-        if (req.url.endsWith('/execution-settle')) { await this.#publicSettle(ctx, body); send(200, { ok: true }); return; }
+        consumerId = caller.consumerId;
+        reservationNonce = singleton(req, 'x-gateway-reservation-nonce');
+        if (reservationNonce === undefined && req.rawHeaders.some((h, i) => i % 2 === 0 && h.toLowerCase() === 'x-gateway-reservation-nonce')) return denied();
+        if (reservationNonce !== undefined) uuid(reservationNonce);
+      } catch { send(403, { code: 'denied' }); return; }
+      const work = () => {
+      const timer = setTimeout(() => { req.destroy(); res.destroy(); }, cfg.timeoutMs);
+      res.once('close', () => clearTimeout(timer)); res.once('finish', () => clearTimeout(timer));
+      return (async () => {
+        const path = req.url!;
+        const limitsLookup = path.endsWith('/account-limits-authority');
+        const ownerLookup = path.endsWith('/oauth-owner-authority');
+        const custodyLookup = path.endsWith('/oauth-custody-authority');
+        const refreshLookup = path.endsWith('/oauth-refresh-authority');
+        const cleanupLookup = path.endsWith('/oauth-cleanup-authority');
+        const ctx = Object.freeze({ consumerId }), body = await jsonBody(req, limitsLookup || ownerLookup || custodyLookup || refreshLookup || cleanupLookup ? Math.min(1024, cfg.controlBytes) : cfg.controlBytes);
+        if (path.endsWith('/execution-authority')) { send(200, await this.#publicAuthority(ctx, body)); return; }
+        if (path.endsWith('/public-admit')) {
+          if (reservationNonce !== undefined && binding((body as Record<string, unknown>).native).requestNonce !== reservationNonce) return denied();
+          send(200, await this.#publicAdmit(ctx, body)); return;
+        }
+        if (path.endsWith('/execution-settle')) { await this.#publicSettle(ctx, body); send(200, { ok: true }); return; }
         if (limitsLookup) { send(200, await this.#accountLimitsOwner(ctx, body)); return; }
         if (ownerLookup) { send(200, await this.#owner(ctx, body)); return; }
         if (custodyLookup) { send(200, await this.#custodyOwner(ctx, body)); return; }
         if (refreshLookup) { send(200, await this.#refreshOwner(ctx, body)); return; }
         if (cleanupLookup) { send(200, await this.#cleanupOwner(ctx, body)); return; }
-        if (req.url.endsWith('/enrollment')) {
+        if (path.endsWith('/enrollment')) {
           const r = object(body, ['originRef','engineIncarnation','qualificationRef']), e = cfg.enrollment;
           if (r.originRef !== e.originRef || r.engineIncarnation !== e.engineIncarnation || r.qualificationRef !== e.qualificationRef) return denied();
-        } else if (req.url.endsWith('/admit')) {
+        } else if (path.endsWith('/admit')) {
           const r = object(body, ['consumerId','requestRef','worker','admission','descriptor','native']);
           if (r.consumerId !== ctx.consumerId) return denied();
           send(200, await this.#admit(ctx, r)); return;
         } else {
-          const route = req.url.slice(req.url.lastIndexOf('/') + 1);
+          const route = path.slice(path.lastIndexOf('/') + 1);
           const r = object(body, ['consumerId','proof', ...(route === 'dispatch-proof' ? ['leaseExpiresAt'] :
             route === 'cleanup-authority' ? ['cleanup'] : route === 'closure-ack' ? ['receipt'] : [])], route === 'closure-ack' ? ['cleanup'] : []);
           if (r.consumerId !== ctx.consumerId) return denied();
@@ -499,7 +512,9 @@ export class NativeAuthority {
         else send(403, { code: 'denied' });
       }).finally(() => clearTimeout(timer));
       };
-      if (admit) admit(req, res, work); else void work();
+      const refusedBeforeWork = req.url === '/private/native/v1/public-admit' && reservationNonce !== undefined
+        ? () => send(503, { kind: 'account-gateway/public-admit-capacity/v1', claim: 'not_started', requestNonce: reservationNonce }) : undefined;
+      if (admit) admit(req, res, work, refusedBeforeWork); else void work();
     });
     // Trusted composition may choose a port, never a public bind address.
     server.maxConnections = cfg.maxPending; server.maxRequestsPerSocket = 1;

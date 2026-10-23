@@ -7,6 +7,7 @@ export const publicTests = ['TestPublicIngressStreamsReplaysEvictsAndPreservesPr
   'TestPublicStatusOnlyReceiptsDisposeButAmbiguousAdmissionRemainsBounded', 'TestPublicTerminalEventAndEOFWaitForDurableSettlementAndFailureTruncates',
   'TestPublicTerminalBurstPacesTwelveCallbacksAndRetainsAbortedQueuedOwner', 'TestPublicTerminalAggregateBudgetWithholdsOnSaturationAndReleases',
   'TestPublicPreclaimAuthorityCapacityIsDistinctFromAuthenticationAndProtocolFailure', 'TestPublicNativeMessagesPreserveProtocolAndExecutionAuthority',
+  'TestPublicPreworkRefusalIsExactNonceBoundAndNeverReplaysAmbiguousAdmission',
   'TestClaudePrivateHTTPRejectsLossyPayloadBeforeAdmission'] as const;
 export const bootstrapTests = ['TestPublicListenerSaturatedRequestsReturnSafeAdmissionRefusal', 'TestPublicInferenceConfigurationIsExplicitAndBounded'] as const;
 

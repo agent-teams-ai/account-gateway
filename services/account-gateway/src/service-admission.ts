@@ -77,7 +77,7 @@ export class NativeControlAdmission {
 // Callback work has independent permits from the facade operations waiting on
 // it. It shares the control SQL lane, without holding a checkout while queued.
 export function admitNativeCallback(admission: NativeControlAdmission, req: IncomingMessage, res: ServerResponse,
-  work: () => Promise<void>): void {
+  work: () => Promise<void>, refusedBeforeWork?: () => void): void {
   const abort = new AbortController();
   const cancel = () => abort.abort();
   req.once('aborted', cancel); res.once('close', cancel);
@@ -85,6 +85,11 @@ export function admitNativeCallback(admission: NativeControlAdmission, req: Inco
     try {
       if (!res.destroyed && !res.writableEnded) await inServiceLane('control', work);
     } finally { release(); }
+  }, () => {
+    // This branch alone proves that callback work never started. A rejection
+    // thrown by work may follow a committed claim and must stay ambiguous.
+    if (refusedBeforeWork && !res.destroyed && !res.writableEnded) { refusedBeforeWork(); return; }
+    if (!res.destroyed && !res.writableEnded) { res.writeHead(503, { connection: 'close' }); res.end(); }
   }).catch(() => {
     if (!res.destroyed && !res.writableEnded) {
       if (res.headersSent) res.destroy();

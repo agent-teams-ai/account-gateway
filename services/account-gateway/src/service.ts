@@ -449,7 +449,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     const binding = original!;
     const enrollment = Object.freeze({ originRef: binding.originRef, engineIncarnation: binding.incarnation, worker });
     const { authority, transport } = composeServiceNative(cfg, control, kernel, store, enrollment, usage);
-    handler = authority.createServer((req, res, work) => admitNativeCallback(req.url === '/private/native/v1/execution-settle' ? nativeSettlements : nativeCallbacks, req, res, work)); install();
+    handler = authority.createServer((req, res, work, refusedBeforeWork) => admitNativeCallback(req.url === '/private/native/v1/execution-settle' ? nativeSettlements : nativeCallbacks, req, res, work, refusedBeforeWork)); install();
     startupStage = 'ready';
     await waitFor(() => ready, 10_000);
     startupActive();

@@ -6,7 +6,7 @@ export const bounds = Object.freeze({ wallMs: 900_000, drainMs: 60_000, attempts
   totalBytes: 536_870_912, artifactBytes: 67_108_864 });
 export const baselineScenarios = ['smoke', 'short-steps', 'long-steps', 'arrivals', 'slow-reader',
   'cancellation', 'overload-recovery', 'bearer-churn'] as const;
-export const scenarios = [...baselineScenarios, 'scale-streams', 'scale-arrivals', 'large-context'] as const;
+export const scenarios = [...baselineScenarios, 'scale-streams', 'scale-arrivals', 'sustained-arrivals', 'large-context'] as const;
 export type Scenario = typeof scenarios[number];
 export type Outcome = 'pass' | 'fail' | 'inconclusive';
 export interface Attempt {

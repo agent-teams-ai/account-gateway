@@ -241,6 +241,39 @@ test('B3a mapping uniqueness, immutable precision/profile and consumer isolation
   } finally { await f.close(); }
 });
 
+test('mapping snapshots progress under a held consumer write lock and hide uncommitted mappings', async () => {
+  const context = ctx(), command = input(), f = await fixture(context);
+  const gate = await lockPool.connect();
+  let pending: Promise<(CandidateMapping | undefined)[]> | undefined;
+  let observed: (CandidateMapping | undefined)[] | undefined;
+  let committed: CandidateMapping | undefined, fresh: CandidateJournal | undefined;
+  try {
+    await f.manager.create(context, command);
+    const journal = await store.readJournal(context, command.operationId); assert.ok(journal);
+    committed = await store.mapping(context, journal.generation); assert.ok(committed);
+    fresh = await owned(context, input(), f.worker);
+    await gate.query('BEGIN');
+    await gate.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE', [context.consumerId]);
+    await gate.query(`INSERT INTO ag_management.physical_mappings
+      (consumer,generation,native_physical_identity,native_id,native_created_at) VALUES ($1,$2,$2,$3,$4)`,
+    [context.consumerId, fresh.generation, nextNativeID++, '2026-10-03T04:05:06.123456789+00:00']);
+    pending = Promise.all([store.mapping(context, journal.generation), store.mapping(context, fresh.generation),
+      store.mapping(context, randomUUID())]);
+    observed = await Promise.race([pending, delay(2000).then(() => undefined)]);
+    await gate.query('COMMIT');
+  } finally {
+    await gate.query('ROLLBACK'); gate.release();
+    await pending?.catch(() => undefined); await f.close();
+  }
+  assert.ok(observed, 'read-only mapping snapshots must finish before the consumer writer releases its lock');
+  assert.deepEqual(observed, [committed, undefined, undefined], 'only committed immutable mappings are visible');
+  assert.ok(fresh);
+  assert.equal((await store.mapping(context, fresh.generation))?.generation, fresh.generation, 'a later snapshot observes the commit');
+  const unknown = ctx();
+  await assert.rejects(store.mapping(unknown, fresh.generation), isCode('unknown'));
+  assert.equal((await pool.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1', [unknown.consumerId])).rowCount, 0);
+});
+
 // Regression: independently valid FKs can attach custody/journal rows to unrelated parents.
 test('B3a direct SQL inserts bind create/reconnect operation, account, owner, permit worker and profile', async () => {
   const constraint = (e: unknown): boolean => !!e && typeof e === 'object' && 'code' in e && e.code === '23514';

@@ -148,13 +148,15 @@ export class PostgresManagementStore implements ManagementStore {
         maxIntents < 1 || maxIntents > 4096 || !Number.isInteger(batch) || batch < 1 || batch > 1000) throw new KernelError('invalid');
     this.checkout = sharedCheckout(pool); this.secrets = secrets; this.ttlMs = ttlMs; this.maxIntents = maxIntents; this.batch = batch;
   }
-  private async tx<T>(consumer: string, action: (db: PoolClient) => Promise<T>): Promise<T> {
+  private async session<T>(consumer: string, readOnly: boolean, action: (db: PoolClient) => Promise<T>): Promise<T> {
     identifier(consumer);
     let db: PoolClient | undefined;
     try {
-      db = await this.checkout(); await db.query('BEGIN');
-      // Reuse the kernel consumer serialization lock; no management permit/authority.
-      const existing = await db.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE', [consumer]);
+      db = await this.checkout(); await db.query(readOnly ? 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY' : 'BEGIN');
+      // Writes retain kernel consumer serialization. Immutable mapping reads
+      // observe one committed snapshot and grant no dispatch authority.
+      const existing = await db.query(readOnly ? 'SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1'
+        : 'SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE', [consumer]);
       if (!existing.rowCount) throw new KernelError('unknown');
       const result = await action(db);
       await db.query('COMMIT'); return result;
@@ -164,6 +166,12 @@ export class PostgresManagementStore implements ManagementStore {
       // SQL errors can contain plaintext query parameters. Never reflect them.
       throw new KernelError('unavailable');
     } finally { db?.release(); }
+  }
+  private tx<T>(consumer: string, action: (db: PoolClient) => Promise<T>): Promise<T> {
+    return this.session(consumer, false, action);
+  }
+  private read<T>(consumer: string, action: (db: PoolClient) => Promise<T>): Promise<T> {
+    return this.session(consumer, true, action);
   }
   async stage(scope: CandidateScope, apiKey: string): Promise<boolean> {
     const s = scopeCopy(scope), envelope = this.secrets.seal(s, apiKey);
@@ -253,7 +261,7 @@ export class PostgresManagementStore implements ManagementStore {
   }
   async mapping(context: TrustedContext, generation: string): Promise<CandidateMapping | undefined> {
     const ctx = captureContext(context); uuid(generation);
-    return this.tx(ctx.consumerId, async db => {
+    return this.read(ctx.consumerId, async db => {
       const r = (await db.query<JournalRow & { native_physical_identity: string; native_id: string; native_created_at: string }>(`SELECT j.*,m.native_physical_identity,m.native_id,m.native_created_at
         FROM ag_management.candidate_journal j JOIN ag_management.physical_mappings m
         ON m.consumer=j.consumer AND m.generation=j.generation WHERE j.consumer=$1 AND j.generation=$2`, [ctx.consumerId,generation])).rows[0];

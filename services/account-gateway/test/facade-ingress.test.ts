@@ -15,6 +15,8 @@ import { IntentSecrets } from '../src/management-store.ts';
 import { codexOAuthProfile, claudeOAuthProfile } from '../src/management.ts';
 import type { CandidateJournal, CandidateMapping, ManagementStore, PhysicalCandidate } from '../src/management.ts';
 import { NativeFailure, NativeOAuthEnrollmentClient } from '../src/native-client.ts';
+import type { NativeAuthority } from '../src/native-authority.ts';
+import { NativeControlAdmission, admitNativeCallback } from '../src/service-admission.ts';
 import { composeServiceControl, composeServiceNative } from '../src/service.ts';
 import { openRouterProfile, captureServiceBearers, captureServiceProfiles, ServiceError } from '../src/service-config.ts';
 const bytes = (text: string) => Buffer.from(text);
@@ -83,7 +85,8 @@ test('OAuth callback ingress accepts genuine encoding and rejects aliases, malfo
 
 // Source boundary fixtures have test-owned committed state and real HTTP hops.
 // They qualify neither SQL transactions nor Go middleware/provider transport.
-async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false, usage?: UsageJournal) {
+async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false, usage?: UsageJournal,
+  callbackAdmission?: Parameters<NativeAuthority['createServer']>[0]) {
   const oauthProfile = oauth === 'claude' ? claudeOAuthProfile : codexOAuthProfile;
   const oauthPath = '/private/native/v1/' + (oauth === 'claude' ? 'claude/oauth' : 'oauth');
   const consumerId = 'source-consumer', worker = randomUUID();
@@ -351,7 +354,7 @@ async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false, usa
   try {
   const control = composeServiceControl(cfg, kernel, store, custody, worker);
   const { authority, transport } = composeServiceNative(cfg, control, kernel, store, enrollment, usage);
-  const callbacks = authority.createServer(); servers.push(callbacks); callbackOrigin = await listen(callbacks);
+  const callbacks = authority.createServer(callbackAdmission); servers.push(callbacks); callbackOrigin = await listen(callbacks);
   const intentHmacKey = randomBytes(32);
   const facade = createFacade({ kernel, store, management: control.management, bearers: control.bearers,
     profiles: control.catalog, enrollment, transport, intentHmacKey, ingressBytes: outputEnvelope ? 1_048_576 : 4096 });
@@ -1202,10 +1205,11 @@ test('source HTTP: Claude browser completion follows saved profile and qualified
 // effect authority, including after the execution capability is revoked.
 test('source HTTP: public execution callbacks hydrate authority, claim once and settle after revoke without pending routing state', async () => {
   let usageFault = true, recorded: lifecycleWire.UsageObservation | null = null;
+  const callbackGate = new NativeControlAdmission(1, 0);
   const usage: UsageJournal = { observe: async () => recorded, append: async (_ctx, fact) => {
     if (usageFault) throw new KernelError('unavailable'); recorded = fact;
   }, list: async () => { throw new Error('not used'); } };
-  const f = await sourceHTTP(false, false, usage);
+  const f = await sourceHTTP(false, false, usage, (req, res, work, refused) => admitNativeCallback(callbackGate, req, res, work, refused));
   try {
     const creationId=randomUUID();
     const creation=await f.publicCall('/v1/accounts',{operationId:creationId,ownerRef:'owner-one',profileId:f.secondProfile.profile,
@@ -1233,8 +1237,24 @@ test('source HTTP: public execution callbacks hydrate authority, claim once and 
     const native={originRef:enrollment.originRef,engineIncarnation:enrollment.engineIncarnation,requestNonce:randomUUID(),generation:original.generation};
     const input={...approved,native,executionBearer:run.bearer};
     assert.equal((await f.callback('public-admit',{...input,native:{...native,generation:randomUUID()}})).status,403);
-    const admitted=await f.callback('public-admit',input);assert.equal(admitted.status,200);
+    const boundCall = (value: unknown, nonce: string) => fetch(f.callbackOrigin + '/private/native/v1/public-admit', {
+      method: 'POST', headers: { authorization: 'Bearer ' + f.consumer.callbackCredential, 'content-type': 'application/json',
+        'x-gateway-reservation-nonce': nonce }, body: JSON.stringify(value) });
+    assert.equal((await boundCall(input, randomUUID())).status, 403, 'nonce header must match the admitted body before claim');
+    assert.equal(f.requests.size, 0);
+    const admitted=await boundCall(input,native.requestNonce);assert.equal(admitted.status,200);
     const permit=await admitted.json() as {dispatch:{closure:NativeDispatchProof}};assert.ok(permit.dispatch);
+    // A later local invocation may be refused before inspecting an existing
+    // accepted request. Its receipt cannot overwrite or settle that old effect.
+    const releaseGate = await callbackGate.acquire(Date.now() + 5000), laterNonce = randomUUID();
+    try {
+      const refused = await boundCall({ ...input, native: { ...native, requestNonce: laterNonce } }, laterNonce);
+      assert.equal(refused.status, 503);
+      assert.deepEqual(await refused.json(), { kind: 'account-gateway/public-admit-capacity/v1', claim: 'not_started', requestNonce: laterNonce });
+      assert.equal((await f.kernel.request(f.context,approved.admission.executionRef,requestRef)).effect,'dispatch_started');
+      assert.deepEqual(await f.kernel.requestProof(f.context,approved.admission.executionRef,requestRef),permit.dispatch.closure);
+      assert.equal(f.requests.size, 1);
+    } finally { releaseGate(); }
     const replay=await f.callback('public-admit',{...input,native:{...native,requestNonce:randomUUID()}});assert.equal(replay.status,200);
     assert.equal('dispatch' in (await replay.json() as object),false);assert.equal(f.requests.size,1);assert.equal(f.forwarded.length,0);
     let closures=0;f.kernel.acknowledgeTransportClosed=async()=>{closures++;};
@@ -1255,5 +1275,36 @@ test('source HTTP: public execution callbacks hydrate authority, claim once and 
     assert.equal((await f.kernel.request(f.context,proof.executionRef,proof.requestRef)).effect,'completed');assert.equal(closures,1);
     assert.equal((await f.callback('execution-settle',{consumerId:f.context.consumerId,proof:{...proof,token:randomUUID()},receipt})).status,403);
     assert.equal(closures,1);assert.equal(f.forwarded.length,0);
-  } finally { await f.close(); }
+  } finally { await callbackGate.stop(); await f.close(); }
+});
+
+test('source HTTP: only authenticated public-admit gate refusal proves this reservation never started claim work', async () => {
+  const gate = new NativeControlAdmission(1, 0), release = await gate.acquire(Date.now() + 10_000);
+  let scheduled = 0;
+  const f = await sourceHTTP(false, false, undefined, (req, res, work, refused) => {
+    scheduled++; admitNativeCallback(gate, req, res, work, refused);
+  });
+  const nonce = randomUUID(), path = '/private/native/v1/public-admit';
+  const call = (route = path, token = f.consumer.callbackCredential, value: string | null = nonce) =>
+    fetch(f.callbackOrigin + route, { method: 'POST', headers: { authorization: 'Bearer ' + token,
+      'content-type': 'application/json', ...(value === null ? {} : { 'x-gateway-reservation-nonce': value }) }, body: '{}' });
+  try {
+    const unauthorized = await call(path, 'untrusted-callback-credential');
+    assert.equal(unauthorized.status, 403); assert.deepEqual(await unauthorized.json(), { code: 'denied' });
+    assert.equal(scheduled, 0, 'untrusted callers cannot reach the gate or receive its marker');
+    assert.equal((await call(path, f.consumer.callbackCredential, 'invalid-nonce')).status, 403);
+    assert.equal((await call(path, f.consumer.callbackCredential, nonce + ', ' + nonce)).status, 403);
+    assert.equal(scheduled, 0);
+    const refused = await call(); assert.equal(refused.status, 503);
+    assert.deepEqual(await refused.json(), { kind: 'account-gateway/public-admit-capacity/v1', claim: 'not_started', requestNonce: nonce });
+    assert.equal(f.requests.size, 0); assert.equal(f.forwarded.length, 0);
+    const legacy = await call(path, f.consumer.callbackCredential, null);
+    assert.equal(legacy.status, 503); assert.equal(await legacy.text(), '');
+    const other = await call('/private/native/v1/execution-settle');
+    assert.equal(other.status, 503); assert.equal(await other.text(), '', 'marker is scoped to public-admit only');
+    release();
+    const started = await call(); assert.equal(started.status, 403);
+    assert.deepEqual(await started.json(), { code: 'denied' }, 'started invalid work cannot become a pre-claim refusal');
+    assert.equal(f.requests.size, 0);
+  } finally { release(); await gate.stop(); await f.close(); }
 });

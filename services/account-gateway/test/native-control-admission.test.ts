@@ -167,3 +167,17 @@ test('native callbacks progress independently while every facade control owner a
     if (failure) throw failure;
   } finally { release.resolve(); await stop(facade); await stop(callback); await owners.stop(); await callbacks.stop(); }
 });
+
+test('callback work throwing after acquisition cannot emit a pre-work refusal', async () => {
+  const gate = new NativeControlAdmission(1, 0);
+  let work = 0, refused = 0;
+  const server = createServer((req, res) => admitNativeCallback(gate, req, res, async () => {
+    work++; throw new Error('controlled post-claim failure');
+  }, () => { refused++; res.writeHead(503); res.end('must-not-be-issued'); }));
+  const origin = await listen(server);
+  try {
+    const response = await fetch(origin);
+    assert.equal(response.status, 503); assert.equal(await response.text(), '');
+    assert.equal(work, 1); assert.equal(refused, 0);
+  } finally { await stop(server); await gate.stop(); }
+});

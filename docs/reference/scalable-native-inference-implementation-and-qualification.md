@@ -23,7 +23,7 @@ steps. It does not establish Codex/Claude OAuth or thousand-stream capacity.
 Implementation is staged in [account-gateway PR 71](https://github.com/agent-teams-ai/account-gateway/pull/71)
 and [sub2api PR 64](https://github.com/agent-teams-ai/sub2api/pull/64). PR 71 depends
 on the preceding cloud-load/control-progress branch, PR 69. The expanded fixture
-pins native `2ca8d7bd5a7646416580eda397b7ec50c0e12055`; each CI receipt records the
+pins native `b48f89102e0ed8375cdc1838d2701718aae76bb1`; each CI receipt records the
 exact gateway/native commits, binary hashes, dependency manifests and runtimes.
 
 ## Contract
@@ -103,22 +103,25 @@ thousand streams. Neither scenario is qualified by the baseline sixteen-slot run
 
 Implementation and source-level repairs are published. Both complete package and
 kernel qualification passed for gateway commit
-`a0953539921f421954749b9835785e85712ba8ad`:
+`d371dc530e9fb4420c0d616890c6c3e9676927e5`:
 
-- [Package qualification](https://github.com/agent-teams-ai/account-gateway/actions/runs/39979996142)
-- [Kernel qualification](https://github.com/agent-teams-ai/account-gateway/actions/runs/39979996124)
+- [Package qualification](https://github.com/agent-teams-ai/account-gateway/actions/runs/39983757117)
+- [Kernel qualification](https://github.com/agent-teams-ai/account-gateway/actions/runs/39983757119)
 
 Fresh disposable PostgreSQL checks passed 59 kernel tests and 74 OAuth enrollment
 tests on each required Node version, without skips. Actual pinned CLI processes
 and the Claude SQL-guard regressions passed in the isolated cloud fixture.
-The [reproducible client workflow](https://github.com/agent-teams-ai/account-gateway/actions/runs/39981662087)
+The [reproducible client workflow](https://github.com/agent-teams-ai/account-gateway/actions/runs/39983757364)
 passed on both Node versions: all 11 public-ingress and 2 bootstrap race tests,
 both Claude PostgreSQL regressions and both actual client processes, with no
 skips, no external network, sanitized evidence and positive PostgreSQL shutdown.
-The corrected full-stack stream/arrival profiles await their complete result.
-Only successful source-pinned receipts
-establish their corresponding load qualification; source review does not imply
-production capacity.
+The corrected two-CPU stream profile passed through 1024 simultaneous streams;
+the same run exposed a pre-claim overload classification defect in the arrival
+and large-context profiles, described below. The PRs link each subsequent
+source-pinned qualification run and its complete results. A previous successful
+profile does not qualify a later source revision or a different load shape.
+Only successful receipts establish their corresponding load qualification;
+source review does not imply production capacity.
 
 ## Implemented operator contract
 
@@ -127,6 +130,11 @@ policy checks and durable usage. Public inference bodies, provider adaptation,
 streaming, backpressure and cancellation run in Go. TypeScript still participates
 in every request through finite metadata callbacks; SQL and callback throughput
 remain capacity limits even when Node no longer copies stream bytes.
+
+Immutable physical-account mapping reads use a read-only consistent snapshot.
+They do not take the consumer's exclusive mutation lock twice on every public
+request. Current dispatch authorization and all actual management writes retain
+their existing durable fences and mutation locks.
 
 The Go public listener is disabled unless protected native bootstrap specifies
 both `publicListenAddress` and `publicMaxActive`. The address must be a separate
@@ -161,6 +169,13 @@ aggregate held-terminal memory limits. Settlement failure retains original
 evidence and prevents a false successful terminal. Before a claim, capacity
 refusal is explicitly `admission_limited` / `not_dispatched`; authentication and
 protocol errors cannot count as successful overload handling.
+
+An authenticated private public-admit callback refused by the finite gate before
+its work starts returns a purpose-specific `claim=not_started` receipt bound to
+Go's original reservation nonce. Only this strictly validated receipt permits
+Go to report a safe pre-claim capacity refusal and discard its unentered local
+reservation. A generic 503, lost callback reply, malformed or mismatched receipt,
+or failure after admission work starts remains ambiguous and retained.
 
 ### Migration and retention rollout
 
@@ -217,10 +232,11 @@ PostgreSQL and controlled TLS provider without external container networking.
 | Baseline, Node 26 and 24 | 2 CPU, 4 GiB, 4096 descriptors | Slow reader, disconnect, close, overload recovery, 130 new execution capabilities beyond the old 128 registry limit |
 | Streams, Node 26 | 2 CPU, 4 GiB, 16384 descriptors | Exactly 64/256/512/1024 occupied streams; 1024 held for at least 60 seconds with control progress; simultaneous completion and durable settlement |
 | Arrivals, Node 26 | 2 CPU, 4 GiB, 16384 descriptors | Two-second offers at target 50/100/250/500/1000 requests per second; actual launch rate, lag, completions and safe refusals |
+| Sustained arrivals, Node 26 | 2 CPU, 4 GiB, 16384 descriptors | 3000 offers at target 50 requests per second over one minute; ten-second completion/refusal/launch-lag windows, control progress and exact final cleanup |
 | Large context, Node 26 | 2 CPU, 4 GiB, 4096 descriptors | Approximately 1 MB synthetic input at 1/8/32/64 synchronized offers; actual completions and safe refusals |
 
 Manual `smoke` runs only the two smoke Node lanes with accurate artifact names.
-The default selection requires both complete baseline lanes and all three scale
+The default selection requires both complete baseline lanes and all four scale
 profiles. Every attempted request is reconciled with the controlled-provider
 entry ledger, SQL effect and exact native closure/ACK. Duplicate entry, unexpected
 authentication failure, ambiguity, a broken successful-client stream, occupied
@@ -236,13 +252,46 @@ containers did not start because their initial 4-CPU request exceeded the
 runner's actual 2 CPUs. This is preserved as infrastructure failure and provides
 no scale-capacity evidence. The matrix now explicitly uses 2 CPU and 4 GiB.
 Those first receipts identify merge checkout `57b55498117faaa1223923f29baa486862e995c4`
-for PR head `0bf0b1481e5a1e74722d73a2799de37446327c37`, with the native pin above.
+for PR head `0bf0b1481e5a1e74722d73a2799de37446327c37`, with native
+`2ca8d7bd5a7646416580eda397b7ec50c0e12055`.
+
+The corrected two-CPU run, [39983757108](https://github.com/agent-teams-ai/account-gateway/actions/runs/39983757108),
+passed both baseline lanes and the stream profile at 64/256/512/1024 concurrent
+streams, with all 1856 requests completed and exactly one provider entry each.
+The 1024 level took 32.791 seconds to admit, held exactly 1024 occupied transports
+for 60.004 seconds, and completed its simultaneous release in 9.973 seconds.
+Control latency during that hold was at most 26 ms. Final occupied and unresolved
+cleanup counts were zero, all 32 executions closed and PostgreSQL stopped.
+Sampled Node and Go peaks were 433,332,224 and 253,444,096 bytes respectively;
+first-byte p50/p95/p99 were 81/109/138 ms. Those latency percentiles cover paced
+admission; completed latency includes the deliberate stream hold and is not an
+ordinary provider-response benchmark. The ten-second per-finalizer deadline
+includes its four-slot queue wait. The aggregate release duration does not expose
+individual finalizer margin; this run establishes successful closure, not robust
+headroom for a larger or more variable simultaneous terminal burst.
+
+That same run failed the first arrival level after 100 offers: 54 completed,
+40 were safely refused and six received ambiguous 202 responses despite no SQL
+claim or provider entry. Large context similarly stopped after 41 offers. The
+private callback gate returned an undifferentiated 503 before work, so Go could
+not prove a no-claim outcome. The nonce-bound pre-work receipt fixes that specific
+boundary while preserving conservative ambiguity after work may have begun.
+These failures remain recorded; they establish no higher arrival-rate capacity.
+This run used merge checkout `bb09c6e79617c92b1286f43b659bc2feaf2faf82` for PR head
+`d371dc530e9fb4420c0d616890c6c3e9676927e5` and native
+`2ca8d7bd5a7646416580eda397b7ec50c0e12055`.
 
 The stream profile paces admission to isolate live-stream capacity. At 1024 total
 streams across 32 accounts it tests 32 live streams per account; 64 is the configured
 ceiling. The arrival profile distinguishes offered and accepted rate: a nominal
 1000-per-second target is not measured completion capacity. Large-context input
 measures synthetic byte transport and validation, not model tokenization/compute.
+The sustained profile requires positive validated terminal completions inside
+every actual ten-second wall interval, as well as eventual positive completions
+for each offered cohort, and separately reports safe refusals and launch lag.
+It measures one minute of continuous
+arrival processing; it is not a multi-hour soak, a zero-refusal 50-rps SLO or an
+unlimited execution-retention claim.
 
 Node resource samples include the load driver and TypeScript service in one
 process. Go samples identify the exact native PID and birth. Provider/PostgreSQL
