@@ -544,3 +544,13 @@ test('single usage read is consumer-control only and exposes absence as null wit
   assert.equal('observeUsage' in management,false);assert.equal('observeUsage' in execution,false);
   assert.equal(await control.observeUsage('execution','request'),null);assert.equal(calls,1);
 });
+
+
+test('stream safe errors retain the actual HTTP status without losing effect identity', async t => {
+  const { execution } = await fixture(t, async (req, res) => {
+    await read(req); json(res, { ...safe('forbidden'), requestRef: 'request-a' }, 403);
+  });
+  await assert.rejects(execution.request('execution-a', { requestId: 'request-a', admission, body: Buffer.from('{}') }),
+    error => error instanceof sdk.GatewayError && error.httpStatus === 403 && error.code === 'safe_error' &&
+      error.effect === 'not_dispatched' && error.requestRef === 'request-a' && error.diagnostic?.code === 'forbidden');
+});

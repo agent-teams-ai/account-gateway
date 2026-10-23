@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { providerConnectionCapabilities, profile as legacyProfile, accountLimitsV2, adaptAccountLimits, grokOAuthAuthorizationURL, codexOAuthAuthorizationURL, claudeOAuthAuthorizationURL, oauthDeviceAuthorization } from '../packages/account-gateway/dist/contracts/index.js';
+import { providerConnectionCapabilities, profile as legacyProfile, accountLimitsV2, grokOAuthAuthorizationURL, codexOAuthAuthorizationURL, claudeOAuthAuthorizationURL, oauthDeviceAuthorization } from '../packages/account-gateway/dist/contracts/index.js';
 import { createManagementClient, createConsumerControlClient, createAccountLimitsV2Client, secretSubmission, GatewayError } from '../packages/account-gateway/dist/http/index.js';
 
 test('provider connection projection is versioned, closed and additive to the old strict profile DTO', async t => {
@@ -88,7 +88,7 @@ test('account-limits/v2 keeps closed units and periods and adapts through one co
   assert.deepEqual(await client.getAccountLimitsCapabilities(), { contract: 'account-limits/v2', cachedRead: true, quotaOnlyRefresh: false });
   assert.deepEqual(await client.readAccountLimits(input), snapshot);
   assert.equal(v1Requests, 0, 'declared v2 never probes v1');
-  const consumer = adaptAccountLimits(await client.readAccountLimits(input), 'account-limits/v2');
+  const consumer = await client.readAccountLimits(input);
   assert.equal(consumer.status, 'snapshot');
   assert.deepEqual(consumer.status === 'snapshot' ? consumer.windows.map(window => [window.unit, window.period.kind]) : [],
     [['credits', 'duration'], ['tokens', 'monthly_billing_cycle']]);

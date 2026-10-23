@@ -16,11 +16,9 @@ export type { UsageObservation, UsageQuery, UsagePage } from '../features/facade
 
 export { ACCOUNT_LIMITS_CONTRACT, accountLimitsRequest, accountLimitsCapabilities, accountLimits,
  PROVIDER_CONNECTIONS_CONTRACT, providerConnectionCapability, providerConnectionCapabilities,
- ACCOUNT_LIMITS_V2_CONTRACT, accountLimitsV2Capabilities, accountLimitsV2,
- consumerAccountLimitsWindow, consumerAccountLimits, adaptAccountLimits } from '../features/facade-client/contracts/index.js';
+ ACCOUNT_LIMITS_V2_CONTRACT, accountLimitsV2Capabilities, accountLimitsV2 } from '../features/facade-client/contracts/index.js';
 export type { AccountLimitsRequest, AccountLimitsCapabilities, AccountLimits,
- ProviderConnectionCapability, ProviderConnectionCapabilities, AccountLimitsV2Capabilities, AccountLimitsV2,
- ConsumerAccountLimitsWindow, ConsumerAccountLimits } from '../features/facade-client/contracts/index.js';
+ ProviderConnectionCapability, ProviderConnectionCapabilities, AccountLimitsV2Capabilities, AccountLimitsV2 } from '../features/facade-client/contracts/index.js';
 export { accountLimitsResult } from '../features/facade-client/contracts/index.js';
 export type { AccountLimitsResult } from '../features/facade-client/contracts/index.js';
 

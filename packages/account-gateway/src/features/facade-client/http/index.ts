@@ -125,7 +125,7 @@ function transport(input: ManagementConfig | ExecutionConfig | ConsumerControlCo
       if (!handle.response.ok) {
         const result = c.safeError.safeParse(await bounded(handle.response, settings.responseBytes));
         if (!result.success || (result.data.requestRef && result.data.requestRef !== request.requestId)) throw handle.failure('invalid_response');
-        throw new GatewayError('safe_error', result.data.effect, undefined, request.requestId, result.data);
+        throw new GatewayError('safe_error', result.data.effect, undefined, request.requestId, result.data, handle.response.status);
       }
       if (handle.response.status !== 200 || handle.response.headers.get('x-gateway-request-ref') !== request.requestId ||
         handle.response.headers.get('content-type')?.split(';')[0] !== 'text/event-stream' || !handle.response.body) throw handle.failure('invalid_response');
