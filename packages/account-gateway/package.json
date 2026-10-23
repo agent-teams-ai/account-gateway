@@ -34,7 +34,7 @@
   "dependencies": {
     "@get-modular/core": "0.2.0",
     "@get-modular/assembly": "0.2.0",
-    "zod": "4.6.5"
+    "zod": "4.6.6"
   },
   "sideEffects": false
 }
