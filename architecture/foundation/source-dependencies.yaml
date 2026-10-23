@@ -56,7 +56,7 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/test/domain.test.ts, services/account-gateway/test/postgres.test.ts, services/account-gateway/test/postgres-client-error.test.ts, services/account-gateway/test/service-admission.test.ts]
     entrypoints: [services/account-gateway/test/domain.test.ts, services/account-gateway/test/postgres.test.ts, services/account-gateway/test/postgres-client-error.test.ts, services/account-gateway/test/service-admission.test.ts]
-    allow: {boundaries: [kernel-domain, kernel-postgres], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:timers/promises', 'node:child_process', 'node:util'], runtimeReferences: []}
+    allow: {boundaries: [kernel-domain, kernel-postgres, foreground-service-entry], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:timers/promises', 'node:child_process', 'node:util'], runtimeReferences: []}
 
   - id: native-management
     dependencyMode: runtime
@@ -95,8 +95,8 @@ boundaries:
     allow: {boundaries: [kernel-domain, kernel-postgres, native-management, private-facade, usage-journal], packages: [], builtins: ['node:http', 'node:https', 'node:crypto', 'node:timers/promises'], runtimeReferences: []}
   - id: native-transport-tests
     dependencyMode: runtime
-    roots: [services/account-gateway/test/native-transport-postgres.test.ts, services/account-gateway/test/native-wire.test.ts, services/account-gateway/test/native-response-diagnostics.test.ts]
-    entrypoints: [services/account-gateway/test/native-transport-postgres.test.ts, services/account-gateway/test/native-wire.test.ts, services/account-gateway/test/native-response-diagnostics.test.ts]
+    roots: [services/account-gateway/test/native-transport-postgres.test.ts, services/account-gateway/test/native-wire.test.ts, services/account-gateway/test/native-control-admission.test.ts, services/account-gateway/test/native-response-diagnostics.test.ts]
+    entrypoints: [services/account-gateway/test/native-transport-postgres.test.ts, services/account-gateway/test/native-wire.test.ts, services/account-gateway/test/native-control-admission.test.ts, services/account-gateway/test/native-response-diagnostics.test.ts]
     allow: {boundaries: [native-transport-http, kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http, private-facade], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:http', 'node:net', 'node:fs/promises', 'node:timers/promises'], runtimeReferences: []}
   - id: native-runtime-assembly-tests
     dependencyMode: runtime

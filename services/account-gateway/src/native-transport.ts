@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { KernelError } from './domain.ts';
 import { inServiceLane } from './service-admission.ts';
+import type { NativeControlAdmission } from './service-admission.ts';
 import type { CleanupAuthority, NativeDispatchProof, TrustedContext } from './domain.ts';
 import type { NativeTransport } from './facade.ts';
 import type { NativeAuthority } from './native-authority.ts';
@@ -12,13 +13,14 @@ import type { CleanupLease, Receipt } from './native-wire.ts';
 const path = '/private/native/v1/transports';
 export class NativeHTTPTransport implements NativeTransport {
   readonly #authority: NativeAuthority;
-  constructor(authority: NativeAuthority) { this.#authority = authority; }
+  readonly #controls?: NativeControlAdmission;
+  constructor(authority: NativeAuthority, controls?: NativeControlAdmission) { this.#authority = authority; this.#controls = controls; }
   async #control(ctx: TrustedContext, p: NativeDispatchProof, action: 'read-owner' | 'cancel-owner' | 'ack-owner' | 'read' | 'cancel' | 'ack', c?: CleanupLease): Promise<Receipt> {
     const authority = this.#authority, cfg = authority.configuration, consumer = authority.consumer(ctx);
     await authority.persisted(ctx, p);
     if (c) await authority.delegated(ctx, p, c);
     const hop = await post(cfg, c ? consumer.cleanupCredential : consumer.executionCredential,
-      path + '/' + action, Buffer.from(JSON.stringify({ proof: p, ...(c ? { cleanup: c } : {}) })));
+      path + '/' + action, Buffer.from(JSON.stringify({ proof: p, ...(c ? { cleanup: c } : {}) })), undefined, cfg.timeoutMs, this.#controls);
     try {
       if (hop.response.statusCode !== 202 || singleton(hop.response, 'content-type') !== 'application/json' ||
           hop.response.rawHeaders.some((h, i) => i % 2 === 0 && h.toLowerCase() === 'content-encoding')) return denied();

@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Pool, PoolClient } from 'pg';
 import { KernelError } from './domain.ts';
 
@@ -9,6 +10,88 @@ export const serviceCapacity = Object.freeze({ dataActive: 16, controlActive: 8,
 export type ServiceLane = 'data' | 'control';
 export type Checkout = () => Promise<PoolClient>;
 export class ServiceCapacityError extends KernelError { constructor() { super('unavailable'); } }
+
+// Scheduling policy derived from the existing native eight-control protocol,
+// not a capacity forecast. Two slots remain for direct native/OAuth controls.
+export const nativeControlCapacity = Object.freeze({ active: 6, headroom: 2,
+  waiting: serviceCapacity.dataActive + serviceCapacity.controlActive });
+export const nativeCallbackCapacity = Object.freeze({ active: serviceCapacity.controlActive,
+  waiting: serviceCapacity.dataActive + nativeControlCapacity.active,
+  usage: 6,
+  sockets: serviceCapacity.dataActive + nativeControlCapacity.active + nativeControlCapacity.headroom +
+    serviceCapacity.controlActive + 6 });
+
+// A permit is physical ownership: a timeout can remove a waiter, but cannot
+// release a started operation. Its owner releases only after physical disposal.
+export class NativeControlAdmission {
+  private active = 0;
+  private stopped = false;
+  private readonly waiting: { start(): void; deny(): void }[] = [];
+  private readonly idle: (() => void)[] = [];
+  readonly activeLimit: number;
+  readonly waitingLimit: number;
+  constructor(active: number = nativeControlCapacity.active, waiting: number = nativeControlCapacity.waiting) {
+    if (!Number.isSafeInteger(active) || active < 1 || active > 32 ||
+        !Number.isSafeInteger(waiting) || waiting < 0 || waiting > 128) throw new KernelError('invalid');
+    this.activeLimit = active; this.waitingLimit = waiting;
+  }
+  acquire(deadline: number, signal?: AbortSignal): Promise<() => void> {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const detach = () => { clearTimeout(timer); signal?.removeEventListener('abort', deny); };
+      const deny = () => {
+        if (settled) return;
+        settled = true; detach();
+        const index = this.waiting.indexOf(waiter);
+        if (index >= 0) this.waiting.splice(index, 1);
+        reject(new ServiceCapacityError());
+      };
+      const waiter = { deny, start: () => {
+        if (this.stopped || signal?.aborted || Date.now() >= deadline) { deny(); return; }
+        settled = true; detach(); this.active++;
+        let released = false;
+        resolve(() => {
+          if (released) return;
+          released = true; this.active--;
+          while (!this.stopped && this.active < this.activeLimit && this.waiting.length) this.waiting.shift()!.start();
+          if (!this.active) this.idle.splice(0).forEach(done => done());
+        });
+      } };
+      if (!Number.isSafeInteger(deadline) || this.stopped || signal?.aborted || Date.now() >= deadline) { deny(); return; }
+      if (this.active < this.activeLimit) { waiter.start(); return; }
+      if (this.waiting.length >= this.waitingLimit) { deny(); return; }
+      this.waiting.push(waiter);
+      timer = setTimeout(deny, Math.max(1, deadline - Date.now()));
+      signal?.addEventListener('abort', deny, { once: true });
+      if (signal?.aborted) deny();
+    });
+  }
+  stop(): Promise<void> {
+    this.stopped = true;
+    for (const waiter of [...this.waiting]) waiter.deny();
+    return this.active ? new Promise(resolve => this.idle.push(resolve)) : Promise.resolve();
+  }
+}
+
+// Callback work has independent permits from the facade operations waiting on
+// it. It shares the control SQL lane, without holding a checkout while queued.
+export function admitNativeCallback(admission: NativeControlAdmission, req: IncomingMessage, res: ServerResponse,
+  work: () => Promise<void>): void {
+  const abort = new AbortController();
+  const cancel = () => abort.abort();
+  req.once('aborted', cancel); res.once('close', cancel);
+  void admission.acquire(Date.now() + serviceCapacity.timeoutMs, abort.signal).then(async release => {
+    try {
+      if (!res.destroyed && !res.writableEnded) await inServiceLane('control', work);
+    } finally { release(); }
+  }).catch(() => {
+    if (!res.destroyed && !res.writableEnded) {
+      if (res.headersSent) res.destroy();
+      else { res.writeHead(503, { connection: 'close' }); res.end(); }
+    }
+  }).finally(() => { req.removeListener('aborted', cancel); res.removeListener('close', cancel); });
+}
 const lane = new AsyncLocalStorage<ServiceLane>();
 export const inServiceLane = <T>(selected: ServiceLane, work: () => T): T => lane.run(selected, work);
 export function facadeUsageReadRoute(method: string | undefined, path: string | undefined): boolean {

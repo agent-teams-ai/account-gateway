@@ -5,7 +5,8 @@ import { writeSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import pg from 'pg';
-import { ServiceAdmission, facadeControlRoute, facadeUsageReadRoute, inServiceLane } from './service-admission.ts';
+import { ServiceAdmission, NativeControlAdmission, admitNativeCallback, nativeCallbackCapacity,
+  facadeControlRoute, facadeUsageReadRoute, inServiceLane } from './service-admission.ts';
 import { KernelError, defaults, uuid } from './domain.ts';
 import type { Bounds } from './domain.ts';
 import { PostgresKernel } from './postgres.ts';
@@ -13,7 +14,7 @@ import { IntentSecrets, PostgresManagementStore } from './management-store.ts';
 import { AccountManagement, exactCandidate, sameCandidate } from './management.ts';
 import type { CandidateJournal, CandidateNative, IntentCustody, ManagementStore, OAuthScope, OAuthCallback,
   OAuthCleanupAuthority, OAuthCleanupAction, OAuthMethod } from './management.ts';
-import type { DurableKernel, ExecutionRead, TrustedContext } from './domain.ts';
+import type { CleanupClaim, DurableKernel, ExecutionRead, TrustedContext } from './domain.ts';
 import { oauthProfileDefinition } from './oauth-profiles.ts';
 import { NativeAccountLimitsClient, NativeManagementClient, NativeRetainedCustodyClient, NativeOAuthEnrollmentClient, NativeOAuthLifecycleClient } from './native-client.ts';
 import { NativeAuthority } from './native-authority.ts';
@@ -36,15 +37,25 @@ export function composeKernelBounds(bearers: readonly ConfiguredBearer[]): Bound
   return Object.freeze({ ...defaults, maxRunMs });
 }
 
-// Cleanup gets the first turn. An acquired claim yields the next serial tick
-// to OAuth maintenance so a retained, uncloseable generation cannot starve it.
-export function composeServiceCleanupClaim(kernel: Pick<DurableKernel, 'claimCleanup'>, ctx: TrustedContext, worker: string) {
+// Retire a bounded batch of successful claims without sleeping between already
+// closed executions. An unresolved claim ends the batch; every acquired batch
+// yields the next serial tick to OAuth. The time budget limits starting more
+// work, while each started claim retains its existing lease and wire deadlines.
+export function composeServiceCleanupTurn(kernel: Pick<DurableKernel, 'claimCleanup'>, ctx: TrustedContext,
+  worker: string, settle: (claim: CleanupClaim) => Promise<boolean>, signal?: AbortSignal) {
   let refreshTurn = false;
   return async () => {
-    if (refreshTurn) { refreshTurn = false; return undefined; }
-    const claim = await kernel.claimCleanup(ctx, worker);
-    refreshTurn = claim !== undefined;
-    return claim;
+    if (refreshTurn) { refreshTurn = false; return false; }
+    const started = performance.now();
+    let acquired = false;
+    for (let count = 0; count < 8 && !signal?.aborted; count++) {
+      if (count && performance.now() - started >= 1000) break;
+      const claim = await kernel.claimCleanup(ctx, worker);
+      if (!claim) break;
+      acquired = refreshTurn = true;
+      if (signal?.aborted || !await settle(claim)) break;
+    }
+    return acquired;
   };
 }
 
@@ -52,12 +63,13 @@ export function composeServiceCleanupClaim(kernel: Pick<DurableKernel, 'claimCle
 // committed original journal. Each call binds a fresh fixed-owner client; no
 // owner cache, caller factory, callback URL or bearer transfer is introduced.
 export function composeServiceControl(cfg: Pick<ServiceConfig, 'native' | 'consumer' | 'profile' | 'secondProfile' | 'oauthEnrollment' | 'claudeOAuthEnrollment' | 'bearers'>,
-  kernel: DurableKernel & ExecutionRead, store: ManagementStore, custody: IntentCustody, worker: string) {
+  kernel: DurableKernel & ExecutionRead, store: ManagementStore, custody: IntentCustody, worker: string,
+  nativeControls?: NativeControlAdmission) {
   const profiles = captureServiceProfiles(cfg);
   const consumerId = cfg.consumer.consumerId;
   const bearers = new FacadeBearers(captureServiceBearers(cfg.bearers, consumerId, profiles));
   const control = { origin: cfg.native.origin, consumerId,
-    controlCredential: cfg.consumer.managementCredential };
+    controlCredential: cfg.consumer.managementCredential, admission: nativeControls };
   const client = new NativeManagementClient(control);
   const checkProfile = (j: CandidateJournal) => {
     const p = profiles.find(p => p.profile === j.profile.profile);
@@ -99,7 +111,7 @@ export function composeServiceControl(cfg: Pick<ServiceConfig, 'native' | 'consu
       authKinds: [oauthProfileDefinition(p.profile) ? 'oauth' as const : 'api_key' as const] },
     maxOutputTokens: p.limits.tokens, limits: p.limits,
   })));
-  return Object.freeze({ profiles, bearers, management, catalog, accountLimits: new NativeAccountLimitsClient(control) });
+  return Object.freeze({ profiles, bearers, management, catalog, nativeControls, accountLimits: new NativeAccountLimitsClient(control) });
 }
 export function composeServiceNative(cfg: Pick<ServiceConfig, 'native' | 'consumer' | 'oauthEnrollment' | 'claudeOAuthEnrollment'>,
   control: ReturnType<typeof composeServiceControl>, kernel: DurableKernel & ExecutionRead, store: ManagementStore,
@@ -111,7 +123,7 @@ export function composeServiceNative(cfg: Pick<ServiceConfig, 'native' | 'consum
       enrollment: { ...enrollment, qualificationRef: control.profiles[0].qualificationRef }, consumers: [cfg.consumer],
       profiles: control.profiles.map(p => ({ ...p, requestBytes: p.limits.requestBytes, outputBytes: p.limits.outputBytes,
         tokens: p.limits.tokens })), timeoutMs: 5000, closureWaitMs: 1000, maxPending: 128 } });
-  return Object.freeze({ authority, transport: new NativeHTTPTransport(authority) });
+  return Object.freeze({ authority, transport: new NativeHTTPTransport(authority, control.nativeControls) });
 }
 
 export interface ProcessBinding {
@@ -254,6 +266,8 @@ export function writeRuntimeFailureDiagnostic(cause: RuntimeFailureCause, error?
 
 export async function startService(configFile: string, signal?: AbortSignal): Promise<Service> {
   const admission = new ServiceAdmission();
+  const nativeControls = new NativeControlAdmission();
+  const nativeCallbacks = new NativeControlAdmission(nativeCallbackCapacity.active, nativeCallbackCapacity.waiting);
   const cfg = loadServiceConfig(configFile); // Fully frozen before any await.
   const pool = new pg.Pool({ connectionString: cfg.kernelDSN, max: 8, connectionTimeoutMillis: 5000,
     query_timeout: 5000, statement_timeout: 5000, idle_in_transaction_session_timeout: 5000 });
@@ -262,7 +276,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     worker = randomUUID(), ctx = Object.freeze({ consumerId: cfg.consumer.consumerId });
   const custody = new IntentSecrets(keyBytes(cfg.keys.intentAEAD), keyBytes(cfg.keys.intentHMAC));
   const store = new PostgresManagementStore(pool, custody);
-  const control = composeServiceControl(cfg, kernel, store, custody, worker);
+  const control = composeServiceControl(cfg, kernel, store, custody, worker, nativeControls);
   const { profiles, bearers, management, catalog } = control;
   const readRetirement = composeServiceRetirementReadback(cfg.native), readbackAbort = new AbortController();
   let handler: Server | undefined, facade: Server | undefined, controlFacade: Server | undefined;
@@ -314,9 +328,9 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     if (facadeControlRoute(req.method, req.url)) {
       if (!controlFacade || stopping || invalid) { res.writeHead(503); res.end(); return; }
       // Analytics shares this protected listener with native proof/cleanup.
-      // Keep two of its eight sockets available for the control protocol.
+      // Keep the independently bounded native callback producer budget free.
       if (facadeUsageReadRoute(req.method, req.url)) {
-        if (usageCallbacks >= 6) { res.writeHead(503, { connection: 'close' }); res.end(); return; }
+        if (usageCallbacks >= nativeCallbackCapacity.usage) { res.writeHead(503, { connection: 'close' }); res.end(); return; }
         usageCallbacks++; req.socket.once('close', () => { usageCallbacks--; });
       }
       controlFacade.emit('request', req, res); return;
@@ -338,13 +352,14 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     enrollmentWaiters++;
     void installed.then(dispatch).catch(() => { res.destroy(); }).finally(() => { enrollmentWaiters--; });
   });
-  callback.maxConnections = 8; callback.maxRequestsPerSocket = 1;
+  callback.maxConnections = nativeCallbackCapacity.sockets; callback.maxRequestsPerSocket = 1;
   callback.on('clientError', (_e, socket) => socket.destroy());
   callback.on('error', error => fail(error, 'callback_error'));
   function stop(): Promise<'retired' | 'pending'> {
     if (stopWork) return stopWork;
     if (stopping) return stopped;
-    stopping = true; const handlersSettled = admission.stop(); readbackAbort.abort(); denyAdmission(); install(); pulse(); wakeSleep?.();
+    stopping = true; const handlersSettled = Promise.all([admission.stop(), nativeControls.stop(), nativeCallbacks.stop()]);
+    readbackAbort.abort(); denyAdmission(); install(); pulse(); wakeSleep?.();
     // Signal only the original ChildProcess handle. The protected Go parent
     // alone decides exact-engine retirement and retains launcher disk evidence.
     if (child && !exited) {
@@ -426,11 +441,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     const binding = original!;
     const enrollment = Object.freeze({ originRef: binding.originRef, engineIncarnation: binding.incarnation, worker });
     const { authority, transport } = composeServiceNative(cfg, control, kernel, store, enrollment);
-    handler = authority.createServer((_req, res, work) => {
-      const release = admission.reserve('control');
-      if (!release) { res.writeHead(503); res.end(); return; }
-      void inServiceLane('control', work).finally(release).catch(() => { res.destroy(); });
-    }); install();
+    handler = authority.createServer((req, res, work) => admitNativeCallback(nativeCallbacks, req, res, work)); install();
     startupStage = 'ready';
     await waitFor(() => ready, 10_000);
     startupActive();
@@ -446,7 +457,36 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     controlFacade = createFacade({ ...options, controlOnly: true }); controlFacade.on('error', error => fail(error, 'control_error'));
     await listen(facade, cfg.facadeOrigin);
     startupActive();
-    const claimCleanup = composeServiceCleanupClaim(kernel, ctx, worker);
+    const cleanupTurn = composeServiceCleanupTurn({ claimCleanup(context, owner) {
+      maintenancePhase = 'cleanup_claim';
+      return kernel.claimCleanup(context, owner);
+    } }, ctx, worker, async claim => {
+      if (stopping) return false; // An acquired lease remains outstanding until expiry.
+      if (claim.scope.kind === 'generation') {
+        maintenancePhase = 'cleanup_generation';
+        return await management.cleanupClaim(ctx, claim) === 'erased';
+      }
+      maintenancePhase = 'cleanup_transport';
+      let closed = claim.scope.transports.length <= 2;
+      for (const t of claim.scope.transports.slice(0, 2)) {
+        if (stopping) { closed = false; break; }
+        if (!t.native || !t.token || t.native.originRef !== binding.originRef) { closed = false; continue; }
+        try {
+          if (t.native.engineIncarnation === binding.incarnation)
+            await cancelFacadeTransport(options!, ctx, { ...t, native: t.native, token: t.token }, claim);
+          else {
+            const receipt = await readRetirement(binding, t.native, readbackAbort.signal);
+            if (!receipt || stopping) { closed = false; continue; }
+            await kernel.acknowledgeTransportClosed(ctx, worker, t, { cleanupRef: claim.cleanupRef, token: claim.token });
+          }
+        }
+        catch { closed = false; }
+      }
+      if (stopping) return false;
+      maintenancePhase = 'cleanup_settlement';
+      await kernel.settleCleanup(ctx, claim.cleanupRef, worker, claim.token, closed);
+      return closed;
+    }, readbackAbort.signal);
     async function tick(): Promise<void> {
         maintenancePhase = 'heartbeat';
         await kernel.heartbeat(ctx, worker);
@@ -455,37 +495,10 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
         await management.reconcile(ctx);
         if (stopping) return;
         maintenancePhase = 'cleanup_claim';
-        const claim = await claimCleanup();
-        if (stopping) return; // An acquired lease remains outstanding until expiry.
-        if (claim?.scope.kind === 'generation') {
-          maintenancePhase = 'cleanup_generation';
-          await management.cleanupClaim(ctx, claim);
-        }
-        else if (claim) {
-          maintenancePhase = 'cleanup_transport';
-          let closed = true;
-          if (claim.scope.transports.length > 2) closed = false;
-          for (const t of claim.scope.transports.slice(0, 2)) {
-            if (stopping) { closed = false; break; }
-            if (!t.native || !t.token || t.native.originRef !== binding.originRef) { closed = false; continue; }
-            try {
-              if (t.native.engineIncarnation === binding.incarnation)
-                await cancelFacadeTransport(options!, ctx, { ...t, native: t.native, token: t.token }, claim);
-              else {
-                const receipt = await readRetirement(binding, t.native, readbackAbort.signal);
-                if (!receipt || stopping) { closed = false; continue; }
-                await kernel.acknowledgeTransportClosed(ctx, worker, t, { cleanupRef: claim.cleanupRef, token: claim.token });
-              }
-            }
-            catch { closed = false; }
-          }
-          if (stopping) return;
-          maintenancePhase = 'cleanup_settlement';
-          await kernel.settleCleanup(ctx, claim.cleanupRef, worker, claim.token, closed);
-        }
+        const claimed = await cleanupTurn();
         if (stopping) return;
         maintenancePhase = 'oauth_refresh';
-        await management.refreshOAuth(ctx, claim !== undefined, readbackAbort.signal);
+        await management.refreshOAuth(ctx, claimed, readbackAbort.signal);
     }
     maintenance = (async () => {
       while (!stopping) {

@@ -4,6 +4,7 @@ import type { AccountLimitsRequest, AccountLimitsCapabilities, AccountLimits } f
 import type { RetainedCustodyProof } from './domain.ts';
 import type { RetainedCustodyVerifier } from './management.ts';
 import { KernelError, identifier, uuid } from './domain.ts';
+import type { NativeControlAdmission } from './service-admission.ts';
 import { secretSubmission } from '@agent-teams/account-gateway/http';
 import { accountLimitsRequest, accountLimitsCapabilities, accountLimits, codexOAuthAuthorizationURL, claudeOAuthAuthorizationURL, oauthDeviceAuthorization } from '@agent-teams/account-gateway/contracts';
 import { codexOAuthProfile, exactCandidate, physicalCandidate } from './management.ts';
@@ -126,6 +127,7 @@ function oauthEndpoint(definition: OAuthProfileDefinition, action: 'begin' | 're
 export interface NativeManagementOptions {
   readonly origin: string; readonly consumerId: string; readonly controlCredential: string;
   readonly deadlineMs?: number; readonly bodyBytes?: number; readonly headerBytes?: number;
+  readonly admission?: NativeControlAdmission;
 }
 // One concrete bounded transport shared by the two private control adapters.
 // It carries no enrollment policy and never performs a second HTTP attempt.
@@ -136,6 +138,7 @@ class NativeControlHTTP {
   readonly #deadlineMs: number;
   readonly #bodyBytes: number;
   readonly #headerBytes: number;
+  readonly #admission?: NativeControlAdmission;
   constructor(options: NativeManagementOptions) {
     let origin: URL;
     try { origin = new URL(options.origin); } catch { throw new KernelError('invalid'); }
@@ -151,6 +154,7 @@ class NativeControlHTTP {
         !Number.isInteger(headerBytes) || headerBytes < 1024 || headerBytes > 16_384) throw new KernelError('invalid');
     this.#origin = origin; this.#consumer = options.consumerId; this.#control = options.controlCredential;
     this.#deadlineMs = deadlineMs; this.#bodyBytes = bodyBytes; this.#headerBytes = headerBytes;
+    this.#admission = options.admission;
   }
   protected scope(scope: Pick<CandidateJournal, 'consumerId' | 'generation' | 'accountRef' | 'ownerRef'>): void {
     if (scope.consumerId !== this.#consumer) throw new NativeFailure('denied');
@@ -158,26 +162,40 @@ class NativeControlHTTP {
   }
   protected async call(method: 'POST' | 'GET' | 'PUT', path: string, value?: unknown,
     deadlineMs = this.#deadlineMs): Promise<Buffer> {
+    const deadline = Date.now() + Math.min(deadlineMs, this.#deadlineMs);
     let body: Buffer | undefined;
     try {
       body = value === undefined ? undefined : Buffer.from(JSON.stringify(value));
       if (body && body.length > (path.endsWith('/oauth/connect/complete') ? 32_768 : 16_384)) throw new NativeFailure('bounded');
     } catch { throw new NativeFailure('bounded'); }
+    let release: (() => void) | undefined;
+    try { release = await this.#admission?.acquire(deadline); }
+    catch { throw new NativeFailure('unavailable'); }
+    if (Date.now() >= deadline) { release?.(); throw new NativeFailure('deadline'); }
     return new Promise<Buffer>((resolve, reject) => {
       let finished = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const finish = (error?: NativeFailure, bytes?: Buffer): void => {
         if (finished) return;
         finished = true; clearTimeout(timer);
         if (error) reject(error); else resolve(bytes ?? Buffer.alloc(0));
+        req.destroy();
       };
       const send = this.#origin.protocol === 'https:' ? httpsRequest : httpRequest;
-      const req = send(this.#origin, {
+      let req: ReturnType<typeof httpRequest>;
+      try { req = send(this.#origin, {
         method, path, agent: false, maxHeaderSize: this.#headerBytes,
         headers: { authorization: 'Bearer ' + this.#control, accept: 'application/json',
           connection: 'close', ...(body ? { 'content-type': 'application/json', 'content-length': String(body.length) } : {}) },
+      }); } catch { release?.(); reject(new NativeFailure('unavailable')); return; }
+      let physical = false;
+      req.once('socket', socket => {
+        physical = true;
+        socket.once('close', () => release?.());
       });
+      req.once('close', () => { if (!physical) release?.(); });
       req.maxHeadersCount = 65;
-      const timer = setTimeout(() => { finish(new NativeFailure('deadline')); req.destroy(); }, Math.min(deadlineMs, this.#deadlineMs));
+      timer = setTimeout(() => finish(new NativeFailure('deadline')), Math.max(1, deadline - Date.now()));
       req.on('error', () => finish(new NativeFailure('unavailable')));
       req.on('response', res => {
         // Retain one overflow sentinel beyond 64 pairs; Node truncates the rest.

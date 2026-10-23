@@ -715,19 +715,21 @@ test('F maintenance: retained pending cleanup cannot starve another active OAuth
     // The old source uses its original direct claim: RED is starvation of real
     // committed selection/HTTP, not an absent adapter import.
     const source = serviceComposition as Partial<typeof serviceComposition>;
-    const claimCleanup = source.composeServiceCleanupClaim?.(f.kernel, f.context, f.worker) ??
-      (() => f.kernel.claimCleanup(f.context, f.worker));
     let cleanupTicks = 0;
+    const settle = async (claim: NonNullable<Awaited<ReturnType<typeof f.kernel.claimCleanup>>>) => {
+      assert.equal(claim.scope.kind, 'generation');
+      assert.equal(await manager.cleanupClaim(f.context, claim), 'quarantined');
+      cleanupTicks++;
+      return false;
+    };
+    const cleanupTurn = source.composeServiceCleanupTurn?.(f.kernel, f.context, f.worker, settle) ??
+      (async () => { const claim = await f.kernel.claimCleanup(f.context, f.worker);
+        if (claim) await settle(claim); return claim !== undefined; });
     for (let tick = 0; tick < 4; tick++) {
       await f.kernel.heartbeat(f.context, f.worker);
-      const claim = await claimCleanup();
-      if (claim) {
-        assert.equal(claim.scope.kind, 'generation');
-        assert.equal(await manager.cleanupClaim(f.context, claim), 'quarantined');
-        cleanupTicks++;
-      }
-      const result = await manager.refreshOAuth(f.context, claim !== undefined);
-      if (claim) assert.equal(result, 'idle', 'cleanup claim retains priority and suppresses same-tick refresh');
+      const claimed = await cleanupTurn();
+      const result = await manager.refreshOAuth(f.context, claimed);
+      if (claimed) assert.equal(result, 'idle', 'cleanup claim retains priority and suppresses same-tick refresh');
     }
     assert.equal(cleanupTicks, 2, 'cleanup remains serviced while uncertainty is retained');
     assert.deepEqual(f.refreshRequests.slice(requestsBefore), [wire(scope(active)), wire(scope(active))],
