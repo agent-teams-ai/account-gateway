@@ -146,3 +146,16 @@ test('legacy Codex and Claude handoffs retain independent official authorization
   assert.equal(oauthDeviceAuthorization.safeParse(device).success, true);
   assert.equal(oauthDeviceAuthorization.safeParse({ ...device, verificationURL: 'https://auth.x.ai/device' }).success, false);
 });
+
+
+test('Grok plain code shares callback lexical bounds and strict completion ingress', () => {
+  for (const code of ['displayed-code', 'a'.repeat(4096), 'valid+code=part']) {
+    assert.equal(secretSubmission.grokOAuthAuthorizationCode.safeParse(code).success, true);
+    assert.equal(secretSubmission.oauthComplete.safeParse({ operationId: 'operation-a', ownerRef: 'owner-a', authorizationCode: code }).success, true);
+  }
+  for (const code of ['', 'a'.repeat(4097), 'é'.repeat(2049), ' leading', 'trailing ', 'code#state', 'code?x', 'code&x', '\ncode', '\ud800'])
+    assert.equal(secretSubmission.grokOAuthAuthorizationCode.safeParse(code).success, false);
+  assert.equal(secretSubmission.oauthComplete.safeParse({ operationId: 'operation-a', ownerRef: 'owner-a', authorizationCode: 'displayed-code', state: 'a'.repeat(64) }).success, false);
+  assert.equal(secretSubmission.claudeOAuthAuthorizationCode.safeParse('displayed-code').success, false);
+  assert.equal(secretSubmission.claudeOAuthAuthorizationCode.safeParse('displayed-code#' + 'a'.repeat(64)).success, true);
+});
