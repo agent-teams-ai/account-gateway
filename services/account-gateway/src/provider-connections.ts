@@ -103,7 +103,7 @@ export const providerConnectionRegistry: readonly ProviderConnectionDefinition[]
     plan: { identity: 'subscription', label: 'Grok subscription' }, region: { identity: 'global', label: 'Global' },
     protocol: 'openai-responses', baseURL: 'https://cli-chat-proxy.grok.com',
     models: [{ modelId: 'grok-4.7', ...standard, reasoning: null, fast: null }], authMethods: ['oauth_authorization_code'],
-    completionInputKind: 'callback_url', oauthCallbackMode: 'manual_callback_url', reconnect: 'oauth_reauthorize',
+    completionInputKind: 'authorization_code', oauthCallbackMode: 'manual_callback_url', reconnect: 'oauth_reauthorize',
     limitsContract: 'account-limits/v2', availability: 'enabled',
     oauth: { family: 'grok', nativePath: '/private/native/v1/grok/oauth/connect',
       refreshPath: '/private/native/v1/grok/oauth/refresh', deviceCode: false, cleanupModels: ['grok-4.7'] } }),
