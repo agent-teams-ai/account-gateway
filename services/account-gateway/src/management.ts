@@ -97,8 +97,8 @@ export interface OAuthEnrollmentOptions {
   readonly lifecycle?: OAuthLifecycleNative;
   readonly refresh?: OAuthRefreshNative;
 }
-export interface OAuthCallback { readonly state: string; readonly code: string }
-export interface OAuthCompleteInput extends OAuthCallback { readonly operationId: string; readonly ownerRef: string }
+export type OAuthCallback = { readonly state: string; readonly code: string } | { readonly authorizationCode: string };
+export type OAuthCompleteInput = OAuthCallback & { readonly operationId: string; readonly ownerRef: string };
 export interface OAuthBeginInput {
   readonly operationId: string; readonly ownerRef: string;
   readonly profile: string; readonly displayName: string;
@@ -364,9 +364,11 @@ export class AccountManagement {
   }
   async completeOAuth(context: TrustedContext, input: OAuthCompleteInput): Promise<OperationStatus> {
     const ctx = captureContext(context), operationId = input.operationId, ownerRef = input.ownerRef;
-    const callback = { state: input.state, code: input.code };
+    const callback: OAuthCallback = 'authorizationCode' in input
+      ? { authorizationCode: input.authorizationCode } : { state: input.state, code: input.code };
     identifier(operationId); identifier(ownerRef);
-    if (typeof callback.state !== 'string' || typeof callback.code !== 'string') throw new KernelError('invalid');
+    if ('authorizationCode' in callback ? typeof callback.authorizationCode !== 'string'
+      : typeof callback.state !== 'string' || typeof callback.code !== 'string') throw new KernelError('invalid');
     const operation = await this.kernel.operation(ctx, operationId);
     if (operation.oauthMethod === 'device_code') throw new KernelError('denied');
     const journal = await this.store.readJournal(ctx, operationId);
@@ -376,6 +378,8 @@ export class AccountManagement {
         operation.executionRef || journal.profile.profile !== oauth.profile.profile ||
         journal.profile.baseURL !== oauth.profile.baseURL || journal.profile.model !== oauth.profile.model ||
         journal.profile.qualificationRef !== oauth.profile.qualificationRef) throw new KernelError('denied');
+    if ('authorizationCode' in callback && oauthProfileDefinition(journal.profile.profile)?.family !== 'grok')
+      throw new KernelError('denied');
     const account = await this.kernel.account(ctx, journal.accountRef);
     if (account.ownerRef !== ownerRef || account.profile !== journal.profile.profile) throw new KernelError('denied');
     // Reuse only this immutable create/reconnect journal. Reconciliation can permanently

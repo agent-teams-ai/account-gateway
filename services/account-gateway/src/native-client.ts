@@ -386,12 +386,23 @@ export class NativeOAuthEnrollmentClient extends NativeControlHTTP implements OA
     return Object.freeze({ operationId: result.operationId, accountRef: result.accountRef, state: result.state });
   }
   async complete(input: OAuthScope, callback: OAuthCallback): Promise<OAuthReadback> {
-    const scope = this.capture(input), state = callback.state, code = callback.code;
-    if (this.#definition.family === 'grok' && /[#?&]/.test(code)) throw new NativeFailure('bounded');
-    if (!secretSubmission.oauthCallbackState.safeParse(state).success ||
-        !(this.#definition.family === 'claude' ? secretSubmission.claudeOAuthCallbackCode : secretSubmission.oauthCallbackCode).safeParse(code).success) throw new NativeFailure('bounded');
+    const scope = this.capture(input);
+    let completion: OAuthCallback;
+    if ('authorizationCode' in callback) {
+      const authorizationCode = callback.authorizationCode;
+      if (this.#definition.family !== 'grok' || !secretSubmission.grokOAuthAuthorizationCode.safeParse(authorizationCode).success)
+        throw new NativeFailure('bounded');
+      completion = { authorizationCode };
+    } else {
+      const state = callback.state, code = callback.code;
+      const codeSchema = this.#definition.family === 'claude' ? secretSubmission.claudeOAuthCallbackCode
+        : this.#definition.family === 'grok' ? secretSubmission.grokOAuthAuthorizationCode : secretSubmission.oauthCallbackCode;
+      if (!secretSubmission.oauthCallbackState.safeParse(state).success || !codeSchema.safeParse(code).success)
+        throw new NativeFailure('bounded');
+      completion = { state, code };
+    }
     const result = this.ack(await this.call('POST', oauthEndpoint(this.#definition, 'complete'),
-      { ...this.wire(scope), state, code }), scope, false);
+      { ...this.wire(scope), ...completion }), scope, false);
     return Object.freeze({ operationId: result.operationId, accountRef: result.accountRef, state: result.state });
   }
   async read(input: OAuthScope): Promise<OAuthReadback> {

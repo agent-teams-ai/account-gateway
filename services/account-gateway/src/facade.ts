@@ -936,8 +936,11 @@ export function createFacade(options: FacadeOptions): Server {
         const definition = oauthProfileDefinition(account.profile);
         const callback = definition?.family === 'claude'
           ? ('authorizationCode' in input ? secretSubmission.parseClaudeOAuthAuthorizationCode(input.authorizationCode) : undefined)
-          : definition?.family === 'grok' && 'callbackURL' in input
-            ? secretSubmission.parseGrokManualCallbackURL(input.callbackURL)
+          : definition?.family === 'grok'
+            ? ('authorizationCode' in input
+              ? (secretSubmission.grokOAuthAuthorizationCode.safeParse(input.authorizationCode).success
+                ? { authorizationCode: input.authorizationCode } : undefined)
+              : secretSubmission.parseGrokManualCallbackURL(input.callbackURL))
             : definition?.family === 'codex' && 'callbackURL' in input
               ? secretSubmission.parseOAuthCallbackURL(input.callbackURL) : undefined;
         if (!callback) throw new KernelError('invalid');

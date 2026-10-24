@@ -42,6 +42,8 @@ export function parseOAuthCallbackURL(value: unknown): { readonly state: string;
   } catch { return undefined; }
 }
 export const oauthCallbackURL = z.string().min(1).max(8192).refine(value => parseOAuthCallbackURL(value) !== undefined);
+/** Plain code displayed by the Grok consent page; state remains in native custody. */
+export const grokOAuthAuthorizationCode = oauthCallbackCode.refine(value => !/[#?&]/.test(value));
 export function parseGrokManualCallbackURL(value: unknown): { readonly state: string; readonly code: string } | undefined {
   try {
     const prefix = 'http://127.0.0.1:56121/callback?';
@@ -56,7 +58,7 @@ export function parseGrokManualCallbackURL(value: unknown): { readonly state: st
       fields.set(key, decodeURIComponent(part.slice(equal + 1).replace(/\+/g, ' ')));
     }
     const code = fields.get('code'), state = fields.get('state'), scope = fields.get('scope');
-    if (!code || /[#?&]/.test(code) || !state || !oauthCallbackState.safeParse(state).success || !oauthCallbackCode.safeParse(code).success ||
+    if (!code || !state || !oauthCallbackState.safeParse(state).success || !grokOAuthAuthorizationCode.safeParse(code).success ||
         (scope !== undefined && new TextEncoder().encode(scope).byteLength > 1024)) return undefined;
     return { code, state };
   } catch { return undefined; }
@@ -79,6 +81,7 @@ export const claudeOAuthAuthorizationCode = z.string().min(1).max(8257)
 export const oauthComplete = z.union([
   z.strictObject({ operationId: c.reference, ownerRef: c.reference, callbackURL: oauthCallbackURL }),
   z.strictObject({ operationId: c.reference, ownerRef: c.reference, authorizationCode: claudeOAuthAuthorizationCode }),
+  z.strictObject({ operationId: c.reference, ownerRef: c.reference, authorizationCode: grokOAuthAuthorizationCode }),
   z.strictObject({ operationId: c.reference, ownerRef: c.reference, callbackURL: grokOAuthCallbackURL }),
 ]);
 export type OAuthComplete = z.infer<typeof oauthComplete>;

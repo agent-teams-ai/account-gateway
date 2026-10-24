@@ -12,6 +12,7 @@ import { facadeControlRoute, facadeBoundedReadRoute } from '../src/service-admis
 import { createFacade, FacadeBearers } from '../src/facade.ts';
 import type { ManagementBearer } from '../src/facade.ts';
 import { IntentSecrets } from '../src/management-store.ts';
+import { grokOAuthProfile } from '../src/oauth-profiles.ts';
 import { codexOAuthProfile, claudeOAuthProfile } from '../src/management.ts';
 import type { CandidateJournal, CandidateMapping, ManagementStore, PhysicalCandidate } from '../src/management.ts';
 import { NativeFailure, NativeOAuthEnrollmentClient } from '../src/native-client.ts';
@@ -128,9 +129,9 @@ test('OAuth callback ingress accepts genuine encoding and rejects aliases, malfo
 
 // Source boundary fixtures have test-owned committed state and real HTTP hops.
 // They qualify neither SQL transactions nor Go middleware/provider transport.
-async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false, limitsRead?: { contract: 'v1' | 'v2'; enter(): Promise<void> }) {
-  const oauthProfile = oauth === 'claude' ? claudeOAuthProfile : codexOAuthProfile;
-  const oauthPath = '/private/native/v1/' + (oauth === 'claude' ? 'claude/oauth' : 'oauth');
+async function sourceHTTP(oauth: boolean | 'claude' | 'grok', outputEnvelope = false, limitsRead?: { contract: 'v1' | 'v2'; enter(): Promise<void> }) {
+  const oauthProfile = oauth === 'grok' ? grokOAuthProfile : oauth === 'claude' ? claudeOAuthProfile : codexOAuthProfile;
+  const oauthPath = '/private/native/v1/' + (oauth === 'grok' ? 'grok/oauth' : oauth === 'claude' ? 'claude/oauth' : 'oauth');
   const consumerId = 'source-consumer', worker = randomUUID();
   let issuer: string = randomUUID();
   const context = { consumerId }, enrollment = { originRef: 'source-origin', engineIncarnation: randomUUID(), worker };
@@ -317,7 +318,7 @@ async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false, lim
       if (path.startsWith(oauthPath + '/connect')) {
         assert.equal(req.method, 'POST'); assert.equal(req.headers.authorization, 'Bearer ' + consumer.managementCredential);
         assert.deepEqual(Object.keys(tuple).sort(), path.endsWith('/complete') ?
-          ['account_ref','code','generation','operation','owner_ref','state'] : ['account_ref','generation','operation','owner_ref']);
+          (oauth === 'grok' && 'authorizationCode' in tuple ? ['account_ref','authorizationCode','generation','operation','owner_ref'] : ['account_ref','code','generation','operation','owner_ref','state']) : ['account_ref','generation','operation','owner_ref']);
         const grant = await callback('oauth-owner-authority', { consumerId, operationId: tuple.operation,
           accountRef: tuple.account_ref, generation: tuple.generation });
         if (grant.status !== 200) { reply({ code: 'denied' }, 403); return; }
@@ -333,7 +334,7 @@ async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false, lim
         }
         if (path === oauthPath + '/connect') begins++;
         if (path.endsWith('/complete')) {
-          assert.equal(tuple.state, 'a'.repeat(64));
+          if (!('authorizationCode' in tuple)) assert.equal(tuple.state, 'a'.repeat(64));
           completions++;
           if (loseCompletion) { req.socket.destroy(); return; }
           connectState = 'completed';
@@ -398,7 +399,10 @@ async function sourceHTTP(oauth: boolean | 'claude', outputEnvelope = false, lim
     { token: 'source-public-run', role: 'run-control' as const, consumerId, ownerRefs: managementGrant.ownerRefs,
       profileIds: [profile.profile, secondProfile.profile], limits: secondProfile.limits, maxRunMs: 20_000 }];
   const cfg = { native: { executable: '/unused', sha256: 'unused', bootstrapFile: '/unused', authorityDir: '/unused', origin, originRef: enrollment.originRef, uid: 1, gid: 1 },
-    consumer, profile, secondProfile, bearers, ...(limitsRead?.contract === 'v2' ? { providerProfiles: [{ ...kimiProfile, qualificationRef: 'source-kimi', limits, providerTokenUpperBound: 1000 }] } : {}), ...(oauth === 'claude' ? { claudeOAuthEnrollment: { enabled: true as const,
+    consumer, profile, secondProfile, bearers, ...(limitsRead?.contract === 'v2' ? { providerProfiles: [{ ...kimiProfile, qualificationRef: 'source-kimi', limits, providerTokenUpperBound: 1000 }] } : {}), ...(oauth === 'grok' ? { grokOAuthEnrollment: { enabled: true as const, deploymentQualified: true as const, authorizationOrigin: 'https://auth.x.ai' as const, redirectPolicy: 'manual_loopback' as const,
+      profile: 'grok-subscription-responses-oauth-v1' as const, modelScope: ['grok-4.7'] as const,
+      clientId: 'b1a00492-073a-47ea-816f-4c329264a828', redirectURI: 'http://127.0.0.1:56121/callback' as const,
+      qualificationRef: 'source-grok', limits, providerTokenUpperBound: 1000 } } : oauth === 'claude' ? { claudeOAuthEnrollment: { enabled: true as const,
       profile: 'anthropic-claude-oauth-messages-v1' as const, modelScope: ['claude-sonnet-4-6'] as const,
       qualificationRef: 'source-claude', limits, providerTokenUpperBound: 1000 } } : oauth ? { oauthEnrollment: { enabled: true as const,
       profile: 'openai-codex-oauth-responses-v1' as const, modelScope: ['gpt-5.6-sol'] as const,
@@ -1331,4 +1335,33 @@ for (const contract of ['v1', 'v2'] as const) test('protected concurrent ' + con
     listener.closeAllConnections(); await new Promise<void>(resolve => listener.close(() => resolve()));
     callbackHandler.closeAllConnections(); await f.close();
   }
+});
+
+
+test('source HTTP: Grok displayed code uses saved profile and never projects original state', async () => {
+  const f = await sourceHTTP('grok');
+  try {
+    f.connect('prepared');
+    const sdk = createManagementClient({ role: 'management', origin: f.facadeOrigin, token: 'source-public-management' });
+    const capabilities = await sdk.getProviderConnectionCapabilities();
+    assert.equal(capabilities.capabilities.find(p => p.profileId === grokOAuthProfile.profile)?.completionInputKind, 'authorization_code');
+    const operationId = randomUUID();
+    await sdk.beginOAuth({ operationId, ownerRef: 'owner-one', profileId: grokOAuthProfile.profile, displayName: 'Grok fixture' });
+    const j = f.journals.get(f.scopeKey(f.context, operationId))!;
+    const before = f.seen.length;
+    for (const authorizationCode of ['claude-code#' + 'a'.repeat(64), 'bad?query'])
+      assert.equal((await f.publicCall('/v1/accounts/oauth/complete', { operationId, ownerRef: 'owner-one', authorizationCode })).status, 400);
+    assert.equal((await f.publicCall('/v1/accounts/oauth/complete', { operationId, ownerRef: 'owner-two', authorizationCode: 'displayed-code' })).status, 403);
+    assert.equal(f.seen.length, before);
+    f.descriptor({ operation: operationId, account_ref: j.accountRef, state: 'staged', qualification: 'controlled-source-v1',
+      native: { account_id: 42, generation: j.generation, created_at: '2026-10-06T01:02:03.123456789Z',
+        profile: grokOAuthProfile.profile, base_url: grokOAuthProfile.baseURL, model: grokOAuthProfile.model } });
+    const input = { operationId, ownerRef: 'owner-one', authorizationCode: 'displayed-code' };
+    const applied = await sdk.completeOAuth(input);
+    assert.equal(applied.state, 'applied'); assert.equal(f.completions(), 1);
+    assert.deepEqual(f.seen.find(s => s.path === 'POST /private/native/v1/grok/oauth/connect/complete')?.tuple,
+      { operation: operationId, owner_ref: j.ownerRef, account_ref: j.accountRef, generation: j.generation, authorizationCode: 'displayed-code' });
+    assert.deepEqual(await sdk.completeOAuth(input), applied); assert.equal(f.completions(), 1);
+    assert.equal(JSON.stringify(applied).includes('displayed-code'), false);
+  } finally { await f.close(); }
 });

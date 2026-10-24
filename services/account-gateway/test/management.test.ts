@@ -412,3 +412,33 @@ for (const profile of [undefined, codexOAuthProfile, claudeOAuthProfile]) test('
     assert.equal(calls, before);
   } finally { await server.close(); }
 });
+
+
+test('Grok plain-code native completion preserves the saved scope and rejects other profiles before HTTP', async () => {
+  const j = journal(), requests: { path: string | undefined; body: unknown }[] = [];
+  const server = await local((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', chunk => chunks.push(chunk)); req.on('end', () => {
+      requests.push({ path: req.url, body: JSON.parse(Buffer.concat(chunks).toString()) });
+      res.end(JSON.stringify({ operation: j.operationId, account_ref: j.accountRef, state: 'completed' }));
+    });
+  });
+  try {
+    const options = { origin: server.origin, consumerId: j.consumerId, ownerRef: j.ownerRef, controlCredential: 'synthetic-control' };
+    const client = new NativeOAuthEnrollmentClient({ ...options, profileId: 'grok-subscription-responses-oauth-v1',
+      grokBrowserPolicy: { clientId: 'b1a00492-073a-47ea-816f-4c329264a828', redirectURI: 'http://127.0.0.1:56121/callback' } });
+    assert.equal((await client.complete(j, { authorizationCode: 'displayed-code' })).state, 'completed');
+    const wire = { operation: j.operationId, owner_ref: j.ownerRef, account_ref: j.accountRef, generation: j.generation };
+    assert.deepEqual(requests, [{ path: '/private/native/v1/grok/oauth/connect/complete', body: { ...wire, authorizationCode: 'displayed-code' } }]);
+    await client.complete(j, { state: 'a'.repeat(64), code: 'legacy-code' });
+    assert.deepEqual(requests[1]?.body, { ...wire, state: 'a'.repeat(64), code: 'legacy-code' });
+    for (const profileId of [codexOAuthProfile.profile, claudeOAuthProfile.profile]) {
+      const other = new NativeOAuthEnrollmentClient({ ...options, profileId });
+      await assert.rejects(other.complete(j, { authorizationCode: 'displayed-code' }), code('bounded'));
+    }
+    for (const authorizationCode of ['bad#state', 'bad?query', 'bad&query', ' bad', 'é'.repeat(2049)])
+      await assert.rejects(client.complete(j, { authorizationCode }), code('bounded'));
+    await assert.rejects(client.complete({ ...j, ownerRef: 'other-owner' }, { authorizationCode: 'displayed-code' }), code('denied'));
+    assert.equal(requests.length, 2, 'invalid code, wrong provider and owner never dispatch');
+  } finally { await server.close(); }
+});
