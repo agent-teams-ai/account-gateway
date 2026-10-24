@@ -1,6 +1,8 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { checkConsumerPin } from './check-consumer-pin.ts';
 const root = resolve(process.argv[2] ?? '.');
+await checkConsumerPin(root);
 const profile = JSON.parse(await readFile(root + '/architecture/feature-module-adoption.json', 'utf8'));
 const failures = [];
 const directories = async path => (await readdir(path, { withFileTypes: true })).filter(e => e.isDirectory()).map(e => e.name);
