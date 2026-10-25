@@ -147,8 +147,13 @@ export function validateResponses(
   )
     throw new KernelError("invalid");
   const policy = modelPolicies?.find((model) => model.modelId === p.model);
-  if (policy?.reasoning === null && p.reasoning !== undefined && p.reasoning !== null)
-    throw new KernelError("invalid");
+  if (policy?.reasoning === null && p.reasoning !== undefined && p.reasoning !== null) {
+    // The pinned Codex client emits {} when its account model disables reasoning.
+    const emptyDisabledReasoning = enforceModelCapabilities &&
+      typeof p.reasoning === "object" && !Array.isArray(p.reasoning) &&
+      Object.keys(p.reasoning).length === 0;
+    if (!emptyDisabledReasoning) throw new KernelError("invalid");
+  }
   if (enforceModelCapabilities && policy?.reasoning && p.reasoning !== undefined && p.reasoning !== null) {
     if (typeof p.reasoning !== "object" || Array.isArray(p.reasoning)) throw new KernelError("invalid");
     const effort = (p.reasoning as Record<string, unknown>).effort;
