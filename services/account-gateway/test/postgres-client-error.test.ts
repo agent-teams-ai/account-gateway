@@ -1,17 +1,19 @@
-import test from 'node:test';
-import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import test from "node:test";
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
-test('borrowed client fatal error is unavailable, discards the client and cannot commit or crash the process',
-  { timeout: 12_000 }, async () => {
+test(
+  "borrowed client fatal error is unavailable, discards the client and cannot commit or crash the process",
+  { timeout: 12_000 },
+  async () => {
     // An asynchronous EventEmitter error without a listener terminates this
     // child process. A query rejection alone cannot reproduce that pg boundary.
     const program = `
       import assert from 'node:assert/strict';
       import { EventEmitter } from 'node:events';
-      import { PostgresKernel } from ${JSON.stringify(new URL('../src/postgres.ts', import.meta.url).href)};
-      import { KernelError } from ${JSON.stringify(new URL('../src/domain.ts', import.meta.url).href)};
+      import { PostgresKernel } from ${JSON.stringify(new URL("../src/postgres.ts", import.meta.url).href)};
+      import { KernelError } from ${JSON.stringify(new URL("../src/domain.ts", import.meta.url).href)};
       const worker = '11111111-1111-4111-8111-111111111111';
       const issuer = '22222222-2222-4222-8222-222222222222';
       const lease = new Date('2099-01-01T00:00:00.000Z');
@@ -63,8 +65,12 @@ test('borrowed client fatal error is unavailable, discards the client and cannot
       }
       process.stdout.write('borrowed-client-error PASS\\n');
     `;
-    const result = await promisify(execFile)(process.execPath, ['--input-type=module', '--eval', program],
-      { timeout: 8000, maxBuffer: 16_384, env: { PATH: process.env.PATH } });
-    assert.equal(result.stdout, 'borrowed-client-error PASS\n');
-    assert.equal(result.stderr, '');
-  });
+    const result = await promisify(execFile)(
+      process.execPath,
+      ["--input-type=module", "--eval", program],
+      { timeout: 8000, maxBuffer: 16_384, env: { PATH: process.env.PATH } },
+    );
+    assert.equal(result.stdout, "borrowed-client-error PASS\n");
+    assert.equal(result.stderr, "");
+  },
+);

@@ -1,4 +1,4 @@
-import type { PoolClient } from 'pg';
+import type { PoolClient } from "pg";
 
 // IDs have no time namespace. Replay hashes, issuer history, the full approved
 // readback tuple, unknown invocation fences and exact native proofs are retained
@@ -10,8 +10,13 @@ import type { PoolClient } from 'pg';
 // not a deletion horizon, and lease expiry is never evidence of closure.
 // Caller holds the kernel budget + consumer transaction locks. All mutation is
 // within that transaction, so a fence/restore/claim cannot race the safety test.
-export async function compactSafePayloads(db: PoolClient, consumer: string, batch: number): Promise<void> {
-  await db.query(`WITH safe AS MATERIALIZED (
+export async function compactSafePayloads(
+  db: PoolClient,
+  consumer: string,
+  batch: number,
+): Promise<void> {
+  await db.query(
+    `WITH safe AS MATERIALIZED (
     SELECT e.ref FROM executions e WHERE e.consumer=$1 AND e.state<>'open'
       AND e.deadline<=clock_timestamp()
       AND (e.intent IS NOT NULL OR EXISTS (SELECT 1 FROM operations o
@@ -31,5 +36,6 @@ export async function compactSafePayloads(db: PoolClient, consumer: string, batc
       UPDATE operations o SET intent=NULL FROM safe s WHERE o.consumer=$1 AND o.execution_ref=s.ref
         AND o.state IN ('applied','rejected') AND o.intent IS NOT NULL RETURNING o.id
     ) UPDATE executions e SET intent=NULL FROM safe s WHERE e.consumer=$1 AND e.ref=s.ref AND e.intent IS NOT NULL`,
-  [consumer, batch]);
+    [consumer, batch],
+  );
 }
