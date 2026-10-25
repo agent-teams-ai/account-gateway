@@ -80,8 +80,8 @@ boundaries:
     allow: {boundaries: [kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:timers/promises', 'node:http', 'node:child_process', 'node:path'], runtimeReferences: []}
   - id: private-facade
     dependencyMode: runtime
-    roots: [services/account-gateway/src/facade.ts, services/account-gateway/src/facade-ingress.ts, services/account-gateway/src/limits-port.ts, services/account-gateway/src/provider-connection-capabilities.ts]
-    entrypoints: [services/account-gateway/src/facade.ts, services/account-gateway/src/facade-ingress.ts, services/account-gateway/src/limits-port.ts, services/account-gateway/src/provider-connection-capabilities.ts]
+    roots: [services/account-gateway/src/facade.ts, services/account-gateway/src/facade-ingress.ts, services/account-gateway/src/limits-port.ts, services/account-gateway/src/models-port.ts, services/account-gateway/src/provider-connection-capabilities.ts]
+    entrypoints: [services/account-gateway/src/facade.ts, services/account-gateway/src/facade-ingress.ts, services/account-gateway/src/limits-port.ts, services/account-gateway/src/models-port.ts, services/account-gateway/src/provider-connection-capabilities.ts]
     allow: {boundaries: [kernel-domain, kernel-postgres, native-management, contracts, http, usage-journal], packages: ['@agent-teams/account-gateway'], builtins: ['node:http', 'node:crypto', 'node:events', 'node:util'], runtimeReferences: []}
   - id: private-facade-tests
     dependencyMode: runtime

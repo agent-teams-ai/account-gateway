@@ -786,13 +786,13 @@ const modelSetting = <T extends readonly [string, ...string[]]>(values: T) =>
       default: z.enum(values),
     })
     .refine((v) => v.allowed.includes(v.default));
-const qualifiedModelCapability = z.strictObject({
+export const qualifiedModelCapability = z.strictObject({
   modelId: z
     .string()
     .min(1)
     .max(128)
     .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/),
-  reasoning: modelSetting(["minimal", "low", "medium", "high", "xhigh"] as const).nullable(),
+  reasoning: modelSetting(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const).nullable(),
   fast: modelSetting(["balanced", "fast"] as const).nullable(),
   tools: modelSetting(["none", "function", "function_and_custom"] as const),
 });
@@ -844,6 +844,31 @@ export const providerConnectionCapabilities = z.strictObject({
 });
 export type ProviderConnectionCapability = z.infer<typeof providerConnectionCapability>;
 export type ProviderConnectionCapabilities = z.infer<typeof providerConnectionCapabilities>;
+
+/** Authoritative, account-scoped Codex model selection. Enrollment keeps its anchor. */
+export const accountModelsRequest = accountLimitsRequest.extend({ forceRefresh: z.boolean().optional() });
+export const accountModelCapability = qualifiedModelCapability.extend({
+  fast: modelSetting(["balanced"] as const),
+  tools: modelSetting(["function"] as const),
+});
+export const accountModels = z.discriminatedUnion("status", [
+  z.strictObject({
+    status: z.literal("snapshot"),
+    physicalGeneration: reference,
+    principalVersion: reference,
+    source: z.literal("codex"),
+    fetchedAt: limitsInstant,
+    expiresAt: limitsInstant,
+    models: z.array(accountModelCapability).max(128)
+      .refine((models) => new Set(models.map((model) => model.modelId)).size === models.length),
+  }).refine((snapshot) => Date.parse(snapshot.fetchedAt) < Date.parse(snapshot.expiresAt)),
+  z.strictObject({ status: z.literal("unknown") }),
+  z.strictObject({ status: z.literal("unsupported") }),
+  z.strictObject({ status: z.literal("unavailable") }),
+]);
+export type AccountModelsRequest = z.infer<typeof accountModelsRequest>;
+export type AccountModels = z.infer<typeof accountModels>;
+export type AccountModelCapability = z.infer<typeof accountModelCapability>;
 
 /** account-limits/v2 adds closed identities and never invents duration or units. */
 export const ACCOUNT_LIMITS_V2_CONTRACT = "account-limits/v2" as const;

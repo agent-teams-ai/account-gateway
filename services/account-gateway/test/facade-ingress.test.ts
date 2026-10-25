@@ -373,6 +373,12 @@ async function sourceHTTP(
     heartbeat: async () => {},
     reconcile: async () => {},
     account: async (c, id) => accounts.get(scopeKey(c, id)) ?? missing(),
+    accountLimitsIdentity: async (c, id) => {
+      const account = await kernel.account(c, id);
+      const mapping = [...mappings.values()].find((m) => m.consumerId === c.consumerId && m.accountRef === id);
+      if (!mapping) return missing();
+      return { ...account, generation: mapping.generation, nativePhysicalIdentity: mapping.descriptor.nativePhysicalIdentity };
+    },
     operation: async (c, id) => operations.get(scopeKey(c, id)) ?? missing(),
     accounts: async (c, query = {}) => {
       const rows = [...accounts.values()]
@@ -675,6 +681,8 @@ async function sourceHTTP(
       body: JSON.stringify(body),
       redirect: "manual",
     });
+  let modelResult: lifecycleWire.AccountModels = { status: "unavailable" };
+  let modelRead: (() => Promise<void>) | undefined;
   const peer = createServer((req, res) => {
     void (async () => {
       const chunks: Buffer[] = [];
@@ -688,6 +696,12 @@ async function sourceHTTP(
         res.writeHead(status, { "content-type": "application/json" });
         res.end(JSON.stringify(body));
       };
+      if (req.method === "POST" && path === "/private/native/v1/account-models/read") {
+        assert.equal(req.headers.authorization, "Bearer " + consumer.managementCredential);
+        await modelRead?.();
+        reply(modelResult);
+        return;
+      }
       if (req.method === "GET" && path === "/private/native/v1/account-limits/capabilities") {
         reply({ contract: "account-limits/v1", cachedRead: true, quotaOnlyRefresh: false });
         return;
@@ -831,7 +845,7 @@ async function sourceHTTP(
         const { payload, ...admit } = tuple;
         const d = tuple.descriptor as Record<string, unknown>,
           generation = d.generation as string;
-        const p = [profile, secondProfile].find((p) => p.profile === d.profile)!;
+        const p = [profile, secondProfile, oauthProfile].find((p) => p.profile === d.profile)!;
         assert.equal(d.base_url, p.baseURL);
         assert.equal(d.model, p.model);
         const native = { ...enrollment, requestNonce: randomUUID(), generation };
@@ -1081,6 +1095,10 @@ async function sourceHTTP(
       descriptor: (value: unknown, mode: typeof descriptorMode = "normal") => {
         descriptorReply = value;
         descriptorMode = mode;
+      },
+      modelResult: (value: lifecycleWire.AccountModels, enter?: () => Promise<void>) => {
+        modelResult = value;
+        modelRead = enter;
       },
       responseBytes: (value: number) => {
         responseBytes = value;
@@ -3165,4 +3183,119 @@ test("source HTTP: Grok displayed code uses saved profile and never projects ori
   } finally {
     await f.close();
   }
+});
+
+
+function modelAccount(f: Awaited<ReturnType<typeof sourceHTTP>>) {
+  const accountRef = randomUUID(), generation = randomUUID();
+  const profile = { ...codexOAuthProfile, qualificationRef: "source-codex", limits: f.profile.limits,
+    providerTokenUpperBound: 1000 };
+  const account: AccountStatus = { accountRef, ownerRef: "owner-one", profile: profile.profile,
+    displayName: "Model catalogue fixture", state: "active", revision: 1, epoch: 1 };
+  f.accounts.set(f.scopeKey(f.context, accountRef), account);
+  f.mappings.set(f.scopeKey(f.context, generation), { consumerId: f.context.consumerId,
+    operationId: randomUUID(), accountRef, ownerRef: account.ownerRef, purpose: "create",
+    generation, worker: randomUUID(), profile,
+    descriptor: { generation, nativePhysicalIdentity: generation, nativeId: 42,
+      createdAt: "2026-10-06T01:02:03Z", ...profile } });
+  const input = { ownerRef: account.ownerRef, accountRef, profileId: profile.profile, expectedAuthorizationEpoch: 1 };
+  const snapshot: lifecycleWire.AccountModels = { status: "snapshot", physicalGeneration: generation,
+    principalVersion: "principal-fixture", source: "codex", fetchedAt: new Date(Date.now() - 1000).toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(), models: [{ modelId: "gpt-unseen-future",
+      reasoning: { allowed: ["high", "ultra"], default: "high" },
+      fast: { allowed: ["balanced"], default: "balanced" }, tools: { allowed: ["function"], default: "function" } }] };
+  return { account, profile, generation, input, snapshot };
+}
+
+// Detects a broken SDK route/schema, leaked static membership, or lost authority fences after native I/O.
+test("account model SDK read uses scoped native catalogue and fences owner, epoch, generation and bearer changes", async () => {
+  const f = await sourceHTTP(true);
+  try {
+    const { account, input, snapshot, generation } = modelAccount(f);
+    const sdk = createManagementClient({ role: "management", origin: f.facadeOrigin, token: "source-public-management" });
+    f.modelResult(snapshot);
+    assert.deepEqual(await sdk.readAccountModels({ ...input, forceRefresh: true }), snapshot);
+    assert.deepEqual(f.seen.find((r) => r.path === "POST /private/native/v1/account-models/read")?.tuple,
+      { ...input, forceRefresh: true });
+    for (const change of [{ ownerRef: "foreign" }, { expectedAuthorizationEpoch: 2 }, { profileId: "foreign" }]) {
+      await assert.rejects(sdk.readAccountModels({ ...input, ...change }));
+    }
+    for (const mutation of [
+      () => { account.epoch++; },
+      () => { account.ownerRef = "foreign"; },
+      () => { const current = f.mappings.get(f.scopeKey(f.context, generation))!;
+        f.mappings.set(f.scopeKey(f.context, generation), { ...current,
+          descriptor: { ...current.descriptor, nativeId: 99 } }); },
+      () => { f.control.bearers.replace([]); },
+    ]) {
+      const old = { epoch: account.epoch, ownerRef: account.ownerRef };
+      const mapping = f.mappings.get(f.scopeKey(f.context, generation))!;
+      f.modelResult(snapshot, async () => mutation());
+      await assert.rejects(sdk.readAccountModels(input));
+      Object.assign(account, old);
+      f.mappings.set(f.scopeKey(f.context, generation), mapping);
+      f.control.bearers.replace(f.cfg.bearers);
+    }
+    f.modelResult({ ...snapshot, physicalGeneration: randomUUID() });
+    await assert.rejects(sdk.readAccountModels(input));
+    f.modelResult({ ...snapshot, models: [] });
+    assert.deepEqual(await sdk.readAccountModels(input), { ...snapshot, models: [] });
+    f.modelResult({ ...snapshot, fetchedAt: new Date(Date.now() - 5000).toISOString(), expiresAt: new Date(Date.now() - 1).toISOString() });
+    assert.deepEqual(await sdk.readAccountModels(input), { status: "unavailable" });
+  } finally { await f.close(); }
+});
+
+// Dynamic membership must reach the existing transport without changing its persisted enrollment anchor.
+test("dynamic Codex selection reaches native transport; unknown, unsupported effort and empty catalogues never enter", async () => {
+  const f = await sourceHTTP(true);
+  try {
+    const { account, profile, generation, snapshot } = modelAccount(f);
+    const executionRef = randomUUID();
+    const saved: SavedExecution = { generation, state: "open", dispatchAllowed: true,
+      admission: { executionRef, issuerEpoch: await f.kernel.issuer(f.context), invocationRef: "models-test", attemptRef: "attempt",
+        accountRef: account.accountRef, authorizationEpoch: 1, subjectRef: "subject", policyRevision: 1,
+        bindingRevision: 1, profileId: profile.profile, limits: profile.limits,
+        expiresAt: new Date(Date.now() + 20_000).toISOString() } };
+    f.executions.set(f.scopeKey(f.context, executionRef), saved);
+    f.control.bearers.replace([...f.cfg.bearers, { role: "execution", consumerId: f.context.consumerId,
+      token: "source-model-execution", saved }]);
+    const { executionRef: _, issuerEpoch: __, ...admission } = saved.admission;
+    const submit = (patch: Record<string, unknown> = {}) => f.publicCall("/v1/executions/" + executionRef + "/requests",
+      { model: "gpt-unseen-future", stream: true, store: false, reasoning: { effort: "ultra" },
+        tools: [{ type: "function", name: "fixture", parameters: {} }], ...patch }, "source-model-execution",
+      { "x-gateway-request-id": randomUUID(), "x-gateway-admission": JSON.stringify(admission) });
+    f.modelResult(snapshot);
+    for (const patch of [{ model: "unknown" }, { reasoning: { effort: "low" } },
+      { service_tier: "priority" }]) {
+      assert.equal((await submit(patch)).status, 400);
+      assert.equal(f.forwarded.length, 0);
+      assert.equal(f.seen.filter((entry) => entry.path === "POST /private/native/v1/transports").length, 0);
+    }
+    const accepted = await submit();
+    assert.equal(accepted.status, 200);
+    await accepted.text();
+    assert.equal(f.forwarded.length, 1);
+    assert.equal((f.forwarded[0].body as Record<string, unknown>).model, "gpt-unseen-future");
+    assert.equal(f.mappings.get(f.scopeKey(f.context, generation))!.descriptor.model, profile.model);
+    // Metadata advertises the upstream function protocol. Preserve qualified
+    // custom input for the existing native custom-to-function codec.
+    const customTools = [{ type: "custom", name: "apply_patch", description: "Apply a patch",
+      format: { type: "grammar", syntax: "lark", definition: "start: /(.|\\n)*/" } }];
+    const custom = await submit({ tools: customTools });
+    assert.equal(custom.status, 200);
+    await custom.text();
+    assert.equal(f.forwarded.length, 2);
+    assert.deepEqual((f.forwarded[1].body as Record<string, unknown>).tools, customTools);
+    f.modelResult({ ...snapshot, models: [] });
+    assert.equal((await submit({ model: profile.model })).status, 400);
+    for (const status of ["unknown", "unsupported"] as const) {
+      f.modelResult({ status });
+      assert.equal((await submit({ model: profile.model })).status, 400);
+    }
+    f.modelResult({ status: "unavailable" });
+    assert.equal((await submit()).status, 400);
+    const anchor = await submit({ model: profile.model, reasoning: undefined });
+    assert.equal(anchor.status, 200);
+    await anchor.text();
+  } finally { await f.close(); }
 });

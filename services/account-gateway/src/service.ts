@@ -31,6 +31,7 @@ import type { DurableKernel, ExecutionRead, TrustedContext } from "./domain.ts";
 import { oauthProfileDefinition } from "./oauth-profiles.ts";
 import { providerConnectionDefinition } from "./provider-connections.ts";
 import {
+  NativeAccountModelsClient,
   NativeAccountLimitsClient,
   NativeAccountLimitsV2Client,
   NativeManagementClient,
@@ -256,15 +257,16 @@ export function composeServiceControl(
     bearers,
     management,
     catalog,
+    accountModels: new NativeAccountModelsClient(control),
     accountLimits: new NativeAccountLimitsClient(control),
     accountLimitsV2: new NativeAccountLimitsV2Client(control),
   });
 }
 /** Both facades and joined callers use the production cached-read wiring. */
 export function composeServiceCachedLimits(
-  control: Pick<ReturnType<typeof composeServiceControl>, "accountLimits" | "accountLimitsV2">,
-): Pick<FacadeOptions, "accountLimits" | "accountLimitsV2"> {
-  return { accountLimits: control.accountLimits, accountLimitsV2: control.accountLimitsV2 };
+  control: Pick<ReturnType<typeof composeServiceControl>, "accountModels" | "accountLimits" | "accountLimitsV2">,
+): Pick<FacadeOptions, "accountModels" | "accountLimits" | "accountLimitsV2"> {
+  return { accountModels: control.accountModels, accountLimits: control.accountLimits, accountLimitsV2: control.accountLimitsV2 };
 }
 export function composeServiceNative(
   cfg: Pick<
@@ -280,6 +282,7 @@ export function composeServiceNative(
     kernel,
     store,
     accountLimitsOwners: { bearers: control.bearers },
+    accountModels: control.accountModels,
     ...(cfg.oauthEnrollment || cfg.claudeOAuthEnrollment || cfg.grokOAuthEnrollment
       ? {
           oauthOwners: { store, bearers: control.bearers },

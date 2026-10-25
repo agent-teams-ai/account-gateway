@@ -111,7 +111,11 @@ export function validateResponses(
   bytes: Uint8Array,
   models: readonly string[],
   tokenMaximum: number,
-  modelPolicies?: readonly { readonly modelId: string; readonly reasoning: object | null }[],
+  modelPolicies?: readonly {
+    readonly modelId: string;
+    readonly reasoning: { readonly allowed: readonly string[] } | null;
+  }[],
+  enforceModelCapabilities = false,
 ): string {
   const input = strictJSON(bytes);
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new KernelError("invalid");
@@ -145,6 +149,13 @@ export function validateResponses(
   const policy = modelPolicies?.find((model) => model.modelId === p.model);
   if (policy?.reasoning === null && p.reasoning !== undefined && p.reasoning !== null)
     throw new KernelError("invalid");
+  if (enforceModelCapabilities && policy?.reasoning && p.reasoning !== undefined && p.reasoning !== null) {
+    if (typeof p.reasoning !== "object" || Array.isArray(p.reasoning)) throw new KernelError("invalid");
+    const effort = (p.reasoning as Record<string, unknown>).effort;
+    if (effort !== undefined && (typeof effort !== "string" || !policy.reasoning.allowed.includes(effort)))
+      throw new KernelError("invalid");
+  }
+  // Native transport owns tool admission and custom-to-function normalization.
   // Validated request selection, not an observation of the provider response model.
   return p.model;
 }

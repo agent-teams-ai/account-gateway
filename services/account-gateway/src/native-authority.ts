@@ -19,6 +19,8 @@ import type { FacadeBearers, NativeCallback, NativeTransport } from "./facade.ts
 import type { ManagementStore, CandidateJournal } from "./management.ts";
 import { accountLimitsTarget, exactCandidate, physicalCandidate } from "./management.ts";
 import { validateResponses } from "./facade-ingress.ts";
+import { readAccountModels, accountModelAdmission } from "./models-port.ts";
+import type { AccountModelsSource } from "./models-port.ts";
 import {
   admission,
   binding,
@@ -60,6 +62,7 @@ export interface Association {
   closeRef?: string;
 }
 export interface AuthorityOptions {
+  readonly accountModels?: AccountModelsSource;
   readonly config: BridgeConfig;
   readonly kernel: DurableKernel & ExecutionRead;
   readonly store: Pick<ManagementStore, "mapping">;
@@ -94,6 +97,7 @@ const key = (ctx: TrustedContext, ref: string, id: string) =>
 export class NativeAuthority {
   readonly configuration: Configuration;
   readonly kernel: DurableKernel & ExecutionRead;
+  readonly #accountModels: AccountModelsSource | undefined;
   readonly #store: Pick<ManagementStore, "mapping">;
   readonly #owners: AuthorityOptions["oauthOwners"];
   readonly #accountLimitsOwners: AuthorityOptions["accountLimitsOwners"];
@@ -138,6 +142,7 @@ export class NativeAuthority {
     this.#store = options.store;
     this.#owners = options.oauthOwners;
     this.#accountLimitsOwners = options.accountLimitsOwners;
+    this.#accountModels = options.accountModels;
     this.#refreshOwners = options.oauthRefreshOwners;
     this.#cleanupOwners = options.oauthCleanupOwners;
     this.#callers = this.configuration.consumers.map((c) => ({
@@ -270,7 +275,26 @@ export class NativeAuthority {
     )
       return denied();
     instant(d.created_at);
-    validateResponses(bytes, [profile.model], profile.providerTokenUpperBound);
+    let models: ReturnType<typeof accountModelAdmission> = { modelIds: [profile.model], models: undefined, enforceCapabilities: false };
+    if (this.#accountModels && providerConnectionDefinition(profile.profile)?.oauth?.family === "codex") {
+      const selector = {
+        ownerRef: mapping.ownerRef,
+        accountRef: fresh.admission.accountRef,
+        profileId: fresh.admission.profileId,
+        expectedAuthorizationEpoch: fresh.admission.authorizationEpoch,
+      };
+      const catalogue = await readAccountModels(this.#accountModels, selector, async () => {
+        const current = await accountLimitsTarget(this.kernel, this.#store, a.context, selector);
+        if (current.nativePhysicalIdentity !== fresh.generation) return denied();
+        return current;
+      });
+      const after = saved(await this.kernel.savedExecution(a.context, fresh.admission.executionRef));
+      if (!sameAdmission(fresh.admission, after.admission) || after.generation !== fresh.generation ||
+        !after.dispatchAllowed || after.state !== "open" || a.signal.aborted ||
+        instant(after.admission.expiresAt) <= now()) return denied();
+      models = accountModelAdmission(catalogue, profile.model);
+    }
+    validateResponses(bytes, models.modelIds, profile.providerTokenUpperBound, models.models, models.enforceCapabilities);
     await this.kernel.currentWorkerLease(a.context, this.configuration.enrollment.worker);
     if (a.signal.aborted) return denied();
     a.descriptor = d;
