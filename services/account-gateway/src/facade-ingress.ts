@@ -114,7 +114,6 @@ export function validateResponses(
   modelPolicies?: readonly {
     readonly modelId: string;
     readonly reasoning: { readonly allowed: readonly string[] } | null;
-    readonly tools?: { readonly allowed: readonly string[] };
   }[],
   enforceModelCapabilities = false,
 ): string {
@@ -156,15 +155,7 @@ export function validateResponses(
     if (effort !== undefined && (typeof effort !== "string" || !policy.reasoning.allowed.includes(effort)))
       throw new KernelError("invalid");
   }
-  if (enforceModelCapabilities && policy?.tools && p.tools !== undefined) {
-    if (!Array.isArray(p.tools) || p.tools.some((tool) => {
-      if (!tool || typeof tool !== "object" || Array.isArray(tool)) return true;
-      const type = (tool as Record<string, unknown>).type;
-      return type === "function" ? !policy.tools!.allowed.includes("function") &&
-        !policy.tools!.allowed.includes("function_and_custom") :
-        type === "custom" ? !policy.tools!.allowed.includes("function_and_custom") : true;
-    })) throw new KernelError("invalid");
-  }
+  // Native transport owns tool admission and custom-to-function normalization.
   // Validated request selection, not an observation of the provider response model.
   return p.model;
 }

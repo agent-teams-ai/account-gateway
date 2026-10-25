@@ -3266,7 +3266,7 @@ test("dynamic Codex selection reaches native transport; unknown, unsupported eff
       { "x-gateway-request-id": randomUUID(), "x-gateway-admission": JSON.stringify(admission) });
     f.modelResult(snapshot);
     for (const patch of [{ model: "unknown" }, { reasoning: { effort: "low" } },
-      { service_tier: "priority" }, { tools: [{ type: "custom", name: "fixture" }] }]) {
+      { service_tier: "priority" }]) {
       assert.equal((await submit(patch)).status, 400);
       assert.equal(f.forwarded.length, 0);
       assert.equal(f.seen.filter((entry) => entry.path === "POST /private/native/v1/transports").length, 0);
@@ -3277,6 +3277,15 @@ test("dynamic Codex selection reaches native transport; unknown, unsupported eff
     assert.equal(f.forwarded.length, 1);
     assert.equal((f.forwarded[0].body as Record<string, unknown>).model, "gpt-unseen-future");
     assert.equal(f.mappings.get(f.scopeKey(f.context, generation))!.descriptor.model, profile.model);
+    // Metadata advertises the upstream function protocol. Preserve qualified
+    // custom input for the existing native custom-to-function codec.
+    const customTools = [{ type: "custom", name: "apply_patch", description: "Apply a patch",
+      format: { type: "grammar", syntax: "lark", definition: "start: /(.|\\n)*/" } }];
+    const custom = await submit({ tools: customTools });
+    assert.equal(custom.status, 200);
+    await custom.text();
+    assert.equal(f.forwarded.length, 2);
+    assert.deepEqual((f.forwarded[1].body as Record<string, unknown>).tools, customTools);
     f.modelResult({ ...snapshot, models: [] });
     assert.equal((await submit({ model: profile.model })).status, 400);
     for (const status of ["unknown", "unsupported"] as const) {
