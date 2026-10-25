@@ -175,6 +175,23 @@ test("source-qualified model capabilities reject configured reasoning for the fo
     );
 });
 
+test("account-disabled reasoning accepts precisely the empty Codex JSON object without changing request bytes", () => {
+  const policy = [{ modelId: "fixture-model", reasoning: null }];
+  const raw = bytes('{"model":"fixture-model","stream":true,"store":false,"reasoning":{}}');
+  const before = Buffer.from(raw);
+  assert.equal(validateResponses(raw, ["fixture-model"], 100, policy, true), "fixture-model");
+  assert.deepEqual(raw, before);
+  for (const reasoning of [undefined, null])
+    assert.equal(validateResponses(bytes(JSON.stringify({ ...valid, reasoning })), ["fixture-model"], 100, policy, true), "fixture-model");
+  for (const reasoning of [
+    { effort: "high" }, { summary: "none" }, { context: "all_turns" }, { unknown: null },
+    JSON.parse('{"__proto__":{}}'), [], [{}], false, 0, "",
+  ])
+    invalid(() => validateResponses(bytes(JSON.stringify({ ...valid, reasoning })), ["fixture-model"], 100, policy, true));
+  // Existing static provider admission does not acquire the Codex-only exception.
+  invalid(() => validateResponses(raw, ["fixture-model"], 100, policy));
+});
+
 test("Responses policy rejects critical aliases and unsafe provider options before transport", () => {
   for (const patch of [
     { store: true },
@@ -3286,6 +3303,18 @@ test("dynamic Codex selection reaches native transport; unknown, unsupported eff
     await custom.text();
     assert.equal(f.forwarded.length, 2);
     assert.deepEqual((f.forwarded[1].body as Record<string, unknown>).tools, customTools);
+    f.modelResult({ ...snapshot, models: snapshot.models.map((model) => ({ ...model, reasoning: null })) });
+    for (const reasoning of [{ effort: "high" }, { summary: "none" }, { context: "all_turns" }, { unknown: null }, [], false]) {
+      assert.equal((await submit({ reasoning })).status, 400);
+      assert.equal(f.forwarded.length, 2);
+    }
+    // Both facade admission and saved-lease NativeAuthority.prepare see the same
+    // disabled account policy before the untouched request reaches native HTTP.
+    const disabled = await submit({ reasoning: {} });
+    assert.equal(disabled.status, 200);
+    await disabled.text();
+    assert.equal(f.forwarded.length, 3);
+    assert.deepEqual((f.forwarded[2].body as Record<string, unknown>).reasoning, {});
     f.modelResult({ ...snapshot, models: [] });
     assert.equal((await submit({ model: profile.model })).status, 400);
     for (const status of ["unknown", "unsupported"] as const) {
