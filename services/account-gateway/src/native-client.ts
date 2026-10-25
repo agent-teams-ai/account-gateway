@@ -1,6 +1,8 @@
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import type {
+  AccountModelsRequest,
+  AccountModels,
   AccountLimitsRequest,
   AccountLimitsCapabilities,
   AccountLimits,
@@ -12,6 +14,8 @@ import type { RetainedCustodyVerifier } from "./management.ts";
 import { KernelError, identifier, uuid } from "./domain.ts";
 import { secretSubmission } from "@agent-teams/account-gateway/http";
 import {
+  accountModelsRequest,
+  accountModels,
   accountLimitsRequest,
   accountLimitsCapabilities,
   accountLimits,
@@ -81,7 +85,7 @@ function object(
     throw new NativeFailure("invalid_readback");
   return value as Record<string, unknown>;
 }
-function decode(bytes: Buffer): unknown {
+function decode(bytes: Buffer, maximumDepth = 4): unknown {
   const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   // JSON.parse chooses the last duplicate. Reject decoded duplicate member names
   // (including escaped aliases) before accepting any physical identity or ACK.
@@ -100,9 +104,9 @@ function decode(bytes: Buffer): unknown {
   };
   const value = (depth: number): void => {
     space();
-    if (depth > 4) throw new NativeFailure("invalid_readback");
+    if (depth > maximumDepth) throw new NativeFailure("invalid_readback");
     if (text[position] === "{") {
-      if (depth > 4) throw new NativeFailure("invalid_readback");
+      if (depth > maximumDepth) throw new NativeFailure("invalid_readback");
       position++;
       space();
       const keys = new Set<string>();
@@ -1044,6 +1048,22 @@ export class NativeAccountLimitsV2Client extends NativeControlHTTP {
           ),
         ),
       );
+    } catch {
+      throw new NativeFailure("invalid_readback");
+    }
+  }
+}
+
+/** Bounded native catalogue read; no provider credentials cross this boundary. */
+export class NativeAccountModelsClient extends NativeControlHTTP {
+  constructor(options: NativeManagementOptions) {
+    super({ ...options, deadlineMs: 5000, bodyBytes: 262144 });
+  }
+  async readAccountModels(input: AccountModelsRequest): Promise<AccountModels> {
+    try {
+      return accountModels.parse(decode(await this.call(
+        "POST", "/private/native/v1/account-models/read", accountModelsRequest.parse(input),
+      ), 6));
     } catch {
       throw new NativeFailure("invalid_readback");
     }

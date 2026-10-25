@@ -42,6 +42,8 @@ import type { AccountManagement, ManagementStore, PhysicalCandidate } from "./ma
 import type { AccountLifecycleReadback } from "./management.ts";
 import { strictJSON, validateResponses } from "./facade-ingress.ts";
 import { readCachedAccountLimits } from "./limits-port.ts";
+import { readAccountModels, accountModelAdmission } from "./models-port.ts";
+import type { AccountModelsSource } from "./models-port.ts";
 
 // Re-export the single wire authority to private composition/configuration.
 export const lifecycleContract = c.LIFECYCLE_CAPABILITY_CONTRACT;
@@ -406,6 +408,7 @@ export interface NativeTransport {
   ): Promise<void>;
 }
 export interface FacadeOptions {
+  readonly accountModels?: AccountModelsSource;
   readonly accountLimits?: {
     getAccountLimitsCapabilities(): Promise<c.AccountLimitsCapabilities>;
     readAccountLimits(input: c.AccountLimitsRequest): Promise<c.AccountLimits>;
@@ -1138,6 +1141,25 @@ export function createFacade(options: FacadeOptions): Server {
             );
             return;
           }
+          if (path === "/v1/account-models/read" && method === "POST") {
+            const input = parse(c.accountModelsRequest,
+              strictJSON(await body(req, Math.min(ingressBytes, 1024)), true));
+            if ((grant.role !== "management" && grant.role !== "consumer-control") ||
+              !permitsProfile(grant, input.profileId) || !permitsOwner(grant, input.ownerRef))
+              throw new KernelError("denied");
+            const selected = await kernel.account(context, input.accountRef);
+            if (selected.ownerRef !== input.ownerRef || selected.profile !== input.profileId ||
+              selected.epoch !== input.expectedAuthorizationEpoch ||
+              !["active", "suspended"].includes(selected.state)) throw new KernelError("denied");
+            requireCurrent(grant);
+            const result = providerConnectionDefinition(input.profileId)?.oauth?.family === "codex"
+              ? await readAccountModels(options.accountModels, input,
+                  () => accountLimitsTarget(kernel, store, context, input))
+              : { status: "unsupported" as const };
+            requireCurrent(grant);
+            send(res, c.accountModels, result, 200, true);
+            return;
+          }
           const limitsRead = async (contract: "account-limits/v1" | "account-limits/v2") => {
             const input = parse(
               c.accountLimitsRequest,
@@ -1518,11 +1540,34 @@ export function createFacade(options: FacadeOptions): Server {
               admission,
               body: raw,
             });
+            let admittedModels: { modelIds: readonly string[]; models?: Parameters<typeof validateResponses>[3]; enforceCapabilities: boolean } = {
+              modelIds: profile.dto.modelIds,
+              models: providerConnectionDefinition(saved.admission.profileId)?.models,
+              enforceCapabilities: false,
+            };
+            if (options.accountModels && providerConnectionDefinition(saved.admission.profileId)?.oauth?.family === "codex") {
+              requireCurrent(grant);
+              const selected = await kernel.account(context, saved.admission.accountRef);
+              const selector: c.AccountModelsRequest = {
+                ownerRef: selected.ownerRef,
+                accountRef: saved.admission.accountRef,
+                profileId: saved.admission.profileId,
+                expectedAuthorizationEpoch: saved.admission.authorizationEpoch,
+              };
+              const catalogue = await readAccountModels(options.accountModels, selector, async () => {
+                const current = await accountLimitsTarget(kernel, store, context, selector);
+                if (current.nativePhysicalIdentity !== saved.generation) throw new KernelError("denied");
+                return current;
+              });
+              requireCurrent(grant);
+              admittedModels = accountModelAdmission(catalogue, profile.dto.modelIds[0]);
+            }
             const requestedModel = validateResponses(
               raw,
-              profile.dto.modelIds,
+              admittedModels.modelIds,
               profile.maxOutputTokens,
-              providerConnectionDefinition(saved.admission.profileId)?.models,
+              admittedModels.models,
+              admittedModels.enforceCapabilities,
             );
             requireCurrent(grant);
             if (!transport || !enrollment) throw new KernelError("unavailable");

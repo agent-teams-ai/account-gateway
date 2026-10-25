@@ -111,7 +111,12 @@ export function validateResponses(
   bytes: Uint8Array,
   models: readonly string[],
   tokenMaximum: number,
-  modelPolicies?: readonly { readonly modelId: string; readonly reasoning: object | null }[],
+  modelPolicies?: readonly {
+    readonly modelId: string;
+    readonly reasoning: { readonly allowed: readonly string[] } | null;
+    readonly tools?: { readonly allowed: readonly string[] };
+  }[],
+  enforceModelCapabilities = false,
 ): string {
   const input = strictJSON(bytes);
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new KernelError("invalid");
@@ -145,6 +150,21 @@ export function validateResponses(
   const policy = modelPolicies?.find((model) => model.modelId === p.model);
   if (policy?.reasoning === null && p.reasoning !== undefined && p.reasoning !== null)
     throw new KernelError("invalid");
+  if (enforceModelCapabilities && policy?.reasoning && p.reasoning !== undefined && p.reasoning !== null) {
+    if (typeof p.reasoning !== "object" || Array.isArray(p.reasoning)) throw new KernelError("invalid");
+    const effort = (p.reasoning as Record<string, unknown>).effort;
+    if (effort !== undefined && (typeof effort !== "string" || !policy.reasoning.allowed.includes(effort)))
+      throw new KernelError("invalid");
+  }
+  if (enforceModelCapabilities && policy?.tools && p.tools !== undefined) {
+    if (!Array.isArray(p.tools) || p.tools.some((tool) => {
+      if (!tool || typeof tool !== "object" || Array.isArray(tool)) return true;
+      const type = (tool as Record<string, unknown>).type;
+      return type === "function" ? !policy.tools!.allowed.includes("function") &&
+        !policy.tools!.allowed.includes("function_and_custom") :
+        type === "custom" ? !policy.tools!.allowed.includes("function_and_custom") : true;
+    })) throw new KernelError("invalid");
+  }
   // Validated request selection, not an observation of the provider response model.
   return p.model;
 }

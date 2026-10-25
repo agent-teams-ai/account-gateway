@@ -496,6 +496,8 @@ export function createManagementClient(settings: ManagementConfig) {
   const { client, json } = accountClient(settings, "management");
   return Object.freeze({
     ...client,
+    readAccountModels: (input: c.AccountModelsRequest, options?: CallOptions): Promise<c.AccountModels> =>
+      json("/v1/account-models/read", c.accountModels, "POST", valid(c.accountModelsRequest, input), options),
     prepare: (input: c.Prepare, options?: CallOptions) => {
       const parsed = valid(c.prepare, input);
       return json("/v1/executions", c.preparationOperation, "POST", parsed, options, {

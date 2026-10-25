@@ -49,7 +49,7 @@ export function facadeBoundedReadRoute(
   return (
     facadeUsageReadRoute(method, path) ||
     (method === "POST" &&
-      (path === "/v1/account-limits/read" || path === "/v2/account-limits/read"))
+      (path === "/v1/account-limits/read" || path === "/v2/account-limits/read" || path === "/v1/account-models/read"))
   );
 }
 export function facadeControlRoute(method: string | undefined, path: string | undefined): boolean {
@@ -60,7 +60,7 @@ export function facadeControlRoute(method: string | undefined, path: string | un
         path === "/v2/capabilities/account-limits" ||
         path === "/v1/provider-connection-capabilities")) ||
     (method === "POST" &&
-      (path === "/v1/account-limits/read" || path === "/v2/account-limits/read"))
+      (path === "/v1/account-limits/read" || path === "/v2/account-limits/read" || path === "/v1/account-models/read"))
   )
     return true;
   if (!path || /[?#%\r\n]/.test(path)) return false;
