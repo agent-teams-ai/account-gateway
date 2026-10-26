@@ -595,6 +595,7 @@ async function run(): Promise<void> {
               stream: true,
               store: false,
               max_output_tokens: 100,
+              ...(provider === "minimax" ? { service_tier: "default" } : {}),
               input,
               ...(tools ? { tools } : {}),
             }),
@@ -618,8 +619,26 @@ async function run(): Promise<void> {
       ]);
       assert.match(first, /function_call/);
       assert.match(first, /joined-call-1/);
+      const completed = first.split(/\r?\n/).filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim()).filter((data) => data !== "" && data !== "[DONE]")
+        .map((data) => JSON.parse(data) as { type?: string; response?: { output?: Record<string, unknown>[] } })
+        .find((event) => event.type === "response.completed");
+      assert.ok(completed?.response?.output);
+      const output = completed.response.output;
+      const calls = output.filter((item) => item.type === "function_call");
+      assert.equal(calls.length, 1);
+      const call = calls[0];
+      assert.equal(call.name, "joined_lookup");
+      assert.equal(call.arguments, "{}");
+      assert.ok(call && typeof call.call_id === "string");
+      if (provider === "minimax") {
+        const reasoning = output.find((item) => item.type === "reasoning");
+        assert.deepEqual(reasoning?.content, [{ type: "reasoning_text", text: "fixture thought" }]);
+      }
       const second = await request([
-        { type: "function_call_output", call_id: "joined-call-1", output: "fixture-tool-result" },
+        { role: "user", content: "Controlled disposable fixture" },
+        ...output,
+        { type: "function_call_output", call_id: call.call_id, output: "fixture-tool-result" },
       ]);
       assert.match(second, /findings/);
       assert.match(second, /revalidations/);
@@ -847,6 +866,7 @@ async function run(): Promise<void> {
     liveProviderAccount: false,
     providers: accounts.map((account) => account.provider),
     controlledTextAndFunctionToolRoundTrip: true,
+    minimaxReasoningContentRoundTrip: true,
     reconnectRetainsAccount: true,
     canonicalErasure: true,
     grokRefresh: true,

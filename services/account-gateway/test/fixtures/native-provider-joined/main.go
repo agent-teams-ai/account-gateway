@@ -61,16 +61,17 @@ type counters struct {
 	pendingTools                                                                                            *toolContinuation
 }
 
-type toolContinuation struct{ custom bool }
+type toolContinuation struct{ custom, reasoning bool }
 
 // A provider may finish a tool turn only after consuming exactly the calls it
 // actually issued. Tool declarations on the continuation cannot change this.
 // The provider handler holds toolMu across validation and response emission.
 func (c *counters) consumeToolContinuation(raw json.RawMessage) (bool, error) {
 	var input []struct {
-		Type   string `json:"type"`
-		CallID string `json:"call_id"`
-		Output string `json:"output"`
+		Type    string          `json:"type"`
+		CallID  string          `json:"call_id"`
+		Output  string          `json:"output"`
+		Content json.RawMessage `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &input); err != nil {
 		var initialText string
@@ -80,7 +81,19 @@ func (c *counters) consumeToolContinuation(raw json.RawMessage) (bool, error) {
 		return false, nil
 	}
 	outputs := map[string]string{}
+	reasoning := false
+	functionCall := false
 	for _, item := range input {
+		if item.Type == "function_call" && item.CallID == "joined-call-1" {
+			functionCall = true
+		}
+		if item.Type == "reasoning" {
+			var content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			reasoning = json.Unmarshal(item.Content, &content) == nil && len(content) == 1 && content[0].Type == "reasoning_text" && content[0].Text == "fixture thought"
+		}
 		// Custom calls are lowered to function calls on this provider wire.
 		if item.Type == "custom_tool_call_output" {
 			return false, deny
@@ -101,6 +114,9 @@ func (c *counters) consumeToolContinuation(raw json.RawMessage) (bool, error) {
 			return false, deny
 		}
 		return false, nil
+	}
+	if !functionCall || c.pendingTools.reasoning && !reasoning {
+		return false, deny
 	}
 	custom := c.pendingTools.custom
 	if outputs["joined-call-1"] == "" || custom && outputs["joined-call-custom"] == "" || !custom && outputs["joined-call-custom"] != "" {
@@ -359,6 +375,10 @@ func run() error {
 			reject()
 			return
 		}
+		if name == "minimax" && body["service_tier"] != nil {
+			reject()
+			return
+		}
 		if name == "grok" && (r.Header.Get("x-grok-client-version") != "" || r.Header.Get("x-grok-client-identifier") != xai.ProtectedClientIdentifier || r.Header.Get("x-grok-client-mode") != "" || r.Header.Get("User-Agent") != xai.ProtectedUserAgent) {
 			reject()
 			return
@@ -493,13 +513,19 @@ func run() error {
 				emit(map[string]any{"type": "response.output_item.done", "output_index": index, "item": item})
 				return item
 			}
-			c.pendingTools = &toolContinuation{custom: customIndex >= 0}
-			output = []any{emitCall(0, "joined-item-1", "joined-call-1", tool.Name, arguments)}
+			c.pendingTools = &toolContinuation{custom: customIndex >= 0, reasoning: name == "minimax"}
+			if name == "minimax" {
+				item := map[string]any{"type": "reasoning", "id": "joined-reasoning-1", "summary": []any{}, "content": []any{map[string]any{"type": "reasoning_text", "text": "fixture thought"}}}
+				emit(map[string]any{"type": "response.output_item.added", "output_index": 0, "item": item})
+				emit(map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item})
+				output = append(output, item)
+			}
+			output = append(output, emitCall(len(output), "joined-item-1", "joined-call-1", tool.Name, arguments))
 			c.functionCalls.Add(1)
 			if customIndex >= 0 {
 				custom := tools[customIndex]
 				args, _ := json.Marshal(map[string]string{"input": "*** Begin Patch\n*** End Patch\n"})
-				output = append(output, emitCall(1, "joined-item-custom", "joined-call-custom", custom.Name, string(args)))
+				output = append(output, emitCall(len(output), "joined-item-custom", "joined-call-custom", custom.Name, string(args)))
 				c.customCalls.Add(1)
 				shape["customLoweredFunction"] = map[string]any{"name": custom.Name, "type": custom.Type, "inputProperty": "input"}
 			}
