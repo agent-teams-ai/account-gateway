@@ -21,6 +21,11 @@ export const publicTests = ['TestPublicIngressStreamsReplaysEvictsAndPreservesPr
   'TestClaudePrivateHTTPRejectsLossyPayloadBeforeAdmission'] as const;
 export const bootstrapTests = ['TestPublicListenerSaturatedRequestsReturnSafeAdmissionRefusal', 'TestPublicInferenceConfigurationIsExplicitAndBounded',
   'TestPublicHTTPServerClosesEachConnection'] as const;
+export const upstreamTests = ['TestGatewayNativeActualResponseHeaderCapAndOrdinaryCompatibility',
+  'TestGatewayNativeStaleHTTP1ConnectionRetainsEnteredUnknownWithoutReplay'] as const;
+export const diagnosticTests = ['TestGatewayNativeResponsesFailureDiagnostics',
+  'TestGatewayNativeTransportFailureReasonClassification',
+  'TestGatewayNativeTransportObservationComposesExistingTrace'] as const;
 export const reservationTests = [
   'TestNEWTESTConcurrentReservationsOneHTTPCallback', 'TestNEWTESTSaturationBeforeHTTPCallbackAndChangedIntent',
   'TestNEWTESTHeldAndLostAdmitACKNeverRearms', 'TestNEWTESTCallbackFullBindingMutationsDeny',

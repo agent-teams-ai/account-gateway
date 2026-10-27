@@ -62,3 +62,40 @@ test('authorization and validation failures cannot masquerade as workload capaci
   for (const sqlCode of ['fenced', 'deadline', 'limit']) assert.ok(reconcile({ ...attempt,
     preclaimRefused: false, effect: 'not_dispatched', sqlCode }, []).includes('unexpected-durable-refusal'));
 });
+
+test('native attempt observations bind entered, completion and effect to the exact original proof without exporting proof material', () => {
+  const p: Proof = { executionRef: 'e', requestRef: 'r', worker: 'w', token: 'private-proof-token',
+    native: { originRef: 'o', engineIncarnation: 'i', requestNonce: 'n', generation: 'g' } };
+  const r = { consumerId: 'c', executionRef: 'e', requestRef: 'r', proof: p, native: p.native,
+    phase: 'closed', effect: 'effect_unknown', acknowledged: true, privateBody: 'private-provider-output',
+    lifetime: { entered: true, completed: false, contextDone: true, forwardingReturned: true,
+      bodyKnown: true, bodyClosed: true, closeFailed: false } };
+  const projected = closureProjection(r, 'c', p);
+  assert.deepEqual(projected, { exactProof: true, nativeEntered: true, nativeCompleted: false,
+    nativeEffect: 'effect_unknown', nativeClosed: true, nativeAcknowledged: true });
+  assert.equal(JSON.stringify(projected).includes('private-'), false);
+  assert.equal(Object.hasOwn(projected, 'proof'), false);
+  assert.equal(Object.hasOwn(projected, 'native'), false);
+  const completed = closureProjection({ ...r, effect: 'completed', lifetime: { ...r.lifetime, completed: true } }, 'c', p);
+  assert.equal(completed.nativeCompleted, true); assert.equal(completed.nativeEffect, 'completed');
+  const noEntry = closureProjection({ ...r, lifetime: { ...r.lifetime, entered: false } }, 'c', p);
+  assert.equal(noEntry.nativeEntered, false); assert.equal(noEntry.nativeCompleted, false);
+  for (const invalid of [
+    { ...r, proof: { ...p, token: 'different' } },
+    { ...r, effect: 'arbitrary-provider-error' },
+    { ...r, lifetime: { ...r.lifetime, entered: 'true' } },
+    { ...r, lifetime: { ...r.lifetime, completed: true, entered: false } },
+    { ...r, effect: 'completed' },
+  ]) {
+    const rejected = closureProjection(invalid, 'c', p);
+    for (const key of ['nativeEntered', 'nativeCompleted', 'nativeEffect']) assert.equal(Object.hasOwn(rejected, key), false);
+  }
+});
+test('zero provider entries and authenticated native closure never excuse an unintentional unknown effect', () => {
+  const a: Attempt = { requestId: 'r', executionRef: 'e', accountRef: 'a', scenario: 'scale-arrivals', mode: 'sdk',
+    offeredAt: 0, startedAt: 1, bytes: 0, effect: 'effect_unknown', response: 'error', occupied: false,
+    nativeEntered: true, nativeCompleted: false, nativeEffect: 'effect_unknown',
+    exactProof: true, nativeClosed: true, nativeAcknowledged: true, providerEntries: 0 };
+  assert.ok(reconcile(a, []).includes('unexpected-effect-or-client-stream-failure'));
+  assert.equal(arrivalObservation([a], 1000, 0, 10).safeRefusals, 0);
+});

@@ -528,3 +528,83 @@ test("native private Codex request shape reaches operator sink with scalar facts
   f.feed(Buffer.from(valid + "\n"));
   assert.deepEqual(f.records, [record + "\n", valid + "\n"]);
 });
+
+
+// The next load run needs transport state without exporting error strings,
+// request URLs, credentials, provider bodies, or network address details.
+test("native diagnostics retains complete closed transport facts through arbitrary pipe chunks", () => {
+  const f = sink();
+  const legacy = { event: "gateway_native_response_failure", phase: "transport" };
+  const expected = [JSON.stringify(legacy) + "\n"];
+  f.feed(Buffer.from(expected[0]));
+  const reasons = [
+    "context_canceled", "context_deadline", "eof", "unexpected_eof", "connection_reset",
+    "connection_closed", "broken_pipe", "connection_refused", "transport_timeout", "other",
+  ];
+  for (const reason of reasons) {
+    for (const connection of ["not_obtained", "new", "reused"]) {
+      for (const entered of [undefined, false, true]) {
+        const row = {
+          ...legacy,
+          transport_error_reason: reason,
+          upstream_connection: connection,
+          upstream_request_written: connection !== "not_obtained",
+          upstream_response_started: connection === "reused",
+          ...(entered === undefined ? {} : { native_entered: entered }),
+        };
+        const reordered = Object.fromEntries(Object.entries(row).reverse());
+        for (const byte of Buffer.from(JSON.stringify(reordered) + "\n")) f.feed(Buffer.from([byte]));
+        expected.push(JSON.stringify(row) + "\n");
+      }
+    }
+  }
+  assert.deepEqual(f.records, expected);
+});
+
+test("native diagnostics drops secret, malformed, partial or misplaced transport facts and resumes", () => {
+  const f = sink();
+  const row = {
+    event: "gateway_native_response_failure",
+    phase: "transport",
+    transport_error_reason: "connection_reset",
+    upstream_connection: "reused",
+    upstream_request_written: true,
+    upstream_response_started: false,
+    native_entered: true,
+  };
+  const record = JSON.stringify(row);
+  const unsafe: string[] = [];
+  for (const key of ["transport_error_reason", "upstream_connection"]) {
+    for (const value of ["SECRET_SENTINEL", "unknown", null, 1, true, {}, []])
+      unsafe.push(JSON.stringify({ ...row, [key]: value }));
+  }
+  for (const key of ["upstream_request_written", "upstream_response_started", "native_entered"]) {
+    for (const value of ["SECRET_SENTINEL", "true", null, 0, 1, {}, []])
+      unsafe.push(JSON.stringify({ ...row, [key]: value }));
+  }
+  for (const key of [
+    "transport_error_reason", "upstream_connection", "upstream_request_written", "upstream_response_started",
+  ]) {
+    const partial: Record<string, unknown> = { ...row };
+    delete partial[key];
+    unsafe.push(JSON.stringify(partial));
+  }
+  unsafe.push(JSON.stringify({ event: row.event, phase: row.phase, native_entered: true }));
+  for (const phase of ["http_status", "deadline", "sse_read", "invalid_response", "body_read"])
+    unsafe.push(JSON.stringify({ ...row, phase }));
+  for (const event of ["gateway_native_oauth_connect_failure", "gateway_native_codex_request_shape"])
+    unsafe.push(JSON.stringify({ ...row, event }));
+  for (const key of [
+    "error", "message", "url", "authorization", "headers", "body", "prompt", "response",
+    "remote_address", "tls_error", "__proto__", "Transport_Error_Reason",
+  ]) unsafe.push(JSON.stringify({ ...row, [key]: "SECRET_SENTINEL" }));
+  unsafe.push(record.replace('"connection_reset"', '"connection_reset_SECRET_SENTINEL"'));
+  unsafe.push(record.replace('"reused"', '"reused_SECRET_SENTINEL"'));
+  unsafe.push(record.replace("}", ',"transport_error_reason":"eof"}'));
+  unsafe.push(record.replace("}", ',"\\u0074ransport_error_reason":"eof"}'));
+  unsafe.push(record.replace("}", ',"upstream_request_written":false}'));
+  for (const line of unsafe) f.feed(Buffer.from(line + "\n"));
+  f.feed(Buffer.from(record + "\n" + valid + "\n"));
+  assert.deepEqual(f.records, [record + "\n", valid + "\n"]);
+  assert.equal(f.records.join("").includes("SECRET_SENTINEL"), false);
+});

@@ -14,6 +14,7 @@ import { sha256 } from './fixture.ts';
 import type { Fixture } from './fixture.ts';
 import { nativeSourceCommit, migrationAdapterSource } from './build-native-fixture.ts';
 import { artifactNames, openArtifactExport } from './artifact-export.ts';
+import { nativeResponseDiagnostics } from '../../src/native-response-diagnostics.ts';
 
 const captured = new Set<ChildProcess>();
 type Stage = 'arguments' | 'network' | 'build_receipt' | 'postgres_version' | 'source' | 'layout' |
@@ -35,6 +36,16 @@ const childSignals = new Set(['SIGTERM','SIGKILL','SIGABRT','SIGSEGV','SIGBUS','
 export function childFailureFacts(privateOutput: string, status: { exitCode: number | null; signal?: unknown;
   spawnCode?: unknown; timedOut: boolean; outputOverflow: boolean }) {
   const text = privateOutput.slice(0, 1_048_576);
+  // Reuse the production fixed-field sanitizer before retaining any diagnostic.
+  // Node's TAP reporter prefixes child stderr lines with '# '; raw text stays
+  // private and is never attached to the immutable qualification artifact.
+  const nativeResponseFailures: Record<string, unknown>[] = [];
+  const collectNative = nativeResponseDiagnostics(record => {
+    if (nativeResponseFailures.length >= 8) return;
+    const value = JSON.parse(record) as Record<string, unknown>;
+    if (value.event === 'gateway_native_response_failure') nativeResponseFailures.push(value);
+  });
+  collectNative(Buffer.from(text.replace(/^[\t ]*# ?/gm, '')));
   const allowed = (pattern: RegExp, codes: ReadonlySet<string>) => [...new Set(Array.from(text.matchAll(pattern),
     match => match[1]).filter(code => codes.has(code)))].slice(0, 8);
   return { exitCode: Number.isInteger(status.exitCode) && status.exitCode! >= 0 && status.exitCode! <= 255 ? status.exitCode : null,
@@ -43,7 +54,7 @@ export function childFailureFacts(privateOutput: string, status: { exitCode: num
     loadCodes: allowed(/\bload:([a-z0-9-]+)\b/g, earlyLoadCodes),
     loaderCodes: allowed(/\b(ERR_[A-Z0-9_]+)\b/g, loaderCodes),
     systemCodes: allowed(/\b([A-Z][A-Z0-9_]+)\b/g, systemCodes),
-    timedOut: status.timedOut === true, outputOverflow: status.outputOverflow === true };
+    timedOut: status.timedOut === true, outputOverflow: status.outputOverflow === true, nativeResponseFailures };
 }
 class CommandFailure extends Error {
   readonly facts: ReturnType<typeof childFailureFacts>;

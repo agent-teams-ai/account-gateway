@@ -161,7 +161,8 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/test/load]
     entrypoints: [services/account-gateway/test/load/stand.ts, services/account-gateway/test/load/provider.ts, services/account-gateway/test/load/model.test.ts, services/account-gateway/test/load/artifact-export.test.ts, services/account-gateway/test/load/provision-guards.test.ts, services/account-gateway/test/load/provision.ts, services/account-gateway/test/load/build-native-fixture.ts]
-    allow: {boundaries: [foreground-service-entry, contracts, http], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs', 'node:path', 'node:url', 'node:child_process', 'node:readline', 'node:http', 'node:https', 'node:net', 'node:timers/promises', 'node:perf_hooks'], runtimeReferences: []}
+    # Reuse the production fixed-field diagnostic sanitizer for failed-run evidence.
+    allow: {boundaries: [foreground-service-entry, native-transport-http, contracts, http], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs', 'node:path', 'node:url', 'node:child_process', 'node:readline', 'node:http', 'node:https', 'node:net', 'node:timers/promises', 'node:perf_hooks'], runtimeReferences: []}
 
   # Disposable qualification orchestration only; no production policy imports.
   - id: native-client-fixture

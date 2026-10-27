@@ -23,7 +23,7 @@ steps. It does not establish Codex/Claude OAuth or thousand-stream capacity.
 Implementation is staged in [account-gateway PR 71](https://github.com/agent-teams-ai/account-gateway/pull/71)
 and [sub2api PR 64](https://github.com/agent-teams-ai/sub2api/pull/64). PR 71 depends
 on the preceding cloud-load/control-progress branch, PR 69. The expanded fixture
-pins native `63a7eb1a0e1fdd5004592df59913b0a06d8646e0`; each CI receipt records the
+pins native `fe0862b6505c3de54e17ff8eaac1269b665229af`; each CI receipt records the
 exact gateway/native commits, binary hashes, dependency manifests and runtimes.
 
 ## Contract
@@ -137,6 +137,44 @@ cause, so that diagnosis remains an inference. The repair makes the public
 server's no-reuse policy explicit and adds a production-constructor regression.
 It neither retries inference nor reclassifies a transport error as safe overload.
 Fresh source-pinned qualification must cover the integrated code and this repair.
+
+### Integrated receipts: gateway be5c65e / native 63a7eb1
+
+[Client qualification 40565984202](https://github.com/agent-teams-ai/account-gateway/actions/runs/40565984202)
+passed both Node lanes on gateway head `be5c65e203cde4093a5e7369b3fbbfddf22255f8`
+and tested merge `7549caa3b756f86d3fc0a505c24c08aed8413d5e`. Both real Codex and
+Claude Code completed through the TypeScript authority, Go engine and PostgreSQL.
+Codex selected `gpt-5.4` from the authenticated catalog; provisional and final
+usage retained that exact requested model. Each lane passed all 22 public,
+14 reservation and three bootstrap tests, both PostgreSQL regressions, and both
+standalone and joined actual-client cases without skips.
+
+[Load qualification 40565984190](https://github.com/agent-teams-ai/account-gateway/actions/runs/40565984190)
+passed both baseline lanes, 1,856 completed streams across the 64/256/512/1,024
+ladder, 3,000 completed offers over one minute, and all 105 large-context offers.
+The burst profile failed at the 500-offers-per-second step: one attempt became
+an unintentional unknown effect after 281 milliseconds, with zero provider
+ledger entries. Its execution was fenced, and 31 later offers on that execution
+were denied. The profile stopped before the 1,000-offer step. All entered
+requests had exact acknowledged closure and final open/occupied/unresolved
+counts were zero; those cleanup results do not make the failed profile pass.
+
+The original receipt omitted native entered/completed observations and discarded
+sanitized transport diagnostics. Zero provider ledger entries therefore did not
+prove native non-entry or identify a socket-level cause. The current fixture
+retains entered/completed/effect only when bound to the original full native
+proof and retains at most eight strictly reconstructed response-failure records
+in failed operator evidence. Diagnostics contain fixed error categories and
+connection/write/response flags, without error text, addresses, credentials or
+provider bodies. Trace flags describe observations available at failure time;
+a false write flag is not proof that no bytes were sent.
+
+The required upstream race gate exercises real TLS response bounds and a stale
+HTTP/1 connection closed at reuse, requiring one original provider entry and no
+replay after ambiguity. The diagnostic race gate checks fixed classification,
+trace composition and privacy. This demonstrates a relevant transport failure
+mechanism; it does not retroactively establish the cause of the earlier burst
+failure. The source-pinned current CI receipts remain the qualification authority.
 
 ### Historical pre-repair receipts: gateway f9b1a57 / native 6545944
 

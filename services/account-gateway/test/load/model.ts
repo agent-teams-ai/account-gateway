@@ -17,6 +17,7 @@ export interface Attempt {
   preclaimRefused?: boolean; safeCode?: string;
   intentionalCancel?: 'raw-disconnect' | 'sdk-abort' | 'sdk-close'; validatedStream?: boolean;
   nativeClosed?: boolean; nativeAcknowledged?: boolean; exactProof?: boolean; providerEntries?: number;
+  nativeEntered?: boolean; nativeCompleted?: boolean; nativeEffect?: 'effect_unknown' | 'completed';
 }
 // Offer targets and actual SDK-call start spacing are separate measurements.
 // Queueing before SDK entry belongs in launch lag; refusal counts require
@@ -90,7 +91,13 @@ export function closureProjection(value: unknown, consumerId: string, p: Proof) 
     ['executionRef','requestRef','worker','token'].every(k => proof[k as keyof Proof] === p[k as keyof Proof]) &&
     !!native && !!proof.native && Object.keys(p.native).every(k => native[k as keyof Proof['native']] === p.native[k as keyof Proof['native']] &&
       proof.native[k as keyof Proof['native']] === p.native[k as keyof Proof['native']]);
-  return { exactProof, nativeClosed: !!l && r.phase === 'closed' && l.contextDone === true &&
+  // These are observations of the same original native proof, not a provider
+  // ledger substitute. Legacy or malformed receipts add no inferred facts.
+  const nativeFacts = exactProof && l && typeof l.entered === 'boolean' && typeof l.completed === 'boolean' &&
+    (r.effect === 'effect_unknown' || r.effect === 'completed') && (!l.completed || l.entered) &&
+    (r.effect === 'completed') === l.completed
+    ? { nativeEntered: l.entered, nativeCompleted: l.completed, nativeEffect: r.effect as 'effect_unknown' | 'completed' } : {};
+  return { exactProof, ...nativeFacts, nativeClosed: !!l && r.phase === 'closed' && l.contextDone === true &&
     l.forwardingReturned === true && l.bodyKnown === true && l.bodyClosed === true && l.closeFailed === false,
   nativeAcknowledged: r?.acknowledged === true };
 }

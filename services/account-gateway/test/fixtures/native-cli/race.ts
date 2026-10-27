@@ -3,7 +3,7 @@
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { bootstrapTests, goTestEvidence, publicTests, reservationTests } from './evidence.ts';
+import { bootstrapTests, diagnosticTests, goTestEvidence, publicTests, reservationTests, upstreamTests } from './evidence.ts';
 
 const [source, artifacts] = process.argv.slice(2);
 if (!source || !artifacts || !isAbsolute(source) || !isAbsolute(artifacts) || process.argv.length !== 4) {
@@ -14,6 +14,8 @@ if (!source || !artifacts || !isAbsolute(source) || !isAbsolute(artifacts) || pr
     { file: 'public-race.json', pkg: './internal/gatewaytransport', pattern: '^(TestPublic|TestStandardResponses|TestBoundReservation|TestClaudePrivate)', names: publicTests },
     { file: 'reservation-race.json', pkg: './internal/gatewaytransport', pattern: '^(TestNEWTEST|TestGatewayNativeUsageReceipt$|TestGatewayNativeOwnerHTTPClosureOnActualCompletedTransport$)', names: reservationTests },
     { file: 'bootstrap-race.json', pkg: './internal/gatewaybootstrap', pattern: '^TestPublic', names: bootstrapTests },
+    { file: 'upstream-race.json', pkg: './internal/repository', pattern: '^(TestGatewayNativeActualResponseHeaderCapAndOrdinaryCompatibility|TestGatewayNativeStaleHTTP1ConnectionRetainsEnteredUnknownWithoutReplay)$', names: upstreamTests },
+    { file: 'diagnostics-race.json', pkg: './internal/service', pattern: '^(TestGatewayNativeResponsesFailureDiagnostics|TestGatewayNativeTransportFailureReasonClassification|TestGatewayNativeTransportObservationComposesExistingTrace)$', names: diagnosticTests },
   ]) {
     const child = spawnSync('go', ['test', '-race', '-tags', 'unit', lane.pkg, '-run', lane.pattern, '-count=1', '-v', '-timeout', '180s'],
       { cwd: source, encoding: 'utf8', timeout: 600_000, maxBuffer: 4_194_304 });
