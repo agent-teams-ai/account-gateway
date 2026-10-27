@@ -1,156 +1,308 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
-import type { Pool } from 'pg';
-import { usageObservation } from '@agent-teams/account-gateway/contracts';
-import type { UsageObservation, UsagePage, UsageQuery } from '@agent-teams/account-gateway/contracts';
-import { KernelError } from './domain.ts';
-import type { TrustedContext } from './domain.ts';
-import { sharedCheckout } from './service-admission.ts';
-import type { Checkout } from './service-admission.ts';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import type { Pool } from "pg";
+import { usageObservation } from "@agent-teams/account-gateway/contracts";
+import type {
+  UsageObservation,
+  UsagePage,
+  UsageQuery,
+} from "@agent-teams/account-gateway/contracts";
+import { KernelError } from "./domain.ts";
+import type { TrustedContext } from "./domain.ts";
+import { sharedCheckout } from "./service-admission.ts";
+import type { Checkout } from "./service-admission.ts";
 
 export interface UsageJournal {
-  observe(context: TrustedContext, executionRef: string, requestRef: string): Promise<UsageObservation | null>;
+  observe(
+    context: TrustedContext,
+    executionRef: string,
+    requestRef: string,
+  ): Promise<UsageObservation | null>;
   append(context: TrustedContext, fact: UsageObservation): Promise<void>;
   list(context: TrustedContext, query: UsageQuery): Promise<UsagePage>;
 }
 // Every writer holds the counter lock through commit. A captured high water
 // therefore cannot hide an earlier uncommitted insert or late correction.
 export class PostgresUsageJournal implements UsageJournal {
-  readonly #checkout: Checkout; readonly #key: Uint8Array;
-  constructor(pool: Pool, key: Uint8Array) { this.#checkout = sharedCheckout(pool); this.#key = createHash('sha256').update(key).update('usage-cursor-v1').digest(); }
-  async observe(context: TrustedContext, executionRef: string, requestRef: string): Promise<UsageObservation | null> {
+  readonly #checkout: Checkout;
+  readonly #key: Uint8Array;
+  constructor(pool: Pool, key: Uint8Array) {
+    this.#checkout = sharedCheckout(pool);
+    this.#key = createHash("sha256").update(key).update("usage-cursor-v1").digest();
+  }
+  async observe(
+    context: TrustedContext,
+    executionRef: string,
+    requestRef: string,
+  ): Promise<UsageObservation | null> {
     const db = await this.#checkout();
-    let failed = false; const onError = () => { failed = true; }; db.on('error', onError);
+    let failed = false;
+    const onError = () => {
+      failed = true;
+    };
+    db.on("error", onError);
     try {
-      const result = await db.query('SELECT fact FROM ag_kernel.usage_observations WHERE consumer=$1 AND execution_ref=$2 AND request_ref=$3 ORDER BY revision DESC LIMIT 1',
-        [context.consumerId, executionRef, requestRef]);
-      if (failed) throw new KernelError('unavailable');
+      const result = await db.query(
+        "SELECT fact FROM ag_kernel.usage_observations WHERE consumer=$1 AND execution_ref=$2 AND request_ref=$3 ORDER BY revision DESC LIMIT 1",
+        [context.consumerId, executionRef, requestRef],
+      );
+      if (failed) throw new KernelError("unavailable");
       return result.rows.length ? usageObservation.parse(result.rows[0].fact) : null;
-    } finally { db.removeListener('error', onError); db.release(failed); }
+    } finally {
+      db.removeListener("error", onError);
+      db.release(failed);
+    }
   }
   async append(context: TrustedContext, input: UsageObservation): Promise<void> {
-    const fact = usageObservation.parse(input), db = await this.#checkout();
-    let transaction = false, destroy = false;
-    const onError = () => { destroy = true; }; db.on('error', onError);
+    const fact = usageObservation.parse(input),
+      db = await this.#checkout();
+    let transaction = false,
+      destroy = false;
+    const onError = () => {
+      destroy = true;
+    };
+    db.on("error", onError);
     try {
-      await db.query('BEGIN');
+      await db.query("BEGIN");
       transaction = true;
-      await db.query('SELECT value FROM ag_kernel.usage_feed_counter WHERE singleton FOR UPDATE');
-      const previous = await db.query('SELECT fact FROM ag_kernel.usage_observations WHERE consumer=$1 AND execution_ref=$2 AND request_ref=$3 AND revision=$4',
-        [context.consumerId, fact.executionRef, fact.requestRef, fact.revision]);
+      await db.query("SELECT value FROM ag_kernel.usage_feed_counter WHERE singleton FOR UPDATE");
+      const previous = await db.query(
+        "SELECT fact FROM ag_kernel.usage_observations WHERE consumer=$1 AND execution_ref=$2 AND request_ref=$3 AND revision=$4",
+        [context.consumerId, fact.executionRef, fact.requestRef, fact.revision],
+      );
       if (previous.rows.length) {
-        if (JSON.stringify(usageObservation.parse(previous.rows[0].fact)) !== JSON.stringify(fact)) throw new KernelError('conflict');
+        if (JSON.stringify(usageObservation.parse(previous.rows[0].fact)) !== JSON.stringify(fact))
+          throw new KernelError("conflict");
       } else {
-        const position = await db.query('UPDATE ag_kernel.usage_feed_counter SET value=value+1 WHERE singleton RETURNING value');
-        await db.query('INSERT INTO ag_kernel.usage_observations(position,consumer,execution_ref,request_ref,revision,fact) VALUES($1,$2,$3,$4,$5,$6)',
-          [position.rows[0].value, context.consumerId, fact.executionRef, fact.requestRef, fact.revision, fact]);
+        const position = await db.query(
+          "UPDATE ag_kernel.usage_feed_counter SET value=value+1 WHERE singleton RETURNING value",
+        );
+        await db.query(
+          "INSERT INTO ag_kernel.usage_observations(position,consumer,execution_ref,request_ref,revision,fact) VALUES($1,$2,$3,$4,$5,$6)",
+          [
+            position.rows[0].value,
+            context.consumerId,
+            fact.executionRef,
+            fact.requestRef,
+            fact.revision,
+            fact,
+          ],
+        );
       }
-      await db.query('COMMIT');
+      await db.query("COMMIT");
       transaction = false;
-      if (destroy) throw new KernelError('unavailable');
+      if (destroy) throw new KernelError("unavailable");
     } catch (error) {
-      if (transaction) { try { await db.query('ROLLBACK'); } catch { destroy = true; } }
-      else destroy = true;
+      if (transaction) {
+        try {
+          await db.query("ROLLBACK");
+        } catch {
+          destroy = true;
+        }
+      } else destroy = true;
       throw error;
-    } finally { db.removeListener('error', onError); db.release(destroy); }
+    } finally {
+      db.removeListener("error", onError);
+      db.release(destroy);
+    }
   }
   #cursor(consumer: string, after: string, high: string): string {
-    const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', this.#key, iv);
-    const encrypted = Buffer.concat([cipher.update(JSON.stringify([consumer, after, high])), cipher.final()]);
-    return Buffer.concat([iv, cipher.getAuthTag(), encrypted]).toString('base64url');
+    const iv = randomBytes(12),
+      cipher = createCipheriv("aes-256-gcm", this.#key, iv);
+    const encrypted = Buffer.concat([
+      cipher.update(JSON.stringify([consumer, after, high])),
+      cipher.final(),
+    ]);
+    return Buffer.concat([iv, cipher.getAuthTag(), encrypted]).toString("base64url");
   }
   #readCursor(consumer: string, cursor: string): readonly [string, string] {
     let values: unknown;
     try {
       if (cursor.length > 512 || !/^[A-Za-z0-9_-]+$/.test(cursor)) throw new Error();
-      const bytes = Buffer.from(cursor, 'base64url');
+      const bytes = Buffer.from(cursor, "base64url");
       if (bytes.length < 29) throw new Error();
-      const decipher = createDecipheriv('aes-256-gcm', this.#key, bytes.subarray(0,12));
-      decipher.setAuthTag(bytes.subarray(12,28));
-      values = JSON.parse(Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString());
-    } catch { throw new KernelError('invalid'); }
-    if (!Array.isArray(values) || values.length !== 3 || values[0] !== consumer ||
-      values.slice(1).some(v => typeof v !== 'string' || !/^(0|[1-9]\d{0,18})$/.test(v))) throw new KernelError('denied');
-    if (BigInt(values[1]) > BigInt(values[2])) throw new KernelError('invalid');
+      const decipher = createDecipheriv("aes-256-gcm", this.#key, bytes.subarray(0, 12));
+      decipher.setAuthTag(bytes.subarray(12, 28));
+      values = JSON.parse(
+        Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString(),
+      );
+    } catch {
+      throw new KernelError("invalid");
+    }
+    if (
+      !Array.isArray(values) ||
+      values.length !== 3 ||
+      values[0] !== consumer ||
+      values.slice(1).some((v) => typeof v !== "string" || !/^(0|[1-9]\d{0,18})$/.test(v))
+    )
+      throw new KernelError("denied");
+    if (BigInt(values[1]) > BigInt(values[2])) throw new KernelError("invalid");
     return [values[1], values[2]];
   }
   async list(context: TrustedContext, query: UsageQuery): Promise<UsagePage> {
     const limit = query.limit ?? 100;
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new KernelError('invalid');
-    const previous = query.afterCursor ? this.#readCursor(context.consumerId, query.afterCursor) : undefined;
-    const bound = query.highWaterCursor ? this.#readCursor(context.consumerId, query.highWaterCursor) : undefined;
-    const after = previous?.[0] ?? '0';
-    if (bound && (bound[0] !== bound[1] || (previous && previous[1] !== bound[1]) || BigInt(after) > BigInt(bound[1]))) throw new KernelError('invalid');
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new KernelError("invalid");
+    const previous = query.afterCursor
+      ? this.#readCursor(context.consumerId, query.afterCursor)
+      : undefined;
+    const bound = query.highWaterCursor
+      ? this.#readCursor(context.consumerId, query.highWaterCursor)
+      : undefined;
+    const after = previous?.[0] ?? "0";
+    if (
+      bound &&
+      (bound[0] !== bound[1] ||
+        (previous && previous[1] !== bound[1]) ||
+        BigInt(after) > BigInt(bound[1]))
+    )
+      throw new KernelError("invalid");
     const db = await this.#checkout();
-    let failed = false; const onError = () => { failed = true; }; db.on('error', onError);
+    let failed = false;
+    const onError = () => {
+      failed = true;
+    };
+    db.on("error", onError);
     try {
       // A completed page begins a new captured window on its next request.
-      const high = bound?.[1] ?? (previous && previous[0] !== previous[1] ? previous[1] :
-        String((await db.query('SELECT value FROM ag_kernel.usage_feed_counter WHERE singleton')).rows[0].value));
-      const rows = await db.query('SELECT position,fact FROM ag_kernel.usage_observations WHERE consumer=$1 AND position>$2 AND position<=$3 ORDER BY position LIMIT $4',
-        [context.consumerId, after, high, limit]);
+      const high =
+        bound?.[1] ??
+        (previous && previous[0] !== previous[1]
+          ? previous[1]
+          : String(
+              (await db.query("SELECT value FROM ag_kernel.usage_feed_counter WHERE singleton"))
+                .rows[0].value,
+            ));
+      const rows = await db.query(
+        "SELECT position,fact FROM ag_kernel.usage_observations WHERE consumer=$1 AND position>$2 AND position<=$3 ORDER BY position LIMIT $4",
+        [context.consumerId, after, high, limit],
+      );
       // Facade control responses have a hard 64KiB bound. A full count-based
       // page can exceed it with valid maximal references; never skip those rows.
       const observations: UsageObservation[] = [];
-      let bytes = 0, last = after;
+      let bytes = 0,
+        last = after;
       for (const row of rows.rows) {
-        const fact = usageObservation.parse(row.fact), size = Buffer.byteLength(JSON.stringify(fact)) + 1;
+        const fact = usageObservation.parse(row.fact),
+          size = Buffer.byteLength(JSON.stringify(fact)) + 1;
         if (bytes + size > 55_000) break;
-        observations.push(fact); bytes += size; last = String(row.position);
+        observations.push(fact);
+        bytes += size;
+        last = String(row.position);
       }
       if (observations.length === rows.rows.length && rows.rows.length < limit) last = high;
       const highWaterCursor = query.highWaterCursor ?? this.#cursor(context.consumerId, high, high);
-      if (failed) throw new KernelError('unavailable');
-      return { observations, nextCursor: last === high ? highWaterCursor : this.#cursor(context.consumerId, last, high), highWaterCursor };
-    } finally { db.removeListener('error', onError); db.release(failed); }
+      if (failed) throw new KernelError("unavailable");
+      return {
+        observations,
+        nextCursor: last === high ? highWaterCursor : this.#cursor(context.consumerId, last, high),
+        highWaterCursor,
+      };
+    } finally {
+      db.removeListener("error", onError);
+      db.release(failed);
+    }
   }
 }
 
 // Bounded transient parsing only: neither prompt nor response body is persisted.
 // Missing/invalid terminal metadata stays unknown; transport success is not usage.
 export class ResponsesUsageCapture {
-  #pending = ''; #decoder = new TextDecoder(); #dropped = false;
-  #usage: Pick<UsageObservation, 'inputTokens' | 'outputTokens' | 'cachedInputTokens' | 'reasoningTokens'> =
-    { inputTokens: null, outputTokens: null, cachedInputTokens: null, reasoningTokens: null };
+  #pending = "";
+  #decoder = new TextDecoder();
+  #dropped = false;
+  #usage: Pick<
+    UsageObservation,
+    "inputTokens" | "outputTokens" | "cachedInputTokens" | "reasoningTokens"
+  > = { inputTokens: null, outputTokens: null, cachedInputTokens: null, reasoningTokens: null };
   push(bytes: Uint8Array): void {
     if (this.#dropped) return;
     this.#pending += this.#decoder.decode(bytes, { stream: true });
-    while (this.#pending.includes('\n')) {
-      const end = this.#pending.indexOf('\n'), line = this.#pending.slice(0, end).replace(/\r$/, '');
+    while (this.#pending.includes("\n")) {
+      const end = this.#pending.indexOf("\n"),
+        line = this.#pending.slice(0, end).replace(/\r$/, "");
       this.#pending = this.#pending.slice(end + 1);
-      if (line.length > 1_048_576) { this.#dropped = true; this.#pending = ''; return; }
-      if (!line.startsWith('data:')) continue;
+      if (line.length > 1_048_576) {
+        this.#dropped = true;
+        this.#pending = "";
+        return;
+      }
+      if (!line.startsWith("data:")) continue;
       try {
         const event = JSON.parse(line.slice(5));
-        if (event.type !== 'response.completed') continue;
+        if (event.type !== "response.completed") continue;
         const u = event.response?.usage;
-        const numeric = (v: unknown): number | null => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : null;
-        this.#usage = { inputTokens: numeric(u?.input_tokens), outputTokens: numeric(u?.output_tokens),
-          cachedInputTokens: numeric(u?.input_tokens_details?.cached_tokens), reasoningTokens: numeric(u?.output_tokens_details?.reasoning_tokens) };
-        if (this.#usage.cachedInputTokens !== null && (this.#usage.inputTokens === null || this.#usage.cachedInputTokens > this.#usage.inputTokens)) this.#usage.cachedInputTokens = null;
-        if (this.#usage.reasoningTokens !== null && (this.#usage.outputTokens === null || this.#usage.reasoningTokens > this.#usage.outputTokens)) this.#usage.reasoningTokens = null;
-      } catch { /* malformed usage cannot become a zero */ }
+        const numeric = (v: unknown): number | null =>
+          typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null;
+        this.#usage = {
+          inputTokens: numeric(u?.input_tokens),
+          outputTokens: numeric(u?.output_tokens),
+          cachedInputTokens: numeric(u?.input_tokens_details?.cached_tokens),
+          reasoningTokens: numeric(u?.output_tokens_details?.reasoning_tokens),
+        };
+        if (
+          this.#usage.cachedInputTokens !== null &&
+          (this.#usage.inputTokens === null ||
+            this.#usage.cachedInputTokens > this.#usage.inputTokens)
+        )
+          this.#usage.cachedInputTokens = null;
+        if (
+          this.#usage.reasoningTokens !== null &&
+          (this.#usage.outputTokens === null ||
+            this.#usage.reasoningTokens > this.#usage.outputTokens)
+        )
+          this.#usage.reasoningTokens = null;
+      } catch {
+        /* malformed usage cannot become a zero */
+      }
     }
-    if (this.#pending.length > 1_048_576) { this.#dropped = true; this.#pending = ''; }
+    if (this.#pending.length > 1_048_576) {
+      this.#dropped = true;
+      this.#pending = "";
+    }
   }
-  snapshot() { return { ...this.#usage, completeness: 'partial' as const }; }
+  snapshot() {
+    return { ...this.#usage, completeness: "partial" as const };
+  }
 }
 
 export interface NativeUsage {
-  source: 'native_provider_response'; state: 'unknown' | 'partial' | 'complete';
-  inputTokens?: number; outputTokens?: number; cachedInputTokens?: number; reasoningOutputTokens?: number;
-  costState: 'unknown'; finalized: boolean;
+  source: "native_provider_response";
+  state: "unknown" | "partial" | "complete";
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+  reasoningOutputTokens?: number;
+  costState: "unknown";
+  finalized: boolean;
 }
 export function nativeUsage(value: unknown): NativeUsage {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new KernelError('invalid');
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new KernelError("invalid");
   const r = value as Record<string, unknown>;
-  const required = ['source','state','costState','finalized'], optional = ['inputTokens','outputTokens','cachedInputTokens','reasoningOutputTokens'];
-  if (required.some(key => !Object.hasOwn(r, key)) || Object.keys(r).some(key => !required.includes(key) && !optional.includes(key))) throw new KernelError('invalid');
-  if (r.source !== 'native_provider_response' || !['unknown','partial','complete'].includes(r.state as string) ||
-      r.costState !== 'unknown' || typeof r.finalized !== 'boolean') throw new KernelError('invalid');
-  for (const key of ['inputTokens','outputTokens','cachedInputTokens','reasoningOutputTokens'])
-    if (r[key] !== undefined && (!Number.isSafeInteger(r[key]) || (r[key] as number) < 0)) throw new KernelError('invalid');
-  if (r.state === 'complete' && (r.inputTokens === undefined || r.outputTokens === undefined) ||
-      r.cachedInputTokens !== undefined && (r.inputTokens === undefined || (r.cachedInputTokens as number) > (r.inputTokens as number)) ||
-      r.reasoningOutputTokens !== undefined && (r.outputTokens === undefined || (r.reasoningOutputTokens as number) > (r.outputTokens as number))) throw new KernelError('invalid');
+  const required = ["source", "state", "costState", "finalized"],
+    optional = ["inputTokens", "outputTokens", "cachedInputTokens", "reasoningOutputTokens"];
+  if (
+    required.some((key) => !Object.hasOwn(r, key)) ||
+    Object.keys(r).some((key) => !required.includes(key) && !optional.includes(key))
+  )
+    throw new KernelError("invalid");
+  if (
+    r.source !== "native_provider_response" ||
+    !["unknown", "partial", "complete"].includes(r.state as string) ||
+    r.costState !== "unknown" ||
+    typeof r.finalized !== "boolean"
+  )
+    throw new KernelError("invalid");
+  for (const key of ["inputTokens", "outputTokens", "cachedInputTokens", "reasoningOutputTokens"])
+    if (r[key] !== undefined && (!Number.isSafeInteger(r[key]) || (r[key] as number) < 0))
+      throw new KernelError("invalid");
+  if (
+    (r.state === "complete" && (r.inputTokens === undefined || r.outputTokens === undefined)) ||
+    (r.cachedInputTokens !== undefined &&
+      (r.inputTokens === undefined ||
+        (r.cachedInputTokens as number) > (r.inputTokens as number))) ||
+    (r.reasoningOutputTokens !== undefined &&
+      (r.outputTokens === undefined ||
+        (r.reasoningOutputTokens as number) > (r.outputTokens as number)))
+  )
+    throw new KernelError("invalid");
   return Object.freeze({ ...r }) as unknown as NativeUsage;
 }
