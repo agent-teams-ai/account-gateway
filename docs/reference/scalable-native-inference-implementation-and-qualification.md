@@ -23,7 +23,7 @@ steps. It does not establish Codex/Claude OAuth or thousand-stream capacity.
 Implementation is staged in [account-gateway PR 71](https://github.com/agent-teams-ai/account-gateway/pull/71)
 and [sub2api PR 64](https://github.com/agent-teams-ai/sub2api/pull/64). PR 71 depends
 on the preceding cloud-load/control-progress branch, PR 69. The expanded fixture
-pins native `fe0862b6505c3de54e17ff8eaac1269b665229af`; each CI receipt records the
+pins native `a04f63eeb2bd5adf0e7193beb696afaa1e516b30`; each CI receipt records the
 exact gateway/native commits, binary hashes, dependency manifests and runtimes.
 
 ## Contract
@@ -175,6 +175,14 @@ replay after ambiguity. The diagnostic race gate checks fixed classification,
 trace composition and privacy. This demonstrates a relevant transport failure
 mechanism; it does not retroactively establish the cause of the earlier burst
 failure. The source-pinned current CI receipts remain the qualification authority.
+
+The next instrumented [full-stack run 40569498843](https://github.com/agent-teams-ai/account-gateway/actions/runs/40569498843)
+passed all six profiles at gateway `34586c6` and native `fe0862b6`.
+[Client qualification 40569498972](https://github.com/agent-teams-ai/account-gateway/actions/runs/40569498972)
+passed both upstream TLS regressions but caught a diagnostic classification bug:
+an outer URL error could hide a nested typed network timeout. The classifier now
+walks bounded wrapped/joined causes without reading error text. Its regression
+remains required; current source still requires a complete fresh client/load run.
 
 ### Historical pre-repair receipts: gateway f9b1a57 / native 6545944
 
