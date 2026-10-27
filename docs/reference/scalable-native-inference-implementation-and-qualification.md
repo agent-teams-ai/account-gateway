@@ -99,9 +99,27 @@ occupied sequential agents mean about fifty new requests per second and one
 thousand streams. One thousand new requests per second instead mean about twenty
 thousand streams. Neither scenario is qualified by the baseline sixteen-slot run.
 
-## Evidence status
+## Evidence and qualification authority
 
-As of 2026-10-27, the latest completed receipts are for gateway head
+[Account-gateway PR 71](https://github.com/agent-teams-ai/account-gateway/pull/71)
+and [native PR 64](https://github.com/agent-teams-ai/sub2api/pull/64) publish the
+current source pins, exact workflow receipt links, per-lane conclusions and
+sanitized evidence. Consult those source-pinned receipts for the current
+qualification status. A successful package, kernel or client run qualifies its
+recorded scope; it does not establish a different load profile or production
+capacity. This reference does not assume that an in-progress or later source
+revision has passed.
+
+The native pre-claim queue/active budget repair is implemented in
+`5a8b8a6f0d2e495891897097ec1770bff5b7cc6b`. The required public-ingress allowlist
+has 21 names, including three regressions for separate queue/active budgets,
+cancellation before POST and ambiguous active attempts. Current-source
+qualification must require all 21; the historical 18-test receipts below apply
+only to their recorded pre-repair source.
+
+### Historical pre-repair receipts: gateway f9b1a57 / native 6545944
+
+The following completed receipts are for gateway head
 `f9b1a57b6f56f17d81a27c1d7ff16936119f59b5` and native
 `654594451d1951f2f85c2d3e4011b000a9e68bdd`:
 
@@ -121,13 +139,13 @@ it produced the unchanged original ownership proof, durable usage and physical
 closure ACK, zero occupied rows and completed execution cleanup. Networking was
 loopback-only with no external egress, and PostgreSQL positively stopped.
 
-The required public-ingress allowlist now has 21 names, adding three regressions
-for separate pre-claim queue/active budgets, cancellation before POST and
-ambiguous active attempts. The 18-test count above belongs to the completed
-`f9b1a57` receipt; it does not claim that the new tests or pending budget repair
-have already passed hosted qualification. The latest full-stack run used merge
-checkout `22d225593ff33bf3ffbff640d3af2035cf7a707c` with the native pin above.
-Its exact stream and failed arrival measurements are recorded below.
+The 18-test count above belongs to the completed `f9b1a57` receipt and does not
+qualify the three new tests or the implemented budget repair. This historical
+full-stack run used merge checkout
+`22d225593ff33bf3ffbff640d3af2035cf7a707c` with native
+`654594451d1951f2f85c2d3e4011b000a9e68bdd`. Its exact stream and failed arrival
+measurements are recorded below as pre-repair evidence. These measurements are
+not a current-source capacity promise.
 
 Earlier complete package and kernel qualification passed for gateway
 `d371dc530e9fb4420c0d616890c6c3e9676927e5`:
@@ -208,20 +226,35 @@ or failure after admission work starts remains ambiguous and retained.
 
 Pre-claim metadata has a separate finite callback lane from dispatch, owner and
 cleanup checks for already accepted work. Go bounds pre-claim callback producers
-before they open callback sockets. The pending correction gives each authority
-and claim callback a bounded five-second queue wait, then a fresh five-second
-active RPC budget after acquiring one of the same four producer slots. The
-original caller's cancellation and earlier deadline still apply. Queue expiry or
-cancellation before acquisition must never send a POST; timeout or cancellation
-after an active attempt retains its conservative ambiguity and cannot authorize
-replay. The independent terminal lane is unchanged. This correction requires new
-source-pinned qualification; the completed receipts above used the earlier
-shared queue/active deadline.
+before they open callback sockets. The implemented correction gives each
+authority and claim callback a bounded five-second queue wait, then a fresh
+five-second active RPC budget after acquiring one of the same four producer
+slots. The original caller's cancellation and earlier deadline still apply.
+Queue expiry or cancellation before acquisition must never send a POST; timeout
+or cancellation after an active attempt retains its conservative ambiguity and
+cannot authorize replay. The independent terminal lane is unchanged. Current
+qualification receipts are published on PR 71 and PR 64; the historical
+`f9b1a57` receipts above used the earlier shared queue/active deadline.
 
 Structurally exact SQL ownership evidence is retained before subsequent live
 dispatch verification; retaining proof does not grant dispatch permission. If
 that later check fails, the original proof remains available for independent
 no-entry settlement and exact closure acknowledgment.
+
+### Early collection rejection
+
+The runtime dependency is pinned to [Zod 4.6.7](https://github.com/colinhacks/zod/releases/tag/v4.6.7).
+Collection upper limits must reject oversized input before validating its
+elements or accumulating an issue for every invalid element. Earlier Zod
+versions could apply `.max()` only after traversing the collection; the
+[upstream fix](https://github.com/colinhacks/zod/commit/a0ebf970f2d752e5f58527cd2942ff48be4f46bd)
+adds early leading size checks, addressing
+[GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5).
+The boundary regression requires rejection before element validation. Request
+byte limits and authentication remain independent controls: an authorized body
+within its byte limit can still contain many invalid elements, so neither
+bounds the validation work of a late array-length check. Keep the early
+collection cap when evolving the shared wire schema.
 
 ### Migration and retention rollout
 
@@ -347,7 +380,7 @@ durability checks and no-replay rule are unchanged. The subsequent source-pinned
 receipts below qualify that correction for the successful profiles they name;
 the failed arrival profiles remain unqualified.
 
-### Latest completed full-stack measurements
+### Historical pre-repair full-stack measurements: run 39992708669
 
 [Run 39992708669](https://github.com/agent-teams-ai/account-gateway/actions/runs/39992708669)
 tested merge checkout `22d225593ff33bf3ffbff640d3af2035cf7a707c` for gateway head
@@ -396,12 +429,14 @@ The working diagnosis is that the pre-claim callback's five-second deadline
 included its wait for one of four producer slots, leaving an exhausted or short
 active budget under saturation. The receipts expose SQL/provider-entry outcomes
 but do not instrument the precise deadline-expiry instant, so exact expiry is an
-inference from the implementation and observed failures. The pending repair
-separates a five-second queue wait from a fresh five-second active budget while
-preserving the original caller, the same four slots and no replay after an
-ambiguous POST. Its three new required public regressions raise the allowlist
-from 18 to 21. New source-pinned workflow receipts are still required before
-claiming that the repair qualifies either failed load shape.
+inference from the pre-repair implementation and observed failures. The repair
+implemented in native `5a8b8a6f0d2e495891897097ec1770bff5b7cc6b` separates a
+five-second queue wait from a fresh five-second active budget while preserving
+the original caller, the same four slots and no replay after an ambiguous POST.
+Its three new required public regressions raise the allowlist from 18 to 21.
+Use the exact current-source workflow receipts published on PR 71 and PR 64 to
+assess the repaired load shapes; these historical failures and passing stream
+measurements do not qualify the repair.
 
 The stream profile paces admission to isolate live-stream capacity. At 1024 total
 streams across 32 accounts it tests 32 live streams per account; 64 is the configured
