@@ -26,7 +26,7 @@ jobs:
     env:
       NPM_CONFIG_ENGINE_STRICT: 'true'
       LOAD_SUITE: ${{ matrix.suite }}
-      NATIVE_COMMIT: 654594451d1951f2f85c2d3e4011b000a9e68bdd
+      NATIVE_COMMIT: 5a8b8a6f0d2e495891897097ec1770bff5b7cc6b
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
       GATEWAY_LOAD_IMAGE: account-gateway-fullstack:qualified
     steps:

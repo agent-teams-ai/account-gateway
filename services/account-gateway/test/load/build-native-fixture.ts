@@ -6,7 +6,7 @@ import { mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const nativeSourceCommit = '654594451d1951f2f85c2d3e4011b000a9e68bdd';
+export const nativeSourceCommit = '5a8b8a6f0d2e495891897097ec1770bff5b7cc6b';
 export const migrationAdapterSource = [
   "// Disposable local fixture provisioning only. Production migration authority is",
   "// repository.ApplyMigrations; this helper cannot serve gateway requests.",
@@ -50,7 +50,7 @@ export const migrationAdapterSource = [
   "  normalized:=sha256.Sum256([]byte(strings.TrimSpace(string(data))))",
   "  var applied string;if db.QueryRowContext(ctx,\"SELECT checksum FROM schema_migrations WHERE filename=$1\",name).Scan(&applied)!=nil || applied!=hex.EncodeToString(normalized[:]) { return fmt.Errorf(\"applied migration checksum mismatch\") }",
   " }",
-  " return json.NewEncoder(os.Stdout).Encode(map[string]any{\"kind\":\"production-native-migration-receipt-v1\",\"sourceCommit\":\"654594451d1951f2f85c2d3e4011b000a9e68bdd\",\"postgresVersion\":version,\"accounts\":count,\"migrationCount\":len(entries),\"migrationsSha256\":hex.EncodeToString(sum.Sum(nil)),\"migrations\":entries})",
+  " return json.NewEncoder(os.Stdout).Encode(map[string]any{\"kind\":\"production-native-migration-receipt-v1\",\"sourceCommit\":\"5a8b8a6f0d2e495891897097ec1770bff5b7cc6b\",\"postgresVersion\":version,\"accounts\":count,\"migrationCount\":len(entries),\"migrationsSha256\":hex.EncodeToString(sum.Sum(nil)),\"migrations\":entries})",
   "}",
   "func main(){if err:=run();err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}}",
 ].join('\n') + '\n';

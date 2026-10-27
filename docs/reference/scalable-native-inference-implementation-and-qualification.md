@@ -23,7 +23,7 @@ steps. It does not establish Codex/Claude OAuth or thousand-stream capacity.
 Implementation is staged in [account-gateway PR 71](https://github.com/agent-teams-ai/account-gateway/pull/71)
 and [sub2api PR 64](https://github.com/agent-teams-ai/sub2api/pull/64). PR 71 depends
 on the preceding cloud-load/control-progress branch, PR 69. The expanded fixture
-pins native `654594451d1951f2f85c2d3e4011b000a9e68bdd`; each CI receipt records the
+pins native `5a8b8a6f0d2e495891897097ec1770bff5b7cc6b`; each CI receipt records the
 exact gateway/native commits, binary hashes, dependency manifests and runtimes.
 
 ## Contract
@@ -101,27 +101,50 @@ thousand streams. Neither scenario is qualified by the baseline sixteen-slot run
 
 ## Evidence status
 
-Implementation and source-level repairs are published. Both complete package and
-kernel qualification passed for gateway commit
+As of 2026-10-27, the latest completed receipts are for gateway head
+`f9b1a57b6f56f17d81a27c1d7ff16936119f59b5` and native
+`654594451d1951f2f85c2d3e4011b000a9e68bdd`:
+
+- [Package qualification 39992708441](https://github.com/agent-teams-ai/account-gateway/actions/runs/39992708441) passed.
+- [Kernel qualification 39992708492](https://github.com/agent-teams-ai/account-gateway/actions/runs/39992708492) passed.
+- [Pinned client qualification 39992708440](https://github.com/agent-teams-ai/account-gateway/actions/runs/39992708440) passed on Node 26.11.1 and 24.21.0.
+- [Full-stack qualification 39992708669](https://github.com/agent-teams-ai/account-gateway/actions/runs/39992708669) failed overall: both complete baseline lanes, large context and the stream ladder passed; arrivals and sustained arrivals failed.
+
+Each pinned-client Node lane passed all 18 then-required public-ingress tests,
+14 private reservation/closure tests, two bootstrap race tests, two Claude
+PostgreSQL regressions, two actual CLI protocol tests and two actual CLI tests
+joined to the real TypeScript authority. There were no skips. Each joined client
+made exactly one controlled-provider entry through the real TypeScript
+management, kernel, usage and cleanup path, Go OAuth transport and native
+PostgreSQL. Blocking the real usage append prevented CLI completion; releasing
+it produced the unchanged original ownership proof, durable usage and physical
+closure ACK, zero occupied rows and completed execution cleanup. Networking was
+loopback-only with no external egress, and PostgreSQL positively stopped.
+
+The required public-ingress allowlist now has 21 names, adding three regressions
+for separate pre-claim queue/active budgets, cancellation before POST and
+ambiguous active attempts. The 18-test count above belongs to the completed
+`f9b1a57` receipt; it does not claim that the new tests or pending budget repair
+have already passed hosted qualification. The latest full-stack run used merge
+checkout `22d225593ff33bf3ffbff640d3af2035cf7a707c` with the native pin above.
+Its exact stream and failed arrival measurements are recorded below.
+
+Earlier complete package and kernel qualification passed for gateway
 `d371dc530e9fb4420c0d616890c6c3e9676927e5`:
 
-- [Package qualification](https://github.com/agent-teams-ai/account-gateway/actions/runs/39983757117)
-- [Kernel qualification](https://github.com/agent-teams-ai/account-gateway/actions/runs/39983757119)
+- [Package qualification 39983757117](https://github.com/agent-teams-ai/account-gateway/actions/runs/39983757117)
+- [Kernel qualification 39983757119](https://github.com/agent-teams-ai/account-gateway/actions/runs/39983757119)
 
-Fresh disposable PostgreSQL checks passed 59 kernel tests and 74 OAuth enrollment
-tests on each required Node version, without skips. Actual pinned CLI processes
-and the Claude SQL-guard regressions passed in the isolated cloud fixture.
-The [reproducible client workflow](https://github.com/agent-teams-ai/account-gateway/actions/runs/39983757364)
-passed on both Node versions: all 11 public-ingress and 2 bootstrap race tests,
-both Claude PostgreSQL regressions and both actual client processes, with no
-skips, no external network, sanitized evidence and positive PostgreSQL shutdown.
-The corrected two-CPU stream profile passed through 1024 simultaneous streams;
-the same run exposed a pre-claim overload classification defect in the arrival
-and large-context profiles, described below. The PRs link each subsequent
-source-pinned qualification run and its complete results. A previous successful
-profile does not qualify a later source revision or a different load shape.
-Only successful receipts establish their corresponding load qualification;
-source review does not imply production capacity.
+Those historical disposable PostgreSQL checks passed 59 kernel tests and 74
+OAuth enrollment tests on each required Node version, without skips. The earlier
+[client workflow 39983757364](https://github.com/agent-teams-ai/account-gateway/actions/runs/39983757364)
+passed its then-required 11 public-ingress tests, two bootstrap race tests, both
+Claude PostgreSQL regressions and both actual client processes on both Node
+versions, with no skips, no external network, sanitized evidence and positive
+PostgreSQL shutdown. Historical successful profiles remain tied to their source
+revisions and workload shapes. Only successful receipts establish their
+corresponding load qualification; source review does not imply production
+capacity.
 
 ## Implemented operator contract
 
@@ -185,11 +208,20 @@ or failure after admission work starts remains ambiguous and retained.
 
 Pre-claim metadata has a separate finite callback lane from dispatch, owner and
 cleanup checks for already accepted work. Go bounds pre-claim callback producers
-before they open callback sockets, retaining the original callback timeout and
-independent terminal lane. Structurally exact SQL ownership evidence is retained
-before subsequent live dispatch verification; retaining proof does not grant
-dispatch permission. If that later check fails, the original proof remains
-available for independent no-entry settlement and exact closure acknowledgment.
+before they open callback sockets. The pending correction gives each authority
+and claim callback a bounded five-second queue wait, then a fresh five-second
+active RPC budget after acquiring one of the same four producer slots. The
+original caller's cancellation and earlier deadline still apply. Queue expiry or
+cancellation before acquisition must never send a POST; timeout or cancellation
+after an active attempt retains its conservative ambiguity and cannot authorize
+replay. The independent terminal lane is unchanged. This correction requires new
+source-pinned qualification; the completed receipts above used the earlier
+shared queue/active deadline.
+
+Structurally exact SQL ownership evidence is retained before subsequent live
+dispatch verification; retaining proof does not grant dispatch permission. If
+that later check fails, the original proof remains available for independent
+no-entry settlement and exact closure acknowledgment.
 
 ### Migration and retention rollout
 
@@ -311,8 +343,65 @@ by 9.929 seconds. Sustained arrivals independently showed the same ten-second
 cutoff. This is failed qualification, not successful overload handling. The
 measured queue-aging defect is why finalization now gives finite queue waiting
 and active settlement separate budgets. Its four owners, SQL limits, terminal
-durability checks and no-replay rule are unchanged. New source-pinned receipts
-must qualify the correction; the historical passing run does not replace them.
+durability checks and no-replay rule are unchanged. The subsequent source-pinned
+receipts below qualify that correction for the successful profiles they name;
+the failed arrival profiles remain unqualified.
+
+### Latest completed full-stack measurements
+
+[Run 39992708669](https://github.com/agent-teams-ai/account-gateway/actions/runs/39992708669)
+tested merge checkout `22d225593ff33bf3ffbff640d3af2035cf7a707c` for gateway head
+`f9b1a57b6f56f17d81a27c1d7ff16936119f59b5`, native
+`654594451d1951f2f85c2d3e4011b000a9e68bdd`, and 2 CPU / 4 GiB per container.
+Both complete baseline lanes, large context and streams passed. Arrivals and
+sustained arrivals failed, so the aggregate workflow failed.
+
+The stream ladder completed all 64/256/512/1024 levels: 1856 controlled-provider
+entries and 1856 validated completions, exactly one entry per original request,
+no reconciliation faults and exact ledger agreement. All 32 executions closed;
+final open, occupied and unresolved-cleanup counts were zero, cleanup retired
+and PostgreSQL stopped. The 1024 level admitted in 31.689 seconds, held exactly
+1024 occupied streams for 60.007 seconds and completed its simultaneous release
+in 10.506 seconds. Control progress during the hold took at most 4 ms.
+First-byte p50/p95/p99 were 75/104/133 ms during paced admission. Sampled peak RSS
+was 460,595,200 bytes for the combined load driver and TypeScript process and
+256,974,848 bytes for Go.
+
+These streams used small SSE output with one-second keepalives. Total consumer
+bytes were 6,514,922 across the whole ladder. The result establishes this
+controlled one-minute hold and completion burst; it does not qualify heavy
+output, long contexts at this concurrency or a multi-hour soak. The finalizer
+queue and active budget separation passed this workload, without implying
+headroom for an arbitrary larger or more variable terminal burst.
+
+The arrival profile reached the following levels before stopping at the failed
+250-per-second step:
+
+| Target offers/second | Offers | Validated completions | SQL-dispatched attempts with no provider entry | Outcomes without a SQL row | Safe rejections |
+| --- | --- | --- | --- | --- | --- |
+| 50 | 100 | 100 | 0 | 0 | 0 |
+| 100 | 200 | 200 | 0 | 0 | 0 |
+| 250 | 500 | 186 | 99 | 210 | 5 |
+| Total | 800 | 486 | 99 | 210 | 5 |
+
+Final arrival occupancy was seven rows, with six unresolved-cleanup rows.
+The 500- and 1000-per-second levels were not reached and have no qualification
+from this run. The sustained profile offered 3000 requests: 1955 entered the
+controlled provider and completed, 495 were SQL-dispatched without provider
+entry, 449 had no SQL row and 101 were safely rejected. It ended with 437
+occupied rows and 32 unresolved-cleanup rows. Neither failed profile establishes
+successful overload recovery or sustained 50-per-second capacity.
+
+The working diagnosis is that the pre-claim callback's five-second deadline
+included its wait for one of four producer slots, leaving an exhausted or short
+active budget under saturation. The receipts expose SQL/provider-entry outcomes
+but do not instrument the precise deadline-expiry instant, so exact expiry is an
+inference from the implementation and observed failures. The pending repair
+separates a five-second queue wait from a fresh five-second active budget while
+preserving the original caller, the same four slots and no replay after an
+ambiguous POST. Its three new required public regressions raise the allowlist
+from 18 to 21. New source-pinned workflow receipts are still required before
+claiming that the repair qualifies either failed load shape.
 
 The stream profile paces admission to isolate live-stream capacity. At 1024 total
 streams across 32 accounts it tests 32 live streams per account; 64 is the configured
