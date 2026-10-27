@@ -23,7 +23,7 @@ steps. It does not establish Codex/Claude OAuth or thousand-stream capacity.
 Implementation is staged in [account-gateway PR 71](https://github.com/agent-teams-ai/account-gateway/pull/71)
 and [sub2api PR 64](https://github.com/agent-teams-ai/sub2api/pull/64). PR 71 depends
 on the preceding cloud-load/control-progress branch, PR 69. The expanded fixture
-pins native `5a8b8a6f0d2e495891897097ec1770bff5b7cc6b`; each CI receipt records the
+pins native `63a7eb1a0e1fdd5004592df59913b0a06d8646e0`; each CI receipt records the
 exact gateway/native commits, binary hashes, dependency manifests and runtimes.
 
 ## Contract
@@ -112,10 +112,31 @@ revision has passed.
 
 The native pre-claim queue/active budget repair is implemented in
 `5a8b8a6f0d2e495891897097ec1770bff5b7cc6b`. The required public-ingress allowlist
-has 21 names, including three regressions for separate queue/active budgets,
-cancellation before POST and ambiguous active attempts. Current-source
-qualification must require all 21; the historical 18-test receipts below apply
-only to their recorded pre-repair source.
+has 22 names, including three regressions for separate queue/active budgets,
+cancellation before POST and ambiguous active attempts, plus exact requested-model
+metadata bound to the original reservation. Current-source qualification must
+require all 22 public tests and all three bootstrap tests, including the public
+connection policy; earlier 18/21-public and two-bootstrap receipts qualify only
+the source revisions they record.
+
+### Pre-integration transport finding: gateway bb0d5b7 / native 5a8b8a6
+
+[Client qualification 40561199655](https://github.com/agent-teams-ai/account-gateway/actions/runs/40561199655)
+passed both runtime lanes at gateway head `bb0d5b732a5618ba97c88f7c4c988cf6b152f83d`.
+[Load qualification 40561199620](https://github.com/agent-teams-ai/account-gateway/actions/runs/40561199620)
+passed both baseline lanes, large context, arrival overload and sustained arrivals,
+but failed the stream profile. It stopped after 108 attempts: 107 entered the
+provider and completed, while one failed at the SDK transport boundary after
+three milliseconds without a SQL row or provider entry. Every entered request
+had exact closure and ACK; final open, occupied and unresolved cleanup counts
+were zero. The aggregate load qualification still failed.
+
+The working diagnosis was reuse of an idle public HTTP connection racing the
+server's one-second idle timeout. The receipt does not expose a socket-level
+cause, so that diagnosis remains an inference. The repair makes the public
+server's no-reuse policy explicit and adds a production-constructor regression.
+It neither retries inference nor reclassifies a transport error as safe overload.
+Fresh source-pinned qualification must cover the integrated code and this repair.
 
 ### Historical pre-repair receipts: gateway f9b1a57 / native 6545944
 
@@ -185,6 +206,15 @@ control sockets. An edge may expose one external TLS origin and route inference
 and control to their respective internal listeners. Client input cannot select
 a provider or private native URL.
 
+The public HTTP listener closes each connection after its response completes.
+It explicitly disables HTTP keepalive reuse so a client cannot race a short
+server idle timeout by reusing a connection for another inference. An active
+SSE response keeps its connection through terminal settlement and delivery; the
+private control listener keeps its existing connection policy. The production
+server constructor is covered by a required real-HTTP bootstrap regression.
+This trades connection reuse for a definite public transport lifetime and does
+not add retries after an ambiguous request.
+
 The execution SDK accepts separate `origin` and `inferenceOrigin`. Omission of
 `inferenceOrigin` preserves existing routing. Standard Responses and native
 Anthropic Messages clients use an execution capability issued by the control
@@ -240,6 +270,24 @@ Structurally exact SQL ownership evidence is retained before subsequent live
 dispatch verification; retaining proof does not grant dispatch permission. If
 that later check fails, the original proof remains available for independent
 no-entry settlement and exact closure acknowledgment.
+
+### Exact requested-model attribution
+
+The canonical account descriptor identifies its qualified provider profile.
+For dynamic Codex catalog selection, its model anchor can differ from the model
+selected for a particular request. Public claim and settlement metadata therefore
+carry a bounded `requestedModel` scalar captured from the qualified payload on
+the first native reservation. Duplicate requests cannot replace it, and neither
+prompt nor output bodies enter these callbacks. The usage journal records the
+requested model in its provisional and final revisions; an inconsistent later
+model cannot authorize terminal acknowledgment. Native account-scoped catalog
+checks remain the dispatch authority. Carrying a model identifier grants no new
+permission and does not trigger pre-claim catalog I/O in TypeScript.
+
+The actual Codex joined E2E selects an alternate model from its controlled account
+catalog and checks the resulting PostgreSQL usage alongside the existing durable
+terminal, original-proof and cleanup assertions. Its source-pinned receipt must
+pass before this integrated revision is qualified.
 
 ### Early collection rejection
 

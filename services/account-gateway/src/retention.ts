@@ -1,4 +1,4 @@
-import type { PoolClient } from 'pg';
+import type { PoolClient } from "pg";
 
 // Execution/prepare tombstones remain permanent replay namespaces. Request
 // details only expire for explicitly opted-in executions with bound v2 native
@@ -12,8 +12,13 @@ import type { PoolClient } from 'pg';
 // not a deletion horizon, and lease expiry is never evidence of closure.
 // Caller holds the kernel consumer transaction lock. All mutation is
 // within that transaction, so a fence/restore/claim cannot race the safety test.
-export async function compactSafePayloads(db: PoolClient, consumer: string, batch: number): Promise<void> {
-  await db.query(`WITH safe AS MATERIALIZED (
+export async function compactSafePayloads(
+  db: PoolClient,
+  consumer: string,
+  batch: number,
+): Promise<void> {
+  await db.query(
+    `WITH safe AS MATERIALIZED (
     SELECT e.ref FROM executions e WHERE e.consumer=$1 AND e.state<>'open'
       AND e.deadline<=clock_timestamp()
       AND (e.intent IS NOT NULL OR EXISTS (SELECT 1 FROM operations o
@@ -33,9 +38,10 @@ export async function compactSafePayloads(db: PoolClient, consumer: string, batc
       UPDATE operations o SET intent=NULL FROM safe s WHERE o.consumer=$1 AND o.execution_ref=s.ref
         AND o.state IN ('applied','rejected') AND o.intent IS NOT NULL RETURNING o.id
     ) UPDATE executions e SET intent=NULL FROM safe s WHERE e.consumer=$1 AND e.ref=s.ref AND e.intent IS NOT NULL`,
-  [consumer, batch]);
+    [consumer, batch],
+  );
   // SQL selects at most batch eligible namespaces once and removes at most batch
   // request rows and their usage revisions. It refunds only those request units
   // under consumer/account -> service-budget order. Other tombstones stay charged.
-  await db.query('SELECT retire_closed_request_details($1,$2)', [consumer, batch]);
+  await db.query("SELECT retire_closed_request_details($1,$2)", [consumer, batch]);
 }

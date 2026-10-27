@@ -50,6 +50,9 @@ type counters struct {
 
 var deny = errors.New("joined fixture refused")
 
+// Deliberately differs from the immutable qualified descriptor anchor.
+const joinedCLIRequestedModel = "gpt-5.4"
+
 type fixtureHTTP struct{ client *http.Client }
 
 func (u fixtureHTTP) Do(r *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
@@ -114,7 +117,7 @@ func run() error {
 	access, refresh := "joined-fake-access-"+uuid.NewString(), "joined-fake-refresh-"+uuid.NewString()
 	verifier := strings.Repeat("v", 64)
 	providerAccount := uuid.NewString()
-	var starts, polls, exchanges, checks, unexpected, inferenceEntries atomic.Int64
+	var starts, polls, exchanges, checks, unexpected, inferenceEntries, modelReads atomic.Int64
 	var authorized atomic.Bool
 	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -159,6 +162,23 @@ func run() error {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"accounts": map[string]any{"fixture": map[string]any{"account": map[string]any{"account_id": providerAccount, "is_default": true}, "entitlement": map[string]any{"expires_at": time.Now().Add(time.Hour).Format(time.RFC3339Nano)}}}})
+		case "/backend-api/codex/models":
+			if !cfg.CLI || r.Host != "chatgpt.com" || r.Method != "GET" ||
+				r.Header.Get("Authorization") != "Bearer "+access || r.Header.Get("ChatGPT-Account-Id") != providerAccount ||
+				len(r.URL.Query()) != 1 || r.URL.Query().Get("client_version") == "" {
+				unexpected.Add(1)
+				w.WriteHeader(400)
+				return
+			}
+			modelReads.Add(1)
+			models := []any{}
+			for _, model := range []string{service.GatewayCodexOAuthModel, joinedCLIRequestedModel} {
+				models = append(models, map[string]any{"slug": model, "visibility": "list",
+					"supported_endpoints": []string{"responses"}, "input_modalities": []string{"text"},
+					"supported_reasoning_levels": []string{"minimal", "low", "medium", "high", "xhigh", "max"},
+					"default_reasoning_level":    "medium"})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"models": models})
 		case "/backend-api/codex/responses":
 			inferenceEntries.Add(1)
 			body, readErr := io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
@@ -167,13 +187,13 @@ func run() error {
 				Stream bool   `json:"stream"`
 			}
 			if !cfg.CLI || r.Host != "chatgpt.com" || r.Method != "POST" || r.Header.Get("Authorization") != "Bearer "+access || r.Header.Get("ChatGPT-Account-Id") != providerAccount ||
-				readErr != nil || len(body) > 1<<20 || json.Unmarshal(body, &input) != nil || input.Model != service.GatewayCodexOAuthModel || !input.Stream {
+				readErr != nil || len(body) > 1<<20 || json.Unmarshal(body, &input) != nil || input.Model != joinedCLIRequestedModel || !input.Stream {
 				unexpected.Add(1)
 				w.WriteHeader(400)
 				return
 			}
 			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = io.WriteString(w, codexCLISSE())
+			_, _ = io.WriteString(w, codexCLISSE(input.Model))
 		default:
 			unexpected.Add(1)
 			w.WriteHeader(404)
@@ -361,7 +381,7 @@ func run() error {
 			return
 		}
 		if cfg.CLI && r.Method == "GET" && r.URL.Path == "/inference-stats" {
-			_ = json.NewEncoder(w).Encode(map[string]int64{"entries": inferenceEntries.Load()})
+			_ = json.NewEncoder(w).Encode(map[string]int64{"entries": inferenceEntries.Load(), "modelReads": modelReads.Load()})
 			return
 		}
 		if r.Method == "POST" && (r.URL.Path == "/limits/seed" || r.URL.Path == "/limits/tombstone") {
@@ -518,9 +538,9 @@ func run() error {
 	return nil
 }
 
-func codexCLISSE() string {
+func codexCLISSE(requestedModel string) string {
 	item := map[string]any{"id": "msg_codex_fixture", "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": "Controlled local fixture reply.", "annotations": []any{}}}}
-	response := map[string]any{"id": "resp_codex_fixture", "object": "response", "created_at": 1792782000, "status": "completed", "model": service.GatewayCodexOAuthModel, "output": []any{item}, "usage": map[string]any{"input_tokens": 7, "output_tokens": 3, "total_tokens": 10, "input_tokens_details": map[string]int{"cached_tokens": 0}, "output_tokens_details": map[string]int{"reasoning_tokens": 0}}}
+	response := map[string]any{"id": "resp_codex_fixture", "object": "response", "created_at": 1792782000, "status": "completed", "model": requestedModel, "output": []any{item}, "usage": map[string]any{"input_tokens": 7, "output_tokens": 3, "total_tokens": 10, "input_tokens_details": map[string]int{"cached_tokens": 0}, "output_tokens_details": map[string]int{"reasoning_tokens": 0}}}
 	events := []map[string]any{{"type": "response.created", "response": map[string]any{"id": "resp_codex_fixture", "status": "in_progress", "output": []any{}}}, {"type": "response.output_item.added", "output_index": 0, "item": map[string]any{"id": "msg_codex_fixture", "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}}}, {"type": "response.output_text.delta", "output_index": 0, "item_id": "msg_codex_fixture", "content_index": 0, "delta": "Controlled local fixture reply."}, {"type": "response.output_item.done", "output_index": 0, "item": item}, {"type": "response.completed", "response": response}}
 	var out strings.Builder
 	for _, event := range events {

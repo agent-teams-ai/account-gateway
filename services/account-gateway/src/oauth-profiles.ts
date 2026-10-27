@@ -1,19 +1,35 @@
+import { providerConnectionDefinition } from "./provider-connections.ts";
+
 // Closed source-owned OAuth tuples. Browser input selects only a configured ID;
 // it never supplies native routes, provider endpoints or credential policy.
-export const codexOAuthProfile = Object.freeze({ profile: 'openai-codex-oauth-responses-v1',
-  baseURL: 'https://chatgpt.com/backend-api/codex', model: 'gpt-5.6-sol' });
-export const claudeOAuthProfile = Object.freeze({ profile: 'anthropic-claude-oauth-messages-v1',
-  baseURL: 'https://api.anthropic.com', model: 'claude-sonnet-4-6' });
-export const codexOAuthCleanupModels: readonly string[] = Object.freeze([codexOAuthProfile.model, 'gpt-6.1-sol']);
+const codexTuple = providerConnectionDefinition("openai-codex-oauth-responses-v1")!;
+const claudeTuple = providerConnectionDefinition("anthropic-claude-oauth-messages-v1")!;
+const grokTuple = providerConnectionDefinition("grok-subscription-responses-oauth-v1")!;
+export const codexOAuthProfile = Object.freeze({
+  profile: codexTuple.profileId,
+  baseURL: codexTuple.baseURL,
+  model: codexTuple.models[0].modelId,
+});
+export const claudeOAuthProfile = Object.freeze({
+  profile: claudeTuple.profileId,
+  baseURL: claudeTuple.baseURL,
+  model: claudeTuple.models[0].modelId,
+});
+export const grokOAuthProfile = Object.freeze({
+  profile: grokTuple.profileId,
+  baseURL: grokTuple.baseURL,
+  model: grokTuple.models[0].modelId,
+});
+export const codexOAuthCleanupModels: readonly string[] = Object.freeze([
+  codexOAuthProfile.model,
+  "gpt-6.1-sol",
+]);
 const definitions = Object.freeze([
-  Object.freeze({ ...codexOAuthProfile, family: 'codex' as const, deviceCode: true,
-    nativePath: '/private/native/v1/oauth/connect', refreshPath: '/private/native/v1/oauth/refresh',
-    cleanupModels: codexOAuthCleanupModels }),
-  Object.freeze({ ...claudeOAuthProfile, family: 'claude' as const, deviceCode: false,
-    nativePath: '/private/native/v1/claude/oauth/connect', refreshPath: '/private/native/v1/claude/oauth/refresh',
-    cleanupModels: Object.freeze([claudeOAuthProfile.model]) as readonly string[] }),
+  Object.freeze({ ...codexOAuthProfile, ...codexTuple.oauth! }),
+  Object.freeze({ ...claudeOAuthProfile, ...claudeTuple.oauth! }),
+  Object.freeze({ ...grokOAuthProfile, ...grokTuple.oauth! }),
 ]);
 export type OAuthProfileDefinition = (typeof definitions)[number];
 export function oauthProfileDefinition(profile: string): OAuthProfileDefinition | undefined {
-  return definitions.find(value => value.profile === profile);
+  return definitions.find((value) => value.profile === profile);
 }

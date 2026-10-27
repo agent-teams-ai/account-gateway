@@ -13,12 +13,14 @@ export const publicTests = ['TestPublicIngressStreamsReplaysEvictsAndPreservesPr
   'TestPublicPreclaimQueueHasFreshActiveBudgetForAuthorityAndClaim',
   'TestPublicPreclaimQueueExpiryAndCallerCancellationNeverPost',
   'TestPublicPreclaimActiveTimeoutOrCancellationPreservesAttemptAmbiguity',
+  'TestPublicRequestedModelMetadataRemainsBoundToReservation',
   'TestPublicLateClaimReplyCannotOverwriteRecoveredOriginalProof',
   'TestPublicTerminalQueueWaitHasIndependentActiveBudgetAndFourOwners',
   'TestPublicTerminalQueueExpiryRetainsEvidenceWithoutCallbackOrReplay',
   'TestPublicTerminalDeliveryRefreshesOnlyWriteDeadlineAfterDurableSettlement',
   'TestClaudePrivateHTTPRejectsLossyPayloadBeforeAdmission'] as const;
-export const bootstrapTests = ['TestPublicListenerSaturatedRequestsReturnSafeAdmissionRefusal', 'TestPublicInferenceConfigurationIsExplicitAndBounded'] as const;
+export const bootstrapTests = ['TestPublicListenerSaturatedRequestsReturnSafeAdmissionRefusal', 'TestPublicInferenceConfigurationIsExplicitAndBounded',
+  'TestPublicHTTPServerClosesEachConnection'] as const;
 export const reservationTests = [
   'TestNEWTESTConcurrentReservationsOneHTTPCallback', 'TestNEWTESTSaturationBeforeHTTPCallbackAndChangedIntent',
   'TestNEWTESTHeldAndLostAdmitACKNeverRearms', 'TestNEWTESTCallbackFullBindingMutationsDeny',

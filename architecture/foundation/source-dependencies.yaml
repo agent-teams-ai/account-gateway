@@ -68,8 +68,8 @@ boundaries:
 
   - id: native-management
     dependencyMode: runtime
-    roots: [services/account-gateway/src/management.ts, services/account-gateway/src/oauth-profiles.ts]
-    entrypoints: [services/account-gateway/src/management.ts, services/account-gateway/src/oauth-profiles.ts]
+    roots: [services/account-gateway/src/management.ts, services/account-gateway/src/oauth-profiles.ts, services/account-gateway/src/provider-connections.ts]
+    entrypoints: [services/account-gateway/src/management.ts, services/account-gateway/src/oauth-profiles.ts, services/account-gateway/src/provider-connections.ts]
     allow: {boundaries: [kernel-domain], packages: [], builtins: [], runtimeReferences: []}
   - id: native-management-postgres
     dependencyMode: runtime
@@ -88,13 +88,13 @@ boundaries:
     allow: {boundaries: [kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:timers/promises', 'node:http', 'node:child_process', 'node:path'], runtimeReferences: []}
   - id: private-facade
     dependencyMode: runtime
-    roots: [services/account-gateway/src/facade.ts, services/account-gateway/src/facade-ingress.ts]
-    entrypoints: [services/account-gateway/src/facade.ts, services/account-gateway/src/facade-ingress.ts]
-    allow: {boundaries: [service-admission, kernel-domain, kernel-postgres, native-management, contracts, http, usage-journal], packages: ['@agent-teams/account-gateway'], builtins: ['node:http', 'node:crypto', 'node:events'], runtimeReferences: []}
+    roots: [services/account-gateway/src/facade.ts, services/account-gateway/src/facade-ingress.ts, services/account-gateway/src/limits-port.ts, services/account-gateway/src/models-port.ts, services/account-gateway/src/provider-connection-capabilities.ts]
+    entrypoints: [services/account-gateway/src/facade.ts, services/account-gateway/src/facade-ingress.ts, services/account-gateway/src/limits-port.ts, services/account-gateway/src/models-port.ts, services/account-gateway/src/provider-connection-capabilities.ts]
+    allow: {boundaries: [service-admission, kernel-domain, kernel-postgres, native-management, contracts, http, usage-journal], packages: ['@agent-teams/account-gateway'], builtins: ['node:http', 'node:crypto', 'node:events', 'node:util'], runtimeReferences: []}
   - id: private-facade-tests
     dependencyMode: runtime
-    roots: [services/account-gateway/test/facade-ingress.test.ts, services/account-gateway/test/execution-capability.test.ts, services/account-gateway/test/facade-postgres.test.ts, services/account-gateway/test/run-access-postgres.test.ts, services/account-gateway/test/oauth-enrollment-postgres.test.ts, services/account-gateway/test/native-retained-custody-joined.ts]
-    entrypoints: [services/account-gateway/test/facade-ingress.test.ts, services/account-gateway/test/execution-capability.test.ts, services/account-gateway/test/facade-postgres.test.ts, services/account-gateway/test/run-access-postgres.test.ts, services/account-gateway/test/oauth-enrollment-postgres.test.ts, services/account-gateway/test/native-retained-custody-joined.ts]
+    roots: [services/account-gateway/test/facade-ingress.test.ts, services/account-gateway/test/execution-capability.test.ts, services/account-gateway/test/facade-postgres.test.ts, services/account-gateway/test/run-access-postgres.test.ts, services/account-gateway/test/oauth-enrollment-postgres.test.ts, services/account-gateway/test/native-retained-custody-joined.ts, services/account-gateway/test/limits-port.test.ts]
+    entrypoints: [services/account-gateway/test/facade-ingress.test.ts, services/account-gateway/test/execution-capability.test.ts, services/account-gateway/test/facade-postgres.test.ts, services/account-gateway/test/run-access-postgres.test.ts, services/account-gateway/test/oauth-enrollment-postgres.test.ts, services/account-gateway/test/native-retained-custody-joined.ts, services/account-gateway/test/limits-port.test.ts]
     # Fault injection verifies that terminal success cannot outrun usage settlement.
     allow: {boundaries: [service-admission, private-facade, contracts, http, kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http, foreground-service-entry, native-transport-http, usage-journal], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:http', 'node:net', 'node:fs/promises', 'node:timers/promises', 'node:path', 'node:readline'], runtimeReferences: []}
   - id: native-transport-http
@@ -115,8 +115,8 @@ boundaries:
     allow: {boundaries: [native-transport-http, kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http, private-facade, contracts, http], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs', 'node:fs/promises', 'node:http', 'node:https', 'node:child_process', 'node:readline', 'node:path'], runtimeReferences: []}
   - id: native-device-joined-test
     dependencyMode: runtime
-    roots: [services/account-gateway/test/native-device-joined.ts, services/account-gateway/test/native-claude-joined.ts]
-    entrypoints: [services/account-gateway/test/native-device-joined.ts, services/account-gateway/test/native-claude-joined.ts]
+    roots: [services/account-gateway/test/native-device-joined.ts, services/account-gateway/test/native-claude-joined.ts, services/account-gateway/test/native-provider-joined.ts]
+    entrypoints: [services/account-gateway/test/native-device-joined.ts, services/account-gateway/test/native-claude-joined.ts, services/account-gateway/test/native-provider-joined.ts]
     allow: {boundaries: [kernel-postgres, native-management, native-management-postgres, private-facade, foreground-service-entry, native-transport-http, http, usage-journal], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:assert/strict', 'node:crypto', 'node:child_process', 'node:fs/promises', 'node:path', 'node:readline', 'node:timers/promises', 'node:http', 'node:util', 'node:url'], runtimeReferences: []}
   - id: foreground-service-entry
     dependencyMode: runtime
