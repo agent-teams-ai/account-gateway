@@ -261,7 +261,7 @@ async function migrateKernel(pool: Pool, database: string): Promise<void> {
   );
   const directory = new URL("../migrations/", import.meta.url);
   const files = (await readdir(directory)).filter((f) => /^\d{3}_.*\.sql$/.test(f)).toSorted();
-  assert.equal(files.length, 6, "use the selected complete numbered kernel migration set");
+  assert.equal(files.length, 8, "use the selected complete numbered kernel migration set");
   for (const file of files) {
     await pool.query(await readFile(new URL(file, directory), "utf8"));
   }
