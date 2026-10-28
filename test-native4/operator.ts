@@ -9,6 +9,7 @@ import { qualifyTap } from './tap.ts';
 import { qualifyGoPins } from './toolchain.ts';
 import { QualificationFailure, safeFailure, failureOutcome } from './failure.ts';
 import type { Failure } from './failure.ts';
+import type { BuildReceipt } from './build-contract.ts';
 const gatewayCommit = '5a1ad4a00a8941f1263d927ab23297bafa640661';
 const expectedAssemblyFixtureSHA256 = '6179f4af873275aabdefd3a270cc338b47abff14379134ab4f65d4c02de59047';
 const nativeCommit = '32cd6f50e76c29b578ee013900484c56013814bc';
@@ -47,7 +48,7 @@ async function cleanSource():Promise<void>{
   check(await run('git',['rev-parse','HEAD'],native)===nativeCommit,'native-pin');
   check(await run('git',['status','--porcelain','--untracked-files=all'],native)==='','native-dirty');
 }
-interface BuildReceipt {kind:'gateway-native4-build/v1';gatewayCommit:string;nativeCommit:string;goVersion:string;nodeVersion:string;goMod:string;goSum:string;gatewaySourceArchiveSHA256:string;goExecutableSHA256:string;nodeExecutableSHA256:string;sourceHashes:Record<string,string>;gatewayTrackedHashes:Record<string,string>;migrationHelperSHA256:string;binaries:Record<string,{path:string;sha256:string;buildInfo:string}>;}
+
 async function build():Promise<void>{
   await cleanSource();const go=option('--go');check(isAbsolute(go),'absolute-go');
   const goVersion=await run(go,['version'],native);check(goVersion==='go version go1.27.3 linux/amd64','go-pin');
@@ -99,7 +100,7 @@ async function runtime():Promise<void>{
     for(const dir of ['/opt/account-gateway-assembly','/opt/account-gateway-service-entry','/opt/account-gateway-service-usage']){
       step='install-'+dir.split('/').at(-1);fresh(dir,0o755);const t=dir.endsWith('usage')?dir:dir+'/tls';if(t!==dir)fresh(t,0o755);
       copyFileSync(cert,t+'/ca.pem');copyFileSync(cert,t+'/server.pem');copyFileSync(tls+'/server-key.pem',t+'/server-key.pem');chmodSync(t+'/server-key.pem',0o600);
-      const name=dir.endsWith('assembly')?'gateway-assembly-fixture':'account-gateway';copyFileSync(join(build,name),dir+'/'+name);chmodSync(dir+'/'+name,0o755);protectedPath(dir+'/'+name);
+      const name=dir.endsWith('assembly')?'gateway-assembly-fixture':'account-gateway';writeFileSync(dir+'/'+name,readFileSync(join(build,name)),{flag:'wx',mode:0o755});chmodSync(dir+'/'+name,0o755);check(hash(dir+'/'+name)===b.binaries[name]!.sha256,'installed-native-bytes');protectedPath(dir+'/'+name);
     }
     const ak='ag_kernel_test_assembly_'+suffix,an='native_bootstrap_assembly_'+suffix;await create(ak);await create(an);
     const tapEvidence:Record<string,{tests:number;sha256:string}>={};

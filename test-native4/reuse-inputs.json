@@ -1,0 +1,27 @@
+{
+  "kind": "gateway-native4-immutable-reuse-inputs/v1",
+  "repositoryId": 1402347800,
+  "producerRun": 40744593619,
+  "producerOverlay": "4c863deae6b63a04088a3a9fdabae658f721857b",
+  "gateway": "5a1ad4a00a8941f1263d927ab23297bafa640661",
+  "native": "32cd6f50e76c29b578ee013900484c56013814bc",
+  "goModSHA256": "adf5c15bf5fb54d5957279d0fcaf7281f49651a754c9deb89fed0f44a8799135",
+  "goSumSHA256": "b17668c6300c04027bd397650e60e28e514dc4abb9ab113e3cea634fdd708109",
+  "assemblySHA256": "6179f4af873275aabdefd3a270cc338b47abff14379134ab4f65d4c02de59047",
+  "lanes": {
+    "24.21.0": {
+      "id": 12840438815,
+      "name": "TEST-native4-build-24.21.0",
+      "size": 172922727,
+      "sha256": "9e4cec71bca7cb8a83677cb83b8f530961533c19794e16ea37fd22e3dc956de4",
+      "buildReceiptSHA256": "cba4b37e7f6ed2befa6d9c83ddbbf82aa2e34dd8c1a28d71bd5660acc467c8b1"
+    },
+    "26.11.1": {
+      "id": 12841815976,
+      "name": "TEST-native4-build-26.11.1",
+      "size": 172921946,
+      "sha256": "16394bc6d68c0e1144f95c50c4523298e7f482cd82520d8884acd5f197f01c08",
+      "buildReceiptSHA256": "ce78ba18b8ed679b68648c0dc3ec3fd339330bb698cf8d4fa72ff180a108d3e1"
+    }
+  }
+}
