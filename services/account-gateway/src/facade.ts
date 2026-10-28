@@ -42,7 +42,7 @@ import type { AccountManagement, ManagementStore, PhysicalCandidate } from "./ma
 import type { AccountLifecycleReadback } from "./management.ts";
 import { strictJSON, validateResponses } from "./facade-ingress.ts";
 import { readCachedAccountLimits } from "./limits-port.ts";
-import { readAccountModels, accountModelAdmission } from "./models-port.ts";
+import { configuredAccountModelSource, readAccountModels, accountModelAdmission } from "./models-port.ts";
 import type { AccountModelsSource } from "./models-port.ts";
 
 // Re-export the single wire authority to private composition/configuration.
@@ -1152,7 +1152,7 @@ export function createFacade(options: FacadeOptions): Server {
               selected.epoch !== input.expectedAuthorizationEpoch ||
               !["active", "suspended"].includes(selected.state)) throw new KernelError("denied");
             requireCurrent(grant);
-            const result = providerConnectionDefinition(input.profileId)?.oauth?.family === "codex"
+            const result = configuredAccountModelSource(input.profileId)
               ? await readAccountModels(options.accountModels, input,
                   () => accountLimitsTarget(kernel, store, context, input))
               : { status: "unsupported" as const };
@@ -1545,7 +1545,7 @@ export function createFacade(options: FacadeOptions): Server {
               models: providerConnectionDefinition(saved.admission.profileId)?.models,
               enforceCapabilities: false,
             };
-            if (options.accountModels && providerConnectionDefinition(saved.admission.profileId)?.oauth?.family === "codex") {
+            if (configuredAccountModelSource(saved.admission.profileId)) {
               requireCurrent(grant);
               const selected = await kernel.account(context, saved.admission.accountRef);
               const selector: c.AccountModelsRequest = {

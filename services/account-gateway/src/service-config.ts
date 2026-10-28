@@ -332,7 +332,8 @@ function captureProfile(value: unknown): ServiceProfile {
     definition &&
     profile.profile !== "openai-responses-apikey-v1" &&
     (definition.baseURL !== profile.baseURL ||
-      !definition.models.some((model) => model.modelId === profile.model))
+      (definition.provider.identity !== "openrouter" &&
+        !definition.models.some((model) => model.modelId === profile.model)))
   )
     deny();
   return freeze(profile);

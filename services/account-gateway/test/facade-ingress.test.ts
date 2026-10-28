@@ -76,6 +76,9 @@ test("capability projection omits new profiles without configuration and does no
   const glm = providerConnectionDefinition("glm-coding-global-responses-apikey-v1");
   assert.equal(glm?.models[0].modelId, "glm-5.3-flash");
   assert.equal(glm?.models[0].reasoning, null);
+  const openrouter = projectProviderConnections([{ profileId: "openrouter-openai-responses-apikey-v1", protocol: "openai-responses", modelIds: ["future-vendor/birth-anchor"] }]);
+  assert.deepEqual(providerConnectionDefinition("openrouter-openai-responses-apikey-v1")?.models, []);
+  assert.deepEqual(openrouter.capabilities[0]?.models, [{ modelId: "future-vendor/birth-anchor", reasoning: null, fast: null, tools: { allowed: ["none"], default: "none" } }]);
 });
 test("Grok manual callback grammar is profile-owned and cannot select another provider", () => {
   const state = "a".repeat(64);
@@ -323,6 +326,7 @@ async function sourceHTTP(
   oauth: boolean | "claude" | "grok",
   outputEnvelope = false,
   limitsRead?: { contract: "v1" | "v2"; enter(): Promise<void> },
+  omitModelSource = false,
 ) {
   const oauthProfile =
     oauth === "grok"
@@ -698,7 +702,8 @@ async function sourceHTTP(
       body: JSON.stringify(body),
       redirect: "manual",
     });
-  let modelResult: lifecycleWire.AccountModels = { status: "unavailable" };
+  let modelResult: unknown = { status: "unavailable" };
+  let modelHTTPStatus = 200;
   let modelRead: (() => Promise<void>) | undefined;
   const peer = createServer((req, res) => {
     void (async () => {
@@ -716,7 +721,7 @@ async function sourceHTTP(
       if (req.method === "POST" && path === "/private/native/v1/account-models/read") {
         assert.equal(req.headers.authorization, "Bearer " + consumer.managementCredential);
         await modelRead?.();
-        reply(modelResult);
+        reply(modelResult, modelHTTPStatus);
         return;
       }
       if (req.method === "GET" && path === "/private/native/v1/account-limits/capabilities") {
@@ -1058,6 +1063,7 @@ async function sourceHTTP(
       enrollment,
       transport,
       ...composeServiceCachedLimits(control),
+      ...(omitModelSource ? { accountModels: undefined } : {}),
       intentHmacKey: randomBytes(32),
       ingressBytes: outputEnvelope ? 1_048_576 : 4096,
     });
@@ -1113,7 +1119,8 @@ async function sourceHTTP(
         descriptorReply = value;
         descriptorMode = mode;
       },
-      modelResult: (value: lifecycleWire.AccountModels, enter?: () => Promise<void>) => {
+      modelResult: (value: unknown, enter?: () => Promise<void>, httpStatus = 200) => {
+        modelHTTPStatus = httpStatus;
         modelResult = value;
         modelRead = enter;
       },
@@ -3203,10 +3210,10 @@ test("source HTTP: Grok displayed code uses saved profile and never projects ori
 });
 
 
-function modelAccount(f: Awaited<ReturnType<typeof sourceHTTP>>) {
+function modelAccount(f: Awaited<ReturnType<typeof sourceHTTP>>, source: "codex" | "openrouter" = "codex") {
   const accountRef = randomUUID(), generation = randomUUID();
-  const profile = { ...codexOAuthProfile, qualificationRef: "source-codex", limits: f.profile.limits,
-    providerTokenUpperBound: 1000 };
+  const profile = source === "codex" ? { ...codexOAuthProfile, qualificationRef: "source-codex", limits: f.profile.limits,
+    providerTokenUpperBound: 1000 } : f.cfg.secondProfile;
   const account: AccountStatus = { accountRef, ownerRef: "owner-one", profile: profile.profile,
     displayName: "Model catalogue fixture", state: "active", revision: 1, epoch: 1 };
   f.accounts.set(f.scopeKey(f.context, accountRef), account);
@@ -3221,14 +3228,17 @@ function modelAccount(f: Awaited<ReturnType<typeof sourceHTTP>>) {
     expiresAt: new Date(Date.now() + 60_000).toISOString(), models: [{ modelId: "gpt-unseen-future",
       reasoning: { allowed: ["high", "ultra"], default: "high" },
       fast: { allowed: ["balanced"], default: "balanced" }, tools: { allowed: ["function"], default: "function" } }] };
-  return { account, profile, generation, input, snapshot };
+  const discovered: lifecycleWire.AccountModels = source === "codex" ? snapshot : { ...snapshot, source: "openrouter",
+    models: snapshot.models.map((model) => ({ ...model, modelId: "future-vendor/review:model", reasoning: null, fast: null })) };
+  return { account, profile, generation, input, snapshot: discovered };
 }
 
 // Detects a broken SDK route/schema, leaked static membership, or lost authority fences after native I/O.
-test("account model SDK read uses scoped native catalogue and fences owner, epoch, generation and bearer changes", async () => {
+for (const source of ["codex", "openrouter"] as const)
+test(`${source} account model SDK read uses scoped native catalogue and fences owner, epoch, generation and bearer changes`, async () => {
   const f = await sourceHTTP(true);
   try {
-    const { account, input, snapshot, generation } = modelAccount(f);
+    const { account, input, snapshot, generation } = modelAccount(f, source);
     const sdk = createManagementClient({ role: "management", origin: f.facadeOrigin, token: "source-public-management" });
     f.modelResult(snapshot);
     assert.deepEqual(await sdk.readAccountModels({ ...input, forceRefresh: true }), snapshot);
@@ -3255,10 +3265,12 @@ test("account model SDK read uses scoped native catalogue and fences owner, epoc
     }
     f.modelResult({ ...snapshot, physicalGeneration: randomUUID() });
     await assert.rejects(sdk.readAccountModels(input));
+    f.modelResult({ ...snapshot, source: source === "codex" ? "openrouter" : "codex", models: [] });
+    await assert.rejects(sdk.readAccountModels(input));
     f.modelResult({ ...snapshot, models: [] });
     assert.deepEqual(await sdk.readAccountModels(input), { ...snapshot, models: [] });
     f.modelResult({ ...snapshot, fetchedAt: new Date(Date.now() - 5000).toISOString(), expiresAt: new Date(Date.now() - 1).toISOString() });
-    assert.deepEqual(await sdk.readAccountModels(input), { status: "unavailable" });
+    assert.deepEqual(await sdk.readAccountModels(input), { status: "unknown" });
   } finally { await f.close(); }
 });
 
@@ -3267,6 +3279,7 @@ test("dynamic Codex selection reaches native transport; unknown, unsupported eff
   const f = await sourceHTTP(true);
   try {
     const { account, profile, generation, snapshot } = modelAccount(f);
+    assert.ok(snapshot.source === "codex");
     const executionRef = randomUUID();
     const saved: SavedExecution = { generation, state: "open", dispatchAllowed: true,
       admission: { executionRef, issuerEpoch: await f.kernel.issuer(f.context), invocationRef: "models-test", attemptRef: "attempt",
@@ -3326,5 +3339,80 @@ test("dynamic Codex selection reaches native transport; unknown, unsupported eff
     const anchor = await submit({ model: profile.model, reasoning: undefined });
     assert.equal(anchor.status, 200);
     await anchor.text();
+  } finally { await f.close(); }
+});
+
+// Both public and native saved-lease admission consume the same discovered set.
+test("dynamic OpenRouter membership reaches transport without rewriting the immutable enrollment anchor", async () => {
+  const f = await sourceHTTP(true);
+  try {
+    const { account, profile, generation, snapshot } = modelAccount(f, "openrouter");
+    assert.ok(snapshot.source === "openrouter");
+    const executionRef = randomUUID();
+    const saved: SavedExecution = { generation, state: "open", dispatchAllowed: true,
+      admission: { executionRef, issuerEpoch: await f.kernel.issuer(f.context), invocationRef: "openrouter-models", attemptRef: "attempt",
+        accountRef: account.accountRef, authorizationEpoch: 1, subjectRef: "subject", policyRevision: 1,
+        bindingRevision: 1, profileId: profile.profile, limits: profile.limits,
+        expiresAt: new Date(Date.now() + 20_000).toISOString() } };
+    f.executions.set(f.scopeKey(f.context, executionRef), saved);
+    f.control.bearers.replace([...f.cfg.bearers, { role: "execution", consumerId: f.context.consumerId,
+      token: "source-openrouter-model-execution", saved }]);
+    const { executionRef: _, issuerEpoch: __, ...admission } = saved.admission;
+    const submit = (model = "future-vendor/review:model", patch: Record<string, unknown> = {}) =>
+      f.publicCall("/v1/executions/" + executionRef + "/requests", { model, stream: true, store: false,
+        tools: [{ type: "function", name: "fixture", parameters: {} }], ...patch }, "source-openrouter-model-execution",
+        { "x-gateway-request-id": randomUUID(), "x-gateway-admission": JSON.stringify(admission) });
+    f.modelResult(snapshot);
+    assert.equal((await submit("outside-the-live-set")).status, 400);
+    assert.equal((await submit(undefined, { reasoning: { effort: "high" } })).status, 400);
+    assert.equal(f.forwarded.length, 0);
+    const accepted = await submit(); assert.equal(accepted.status, 200); await accepted.text();
+    assert.equal((f.forwarded[0].body as Record<string, unknown>).model, "future-vendor/review:model");
+    assert.equal(f.mappings.get(f.scopeKey(f.context, generation))!.descriptor.model, profile.model);
+    assert.ok(f.seen.filter((r) => r.path === "POST /private/native/v1/account-models/read").length >= 2);
+    f.modelResult({ ...snapshot, models: [] });
+    assert.equal((await submit(profile.model)).status, 400);
+    for (const status of ["unknown", "unsupported"] as const) {
+      f.modelResult({ status }); assert.equal((await submit(profile.model)).status, 400);
+    }
+    // Failed observations never acquire the explicit unavailable fallback authority.
+    for (const observed of [
+      { ...snapshot, models: [{ modelId: "invalid model" }] },
+      { ...snapshot, fetchedAt: new Date(Date.now() - 5000).toISOString(), expiresAt: new Date(Date.now() - 1).toISOString() },
+      { ...snapshot, fetchedAt: new Date(Date.now() + 50_000).toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() },
+      undefined,
+    ]) {
+      f.modelResult(observed);
+      assert.equal((await submit(profile.model)).status, 400);
+    }
+    f.modelResult({ status: "unavailable" }, undefined, 503);
+    assert.equal((await submit(profile.model)).status, 400);
+    f.modelResult({ status: "unavailable" });
+    assert.equal((await submit()).status, 400);
+    const anchor = await submit(profile.model); assert.equal(anchor.status, 200); await anchor.text();
+  } finally { await f.close(); }
+});
+
+// Missing composition is not an observed outage and cannot grant fallback membership.
+test("qualified OpenRouter execution with a missing discovery source denies its anchor before transport", async () => {
+  const f = await sourceHTTP(true, false, undefined, true);
+  try {
+    const { account, profile, generation, input } = modelAccount(f, "openrouter");
+    const sdk = createManagementClient({ role: "management", origin: f.facadeOrigin, token: "source-public-management" });
+    assert.deepEqual(await sdk.readAccountModels(input), { status: "unknown" });
+    const executionRef = randomUUID();
+    const saved: SavedExecution = { generation, state: "open", dispatchAllowed: true,
+      admission: { executionRef, issuerEpoch: await f.kernel.issuer(f.context), invocationRef: "missing-source", attemptRef: "attempt",
+        accountRef: account.accountRef, authorizationEpoch: 1, subjectRef: "subject", policyRevision: 1, bindingRevision: 1,
+        profileId: profile.profile, limits: profile.limits, expiresAt: new Date(Date.now() + 20_000).toISOString() } };
+    f.executions.set(f.scopeKey(f.context, executionRef), saved);
+    f.control.bearers.replace([...f.cfg.bearers, { role: "execution", consumerId: f.context.consumerId, token: "missing-model-source", saved }]);
+    const { executionRef: _, issuerEpoch: __, ...admission } = saved.admission;
+    const result = await f.publicCall("/v1/executions/" + executionRef + "/requests",
+      { model: profile.model, stream: true, store: false }, "missing-model-source",
+      { "x-gateway-request-id": randomUUID(), "x-gateway-admission": JSON.stringify(admission) });
+    assert.equal(result.status, 400);
+    assert.equal(f.forwarded.length, 0);
+    assert.equal(f.seen.some((row) => row.path === "POST /private/native/v1/transports"), false);
   } finally { await f.close(); }
 });

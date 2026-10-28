@@ -7,15 +7,15 @@ export function providerConnectionCapability(
   modelIds?: readonly string[],
 ): c.ProviderConnectionCapability {
   const selected =
-    modelIds && definition.profileId !== "openai-responses-apikey-v1"
+    modelIds && definition.profileId !== "openai-responses-apikey-v1" && definition.provider.identity !== "openrouter"
       ? definition.models.filter((model) => modelIds.includes(model.modelId))
       : (modelIds?.map((modelId) => ({
           modelId,
           reasoning: null,
           fast: null,
           tools: {
-            allowed: ["function", "function_and_custom"] as const,
-            default: "function" as const,
+            allowed: definition.provider.identity === "openrouter" ? ["none"] as const : ["function", "function_and_custom"] as const,
+            default: definition.provider.identity === "openrouter" ? "none" as const : "function" as const,
           },
         })) ?? definition.models);
   if (!selected.length || selected.length !== (modelIds?.length ?? definition.models.length))

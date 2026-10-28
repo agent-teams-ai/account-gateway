@@ -45,3 +45,50 @@ pnpm foundation, pnpm check:topology and pnpm docs:check. Pack with pnpm --dir
 packages/account-gateway pack; run scripts/qualify-consumers.sh with the absolute
 archive and a new directory outside the source workspace. See docs/HANDOFF.md
 for current gate results and root documentation adoption prerequisites.
+
+## Account model discovery
+
+Management and consumer-control clients expose `readAccountModels`; execution
+clients do not. The read accepts the current owner, account, qualified profile
+and expected authorization epoch, with optional `forceRefresh`. It does not
+submit a provider request or transfer a provider credential.
+
+`accountModelDiscoveryProfile(profileId)` identifies the qualified discovery
+profiles and their source, protocol and auth kind. A lookup can trigger a strict
+read; use `accountModelDiscoverySource({profileId, protocol, authKind})` against
+trusted current profile metadata before treating a snapshot as model authority.
+The qualified sources are Codex OAuth over Responses and OpenRouter API keys
+over Responses. Vendor labels and arbitrary profile IDs cannot enable discovery.
+
+An authoritative `snapshot` carries its source, physical generation, principal
+version, fetch time, expiry and the complete model/capability set. Codex retains
+its 128-model limit and existing balanced/function capability contract.
+OpenRouter admits at most 2,048 models, has no fast-mode claim, and exposes only
+normalized none/function tool capabilities. Reasoning controls must be supported
+by the producer's actual discovery contract; a parameter name alone does not
+establish allowed effort values. Empty snapshots remain authoritative empty sets.
+Unknown, unsupported and unavailable results never invent dynamic membership.
+
+For complete catalogs, construct the model-reading client with
+`responseBytes: 2 * 1024 * 1024`. The explicit ceiling is 2 MiB; the default stays
+64 KiB and is never silently bypassed. Other SDK buffer defaults and ceilings
+are unchanged. Native model reads use the same 2 MiB response ceiling.
+
+The Gateway rechecks account identity and authorization around discovery,
+verifies source/profile consistency, and rejects future-dated or expired
+snapshots. Both facade request admission and the saved-lease native authority
+reuse the same model-discovery port. A request selects a discovered model without
+rewriting the enrollment descriptor or its immutable birth model. OpenRouter
+configuration may capture any syntactically safe anchor under its fixed provider
+origin; Native must verify live catalog membership before creation/activation.
+A source outage retains only the existing immutable-anchor fallback, never the
+last expired catalog as authority for other models. Unknown, unsupported and
+empty catalogs authorize no fallback models. Malformed or missing observations,
+failed native HTTP reads, and expired or future-dated snapshots are unknown;
+only an explicitly observed unavailable result permits the anchor fallback.
+
+Upgrade the SDK, Gateway service and qualified Native producer together before
+enabling OpenRouter discovery in a consumer. An older producer returning
+unsupported cannot become dynamic merely because a newer client understands the
+source. Consumer rollout switches and display-only public pricing remain owned
+by the consumer, independently of this admission contract.

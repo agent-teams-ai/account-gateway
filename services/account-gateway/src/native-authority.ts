@@ -19,7 +19,7 @@ import type { FacadeBearers, NativeCallback, NativeTransport } from "./facade.ts
 import type { ManagementStore, CandidateJournal } from "./management.ts";
 import { accountLimitsTarget, exactCandidate, physicalCandidate } from "./management.ts";
 import { validateResponses } from "./facade-ingress.ts";
-import { readAccountModels, accountModelAdmission } from "./models-port.ts";
+import { configuredAccountModelSource, readAccountModels, accountModelAdmission } from "./models-port.ts";
 import type { AccountModelsSource } from "./models-port.ts";
 import {
   admission,
@@ -276,7 +276,7 @@ export class NativeAuthority {
       return denied();
     instant(d.created_at);
     let models: ReturnType<typeof accountModelAdmission> = { modelIds: [profile.model], models: undefined, enforceCapabilities: false };
-    if (this.#accountModels && providerConnectionDefinition(profile.profile)?.oauth?.family === "codex") {
+    if (configuredAccountModelSource(profile.profile)) {
       const selector = {
         ownerRef: mapping.ownerRef,
         accountRef: fresh.admission.accountRef,
