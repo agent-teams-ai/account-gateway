@@ -3244,6 +3244,45 @@ function modelAccount(f: Awaited<ReturnType<typeof sourceHTTP>>, source: "codex"
   return { account, profile, generation, input, snapshot: discovered };
 }
 
+test("OpenRouter model discovery uses native owner authority without granting a quota contract", async () => {
+  const f = await sourceHTTP(true);
+  try {
+    const { account, input, snapshot } = modelAccount(f, "openrouter");
+    const sdk = createManagementClient({ role: "management", origin: f.facadeOrigin,
+      token: "source-public-management", responseBytes: 2 * 1024 * 1024 });
+    const callbackStatuses: number[] = [];
+    f.modelResult(snapshot, async () => {
+      const grant = await f.callback("account-limits-authority", { ...f.context, ...input });
+      callbackStatuses.push(grant.status);
+      await grant.arrayBuffer();
+      f.modelResult(grant.status === 200 ? snapshot : { status: "unavailable" });
+    });
+    const observed = await sdk.readAccountModels(input);
+    assert.deepEqual(callbackStatuses, [200]);
+    assert.deepEqual(observed, snapshot);
+    for (const version of ["v1", "v2"]) {
+      const result = await f.publicCall(`/${version}/account-limits/read`, input);
+      assert.equal(result.status, 200);
+      assert.deepEqual(await result.json(), { status: "unsupported" });
+    }
+    assert.equal(f.seen.some((entry) => entry.path.endsWith("/account-limits/read")), false);
+    for (const patch of [{ consumerId: "foreign" }, { ownerRef: "foreign" },
+      { expectedAuthorizationEpoch: 2 }, { profileId: "arbitrary-profile" }]) {
+      const denied = await f.callback("account-limits-authority", { ...f.context, ...input, ...patch });
+      assert.equal(denied.status, 403);
+      await denied.arrayBuffer();
+    }
+    account.state = "suspended";
+    const suspended = await f.callback("account-limits-authority", { ...f.context, ...input });
+    assert.equal(suspended.status, 200);
+    await suspended.arrayBuffer();
+    f.control.bearers.replace([]);
+    const revoked = await f.callback("account-limits-authority", { ...f.context, ...input });
+    assert.equal(revoked.status, 403);
+    await revoked.arrayBuffer();
+  } finally { await f.close(); }
+});
+
 // Detects a broken SDK route/schema, leaked static membership, or lost authority fences after native I/O.
 for (const source of ["codex", "openrouter"] as const)
 test(`${source} account model SDK read uses scoped native catalogue and fences owner, epoch, generation and bearer changes`, async () => {

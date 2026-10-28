@@ -320,7 +320,7 @@ export class NativeAuthority {
       return undefined;
     return profile;
   }
-  // Cached reads have separate consumer authority and permit suspended custody.
+  // Cached quota and model reads share owner authority and permit suspended custody.
   async #accountLimitsOwner(ctx: TrustedContext, value: unknown): Promise<unknown> {
     const r = object(value, [
       "consumerId",
@@ -334,7 +334,8 @@ export class NativeAuthority {
       !this.#accountLimitsOwners ||
       typeof r.profileId !== "string" ||
       !providerConnectionDefinition(r.profileId) ||
-      providerConnectionDefinition(r.profileId)?.limitsContract === "none" ||
+      (providerConnectionDefinition(r.profileId)?.limitsContract === "none" &&
+        !configuredAccountModelSource(r.profileId)) ||
       !this.#accountLimitsOwners.bearers.authorizesAccountLimits(
         ctx,
         r.ownerRef as string,
