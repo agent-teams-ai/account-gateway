@@ -81,14 +81,28 @@ jobs:
           import {createRequire} from 'node:module'; import{dirname,join}from'node:path';import{symlinkSync,writeFileSync,realpathSync,readFileSync}from'node:fs';
           const [g,p]=process.argv.slice(2),r=createRequire(join(g,'package.json')),f=r.resolve('@agent-teams/engineering-foundation/package.json'),n=realpathSync(join(dirname(f),'../../node-or-bun'));if(JSON.parse(readFileSync(join(n,'package.json'),'utf8')).version!=='0.2.2')throw Error('nob-version');
           symlinkSync(n,join(p,'node_modules/node-or-bun'));
-          writeFileSync(join(p,'tsconfig.cloud.json'),JSON.stringify({compilerOptions:{target:'ES2023',module:'NodeNext',moduleResolution:'NodeNext',strict:true,noEmit:true,allowImportingTsExtensions:true,erasableSyntaxOnly:true,types:['node'],typeRoots:[join(g,'node_modules/@types')],skipLibCheck:true},files:['operator.ts','tap.ts','tap.test.ts','toolchain.ts','toolchain.test.ts']}));
+          writeFileSync(join(p,'tsconfig.cloud.json'),JSON.stringify({compilerOptions:{target:'ES2023',module:'NodeNext',moduleResolution:'NodeNext',strict:true,noEmit:true,allowImportingTsExtensions:true,erasableSyntaxOnly:true,types:['node'],typeRoots:[join(g,'node_modules/@types')],skipLibCheck:true},files:['operator.ts','tap.ts','tap.test.ts','toolchain.ts','toolchain.test.ts','failure.ts','failure.test.ts','stage-receipts.ts','stage-receipts.test.ts']}));
           NODE
           node "$GITHUB_WORKSPACE/gateway/node_modules/typescript/bin/tsc" -p "$packet/tsconfig.cloud.json"
-          node --test "$packet/tap.test.ts" "$packet/toolchain.test.ts"
+          node --test "$packet/tap.test.ts" "$packet/toolchain.test.ts" "$packet/failure.test.ts" "$packet/stage-receipts.test.ts"
       - name: Build exact native main and separately hashed TEST fixtures
         run: |
           node "$GITHUB_WORKSPACE/overlay/test-native4/operator.ts" --phase build --gateway "$GITHUB_WORKSPACE/gateway" --native "$NATIVE4_ROOT/native" --output "$NATIVE4_ROOT/build" --go "$NATIVE4_GO"
           docker build --pull --build-arg "PG_IMAGE=$PG_IMAGE" -t "test-native4:${{ matrix.node }}" "$GITHUB_WORKSPACE/overlay/test-native4"
+      - name: Retain exact completed native build before runtime
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: TEST-native4-build-${{ matrix.node }}
+          path: |
+            ${{ env.NATIVE4_ROOT }}/build/build.json
+            ${{ env.NATIVE4_ROOT }}/build/gateway-source.tar
+            ${{ env.NATIVE4_ROOT }}/build/account-gateway
+            ${{ env.NATIVE4_ROOT }}/build/gateway-assembly-fixture
+            ${{ env.NATIVE4_ROOT }}/build/native-provider-joined
+            ${{ env.NATIVE4_ROOT }}/build/native-migrate
+          if-no-files-found: warn
+          retention-days: 14
       - name: Entire four suites with no external network
         run: |
           docker run --rm --network none --user 0:0 --cpus 2 --memory 4g --pids-limit 256 \
@@ -103,12 +117,15 @@ jobs:
             "$GITHUB_WORKSPACE/overlay/test-native4/operator.ts" --phase runtime \
             --gateway "$GITHUB_WORKSPACE/gateway" --native "$NATIVE4_ROOT/native" \
             --build "$NATIVE4_ROOT/build" --output "$NATIVE4_ROOT/container-output/result" --go "$NATIVE4_GO"
+      - name: Stage only sanitized root receipts for runner read access
+        if: ${{ always() }}
+        run: |
+          sudo -n "$NATIVE4_NODE" "$GITHUB_WORKSPACE/overlay/test-native4/stage-receipts.ts" \
+            "$NATIVE4_ROOT/container-output/result" "$NATIVE4_ROOT/receipt-staging" "$(id -u)" "$(id -g)"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: ${{ always() }}
         with:
-          name: TEST-native4-${{ matrix.node }}
-          path: |
-            ${{ env.NATIVE4_ROOT }}/build/build.json
-            ${{ env.NATIVE4_ROOT }}/container-output/result/runtime.json
+          name: TEST-native4-runtime-${{ matrix.node }}
+          path: ${{ env.NATIVE4_ROOT }}/receipt-staging
           if-no-files-found: warn
           retention-days: 14

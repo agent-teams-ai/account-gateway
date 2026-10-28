@@ -1,5 +1,5 @@
 // Finite Gateway Host TEST policy. Never import this operator in product code.
-import { createProcessExecutor, isProcessRuntimeError } from 'node-or-bun';
+import { createProcessExecutor } from 'node-or-bun';
 import { createNodeProcessAdapter } from 'node-or-bun/node';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, chmodSync, readdirSync, lstatSync } from 'node:fs';
@@ -7,6 +7,8 @@ import { join, resolve, dirname, isAbsolute } from 'node:path';
 import { createServer } from 'node:net';
 import { qualifyTap } from './tap.ts';
 import { qualifyGoPins } from './toolchain.ts';
+import { QualificationFailure, safeFailure, failureOutcome } from './failure.ts';
+import type { Failure } from './failure.ts';
 const gatewayCommit = '5a1ad4a00a8941f1263d927ab23297bafa640661';
 const expectedAssemblyFixtureSHA256 = '6179f4af873275aabdefd3a270cc338b47abff14379134ab4f65d4c02de59047';
 const nativeCommit = '32cd6f50e76c29b578ee013900484c56013814bc';
@@ -24,17 +26,17 @@ const phase=option('--phase'),gateway=resolve(option('--gateway')),native=resolv
 const env: Record<string,string> = {};
 for (const k of ['PATH','HOME','TMPDIR','GOPATH','GOCACHE','GOMODCACHE','SSL_CERT_FILE','SSL_CERT_DIR','NODE_EXTRA_CA_CERTS']) { const v=process.env[k];if(v)env[k]=v; }
 Object.assign(env,{GOTOOLCHAIN:'local',GOENV:'off',GOWORK:'off',CGO_ENABLED:'0',NODE_DISABLE_COMPILE_CACHE:'1'});
-let step='guard';let lastFailure:unknown;
+let step='guard';let lastFailure:unknown;let primaryFailure:Failure|undefined;let cleanupFailure:Failure|undefined;
 async function run(command: string,args: readonly string[],cwd=gateway,extra: Record<string,string>={},timeoutMs=600_000): Promise<string> {
   step=command.split('/').at(-1) ?? 'command';
   const r=await exec.run({command,args,cwd,environment:{...env,...extra},timeoutMs,strictUtf8:true});
-  if(r.exitCode!==0||r.signal!==null){const safePhase=/\"phase\":\s*\"([a-z][a-z0-9-]{0,80})\"/.exec(r.stdout)?.[1];const fixturePhase=/service fixture: ([a-z][a-z ]{0,80})/.exec(r.stdout)?.[1];lastFailure={exitCode:r.exitCode,signal:r.signal,stdoutSha256:createHash('sha256').update(r.stdout).digest('hex'),stderrSha256:createHash('sha256').update(r.stderr).digest('hex'),safePhase,fixturePhase};throw new Error('command-failed-'+step);}
+  if(r.exitCode!==0||r.signal!==null){const safePhase=/\"phase\":\s*\"([a-z][a-z0-9-]{0,80})\"/.exec(r.stdout)?.[1];const fixturePhase=/service fixture: ([a-z][a-z ]{0,80})/.exec(r.stdout)?.[1];lastFailure={exitCode:r.exitCode,signal:r.signal,stdoutSha256:createHash('sha256').update(r.stdout).digest('hex'),stderrSha256:createHash('sha256').update(r.stderr).digest('hex'),safePhase,fixturePhase};throw new QualificationFailure({code:'command-failed-'+step,step,process:lastFailure as NonNullable<Failure['process']>});}
   return r.stdout.trim(); // Never export raw stderr, provider bodies or configurations.
 }
 function json(path:string,value:unknown):void { writeFileSync(path,JSON.stringify(value,null,2)+'\n',{flag:'wx',mode:0o600}); }
 function fresh(path:string,mode=0o700):void {check(!existsSync(path),'path-exists');mkdirSync(path,{recursive:true,mode});}
 function protectedPath(path:string):void {
-  for(let p=path;;p=dirname(p)){const s=lstatSync(p);check(s.uid===0&&!s.isSymbolicLink()&&(s.mode&0o022)===0,'unprotected-path');if(p==='/')break;}
+  for(let p=path;;p=dirname(p)){const s=lstatSync(p);if(!(s.uid===0&&!s.isSymbolicLink()&&(s.mode&0o022)===0))throw new QualificationFailure({code:'unprotected-path',step,guard:{path:p,uid:s.uid,gid:s.gid,mode:s.mode.toString(8),symlink:s.isSymbolicLink()}});if(p==='/')break;}
 }
 async function origin():Promise<string>{const s=createServer();await new Promise<void>((ok,no)=>{s.once('error',no);s.listen(0,'127.0.0.1',ok);});const a=s.address();check(a&&typeof a==='object','port');await new Promise<void>((ok,no)=>s.close(e=>e?no(e):ok()));return 'http://127.0.0.1:'+a.port;}
 const files = ['services/account-gateway/test/fixtures/native-assembly/main.go','services/account-gateway/test/fixtures/native-provider-joined/main.go','services/account-gateway/test/native-runtime-assembly.test.ts','services/account-gateway/test/service-runtime.test.ts','services/account-gateway/test/service-usage-runtime.test.ts','services/account-gateway/test/native-provider-joined.ts','services/account-gateway/src/service.ts'];
@@ -84,17 +86,18 @@ async function runtime():Promise<void>{
   // Fresh image filesystem, no reused cluster, no network interface except loopback.
   const pgdata='/var/lib/postgresql/native4';fresh(pgdata);await run('chown',['postgres:postgres',pgdata]);
   await run('gosu',['postgres',join(pg,'initdb'),'-D',pgdata,'-A','trust','--no-locale']);
-  await run('gosu',['postgres',join(pg,'pg_ctl'),'-D',pgdata,'-l',pgdata+'/server.log','-o',"-h 127.0.0.1 -p 5432 -k /tmp",'-w','start']);
-  let stopped=false;let runtimeReceipt:unknown;
+  let postgresStartAttempted=false;let runtimeReceipt:unknown;
   const sql=async(db:string,text:string):Promise<string>=>run(join(pg,'psql'),['-h','127.0.0.1','-p','5432','-U','postgres','-d',db,'-X','-A','-t','-v','ON_ERROR_STOP=1','-c',text]);
   const create=async(name:string):Promise<void>=>{check(/^[a-z0-9_]+$/.test(name),'db-name');await sql('postgres','CREATE DATABASE '+name);};
   const dsn=(db:string):string=>'postgres://postgres@127.0.0.1:5432/'+db+'?sslmode=disable';
-  const id=randomUUID().replaceAll('-',''),suffix=id.slice(0,16),cert='/usr/local/share/ca-certificates/native4.crt',tls='/root/native4-tls';fresh(tls);
+  const id=randomUUID().replaceAll('-',''),suffix=id.slice(0,16),cert='/usr/local/share/ca-certificates/native4.crt',tls='/root/native4-tls';
   try {
+    postgresStartAttempted=true;await run('gosu',['postgres',join(pg,'pg_ctl'),'-D',pgdata,'-l',pgdata+'/server.log','-o',"-h 127.0.0.1 -p 5432 -k /tmp",'-w','start']);
+    fresh(tls);
     check((await sql('postgres',"SHOW server_version")).startsWith('17.10'),'server-version');
     await run('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=127.0.0.1','-addext','subjectAltName=IP:127.0.0.1','-keyout',tls+'/server-key.pem','-out',cert]);chmodSync(tls+'/server-key.pem',0o600);await run('update-ca-certificates',[]);
     for(const dir of ['/opt/account-gateway-assembly','/opt/account-gateway-service-entry','/opt/account-gateway-service-usage']){
-      fresh(dir,0o755);const t=dir.endsWith('usage')?dir:dir+'/tls';if(t!==dir)fresh(t,0o755);
+      step='install-'+dir.split('/').at(-1);fresh(dir,0o755);const t=dir.endsWith('usage')?dir:dir+'/tls';if(t!==dir)fresh(t,0o755);
       copyFileSync(cert,t+'/ca.pem');copyFileSync(cert,t+'/server.pem');copyFileSync(tls+'/server-key.pem',t+'/server-key.pem');chmodSync(t+'/server-key.pem',0o600);
       const name=dir.endsWith('assembly')?'gateway-assembly-fixture':'account-gateway';copyFileSync(join(build,name),dir+'/'+name);chmodSync(dir+'/'+name,0o755);protectedPath(dir+'/'+name);
     }
@@ -120,19 +123,29 @@ async function runtime():Promise<void>{
     await create('ag_usage_service_20261022');await create('native_bootstrap_usage_20261022');
     await suite(files[4]!,{AG_SERVICE_USAGE_ALLOW:'new_disposable_root_pg17_10',AG_SERVICE_USAGE_KERNEL_DSN:'postgres://postgres@127.0.0.1:5432/ag_usage_service_20261022',AG_SERVICE_USAGE_NATIVE_DSN:'postgres://postgres@127.0.0.1:5432/native_bootstrap_usage_20261022',AG_SERVICE_USAGE_NATIVE_SHA256:b.binaries['account-gateway']!.sha256});reports.usage={passed:true};
     // Same fresh cluster, distinct listener port; no PG schemas/databases reused.
-    await run('gosu',['postgres',join(pg,'pg_ctl'),'-D',pgdata,'-m','fast','-w','stop']);stopped=true;
-    const port=new URL(await origin()).port;await run('gosu',['postgres',join(pg,'pg_ctl'),'-D',pgdata,'-l',pgdata+'/server.log','-o','-h 127.0.0.1 -p '+port+' -k /tmp','-w','start']);stopped=false;
+    await run('gosu',['postgres',join(pg,'pg_ctl'),'-D',pgdata,'-m','fast','-w','stop']);
+    const port=new URL(await origin()).port;await run('gosu',['postgres',join(pg,'pg_ctl'),'-D',pgdata,'-l',pgdata+'/server.log','-o','-h 127.0.0.1 -p '+port+' -k /tmp','-w','start']);
     const jn='native_provider_joined_'+suffix,jk='ag_kernel_test_provider_joined_'+suffix;
     for(const db of [jn,jk])await run(join(pg,'createdb'),['-h','127.0.0.1','-p',port,'-U','postgres',db]);
     const joined='/tmp/native-provider-joined';fresh(joined,0o755);copyFileSync(join(build,'native-provider-joined'),joined+'/fixture');chmodSync(joined+'/fixture',0o755);
     const joinedOutput=await run(process.execPath,[files[5]!],gateway,{AG_NATIVE_PROVIDER_JOINED_ALLOW:'disposable_pg17_10',AG_NATIVE_PROVIDER_JOINED_NATIVE_DSN:'postgres://postgres@127.0.0.1:'+port+'/'+jn+'?sslmode=disable',AG_NATIVE_PROVIDER_JOINED_KERNEL_DSN:'postgres://postgres@127.0.0.1:'+port+'/'+jk+'?sslmode=disable',AG_NATIVE_PROVIDER_JOINED_BINARY:joined+'/fixture',AG_NATIVE_PROVIDER_JOINED_GO:option('--go'),AG_NATIVE_PROVIDER_JOINED_GATEWAY_BASE_SHA:gatewayCommit,AG_NATIVE_PROVIDER_JOINED_GATEWAY_SOURCE_SHA256:b.gatewaySourceArchiveSHA256},180_000);const joinedReceipt=JSON.parse(joinedOutput) as Record<string,unknown>;check(joinedReceipt.phase==='completed'&&joinedReceipt.contract==='gateway-native-provider-joined/v1'&&joinedReceipt.nativeHead===nativeCommit&&joinedReceipt.liveProviderAccount===false,'joined-receipt');reports.joined={passed:true};
     check(JSON.stringify(b.sourceHashes)===JSON.stringify(sourceHashes()),'final-source-change');
     runtimeReceipt={kind:'gateway-native4-runtime/v1',gatewayCommit,nativeCommit,node:process.version,pgImage,buildReceipt:hash(join(build,'build.json')),reports,tapEvidence,pythonPidfd,nodeExecutableSHA256:hash(process.execPath),externalProviderCalls:false};
+  } catch(error) {
+    primaryFailure??=safeFailure(error,step);throw error;
   } finally {
-    if(!stopped)await run('gosu',['postgres',join(pg,'pg_ctl'),'-D',pgdata,'-m','fast','-w','stop']);
-    const status=await exec.run({command:'gosu',args:['postgres',join(pg,'pg_ctl'),'-D',pgdata,'status'],cwd:gateway,environment:env,timeoutMs:5000,strictUtf8:true});check(status.exitCode===3&&status.signal===null&&status.stdout.includes('no server running'),'pg-stop-unproven');
+    let postgresStopVerified=false;let stopCommand:{attempted:boolean;exitCode:number|null;signal:string|null}={attempted:false,exitCode:null,signal:null};let statusBefore:{exitCode:number|null;signal:string|null;noServerRunning:boolean}|undefined;let statusAfter:typeof statusBefore;
+    const pgStatus=async()=>{const result=await exec.run({command:'gosu',args:['postgres',join(pg,'pg_ctl'),'-D',pgdata,'status'],cwd:gateway,environment:env,timeoutMs:5000,strictUtf8:true});return {exitCode:result.exitCode,signal:result.signal,noServerRunning:result.stdout.includes('no server running')};};
+    try {
+      statusBefore=await pgStatus();
+      if(statusBefore.exitCode===0&&statusBefore.signal===null){stopCommand={attempted:true,exitCode:null,signal:null};const result=await exec.run({command:'gosu',args:['postgres',join(pg,'pg_ctl'),'-D',pgdata,'-m','fast','-w','stop'],cwd:gateway,environment:env,timeoutMs:600000,strictUtf8:true});stopCommand={attempted:true,exitCode:result.exitCode,signal:result.signal};}
+      statusAfter=await pgStatus();
+      postgresStopVerified=statusAfter.exitCode===3&&statusAfter.signal===null&&statusAfter.noServerRunning&&(statusBefore.exitCode===3&&statusBefore.signal===null&&statusBefore.noServerRunning||stopCommand.attempted&&stopCommand.exitCode===0&&stopCommand.signal===null);
+      check(postgresStopVerified,'pg-stop-unproven');
+    } catch(error) {cleanupFailure=safeFailure(error,'postgres-cleanup');throw error;}
+    finally {try{json(join(output,'cleanup.json'),{kind:'gateway-native4-cleanup/v1',postgresStartAttempted,postgresStopVerified,stopCommand,statusBefore,statusAfter});}catch(error){cleanupFailure??=safeFailure(error,'cleanup-receipt');if(!primaryFailure)throw error;}}
   }
   check(runtimeReceipt,'runtime-incomplete');json(join(output,'runtime.json'),runtimeReceipt);
 }
 try{check(['build','runtime'].includes(phase),'phase');if(phase==='build')await build();else await runtime();}
-catch(error){process.stderr.write(JSON.stringify({outcome:'fail',phase,step,lastFailure,code:isProcessRuntimeError(error)?'process-'+error.code:error instanceof Error&&/^[a-z0-9-]+$/.test(error.message)?error.message:'operator-failed'})+'\n');process.exitCode=1;}
+catch(error){primaryFailure??=cleanupFailure??safeFailure(error,step);const diagnostic={outcome:'fail',phase,...failureOutcome(primaryFailure,cleanupFailure)};let failureReceiptWritten=false;try{if(existsSync(output)){json(join(output,'failure.json'),diagnostic);failureReceiptWritten=true;}}catch{cleanupFailure??={code:'failure-receipt-write-failed',step:'failure-receipt'};}process.stderr.write(JSON.stringify({outcome:'fail',phase,...failureOutcome(primaryFailure,cleanupFailure),failureReceiptWritten})+'\n');process.exitCode=1;}
