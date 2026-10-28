@@ -281,7 +281,8 @@ async function run(): Promise<void> {
       limits,
       providerTokenUpperBound: 32768,
     },
-    providerProfiles: [...qualified.slice(0, 3), openRouterEnrollment],
+    secondProfile: openRouterEnrollment,
+    providerProfiles: qualified.slice(0, 3),
     grokOAuthEnrollment: {
       enabled: true,
       profile: "grok-subscription-responses-oauth-v1",
@@ -309,7 +310,7 @@ async function run(): Promise<void> {
     ],
   } satisfies Pick<
     ServiceConfig,
-    "native" | "consumer" | "profile" | "providerProfiles" | "grokOAuthEnrollment" | "bearers"
+    "native" | "consumer" | "profile" | "secondProfile" | "providerProfiles" | "grokOAuthEnrollment" | "bearers"
   >;
   phase = "gateway-control-composition";
   const control = composeServiceControl(cfg, kernel, store, secrets, worker);

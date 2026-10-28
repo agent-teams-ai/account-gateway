@@ -364,8 +364,7 @@ export function captureServiceProfiles(
       if (
         p.profile === first.profile ||
         p.profile !== openRouterProfile.profile ||
-        p.baseURL !== openRouterProfile.baseURL ||
-        (p.model !== openRouterProfile.model && p.model !== "openai/gpt-5.4-nano")
+        p.baseURL !== openRouterProfile.baseURL
       )
         return deny();
       profiles.push(p);
