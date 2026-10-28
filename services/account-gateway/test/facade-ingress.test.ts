@@ -3239,9 +3239,16 @@ test(`${source} account model SDK read uses scoped native catalogue and fences o
   const f = await sourceHTTP(true);
   try {
     const { account, input, snapshot, generation } = modelAccount(f, source);
-    const sdk = createManagementClient({ role: "management", origin: f.facadeOrigin, token: "source-public-management" });
+    const sdk = createManagementClient({ role: "management", origin: f.facadeOrigin, token: "source-public-management", responseBytes: 2 * 1024 * 1024 });
     f.modelResult(snapshot);
     assert.deepEqual(await sdk.readAccountModels({ ...input, forceRefresh: true }), snapshot);
+    if (snapshot.source === "openrouter") {
+      const complete = { ...snapshot, models: Array.from({ length: 2048 }, (_, index) => ({ ...snapshot.models[0], modelId: `future-vendor/model-${index}` })) };
+      f.modelResult(complete);
+      assert.deepEqual(await sdk.readAccountModels(input), complete);
+      f.modelResult(snapshot);
+    }
+
     assert.deepEqual(f.seen.find((r) => r.path === "POST /private/native/v1/account-models/read")?.tuple,
       { ...input, forceRefresh: true });
     for (const change of [{ ownerRef: "foreign" }, { expectedAuthorizationEpoch: 2 }, { profileId: "foreign" }]) {
@@ -3366,7 +3373,18 @@ test("dynamic OpenRouter membership reaches transport without rewriting the immu
     assert.equal((await submit("outside-the-live-set")).status, 400);
     assert.equal((await submit(undefined, { reasoning: { effort: "high" } })).status, 400);
     assert.equal(f.forwarded.length, 0);
-    const accepted = await submit(); assert.equal(accepted.status, 200); await accepted.text();
+    const claimsBeforeRoutingRejections = f.requests.size;
+    for (const patch of [{ models: ["another/model"] }, { provider: { order: ["other"] } }, { plugins: [] }, { background: true }])
+      assert.equal((await submit(undefined, patch)).status, 400);
+    assert.equal(f.requests.size, claimsBeforeRoutingRejections, "unsupported routing/async fields never acquire a request claim");
+    assert.equal(f.forwarded.length, 0);
+    const accepted = await submit(undefined, {
+      input: "Opaque provider/models/plugins/background text", instructions: "Controlled input",
+      service_tier: "default", max_output_tokens: 20, tool_choice: "auto", reasoning: {},
+      parallel_tool_calls: true, temperature: 0.5, top_p: 0.9, text: { format: { type: "text" } },
+      include: [], prompt_cache_key: "fixture", client_metadata: { provider: "opaque", models: ["opaque"] },
+    });
+    assert.equal(accepted.status, 200); await accepted.text();
     assert.equal((f.forwarded[0].body as Record<string, unknown>).model, "future-vendor/review:model");
     assert.equal(f.mappings.get(f.scopeKey(f.context, generation))!.descriptor.model, profile.model);
     assert.ok(f.seen.filter((r) => r.path === "POST /private/native/v1/account-models/read").length >= 2);

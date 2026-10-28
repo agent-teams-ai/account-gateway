@@ -39,7 +39,7 @@ export async function readAccountModels(
   return result;
 }
 
-/** Empty authoritative snapshots remain empty. Missing observations retain only the frozen anchor. */
+/** Empty/unknown observations admit nothing; only explicit unavailability retains the frozen anchor. */
 export function accountModelAdmission(result: c.AccountModels, anchor: string) {
   return result.status === "snapshot"
     ? { modelIds: result.models.map((model) => model.modelId), models: result.models, enforceCapabilities: true }

@@ -582,9 +582,10 @@ function send<T>(
   value: T,
   status = 200,
   privateCache = false,
+  maximumBytes = 65_536,
 ): void {
   const bytes = JSON.stringify(schema.parse(value));
-  if (Buffer.byteLength(bytes) > 65_536) throw new KernelError("unavailable");
+  if (Buffer.byteLength(bytes) > maximumBytes) throw new KernelError("unavailable");
   res.writeHead(status, {
     "content-type": "application/json",
     "cache-control": privateCache ? "private, no-store" : "no-store",
@@ -1157,7 +1158,7 @@ export function createFacade(options: FacadeOptions): Server {
                   () => accountLimitsTarget(kernel, store, context, input))
               : { status: "unsupported" as const };
             requireCurrent(grant);
-            send(res, c.accountModels, result, 200, true);
+            send(res, c.accountModels, result, 200, true, 2 * 1024 * 1024);
             return;
           }
           const limitsRead = async (contract: "account-limits/v1" | "account-limits/v2") => {
@@ -1568,6 +1569,7 @@ export function createFacade(options: FacadeOptions): Server {
               profile.maxOutputTokens,
               admittedModels.models,
               admittedModels.enforceCapabilities,
+              configuredAccountModelSource(saved.admission.profileId),
             );
             requireCurrent(grant);
             if (!transport || !enrollment) throw new KernelError("unavailable");

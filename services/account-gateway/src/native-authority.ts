@@ -294,7 +294,7 @@ export class NativeAuthority {
         instant(after.admission.expiresAt) <= now()) return denied();
       models = accountModelAdmission(catalogue, profile.model);
     }
-    validateResponses(bytes, models.modelIds, profile.providerTokenUpperBound, models.models, models.enforceCapabilities);
+    validateResponses(bytes, models.modelIds, profile.providerTokenUpperBound, models.models, models.enforceCapabilities, configuredAccountModelSource(profile.profile));
     await this.kernel.currentWorkerLease(a.context, this.configuration.enrollment.worker);
     if (a.signal.aborted) return denied();
     a.descriptor = d;
