@@ -699,7 +699,10 @@ async function run(): Promise<void> {
     expectedAuthorizationEpoch: openRouterAccount.authorizationEpoch };
   const openRouterSnapshot = await consumer.readAccountModels(openRouterSelector);
   assert.ok(openRouterSnapshot.status === "snapshot" && openRouterSnapshot.source === "openrouter");
-  assert.ok(openRouterSnapshot.models.some((model) => model.modelId === "unseen-vendor/new-model:free"));
+  const selectedOpenRouterModel = openRouterSnapshot.models.find((model) => model.modelId === "unseen-vendor/new-model:free");
+  assert.ok(selectedOpenRouterModel?.reasoning);
+  assert.deepEqual(new Set(selectedOpenRouterModel.reasoning.allowed), new Set(["high", "medium"]));
+  assert.equal(selectedOpenRouterModel.reasoning.default, "medium");
   await assert.rejects(consumer.readAccountModels({ ...openRouterSelector, ownerRef: "foreign" }), denied);
   const openRouterAccess = await consumer.runAccess({ operationId: randomUUID(), invocationRef: randomUUID(), attemptRef: randomUUID(),
     accountRefs: [openRouterAccountRef], subjectRef: "joined-provider-policy", policyRevision: 1, bindingRevision: 1,
@@ -711,11 +714,11 @@ async function run(): Promise<void> {
     requestId: randomUUID(), admission: openRouterAccess.admission,
     body: Buffer.from(JSON.stringify({ model, stream: true, store: false, input: "Controlled dynamic OpenRouter", ...patch })) });
   const beforeOpenRouter = await stats();
-  for (const [model, patch] of [["unknown/model", {}], ["unseen-vendor/new-model:free", { reasoning: { effort: "high" } }]] as const)
+  for (const [model, patch] of [["unknown/model", {}], ["unseen-vendor/new-model:free", { reasoning: { effort: "low" } }]] as const)
     await assert.rejects(openRouterRequest(model, patch), (error: unknown) => error instanceof GatewayError && error.diagnostic?.code === "invalid_request");
   assert.equal((await stats()).openrouter.dispatches, beforeOpenRouter.openrouter.dispatches);
   phase = "openrouter-dynamic-real-native-dispatch";
-  const openRouterResponse = await openRouterRequest("unseen-vendor/new-model:free");
+  const openRouterResponse = await openRouterRequest("unseen-vendor/new-model:free", { reasoning: { effort: "high" } });
   assert.equal(openRouterResponse.kind, "stream");
   if (openRouterResponse.kind !== "stream") throw new Error("missing OpenRouter stream");
   let openRouterText = "";
@@ -919,6 +922,7 @@ async function run(): Promise<void> {
     controlledTextAndFunctionToolRoundTrip: true,
     dynamicOpenRouterDiscoveryAndDispatch: true,
     dynamicOpenRouterAuthoritativeRemoval: true,
+    dynamicOpenRouterQualifiedReasoning: true,
     dynamicOpenRouterImmutableAnchor: true,
     minimaxReasoningContentRoundTrip: true,
     reconnectRetainsAccount: true,

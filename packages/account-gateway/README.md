@@ -64,18 +64,22 @@ An authoritative `snapshot` carries its source, physical generation, principal
 version, fetch time, expiry and the complete model/capability set. Codex retains
 its 128-model limit and existing balanced/function capability contract.
 OpenRouter admits at most 2,048 models, has no fast-mode claim, and exposes only
-normalized none/function tool capabilities. Reasoning controls must be supported
-by the producer's actual discovery contract; a parameter name alone does not
-establish allowed effort values. Empty snapshots remain authoritative empty sets.
+normalized none/function tool capabilities. When the [public model metadata](https://openrouter.ai/api/v1/models)
+supplies `reasoning.supported_efforts` and `reasoning.default_effort`, the paired
+producer can qualify explicit compatible values and a member default. A parameter
+name alone does not establish allowed effort values; missing or invalid metadata
+leaves reasoning controls null. Empty snapshots remain authoritative empty sets.
 Unknown, unsupported and unavailable results never invent dynamic membership.
 The generic `accountModelCapability` schema and `AccountModelCapability` type
 accept rows from either source; complete snapshots additionally enforce each
 source's stricter capability and size contract. A null reasoning or fast field
 means the Gateway has no qualified control to expose; it does not establish that
 the provider itself lacks that capability. During a coordinated upgrade, enable
-the compatible catalog and resave existing OpenRouter selections that explicitly
-set effort or fast mode with provider defaults before resuming their reviews.
-Stale explicit controls fail closed rather than being silently ignored.
+the compatible catalog and inspect existing OpenRouter selections against the
+refreshed snapshot. Resave only explicit controls that are no longer qualified
+with provider defaults before resuming those reviews; still-qualified effort
+values remain valid. Unqualified explicit controls fail closed rather than being
+silently ignored.
 
 For complete catalogs, construct the model-reading client with
 `responseBytes: 2 * 1024 * 1024`. The explicit ceiling is 2 MiB; the default stays

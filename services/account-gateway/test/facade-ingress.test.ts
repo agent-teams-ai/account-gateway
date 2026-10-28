@@ -122,6 +122,17 @@ test("Responses permits the provider default when no service tier is requested",
     );
 });
 
+test("OpenRouter admission preserves exactly the selected snapshot reasoning efforts", () => {
+  const model = { modelId: "future-vendor/review-model", reasoning: { allowed: ["high", "medium"], default: "medium" } };
+  const request = (effort?: string) => bytes(JSON.stringify({ ...valid, model: model.modelId,
+    ...(effort === undefined ? {} : { reasoning: { effort } }) }));
+  for (const effort of [undefined, "high", "medium"])
+    assert.equal(validateResponses(request(effort), [model.modelId], 100, [model], true, "openrouter"), model.modelId);
+  for (const effort of ["low", "max", "none"])
+    invalid(() => validateResponses(request(effort), [model.modelId], 100, [model], true, "openrouter"));
+  invalid(() => validateResponses(request("high"), [model.modelId], 100, [{ ...model, reasoning: null }], true, "openrouter"));
+});
+
 test("source-qualified model capabilities reject configured reasoning for the four new profiles", () => {
   const profiles = providerConnectionRegistry.filter(
     (profile) => profile.limitsContract === "account-limits/v2",

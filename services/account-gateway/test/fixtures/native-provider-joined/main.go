@@ -331,7 +331,7 @@ func run() error {
 			for _, id := range ids {
 				rows = append(rows, map[string]any{"id": id, "name": id, "context_length": 128000,
 					"architecture":         map[string]any{"input_modalities": []string{"text"}, "output_modalities": []string{"text"}},
-					"supported_parameters": []string{"tools"}, "pricing": map[string]string{"prompt": "0", "completion": "0"}})
+					"supported_parameters": []string{"tools", "reasoning"}, "reasoning": map[string]any{"supported_efforts": []string{"high", "medium"}, "default_effort": "medium"}, "pricing": map[string]string{"prompt": "0", "completion": "0"}})
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": rows})
 			return
@@ -397,6 +397,15 @@ func run() error {
 		if r.Method != "POST" || r.URL.RequestURI() != paths[name] || json.NewDecoder(io.LimitReader(r.Body, (4<<20)+1)).Decode(&body) != nil || string(body["model"]) != fmt.Sprintf("%q", models[name]) || string(body["stream"]) != "true" || string(body["store"]) != "false" || body["previous_response_id"] != nil || r.Header.Get("Idempotency-Key") != "" {
 			reject()
 			return
+		}
+		if name == "openrouter" {
+			var reasoning struct {
+				Effort string `json:"effort"`
+			}
+			if json.Unmarshal(body["reasoning"], &reasoning) != nil || reasoning.Effort != "high" {
+				reject()
+				return
+			}
 		}
 		if name == "minimax" && body["service_tier"] != nil {
 			reject()
