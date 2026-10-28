@@ -712,7 +712,7 @@ async function run(): Promise<void> {
   const openRouterExecution = createExecutionClient({ role: "execution", origin, token: openRouterAccess.bearer });
   const openRouterRequest = (model: string, patch: Record<string, unknown> = {}) => openRouterExecution.request(openRouterExecutionRef, {
     requestId: randomUUID(), admission: openRouterAccess.admission,
-    body: Buffer.from(JSON.stringify({ model, stream: true, store: false, input: "Controlled dynamic OpenRouter", ...patch })) });
+    body: Buffer.from(JSON.stringify({ model, stream: true, store: false, service_tier: "default", input: "Controlled dynamic OpenRouter", ...patch })) });
   const beforeOpenRouter = await stats();
   for (const [model, patch] of [["unknown/model", {}], ["unseen-vendor/new-model:free", { reasoning: { effort: "low" } }]] as const)
     await assert.rejects(openRouterRequest(model, patch), (error: unknown) => error instanceof GatewayError && error.diagnostic?.code === "invalid_request");
