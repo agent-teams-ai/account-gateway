@@ -137,9 +137,23 @@ export function strictJSON(bytes: Uint8Array, integersOnly = false): unknown {
 // Qualified OpenRouter root protocol only. Native independently enforces the final
 // provider boundary; nested user text and JSON/tool schemas remain opaque here.
 const openRouterResponseFields = new Set([
-  "model", "input", "instructions", "stream", "store", "service_tier",
-  "max_output_tokens", "tools", "tool_choice", "reasoning", "parallel_tool_calls",
-  "temperature", "top_p", "text", "include", "prompt_cache_key", "client_metadata",
+  "model",
+  "input",
+  "instructions",
+  "stream",
+  "store",
+  "service_tier",
+  "max_output_tokens",
+  "tools",
+  "tool_choice",
+  "reasoning",
+  "parallel_tool_calls",
+  "temperature",
+  "top_p",
+  "text",
+  "include",
+  "prompt_cache_key",
+  "client_metadata",
 ]);
 
 export function validateResponses(
@@ -158,8 +172,12 @@ export function validateResponses(
     throw new KernelError("invalid");
   }
   const p = input as Record<string, unknown>;
-  if (modelSource === "openrouter" && Object.keys(p).some((key) => !openRouterResponseFields.has(key)))
+  if (
+    modelSource === "openrouter" &&
+    Object.keys(p).some((key) => !openRouterResponseFields.has(key))
+  ) {
     throw new KernelError("invalid");
+  }
   const critical = [
     "model",
     "stream",

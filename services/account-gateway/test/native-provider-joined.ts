@@ -19,7 +19,12 @@ import {
 } from "@agent-teams/account-gateway/http";
 import { PostgresKernel } from "../src/postgres.ts";
 import { IntentSecrets, PostgresManagementStore } from "../src/management-store.ts";
-import { openRouterProfile, kimiProfile, glmProfile, minimaxProfile } from "../src/service-config.ts";
+import {
+  openRouterProfile,
+  kimiProfile,
+  glmProfile,
+  minimaxProfile,
+} from "../src/service-config.ts";
 import { grokOAuthProfile } from "../src/oauth-profiles.ts";
 import {
   composeServiceControl,
@@ -259,7 +264,13 @@ async function run(): Promise<void> {
     limits,
     providerTokenUpperBound: 32768,
   }));
-  const openRouterEnrollment = { ...openRouterProfile, model: "birth/anchor", qualificationRef: "controlled-source-v1", limits, providerTokenUpperBound: 32768 };
+  const openRouterEnrollment = {
+    ...openRouterProfile,
+    model: "birth/anchor",
+    qualificationRef: "controlled-source-v1",
+    limits,
+    providerTokenUpperBound: 32768,
+  };
   const profileIds = [...tuples.map((tuple) => tuple.profile), openRouterEnrollment.profile];
   const bearer = (token: string, owner: string) => ({
     token,
@@ -332,7 +343,13 @@ async function run(): Promise<void> {
     ],
   } satisfies Pick<
     ServiceConfig,
-    "native" | "consumer" | "profile" | "secondProfile" | "providerProfiles" | "grokOAuthEnrollment" | "bearers"
+    | "native"
+    | "consumer"
+    | "profile"
+    | "secondProfile"
+    | "providerProfiles"
+    | "grokOAuthEnrollment"
+    | "bearers"
   >;
   phase = "gateway-control-composition";
   const control = composeServiceControl(cfg, kernel, store, secrets, worker);
@@ -361,7 +378,12 @@ async function run(): Promise<void> {
     }) + "\n",
   );
   await next("configured");
-  const client = createManagementClient({ role: "management", origin, token: publicToken, responseBytes: 2 * 1024 * 1024 });
+  const client = createManagementClient({
+    role: "management",
+    origin,
+    token: publicToken,
+    responseBytes: 2 * 1024 * 1024,
+  });
   const foreign = createManagementClient({ role: "management", origin, token: foreignToken });
   const consumer = createConsumerControlClient({
     role: "consumer-control",
@@ -385,7 +407,10 @@ async function run(): Promise<void> {
     customCalls: number;
     customOutputs: number;
   };
-  type Stats = Record<"kimi" | "glm" | "minimax" | "grok" | "openrouter", ProviderStats> & { unexpected: number; openrouterModelGets: number };
+  type Stats = Record<"kimi" | "glm" | "minimax" | "grok" | "openrouter", ProviderStats> & {
+    unexpected: number;
+    openrouterModelGets: number;
+  };
   const controller = async (path: string, value?: unknown): Promise<Response> =>
     fetch(ready.controllerOrigin + path, {
       method: value === undefined ? "GET" : "POST",
@@ -408,9 +433,9 @@ async function run(): Promise<void> {
     [...profileIds].toSorted(),
   );
   assert.equal(
-    capabilities.capabilities.filter((capability) => capability.profileId !== openRouterEnrollment.profile).every(
-      (capability) => capability.limitsContract === "account-limits/v2",
-    ),
+    capabilities.capabilities
+      .filter((capability) => capability.profileId !== openRouterEnrollment.profile)
+      .every((capability) => capability.limitsContract === "account-limits/v2"),
     true,
   );
   assert.deepEqual(await limitsClient.getAccountLimitsCapabilities(), {
@@ -729,56 +754,129 @@ async function run(): Promise<void> {
     assert.deepEqual(await stats(), collected);
   }
   phase = "openrouter-dynamic-enrollment";
-  const openRouterCreated = await client.connect({ operationId: randomUUID(), ownerRef, profileId: openRouterEnrollment.profile,
-    displayName: "Dynamic OpenRouter", credential: { kind: "api_key", value: "fixture-provider-key-openrouter" } });
+  const openRouterCreated = await client.connect({
+    operationId: randomUUID(),
+    ownerRef,
+    profileId: openRouterEnrollment.profile,
+    displayName: "Dynamic OpenRouter",
+    credential: { kind: "api_key", value: "fixture-provider-key-openrouter" },
+  });
   assert.ok(openRouterCreated.state === "applied" && openRouterCreated.result?.kind === "account");
   const openRouterAccountRef = openRouterCreated.result.accountRef;
   const openRouterAccount = await client.get(openRouterAccountRef);
-  const openRouterSelector = { ownerRef, accountRef: openRouterAccountRef, profileId: openRouterEnrollment.profile,
-    expectedAuthorizationEpoch: openRouterAccount.authorizationEpoch };
+  const openRouterSelector = {
+    ownerRef,
+    accountRef: openRouterAccountRef,
+    profileId: openRouterEnrollment.profile,
+    expectedAuthorizationEpoch: openRouterAccount.authorizationEpoch,
+  };
   const openRouterSnapshot = await consumer.readAccountModels(openRouterSelector);
   assert.ok(openRouterSnapshot.status === "snapshot" && openRouterSnapshot.source === "openrouter");
-  const selectedOpenRouterModel = openRouterSnapshot.models.find((model) => model.modelId === "unseen-vendor/new-model:free");
+  const selectedOpenRouterModel = openRouterSnapshot.models.find(
+    (model) => model.modelId === "unseen-vendor/new-model:free",
+  );
   assert.ok(selectedOpenRouterModel?.reasoning);
   assert.deepEqual(new Set(selectedOpenRouterModel.reasoning.allowed), new Set(["high", "medium"]));
   assert.equal(selectedOpenRouterModel.reasoning.default, "medium");
-  await assert.rejects(consumer.readAccountModels({ ...openRouterSelector, ownerRef: "foreign" }), denied);
-  const openRouterAccess = await consumer.runAccess({ operationId: randomUUID(), invocationRef: randomUUID(), attemptRef: randomUUID(),
-    accountRefs: [openRouterAccountRef], subjectRef: "joined-provider-policy", policyRevision: 1, bindingRevision: 1,
-    profileId: openRouterEnrollment.profile, limits, deadline: new Date(Date.now() + 30_000).toISOString() });
-  assert.ok(openRouterAccess.operation.state === "applied" && openRouterAccess.operation.result?.kind === "execution");
+  await assert.rejects(
+    consumer.readAccountModels({ ...openRouterSelector, ownerRef: "foreign" }),
+    denied,
+  );
+  const openRouterAccess = await consumer.runAccess({
+    operationId: randomUUID(),
+    invocationRef: randomUUID(),
+    attemptRef: randomUUID(),
+    accountRefs: [openRouterAccountRef],
+    subjectRef: "joined-provider-policy",
+    policyRevision: 1,
+    bindingRevision: 1,
+    profileId: openRouterEnrollment.profile,
+    limits,
+    deadline: new Date(Date.now() + 30_000).toISOString(),
+  });
+  assert.ok(
+    openRouterAccess.operation.state === "applied" &&
+      openRouterAccess.operation.result?.kind === "execution",
+  );
   const openRouterExecutionRef = openRouterAccess.operation.result.executionRef;
-  const openRouterExecution = createExecutionClient({ role: "execution", origin, token: openRouterAccess.bearer });
-  const openRouterRequest = (model: string, patch: Record<string, unknown> = {}) => openRouterExecution.request(openRouterExecutionRef, {
-    requestId: randomUUID(), admission: openRouterAccess.admission,
-    body: Buffer.from(JSON.stringify({ model, stream: true, store: false, service_tier: "default", input: "Controlled dynamic OpenRouter", ...patch })) });
+  const openRouterExecution = createExecutionClient({
+    role: "execution",
+    origin,
+    token: openRouterAccess.bearer,
+  });
+  const openRouterRequest = (model: string, patch: Record<string, unknown> = {}) =>
+    openRouterExecution.request(openRouterExecutionRef, {
+      requestId: randomUUID(),
+      admission: openRouterAccess.admission,
+      body: Buffer.from(
+        JSON.stringify({
+          model,
+          stream: true,
+          store: false,
+          service_tier: "default",
+          input: "Controlled dynamic OpenRouter",
+          ...patch,
+        }),
+      ),
+    });
   const beforeOpenRouter = await stats();
-  for (const [model, patch] of [["unknown/model", {}], ["unseen-vendor/new-model:free", { reasoning: { effort: "low" } }]] as const)
-    await assert.rejects(openRouterRequest(model, patch), (error: unknown) => error instanceof GatewayError && error.diagnostic?.code === "invalid_request");
+  for (const [model, patch] of [
+    ["unknown/model", {}],
+    ["unseen-vendor/new-model:free", { reasoning: { effort: "low" } }],
+  ] as const) {
+    await assert.rejects(
+      openRouterRequest(model, patch),
+      (error: unknown) =>
+        error instanceof GatewayError && error.diagnostic?.code === "invalid_request",
+    );
+  }
   assert.equal((await stats()).openrouter.dispatches, beforeOpenRouter.openrouter.dispatches);
   phase = "openrouter-dynamic-real-native-dispatch";
-  const openRouterResponse = await openRouterRequest("unseen-vendor/new-model:free", { reasoning: { effort: "high" } });
+  const openRouterResponse = await openRouterRequest("unseen-vendor/new-model:free", {
+    reasoning: { effort: "high" },
+  });
   assert.equal(openRouterResponse.kind, "stream");
-  if (openRouterResponse.kind !== "stream") throw new Error("missing OpenRouter stream");
   let openRouterText = "";
-  for await (const part of openRouterResponse.body) openRouterText += new TextDecoder().decode(part);
+  for await (const part of openRouterResponse.body) {
+    openRouterText += new TextDecoder().decode(part);
+  }
   assert.match(openRouterText, /response.completed/);
   const openRouterAfter = await stats();
   assert.equal(openRouterAfter.openrouter.dispatches, beforeOpenRouter.openrouter.dispatches + 1);
   assert.ok(openRouterAfter.openrouterModelGets > 0);
   phase = "openrouter-dynamic-authoritative-removal";
   assert.equal((await controller("/openrouter/remove-model", {})).status, 204);
-  const removedSnapshot = await consumer.readAccountModels({ ...openRouterSelector, forceRefresh: true });
+  const removedSnapshot = await consumer.readAccountModels({
+    ...openRouterSelector,
+    forceRefresh: true,
+  });
   assert.ok(removedSnapshot.status === "snapshot" && removedSnapshot.source === "openrouter");
-  assert.ok(!removedSnapshot.models.some((model) => model.modelId === "unseen-vendor/new-model:free"));
-  await assert.rejects(openRouterRequest("unseen-vendor/new-model:free"), (error: unknown) => error instanceof GatewayError && error.diagnostic?.code === "invalid_request");
+  assert.ok(
+    !removedSnapshot.models.some((model) => model.modelId === "unseen-vendor/new-model:free"),
+  );
+  await assert.rejects(
+    openRouterRequest("unseen-vendor/new-model:free"),
+    (error: unknown) =>
+      error instanceof GatewayError && error.diagnostic?.code === "invalid_request",
+  );
   assert.equal((await stats()).openrouter.dispatches, openRouterAfter.openrouter.dispatches);
   const openRouterPhysical = await store.mapping(context, openRouterSnapshot.physicalGeneration);
   assert.ok(openRouterPhysical);
   assert.equal(openRouterPhysical.descriptor.model, "birth/anchor");
-  await openRouterExecution.close(openRouterExecutionRef, { operationId: randomUUID(), reason: "completed" });
+  await openRouterExecution.close(openRouterExecutionRef, {
+    operationId: randomUUID(),
+    reason: "completed",
+  });
   const latestOpenRouter = await client.get(openRouterAccountRef);
-  assert.equal((await client.disable(openRouterAccountRef, { operationId: randomUUID(), expectedMetadataRevision: latestOpenRouter.metadataRevision })).state, "applied");
+  assert.equal(
+    (
+      await client.disable(openRouterAccountRef, {
+        operationId: randomUUID(),
+        expectedMetadataRevision: latestOpenRouter.metadataRevision,
+      })
+    ).state,
+    "applied",
+  );
   phase = "grok-source-refresh";
   const beforeRefresh = await stats();
   assert.equal(await control.management.refreshOAuth(context), "observed");

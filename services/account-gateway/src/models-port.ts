@@ -6,9 +6,14 @@ import { providerConnectionDefinition } from "./provider-connections.ts";
 
 export function configuredAccountModelSource(profileId: string) {
   const profile = providerConnectionDefinition(profileId);
-  return profile && c.accountModelDiscoverySource({
-    profileId, protocol: profile.protocol, authKind: profile.oauth ? "oauth" : "api_key",
-  });
+  return (
+    profile &&
+    c.accountModelDiscoverySource({
+      profileId,
+      protocol: profile.protocol,
+      authKind: profile.oauth ? "oauth" : "api_key",
+    })
+  );
 }
 
 export interface AccountModelsSource {
@@ -35,10 +40,16 @@ export async function readAccountModels(
     throw new KernelError("denied");
   }
   if (result.status === "snapshot") {
-    if (result.source !== configuredAccountModelSource(input.profileId) || result.physicalGeneration !== after.generation) throw new KernelError("denied");
+    if (
+      result.source !== configuredAccountModelSource(input.profileId) ||
+      result.physicalGeneration !== after.generation
+    ) {
+      throw new KernelError("denied");
+    }
     const now = Date.now();
-    if (Date.parse(result.fetchedAt) > now || Date.parse(result.expiresAt) <= now)
+    if (Date.parse(result.fetchedAt) > now || Date.parse(result.expiresAt) <= now) {
       return { status: "unknown" };
+    }
   }
   return result;
 }

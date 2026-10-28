@@ -882,25 +882,40 @@ export type ProviderConnectionCapabilities = z.infer<typeof providerConnectionCa
 
 /** One qualified profile identity authority for discovery triggers and full guards. */
 const accountModelDiscoveryProfiles = Object.freeze([
-  Object.freeze({ profileId: "openai-codex-oauth-responses-v1", protocol: "openai-responses", authKind: "oauth", source: "codex" } as const),
-  Object.freeze({ profileId: "openrouter-openai-responses-apikey-v1", protocol: "openai-responses", authKind: "api_key", source: "openrouter" } as const),
+  Object.freeze({
+    profileId: "openai-codex-oauth-responses-v1",
+    protocol: "openai-responses",
+    authKind: "oauth",
+    source: "codex",
+  } as const),
+  Object.freeze({
+    profileId: "openrouter-openai-responses-apikey-v1",
+    protocol: "openai-responses",
+    authKind: "api_key",
+    source: "openrouter",
+  } as const),
 ]);
 export function accountModelDiscoveryProfile(profileId: string) {
-  return accountModelDiscoveryProfiles.find((profile) => profile.profileId === profileId);
+  return accountModelDiscoveryProfiles.find((candidate) => candidate.profileId === profileId);
 }
 /** A lookup may trigger a strict read; admission also verifies protocol and auth. */
-export function accountModelDiscoverySource(profile: {
+export function accountModelDiscoverySource(candidate: {
   readonly profileId: string;
   readonly protocol: string;
   readonly authKind: string;
 }): "codex" | "openrouter" | undefined {
-  const qualified = accountModelDiscoveryProfile(profile.profileId);
-  return qualified && profile.protocol === qualified.protocol && profile.authKind === qualified.authKind
-    ? qualified.source : undefined;
+  const qualified = accountModelDiscoveryProfile(candidate.profileId);
+  return qualified &&
+    candidate.protocol === qualified.protocol &&
+    candidate.authKind === qualified.authKind
+    ? qualified.source
+    : undefined;
 }
 
 /** Authoritative account models share discovery and fences; enrollment retains its anchor. */
-export const accountModelsRequest = accountLimitsRequest.extend({ forceRefresh: z.boolean().optional() });
+export const accountModelsRequest = accountLimitsRequest.extend({
+  forceRefresh: z.boolean().optional(),
+});
 // Retain Codex's existing capability restrictions independently of other sources.
 const codexAccountModelCapability = qualifiedModelCapability.extend({
   fast: modelSetting(["balanced"] as const),
@@ -910,7 +925,10 @@ const openRouterAccountModelCapability = qualifiedModelCapability.extend({
   fast: z.null(),
   tools: modelSetting(["none", "function"] as const),
 });
-export const accountModelCapability = z.union([codexAccountModelCapability, openRouterAccountModelCapability]);
+export const accountModelCapability = z.union([
+  codexAccountModelCapability,
+  openRouterAccountModelCapability,
+]);
 const accountModelSnapshot = z.strictObject({
   status: z.literal("snapshot"),
   physicalGeneration: reference,
@@ -923,14 +941,18 @@ const distinctModels = (models: readonly { modelId: string }[]) =>
 const validSnapshotPeriod = (snapshot: { fetchedAt: string; expiresAt: string }) =>
   Date.parse(snapshot.fetchedAt) < Date.parse(snapshot.expiresAt);
 export const accountModels = z.union([
-  accountModelSnapshot.extend({
-    source: z.literal("codex"),
-    models: z.array(codexAccountModelCapability).max(128).refine(distinctModels),
-  }).refine(validSnapshotPeriod),
-  accountModelSnapshot.extend({
-    source: z.literal("openrouter"),
-    models: z.array(openRouterAccountModelCapability).max(2048).refine(distinctModels),
-  }).refine(validSnapshotPeriod),
+  accountModelSnapshot
+    .extend({
+      source: z.literal("codex"),
+      models: z.array(codexAccountModelCapability).max(128).refine(distinctModels),
+    })
+    .refine(validSnapshotPeriod),
+  accountModelSnapshot
+    .extend({
+      source: z.literal("openrouter"),
+      models: z.array(openRouterAccountModelCapability).max(2048).refine(distinctModels),
+    })
+    .refine(validSnapshotPeriod),
   z.strictObject({ status: z.literal("unknown") }),
   z.strictObject({ status: z.literal("unsupported") }),
   z.strictObject({ status: z.literal("unavailable") }),

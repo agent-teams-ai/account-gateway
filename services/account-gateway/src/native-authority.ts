@@ -19,7 +19,11 @@ import type { FacadeBearers, NativeCallback, NativeTransport } from "./facade.ts
 import type { ManagementStore, CandidateJournal } from "./management.ts";
 import { accountLimitsTarget, exactCandidate, physicalCandidate } from "./management.ts";
 import { validateResponses } from "./facade-ingress.ts";
-import { configuredAccountModelSource, readAccountModels, accountModelAdmission } from "./models-port.ts";
+import {
+  configuredAccountModelSource,
+  readAccountModels,
+  accountModelAdmission,
+} from "./models-port.ts";
 import type { AccountModelsSource } from "./models-port.ts";
 import {
   admission,
@@ -306,7 +310,11 @@ export class NativeAuthority {
       return denied();
     }
     instant(d.created_at);
-    let models: ReturnType<typeof accountModelAdmission> = { modelIds: [profile.model], models: undefined, enforceCapabilities: false };
+    let models: ReturnType<typeof accountModelAdmission> = {
+      modelIds: [profile.model],
+      models: undefined,
+      enforceCapabilities: false,
+    };
     if (configuredAccountModelSource(profile.profile)) {
       const selector = {
         ownerRef: mapping.ownerRef,
@@ -336,7 +344,14 @@ export class NativeAuthority {
       }
       models = accountModelAdmission(catalogue, profile.model);
     }
-    validateResponses(bytes, models.modelIds, profile.providerTokenUpperBound, models.models, models.enforceCapabilities, configuredAccountModelSource(profile.profile));
+    validateResponses(
+      bytes,
+      models.modelIds,
+      profile.providerTokenUpperBound,
+      models.models,
+      models.enforceCapabilities,
+      configuredAccountModelSource(profile.profile),
+    );
     await this.kernel.currentWorkerLease(a.context, this.configuration.enrollment.worker);
     if (signalAborted(a.signal)) {
       return denied();

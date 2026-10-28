@@ -15,6 +15,10 @@ export type {
   ProviderConnectionCapabilities,
 } from "./contracts/index.js";
 
-export type { AccountModelsRequest, AccountModels, AccountModelCapability } from "./contracts/index.js";
+export type {
+  AccountModelsRequest,
+  AccountModels,
+  AccountModelCapability,
+} from "./contracts/index.js";
 
 export { accountModelDiscoveryProfile, accountModelDiscoverySource } from "./contracts/index.js";

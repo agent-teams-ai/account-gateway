@@ -394,7 +394,11 @@ void test("source catalog: singleton compatibility and finite simultaneous per-p
   const profiles = captureServiceProfiles({ profile, secondProfile });
   assert.deepEqual(profiles, [profile, secondProfile]);
   assert.ok(Object.isFrozen(profiles[1].limits));
-  for (const model of ["openai/gpt-5.4-mini", "openai/gpt-5.4-nano", "future-vendor/review-model:free"]) {
+  for (const model of [
+    "openai/gpt-5.4-mini",
+    "openai/gpt-5.4-nano",
+    "future-vendor/review-model:free",
+  ]) {
     const selected = { ...secondProfile, model };
     assert.deepEqual(captureServiceProfiles({ profile, secondProfile: selected }), [
       profile,
