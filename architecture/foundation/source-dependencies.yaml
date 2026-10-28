@@ -133,7 +133,7 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/test/usage.test.ts, services/account-gateway/test/usage-postgres.test.ts, services/account-gateway/test/usage-checkout.test.ts]
     entrypoints: [services/account-gateway/test/usage.test.ts, services/account-gateway/test/usage-postgres.test.ts, services/account-gateway/test/usage-checkout.test.ts]
-    allow: {boundaries: [usage-journal, contracts, native-transport-http], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:fs/promises', 'node:events'], runtimeReferences: []}
+    allow: {boundaries: [usage-journal, kernel-domain, contracts, native-transport-http], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:fs/promises', 'node:events'], runtimeReferences: []}
 
   - id: usage-capacity-tests
     dependencyMode: runtime
