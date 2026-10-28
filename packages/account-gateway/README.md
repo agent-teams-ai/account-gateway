@@ -68,6 +68,14 @@ normalized none/function tool capabilities. Reasoning controls must be supported
 by the producer's actual discovery contract; a parameter name alone does not
 establish allowed effort values. Empty snapshots remain authoritative empty sets.
 Unknown, unsupported and unavailable results never invent dynamic membership.
+The generic `accountModelCapability` schema and `AccountModelCapability` type
+accept rows from either source; complete snapshots additionally enforce each
+source's stricter capability and size contract. A null reasoning or fast field
+means the Gateway has no qualified control to expose; it does not establish that
+the provider itself lacks that capability. During a coordinated upgrade, enable
+the compatible catalog and resave existing OpenRouter selections that explicitly
+set effort or fast mode with provider defaults before resuming their reviews.
+Stale explicit controls fail closed rather than being silently ignored.
 
 For complete catalogs, construct the model-reading client with
 `responseBytes: 2 * 1024 * 1024`. The explicit ceiling is 2 MiB; the default stays

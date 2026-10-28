@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { createManagementClient, createConsumerControlClient, createExecutionClient, GatewayError } from "../packages/account-gateway/dist/http/index.js";
-import { accountModelDiscoveryProfile, accountModelDiscoverySource, accountModels, accountModelsRequest } from "../packages/account-gateway/dist/contracts/index.js";
+import { accountModelCapability, accountModelDiscoveryProfile, accountModelDiscoverySource, accountModels, accountModelsRequest } from "../packages/account-gateway/dist/contracts/index.js";
 
 // Detects schema drift, silent fallback from an authoritative empty set, and invalid SDK paths/bodies.
 test("account-scoped models use strict canonical wire through management and consumer-control HTTP", async (t) => {
@@ -87,6 +87,7 @@ test("OpenRouter discovery supports bounded full catalogs without weakening Code
     tools: { allowed: ["none", "function"], default: "function" } };
   const snapshot = { status: "snapshot", source: "openrouter", physicalGeneration: "physical", principalVersion: "principal",
     fetchedAt: "2026-10-25T00:00:00Z", expiresAt: "2026-10-25T00:01:00Z", models: [model] };
+  assert.equal(accountModelCapability.safeParse(model).success, true);
   const rows = Array.from({ length: 2048 }, (_, i) => ({ ...model, modelId: `future-vendor/model-${i}` }));
   assert.equal(accountModels.safeParse({ ...snapshot, models: rows }).success, true);
   assert.equal(accountModels.safeParse({ ...snapshot, models: [...rows, { ...model, modelId: "overflow" }] }).success, false);
@@ -95,6 +96,7 @@ test("OpenRouter discovery supports bounded full catalogs without weakening Code
   assert.equal(accountModels.safeParse({ ...snapshot, models: [{ ...model, fast: { allowed: ["fast"], default: "fast" } }] }).success, false);
   assert.equal(accountModels.safeParse({ ...snapshot, models: [{ ...model, tools: { allowed: ["function_and_custom"], default: "function_and_custom" } }] }).success, false);
   const codex = { ...model, fast: { allowed: ["balanced"], default: "balanced" }, tools: { allowed: ["function"], default: "function" } };
+  assert.equal(accountModelCapability.safeParse(codex).success, true);
   assert.equal(accountModels.safeParse({ ...snapshot, source: "codex", models: [codex] }).success, true);
   assert.equal(accountModels.safeParse({ ...snapshot, source: "codex", models: rows.slice(0,129).map((row) => ({ ...codex, modelId: row.modelId })) }).success, false);
   assert.equal(accountModels.safeParse({ ...snapshot, source: "codex", models: [model] }).success, false);

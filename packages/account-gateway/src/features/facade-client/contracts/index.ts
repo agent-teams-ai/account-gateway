@@ -867,7 +867,7 @@ export function accountModelDiscoverySource(profile: {
 /** Authoritative account models share discovery and fences; enrollment retains its anchor. */
 export const accountModelsRequest = accountLimitsRequest.extend({ forceRefresh: z.boolean().optional() });
 // Retain Codex's existing capability restrictions independently of other sources.
-export const accountModelCapability = qualifiedModelCapability.extend({
+const codexAccountModelCapability = qualifiedModelCapability.extend({
   fast: modelSetting(["balanced"] as const),
   tools: modelSetting(["function"] as const),
 });
@@ -875,6 +875,7 @@ const openRouterAccountModelCapability = qualifiedModelCapability.extend({
   fast: z.null(),
   tools: modelSetting(["none", "function"] as const),
 });
+export const accountModelCapability = z.union([codexAccountModelCapability, openRouterAccountModelCapability]);
 const accountModelSnapshot = z.strictObject({
   status: z.literal("snapshot"),
   physicalGeneration: reference,
@@ -889,7 +890,7 @@ const validSnapshotPeriod = (snapshot: { fetchedAt: string; expiresAt: string })
 export const accountModels = z.union([
   accountModelSnapshot.extend({
     source: z.literal("codex"),
-    models: z.array(accountModelCapability).max(128).refine(distinctModels),
+    models: z.array(codexAccountModelCapability).max(128).refine(distinctModels),
   }).refine(validSnapshotPeriod),
   accountModelSnapshot.extend({
     source: z.literal("openrouter"),
@@ -901,7 +902,7 @@ export const accountModels = z.union([
 ]);
 export type AccountModelsRequest = z.infer<typeof accountModelsRequest>;
 export type AccountModels = z.infer<typeof accountModels>;
-export type AccountModelCapability = Extract<AccountModels, { status: "snapshot" }>["models"][number];
+export type AccountModelCapability = z.infer<typeof accountModelCapability>;
 
 /** account-limits/v2 adds closed identities and never invents duration or units. */
 export const ACCOUNT_LIMITS_V2_CONTRACT = "account-limits/v2" as const;
