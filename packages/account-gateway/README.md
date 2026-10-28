@@ -51,7 +51,7 @@ for current gate results and root documentation adoption prerequisites.
 Management and consumer-control clients expose `readAccountModels`; execution
 clients do not. The read accepts the current owner, account, qualified profile
 and expected authorization epoch, with optional `forceRefresh`. It does not
-submit a provider request or transfer a provider credential.
+submit an inference request or transfer a provider credential.
 
 `accountModelDiscoveryProfile(profileId)` identifies the qualified discovery
 profiles and their source, protocol and auth kind. A lookup can trigger a strict
