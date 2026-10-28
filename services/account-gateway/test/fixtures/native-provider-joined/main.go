@@ -259,12 +259,14 @@ func run() error {
 		return deny
 	}
 	oauth := &oauthFixture{key: key}
-	countersByProvider := map[string]*counters{"kimi": {}, "glm": {}, "minimax": {}, "grok": {}}
+	countersByProvider := map[string]*counters{"kimi": {}, "glm": {}, "minimax": {}, "grok": {}, "openrouter": {}}
 	var unexpected atomic.Int64
+	var openRouterModelGets atomic.Int64
+	var openRouterModelRemoved atomic.Bool
 	var toolShapeMu sync.Mutex
 	toolShapes := map[string]any{}
 	stats := func() map[string]any {
-		out := map[string]any{"unexpected": unexpected.Load()}
+		out := map[string]any{"unexpected": unexpected.Load(), "openrouterModelGets": openRouterModelGets.Load()}
 		for name, c := range countersByProvider {
 			out[name] = c.snapshot()
 		}
@@ -315,8 +317,29 @@ func run() error {
 				return
 			}
 		}
+		if r.Host == "openrouter.ai" && r.Method == "GET" && r.URL.RequestURI() == "/api/v1/models" {
+			if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+				reject()
+				return
+			}
+			openRouterModelGets.Add(1)
+			rows := []map[string]any{}
+			ids := []string{"birth/anchor"}
+			if !openRouterModelRemoved.Load() {
+				ids = append(ids, "unseen-vendor/new-model:free")
+			}
+			for _, id := range ids {
+				rows = append(rows, map[string]any{"id": id, "name": id, "context_length": 128000,
+					"architecture":         map[string]any{"input_modalities": []string{"text"}, "output_modalities": []string{"text"}},
+					"supported_parameters": []string{"tools", "reasoning"}, "reasoning": map[string]any{"supported_efforts": []string{"high", "medium"}, "default_effort": "medium"}, "pricing": map[string]string{"prompt": "0", "completion": "0"}})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": rows})
+			return
+		}
 		name := ""
 		switch r.Host {
+		case "openrouter.ai":
+			name = "openrouter"
 		case "api.kimi.ai":
 			name = "kimi"
 		case "api.z.ai":
@@ -367,13 +390,22 @@ func run() error {
 			}
 			return
 		}
-		paths := map[string]string{"kimi": "/coding/v1/responses", "glm": "/api/v1/responses", "minimax": "/v1/responses", "grok": "/v1/responses"}
-		models := map[string]string{"kimi": "k3-256k", "glm": "glm-5.3-flash", "minimax": "MiniMax-M3.1-Flash", "grok": "grok-4.7"}
+		paths := map[string]string{"kimi": "/coding/v1/responses", "glm": "/api/v1/responses", "minimax": "/v1/responses", "grok": "/v1/responses", "openrouter": "/api/v1/responses"}
+		models := map[string]string{"kimi": "k3-256k", "glm": "glm-5.3-flash", "minimax": "MiniMax-M3.1-Flash", "grok": "grok-4.7", "openrouter": "unseen-vendor/new-model:free"}
 		c.dispatches.Add(1)
 		var body map[string]json.RawMessage
 		if r.Method != "POST" || r.URL.RequestURI() != paths[name] || json.NewDecoder(io.LimitReader(r.Body, (4<<20)+1)).Decode(&body) != nil || string(body["model"]) != fmt.Sprintf("%q", models[name]) || string(body["stream"]) != "true" || string(body["store"]) != "false" || body["previous_response_id"] != nil || r.Header.Get("Idempotency-Key") != "" {
 			reject()
 			return
+		}
+		if name == "openrouter" {
+			var reasoning struct {
+				Effort string `json:"effort"`
+			}
+			if json.Unmarshal(body["reasoning"], &reasoning) != nil || reasoning.Effort != "high" {
+				reject()
+				return
+			}
 		}
 		if name == "minimax" && body["service_tier"] != nil {
 			reject()
@@ -555,7 +587,7 @@ func run() error {
 	defer providerTransport.CloseIdleConnections()
 	providerTransport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		switch address {
-		case "auth.x.ai:443", "api.kimi.ai:443", "api.z.ai:443", "api.minimax.io:443", "www.minimax.io:443", "cli-chat-proxy.grok.com:443":
+		case "openrouter.ai:443", "auth.x.ai:443", "api.kimi.ai:443", "api.z.ai:443", "api.minimax.io:443", "www.minimax.io:443", "cli-chat-proxy.grok.com:443":
 		default:
 			unexpected.Add(1)
 			return nil, deny
@@ -591,6 +623,9 @@ func run() error {
 		return deny
 	}
 	gateway := service.NewOpenAIGatewayService(accountRepo, nil, nil, nil, nil, nil, nil, &config.Config{}, nil, nil, nil, nil, nil, upstream, nil, nil, nil, nil, nil, nil, nil, nil)
+	if gateway.SetGatewayOpenRouterModels(service.NewGatewayOpenRouterModels(providerTransport)) != nil {
+		return deny
+	}
 	cache := repository.NewGatewayAccountLimitsRepositoryV2(db)
 	collector := service.NewGatewayProviderQuotaCollector(providerTransport)
 	var callback atomic.Value
@@ -704,8 +739,12 @@ func run() error {
 			c.AbortWithStatus(403)
 			return
 		}
-		c.Request = c.Request.WithContext(ctx)
+		c.Request = c.Request.WithContext(service.WithGatewayNativeCustody(ctx, custody))
 		c.Next()
+	}
+	modelReader, err := service.NewGatewayAccountModelsReader(nil, gateway, authorizeLimits)
+	if err != nil {
+		return deny
 	}
 	cleanupAuthority := func(ctx context.Context, in service.GatewayNativeOAuthCleanupRequest) (service.GatewayNativeOAuthCleanupAuthority, error) {
 		var reply struct {
@@ -763,16 +802,17 @@ func run() error {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	const prefix = "/private/native/v1/grok/oauth"
-	if admin.RegisterGatewayNativeOAuthCleanupRoute(router.Group(""), grok, authorizeCleanup, cleanupAuthority, prefix) != nil || admin.RegisterGatewayNativeGrokOAuthRoutes(router.Group(""), grok, authorize) != nil || admin.RegisterGatewayNativeOAuthDescriptorRoute(router.Group(""), grok, authorize, prefix) != nil || admin.RegisterGatewayNativeOAuthRetainedCustodyRoute(router.Group(""), grok, authorize, prefix) != nil || admin.RegisterGatewayNativeOAuthRefreshRoute(router.Group(""), grok, authorize, prefix) != nil || admin.RegisterGatewayAccountLimitsRoutesV2(router.Group(""), reader, authorizeLimitsHTTP) != nil {
+	if admin.RegisterGatewayNativeOAuthCleanupRoute(router.Group(""), grok, authorizeCleanup, cleanupAuthority, prefix) != nil || admin.RegisterGatewayNativeGrokOAuthRoutes(router.Group(""), grok, authorize) != nil || admin.RegisterGatewayNativeOAuthDescriptorRoute(router.Group(""), grok, authorize, prefix) != nil || admin.RegisterGatewayNativeOAuthRetainedCustodyRoute(router.Group(""), grok, authorize, prefix) != nil || admin.RegisterGatewayNativeOAuthRefreshRoute(router.Group(""), grok, authorize, prefix) != nil || admin.RegisterGatewayAccountLimitsRoutesV2(router.Group(""), reader, authorizeLimitsHTTP) != nil || admin.RegisterGatewayAccountModelsRoutes(router.Group(""), modelReader, authorizeLimitsHTTP) != nil {
 		return deny
 	}
 	primaryProfile := admin.GatewayNativeProfile{ID: service.GatewayMiMoResponsesProfile, BaseURL: "https://api.openai.com/v1", Model: "fixture-unused"}
+	openRouterQualified := gatewaytransport.QualifiedProfile{Profile: service.GatewayOpenRouterResponsesProfile, BaseURL: service.GatewayOpenRouterBaseURL, Model: "birth/anchor", QualificationRef: "controlled-source-v1", RequestBytes: 4 << 20, OutputBytes: 8 << 20, Tokens: 32768, ProviderTokenUpperBound: 32768}
 	plans := []gatewaytransport.QualifiedProfile{
 		{Profile: service.GatewayKimiCodeResponsesProfile, BaseURL: service.GatewayKimiCodeResponsesBaseURL, Model: service.GatewayKimiCodeResponsesModel},
 		{Profile: service.GatewayGLMCodingResponsesProfile, BaseURL: service.GatewayGLMCodingResponsesBaseURL, Model: service.GatewayGLMCodingResponsesModel},
 		{Profile: service.GatewayMiniMaxMPlanResponsesProfile, BaseURL: service.GatewayMiniMaxMPlanResponsesBaseURL, Model: service.GatewayMiniMaxMPlanResponsesModel},
 	}
-	planProfiles := []admin.GatewayNativeProfile{}
+	planProfiles := []admin.GatewayNativeProfile{{ID: openRouterQualified.Profile, BaseURL: openRouterQualified.BaseURL, Model: openRouterQualified.Model}}
 	for i := range plans {
 		plans[i].QualificationRef = "controlled-source-v1"
 		plans[i].RequestBytes = 4 << 20
@@ -812,6 +852,11 @@ func run() error {
 			toolShapeMu.Lock()
 			defer toolShapeMu.Unlock()
 			_ = json.NewEncoder(w).Encode(toolShapes)
+			return
+		}
+		if r.Method == "POST" && r.URL.Path == "/openrouter/remove-model" {
+			openRouterModelRemoved.Store(true)
+			w.WriteHeader(204)
 			return
 		}
 		if r.Method == "GET" && r.URL.Path == "/stats" {
@@ -951,7 +996,7 @@ func run() error {
 	}
 	primary := gatewaytransport.QualifiedProfile{Profile: primaryProfile.ID, BaseURL: primaryProfile.BaseURL, Model: primaryProfile.Model, QualificationRef: command.QualificationRef, RequestBytes: 4 << 20, OutputBytes: 8 << 20, Tokens: 32768, ProviderTokenUpperBound: 32768}
 	qualified := gatewaytransport.QualifiedProfile{Profile: service.GatewayGrokOAuthResponsesProfile, BaseURL: service.GatewayGrokOAuthBaseURL, Model: service.GatewayGrokOAuthModel, QualificationRef: "controlled-source-v1", RequestBytes: 4 << 20, OutputBytes: 8 << 20, Tokens: 32768, ProviderTokenUpperBound: 32768}
-	tcfg := gatewaytransport.Config{Gateway: gateway, Custody: custody, GrokOAuth: grok, Grok: &qualified, CodingPlans: plans, ProviderLimits: cache, Profile: primary, Enrollment: gatewaytransport.Enrollment{OriginRef: command.OriginRef, EngineIncarnation: command.EngineIncarnation, QualificationRef: primary.QualificationRef}, CallbackOrigin: command.CallbackOrigin, CallbackCredential: cfg.Callback, CallbackTimeout: 4 * time.Second, IOTimeout: 5 * time.Second, ProviderReadIdle: 5 * time.Second, CleanupTimeout: 4 * time.Second, MaxEntries: 32, EnvelopeBytes: 5 << 20, CallbackBytes: 16384,
+	tcfg := gatewaytransport.Config{Gateway: gateway, Custody: custody, GrokOAuth: grok, Grok: &qualified, OpenRouter: &openRouterQualified, CodingPlans: plans, ProviderLimits: cache, Profile: primary, Enrollment: gatewaytransport.Enrollment{OriginRef: command.OriginRef, EngineIncarnation: command.EngineIncarnation, QualificationRef: primary.QualificationRef}, CallbackOrigin: command.CallbackOrigin, CallbackCredential: cfg.Callback, CallbackTimeout: 4 * time.Second, IOTimeout: 5 * time.Second, ProviderReadIdle: 5 * time.Second, CleanupTimeout: 4 * time.Second, MaxEntries: 32, EnvelopeBytes: 5 << 20, CallbackBytes: 16384,
 		Authorize: func(r *http.Request) (gatewaytransport.Peer, error) {
 			token := r.Header.Get("Authorization")
 			if token == "Bearer "+cfg.Control {
@@ -1007,6 +1052,7 @@ func run() error {
  OR (extra ? 'gateway_profile_v1' AND
   (CASE WHEN jsonb_typeof(credentials)='object' THEN
    credentials-'base_url'='{}'::jsonb AND credentials->>'base_url'=CASE extra->>'gateway_profile_v1'
+    WHEN 'openrouter-openai-responses-apikey-v1' THEN 'https://openrouter.ai/api/v1'
     WHEN 'kimi-code-global-responses-apikey-v1' THEN 'https://api.kimi.ai/coding/v1'
     WHEN 'glm-coding-global-responses-apikey-v1' THEN 'https://api.z.ai/api/v1'
     WHEN 'minimax-mplan-global-responses-apikey-v1' THEN 'https://api.minimax.io/v1'

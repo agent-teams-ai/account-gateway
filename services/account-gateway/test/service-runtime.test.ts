@@ -394,7 +394,7 @@ void test("source catalog: singleton compatibility and finite simultaneous per-p
   const profiles = captureServiceProfiles({ profile, secondProfile });
   assert.deepEqual(profiles, [profile, secondProfile]);
   assert.ok(Object.isFrozen(profiles[1].limits));
-  for (const model of ["openai/gpt-5.4-mini", "openai/gpt-5.4-nano"]) {
+  for (const model of ["openai/gpt-5.4-mini", "openai/gpt-5.4-nano", "future-vendor/review-model:free"]) {
     const selected = { ...secondProfile, model };
     assert.deepEqual(captureServiceProfiles({ profile, secondProfile: selected }), [
       profile,
@@ -406,7 +406,7 @@ void test("source catalog: singleton compatibility and finite simultaneous per-p
     () =>
       captureServiceProfiles({
         profile,
-        secondProfile: { ...secondProfile, model: "unapproved-model" },
+        secondProfile: { ...secondProfile, model: "invalid model" },
       }),
     (e) => e instanceof ServiceError && e.code === "config_denied",
   );
@@ -547,7 +547,7 @@ void test("source catalog: singleton compatibility and finite simultaneous per-p
     { profile: profile.profile },
     { profile: "openrouter-alias" },
     { baseURL: profile.baseURL },
-    { model: profile.model },
+    { model: "invalid model" },
     { endpoint: secondProfile.baseURL },
     { providerTokenUpperBound: 49 },
     { limits: { ...limits, concurrency: 5 } },

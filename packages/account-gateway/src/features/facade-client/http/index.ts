@@ -8,7 +8,7 @@ const config = z.strictObject({
   role: z.enum(["management", "execution", "consumer-control"]),
   origin: z.string().check(z.url()),
   token: z.string().min(1).max(16384),
-  responseBytes: z.number().int().min(1024).max(1048576).default(65536),
+  responseBytes: z.number().int().min(1024).max(2097152).default(65536),
   timeoutMs: z.number().int().min(1).max(3600000).default(30000),
   bufferBytes: z.number().int().min(1024).max(1048576).default(65536),
 });
