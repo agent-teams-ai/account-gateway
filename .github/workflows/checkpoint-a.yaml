@@ -1,53 +1,114 @@
-name: Checkpoint A package qualification
+# PREPARATION ONLY: replace a manual workflow on a disposable TEST-only ref.
+# Never install this overlay on main. No pull_request trigger or required gate.
+name: TEST actual native four suites
 on:
-  pull_request:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  qualify_runtime:
-    name: qualify (Node ${{ matrix.node }})
+  actual_native:
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
-        # Active default first; Node 24 remains a required compatibility lane.
-        node: ["26.11.1", "24.21.0"]
+        node: ['26.11.1', '24.21.0']
     env:
-      NPM_CONFIG_ENGINE_STRICT: "true"
+      NPM_CONFIG_ENGINE_STRICT: 'true'
+      PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
+      NATIVE_COMMIT: 32cd6f50e76c29b578ee013900484c56013814bc
+      GATEWAY_COMMIT: 5a1ad4a00a8941f1263d927ab23297bafa640661
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The TEST overlay ref must contain only reviewed operator packet files.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+          path: overlay
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 5a1ad4a00a8941f1263d927ab23297bafa640661
+          persist-credentials: false
+          path: gateway
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.21.0'
+      - name: Retain Node24 Corepack
+        run: echo "COREPACK_ENTRY=$(dirname "$(dirname "$(command -v node)")")/lib/node_modules/corepack/dist/corepack.js" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: ${{ matrix.node }}
-      - run: npm install --prefix "$RUNNER_TEMP/gateway-pnpm" --ignore-scripts pnpm@11.28.2
-      - name: Verify pinned runtime and strict engine configuration
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Prepare isolated exact-source build inputs
         run: |
-          test "$(node --version)" = "v${{ matrix.node }}"
-          test "$(npm config get engine-strict)" = true
-          test "$(node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --config.engine-strict=true config get engine-strict)" = true
-      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --config.engine-strict=true install --frozen-lockfile
-      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run check:toolchain-config
-      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run toolchain:doctor
-      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run build
-      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run lint
-      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run format:check
-      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run typecheck
-      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" test
-      - run: node scripts/check-topology.mjs
-      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run foundation
-      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run foundation:dev-only
-      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run docs:check
-      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir packages/account-gateway pack --pack-destination "$RUNNER_TEMP/gateway-archive"
-      - run: scripts/qualify-consumers.sh "$RUNNER_TEMP/gateway-archive/agent-teams-account-gateway-0.1.0.tgz" "$RUNNER_TEMP/gateway-consumers"
-  qualify:
-    needs: qualify_runtime
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require both Node runtime lanes
-        env:
-          LANE_RESULT: ${{ needs.qualify_runtime.result }}
-        run: test "$LANE_RESULT" = success
+          set -euo pipefail
+          root="$RUNNER_TEMP/TEST-native4-${{ matrix.node }}"
+          test ! -e "$root"
+          mkdir -m 700 "$root"
+          mkdir "$root/tmp" "$root/shim" "$root/container-output"
+          echo "NATIVE4_ROOT=$root" >> "$GITHUB_ENV"
+          echo "NATIVE4_NODE=$(command -v node)" >> "$GITHUB_ENV"
+          echo "NATIVE4_NODE_HOME=$(dirname "$(dirname "$(command -v node)")")" >> "$GITHUB_ENV"
+          echo "NATIVE4_GO=$(command -v go)" >> "$GITHUB_ENV"
+          echo "NATIVE4_GO_HOME=$(go env GOROOT)" >> "$GITHUB_ENV"
+          for entry in "TMPDIR=tmp" "GOCACHE=go-cache" "GOMODCACHE=go-modules" "GOPATH=go" "COREPACK_HOME=corepack"; do
+            echo "${entry%=*}=$root/${entry#*=}" >> "$GITHUB_ENV"
+          done
+          printf '#!/bin/sh\nexec "%s" "%s" pnpm "$@"\n' "$(command -v node)" "$COREPACK_ENTRY" > "$root/shim/pnpm"
+          chmod 755 "$root/shim/pnpm"
+          echo "$root/shim" >> "$GITHUB_PATH"
+          uname -a
+          cat /etc/machine-id
+          df -B1 "$root"
+          free -b
+          git clone --no-checkout https://github.com/agent-teams-ai/sub2api.git "$root/native"
+          git -C "$root/native" checkout --detach "$NATIVE_COMMIT"
+      - name: Frozen normal Gateway graph and SDK build
+        working-directory: gateway
+        run: |
+          pnpm --config.engine-strict=true install --frozen-lockfile --store-dir "$NATIVE4_ROOT/store"
+          pnpm run build
+          node --run typecheck
+          node --run foundation
+          node --run foundation:dev-only
+      - name: Bind existing NOB and typecheck finite operator
+        run: |
+          packet="$GITHUB_WORKSPACE/overlay/test-native4"
+          mkdir "$packet/node_modules"
+          node --input-type=module - "$GITHUB_WORKSPACE/gateway" "$packet" <<'NODE'
+          import {createRequire} from 'node:module'; import{dirname,join}from'node:path';import{symlinkSync,writeFileSync,realpathSync,readFileSync}from'node:fs';
+          const [g,p]=process.argv.slice(2),r=createRequire(join(g,'package.json')),f=r.resolve('@agent-teams/engineering-foundation/package.json'),n=realpathSync(join(dirname(f),'../../node-or-bun'));if(JSON.parse(readFileSync(join(n,'package.json'),'utf8')).version!=='0.2.2')throw Error('nob-version');
+          symlinkSync(n,join(p,'node_modules/node-or-bun'));
+          writeFileSync(join(p,'tsconfig.cloud.json'),JSON.stringify({compilerOptions:{target:'ES2023',module:'NodeNext',moduleResolution:'NodeNext',strict:true,noEmit:true,allowImportingTsExtensions:true,erasableSyntaxOnly:true,types:['node'],typeRoots:[join(g,'node_modules/@types')],skipLibCheck:true},files:['operator.ts','tap.ts','tap.test.ts','toolchain.ts','toolchain.test.ts']}));
+          NODE
+          node "$GITHUB_WORKSPACE/gateway/node_modules/typescript/bin/tsc" -p "$packet/tsconfig.cloud.json"
+          node --test "$packet/tap.test.ts" "$packet/toolchain.test.ts"
+      - name: Build exact native main and separately hashed TEST fixtures
+        run: |
+          node "$GITHUB_WORKSPACE/overlay/test-native4/operator.ts" --phase build --gateway "$GITHUB_WORKSPACE/gateway" --native "$NATIVE4_ROOT/native" --output "$NATIVE4_ROOT/build" --go "$NATIVE4_GO"
+          docker build --pull --build-arg "PG_IMAGE=$PG_IMAGE" -t "test-native4:${{ matrix.node }}" "$GITHUB_WORKSPACE/overlay/test-native4"
+      - name: Entire four suites with no external network
+        run: |
+          docker run --rm --network none --user 0:0 --cpus 2 --memory 4g --pids-limit 256 \
+            --cap-add SYS_ADMIN --cap-add CHECKPOINT_RESTORE --security-opt seccomp=unconfined \
+            --mount "type=bind,source=$NATIVE4_NODE_HOME,target=$NATIVE4_NODE_HOME,readonly" \
+            --mount "type=bind,source=$NATIVE4_GO_HOME,target=$NATIVE4_GO_HOME,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=$GITHUB_WORKSPACE" \
+            --mount "type=bind,source=$NATIVE4_ROOT/build,target=$NATIVE4_ROOT/build,readonly" \
+            --mount "type=bind,source=$NATIVE4_ROOT/container-output,target=$NATIVE4_ROOT/container-output" \
+            -e GATEWAY_NATIVE4_ALLOW=fresh_isolated_root_linux_pg17_10 \
+            --entrypoint "$NATIVE4_NODE" "test-native4:${{ matrix.node }}" \
+            "$GITHUB_WORKSPACE/overlay/test-native4/operator.ts" --phase runtime \
+            --gateway "$GITHUB_WORKSPACE/gateway" --native "$NATIVE4_ROOT/native" \
+            --build "$NATIVE4_ROOT/build" --output "$NATIVE4_ROOT/container-output/result" --go "$NATIVE4_GO"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: ${{ always() }}
+        with:
+          name: TEST-native4-${{ matrix.node }}
+          path: |
+            ${{ env.NATIVE4_ROOT }}/build/build.json
+            ${{ env.NATIVE4_ROOT }}/container-output/result/runtime.json
+          if-no-files-found: warn
+          retention-days: 14
