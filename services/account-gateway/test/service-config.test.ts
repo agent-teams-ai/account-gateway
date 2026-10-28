@@ -6,6 +6,7 @@ import {
   glmProfile,
   kimiProfile,
   minimaxProfile,
+  openRouterProfile,
   captureGrokOAuthEnrollmentConfig,
   ServiceError,
 } from "../src/service-config.ts";
@@ -275,4 +276,21 @@ test("Grok needs explicit deployment qualification and cannot bypass it through 
       },
     }),
   );
+});
+
+// Enrollment captures a safe immutable anchor; Native owns live membership qualification.
+test("OpenRouter enrollment accepts future safe anchors without loosening its fixed provider tuple", () => {
+  const selected = { ...serviceProfile(2), ...openRouterProfile, model: "future-vendor/review:model-9" };
+  const first = serviceProfile(2);
+  assert.deepEqual(captureServiceProfiles({ profile: selected }), [selected]);
+  assert.deepEqual(captureServiceProfiles({ profile: first, secondProfile: selected }), [first, selected]);
+  for (const model of ["bad model", "../model", "", "x".repeat(129)]) {
+    denied(() => captureServiceProfiles({ profile: { ...selected, model } }));
+    denied(() => captureServiceProfiles({ profile: first, secondProfile: { ...selected, model } }));
+  }
+  const foreign = { ...selected, baseURL: "https://attacker.example/v1" };
+  denied(() => captureServiceProfiles({ profile: foreign }));
+  denied(() => captureServiceProfiles({ profile: first, secondProfile: foreign }));
+  denied(() => captureServiceProfiles({ profile: selected, secondProfile: selected }));
+  denied(() => captureServiceProfiles({ profile: first, secondProfile: { ...selected, profile: "different-profile" } }));
 });

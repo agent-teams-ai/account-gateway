@@ -19,7 +19,7 @@ import type { FacadeBearers, NativeCallback, NativeTransport } from "./facade.ts
 import type { ManagementStore, CandidateJournal } from "./management.ts";
 import { accountLimitsTarget, exactCandidate, physicalCandidate } from "./management.ts";
 import { validateResponses } from "./facade-ingress.ts";
-import { readAccountModels, accountModelAdmission } from "./models-port.ts";
+import { configuredAccountModelSource, readAccountModels, accountModelAdmission } from "./models-port.ts";
 import type { AccountModelsSource } from "./models-port.ts";
 import {
   admission,
@@ -276,7 +276,7 @@ export class NativeAuthority {
       return denied();
     instant(d.created_at);
     let models: ReturnType<typeof accountModelAdmission> = { modelIds: [profile.model], models: undefined, enforceCapabilities: false };
-    if (this.#accountModels && providerConnectionDefinition(profile.profile)?.oauth?.family === "codex") {
+    if (configuredAccountModelSource(profile.profile)) {
       const selector = {
         ownerRef: mapping.ownerRef,
         accountRef: fresh.admission.accountRef,
@@ -294,7 +294,7 @@ export class NativeAuthority {
         instant(after.admission.expiresAt) <= now()) return denied();
       models = accountModelAdmission(catalogue, profile.model);
     }
-    validateResponses(bytes, models.modelIds, profile.providerTokenUpperBound, models.models, models.enforceCapabilities);
+    validateResponses(bytes, models.modelIds, profile.providerTokenUpperBound, models.models, models.enforceCapabilities, configuredAccountModelSource(profile.profile));
     await this.kernel.currentWorkerLease(a.context, this.configuration.enrollment.worker);
     if (a.signal.aborted) return denied();
     a.descriptor = d;
@@ -320,7 +320,7 @@ export class NativeAuthority {
       return undefined;
     return profile;
   }
-  // Cached reads have separate consumer authority and permit suspended custody.
+  // Cached quota and model reads share owner authority and permit suspended custody.
   async #accountLimitsOwner(ctx: TrustedContext, value: unknown): Promise<unknown> {
     const r = object(value, [
       "consumerId",
@@ -334,7 +334,8 @@ export class NativeAuthority {
       !this.#accountLimitsOwners ||
       typeof r.profileId !== "string" ||
       !providerConnectionDefinition(r.profileId) ||
-      providerConnectionDefinition(r.profileId)?.limitsContract === "none" ||
+      (providerConnectionDefinition(r.profileId)?.limitsContract === "none" &&
+        !configuredAccountModelSource(r.profileId)) ||
       !this.#accountLimitsOwners.bearers.authorizesAccountLimits(
         ctx,
         r.ownerRef as string,

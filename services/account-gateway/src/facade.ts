@@ -42,7 +42,7 @@ import type { AccountManagement, ManagementStore, PhysicalCandidate } from "./ma
 import type { AccountLifecycleReadback } from "./management.ts";
 import { strictJSON, validateResponses } from "./facade-ingress.ts";
 import { readCachedAccountLimits } from "./limits-port.ts";
-import { readAccountModels, accountModelAdmission } from "./models-port.ts";
+import { configuredAccountModelSource, readAccountModels, accountModelAdmission } from "./models-port.ts";
 import type { AccountModelsSource } from "./models-port.ts";
 
 // Re-export the single wire authority to private composition/configuration.
@@ -582,9 +582,10 @@ function send<T>(
   value: T,
   status = 200,
   privateCache = false,
+  maximumBytes = 65_536,
 ): void {
   const bytes = JSON.stringify(schema.parse(value));
-  if (Buffer.byteLength(bytes) > 65_536) throw new KernelError("unavailable");
+  if (Buffer.byteLength(bytes) > maximumBytes) throw new KernelError("unavailable");
   res.writeHead(status, {
     "content-type": "application/json",
     "cache-control": privateCache ? "private, no-store" : "no-store",
@@ -1152,12 +1153,12 @@ export function createFacade(options: FacadeOptions): Server {
               selected.epoch !== input.expectedAuthorizationEpoch ||
               !["active", "suspended"].includes(selected.state)) throw new KernelError("denied");
             requireCurrent(grant);
-            const result = providerConnectionDefinition(input.profileId)?.oauth?.family === "codex"
+            const result = configuredAccountModelSource(input.profileId)
               ? await readAccountModels(options.accountModels, input,
                   () => accountLimitsTarget(kernel, store, context, input))
               : { status: "unsupported" as const };
             requireCurrent(grant);
-            send(res, c.accountModels, result, 200, true);
+            send(res, c.accountModels, result, 200, true, 2 * 1024 * 1024);
             return;
           }
           const limitsRead = async (contract: "account-limits/v1" | "account-limits/v2") => {
@@ -1545,7 +1546,7 @@ export function createFacade(options: FacadeOptions): Server {
               models: providerConnectionDefinition(saved.admission.profileId)?.models,
               enforceCapabilities: false,
             };
-            if (options.accountModels && providerConnectionDefinition(saved.admission.profileId)?.oauth?.family === "codex") {
+            if (configuredAccountModelSource(saved.admission.profileId)) {
               requireCurrent(grant);
               const selected = await kernel.account(context, saved.admission.accountRef);
               const selector: c.AccountModelsRequest = {
@@ -1568,6 +1569,7 @@ export function createFacade(options: FacadeOptions): Server {
               profile.maxOutputTokens,
               admittedModels.models,
               admittedModels.enforceCapabilities,
+              configuredAccountModelSource(saved.admission.profileId),
             );
             requireCurrent(grant);
             if (!transport || !enrollment) throw new KernelError("unavailable");

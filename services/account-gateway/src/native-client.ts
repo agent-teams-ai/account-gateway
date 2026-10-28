@@ -327,7 +327,7 @@ class NativeControlHTTP {
       deadlineMs > 30_000 ||
       !Number.isInteger(bodyBytes) ||
       bodyBytes < 1 ||
-      bodyBytes > 262_144 ||
+      bodyBytes > 2 * 1024 * 1024 ||
       !Number.isInteger(headerBytes) ||
       headerBytes < 1024 ||
       headerBytes > 16_384
@@ -1057,7 +1057,7 @@ export class NativeAccountLimitsV2Client extends NativeControlHTTP {
 /** Bounded native catalogue read; no provider credentials cross this boundary. */
 export class NativeAccountModelsClient extends NativeControlHTTP {
   constructor(options: NativeManagementOptions) {
-    super({ ...options, deadlineMs: 5000, bodyBytes: 262144 });
+    super({ ...options, deadlineMs: 5000, bodyBytes: 2 * 1024 * 1024 });
   }
   async readAccountModels(input: AccountModelsRequest): Promise<AccountModels> {
     try {

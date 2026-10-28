@@ -118,5 +118,5 @@ export {
   grokOAuthAuthorizationURL,
 } from "../features/facade-client/contracts/index.js";
 
-export { accountModelsRequest, accountModels, accountModelCapability, qualifiedModelCapability } from "../features/facade-client/contracts/index.js";
+export { accountModelDiscoveryProfile, accountModelDiscoverySource, accountModelsRequest, accountModels, accountModelCapability, qualifiedModelCapability } from "../features/facade-client/contracts/index.js";
 export type { AccountModelsRequest, AccountModels, AccountModelCapability } from "../features/facade-client/contracts/index.js";

@@ -845,23 +845,57 @@ export const providerConnectionCapabilities = z.strictObject({
 export type ProviderConnectionCapability = z.infer<typeof providerConnectionCapability>;
 export type ProviderConnectionCapabilities = z.infer<typeof providerConnectionCapabilities>;
 
-/** Authoritative, account-scoped Codex model selection. Enrollment keeps its anchor. */
+/** One qualified profile identity authority for discovery triggers and full guards. */
+const accountModelDiscoveryProfiles = Object.freeze([
+  Object.freeze({ profileId: "openai-codex-oauth-responses-v1", protocol: "openai-responses", authKind: "oauth", source: "codex" } as const),
+  Object.freeze({ profileId: "openrouter-openai-responses-apikey-v1", protocol: "openai-responses", authKind: "api_key", source: "openrouter" } as const),
+]);
+export function accountModelDiscoveryProfile(profileId: string) {
+  return accountModelDiscoveryProfiles.find((profile) => profile.profileId === profileId);
+}
+/** A lookup may trigger a strict read; admission also verifies protocol and auth. */
+export function accountModelDiscoverySource(profile: {
+  readonly profileId: string;
+  readonly protocol: string;
+  readonly authKind: string;
+}): "codex" | "openrouter" | undefined {
+  const qualified = accountModelDiscoveryProfile(profile.profileId);
+  return qualified && profile.protocol === qualified.protocol && profile.authKind === qualified.authKind
+    ? qualified.source : undefined;
+}
+
+/** Authoritative account models share discovery and fences; enrollment retains its anchor. */
 export const accountModelsRequest = accountLimitsRequest.extend({ forceRefresh: z.boolean().optional() });
-export const accountModelCapability = qualifiedModelCapability.extend({
+// Retain Codex's existing capability restrictions independently of other sources.
+const codexAccountModelCapability = qualifiedModelCapability.extend({
   fast: modelSetting(["balanced"] as const),
   tools: modelSetting(["function"] as const),
 });
-export const accountModels = z.discriminatedUnion("status", [
-  z.strictObject({
-    status: z.literal("snapshot"),
-    physicalGeneration: reference,
-    principalVersion: reference,
+const openRouterAccountModelCapability = qualifiedModelCapability.extend({
+  fast: z.null(),
+  tools: modelSetting(["none", "function"] as const),
+});
+export const accountModelCapability = z.union([codexAccountModelCapability, openRouterAccountModelCapability]);
+const accountModelSnapshot = z.strictObject({
+  status: z.literal("snapshot"),
+  physicalGeneration: reference,
+  principalVersion: reference,
+  fetchedAt: limitsInstant,
+  expiresAt: limitsInstant,
+});
+const distinctModels = (models: readonly { modelId: string }[]) =>
+  new Set(models.map((model) => model.modelId)).size === models.length;
+const validSnapshotPeriod = (snapshot: { fetchedAt: string; expiresAt: string }) =>
+  Date.parse(snapshot.fetchedAt) < Date.parse(snapshot.expiresAt);
+export const accountModels = z.union([
+  accountModelSnapshot.extend({
     source: z.literal("codex"),
-    fetchedAt: limitsInstant,
-    expiresAt: limitsInstant,
-    models: z.array(accountModelCapability).max(128)
-      .refine((models) => new Set(models.map((model) => model.modelId)).size === models.length),
-  }).refine((snapshot) => Date.parse(snapshot.fetchedAt) < Date.parse(snapshot.expiresAt)),
+    models: z.array(codexAccountModelCapability).max(128).refine(distinctModels),
+  }).refine(validSnapshotPeriod),
+  accountModelSnapshot.extend({
+    source: z.literal("openrouter"),
+    models: z.array(openRouterAccountModelCapability).max(2048).refine(distinctModels),
+  }).refine(validSnapshotPeriod),
   z.strictObject({ status: z.literal("unknown") }),
   z.strictObject({ status: z.literal("unsupported") }),
   z.strictObject({ status: z.literal("unavailable") }),
