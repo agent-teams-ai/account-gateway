@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import {
   createAccountLimitsClient,
@@ -11,7 +11,7 @@ import { accountLimitsResult } from "../packages/account-gateway/dist/contracts/
 
 // Regression: a provider-shaped payload, offsets, unsafe revisions or zero invented
 // from null could otherwise become an apparently valid numeric account quota.
-test("cached limits HTTP keeps canonical partial/overage facts and rejects unsafe wire data", async (t) => {
+void test("cached limits HTTP keeps canonical partial/overage facts and rejects unsafe wire data", async (t) => {
   const input = {
     ownerRef: "owner-a",
     accountRef: "account-a",
@@ -38,7 +38,9 @@ test("cached limits HTTP keeps canonical partial/overage facts and rejects unsaf
   };
   let result: unknown = snapshot,
     calls = 0;
-  const server = createServer(async (req, res) => {
+  const settlements: Promise<void>[] = [];
+  const failures: unknown[] = [];
+  async function handleRequest(req: IncomingMessage, res: ServerResponse) {
     calls++;
     assert.equal(req.headers.authorization, "Bearer fixture-token");
     res.setHeader("content-type", "application/json");
@@ -56,18 +58,30 @@ test("cached limits HTTP keeps canonical partial/overage facts and rejects unsaf
     assert.equal(req.method, "POST");
     assert.equal(req.url, "/v1/account-limits/read");
     const chunks: Buffer[] = [];
-    for await (const bytes of req) chunks.push(Buffer.from(bytes as Uint8Array));
+    for await (const bytes of req) {
+      chunks.push(Buffer.from(bytes as Uint8Array));
+    }
     assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString()), input);
     res.end(JSON.stringify(result));
+  }
+  const server = createServer((req, res) => {
+    settlements.push(
+      handleRequest(req, res).catch((error: unknown) => {
+        failures.push(error);
+        res.destroy();
+      }),
+    );
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
-  t.after(() => {
+  t.after(async () => {
     server.closeAllConnections();
     server.close();
+    await Promise.all(settlements);
+    assert.deepEqual(failures, [], "HTTP fixture handler failed");
   });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   const cfg = {
     role: "consumer-control" as const,
     origin: `http://127.0.0.1:${address.port}`,
@@ -122,11 +136,12 @@ test("cached limits HTTP keeps canonical partial/overage facts and rejects unsaf
     (e) => e instanceof GatewayError && e.code === "invalid_input",
   );
   assert.equal(calls, before, "invalid selectors never enter HTTP");
-  for (const changed of [{ timeoutMs: 3001 }, { responseBytes: 262145 }])
+  for (const changed of [{ timeoutMs: 3001 }, { responseBytes: 262145 }]) {
     assert.throws(() => createAccountLimitsClient({ ...cfg, ...changed }), GatewayError);
+  }
 });
 
-test("Claude cached limits preserve separate global and model windows through the public SDK", async (t) => {
+void test("Claude cached limits preserve separate global and model windows through the public SDK", async (t) => {
   const input = {
     ownerRef: "claude-owner",
     accountRef: "claude-account",
@@ -155,25 +170,39 @@ test("Claude cached limits preserve separate global and model windows through th
   };
   let result: unknown = snapshot,
     requests = 0;
-  const server = createServer(async (request, response) => {
+  const settlements: Promise<void>[] = [];
+  const failures: unknown[] = [];
+  async function handleRequest(request: IncomingMessage, response: ServerResponse) {
     requests++;
     assert.equal(request.method, "POST");
     assert.equal(request.url, "/v1/account-limits/read");
     assert.equal(request.headers.authorization, "Bearer controlled-claude-token");
     const chunks: Buffer[] = [];
-    for await (const bytes of request) chunks.push(Buffer.from(bytes as Uint8Array));
+    for await (const bytes of request) {
+      chunks.push(Buffer.from(bytes as Uint8Array));
+    }
     assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString()), input);
     response.setHeader("content-type", "application/json");
     response.end(JSON.stringify(result));
+  }
+  const server = createServer((request, response) => {
+    settlements.push(
+      handleRequest(request, response).catch((error: unknown) => {
+        failures.push(error);
+        response.destroy();
+      }),
+    );
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
-  t.after(() => {
+  t.after(async () => {
     server.closeAllConnections();
     server.close();
+    await Promise.all(settlements);
+    assert.deepEqual(failures, [], "HTTP fixture handler failed");
   });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   const client = createAccountLimitsClient({
     role: "management",
     origin: `http://127.0.0.1:${address.port}`,
@@ -184,7 +213,7 @@ test("Claude cached limits preserve separate global and model windows through th
     result = { status };
     assert.deepEqual(await client.readAccountLimits(input), result);
   }
-  const first = snapshot.windows[0]!;
+  const first = snapshot.windows[0];
   for (const windows of [
     [{ ...first, id: "claude-7d-opus" }],
     [first, { ...first, family: "codex", id: "primary" }],

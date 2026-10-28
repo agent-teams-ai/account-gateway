@@ -7,19 +7,32 @@ import { setTimeout as delay } from "node:timers/promises";
 import { config, post } from "../src/native-wire.ts";
 import { KernelError } from "../src/domain.ts";
 
-async function peer(handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>) {
-  let requests = 0,
-    failure: unknown;
+async function peer(handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>) {
+  let requests = 0;
+  const failures: unknown[] = [];
+  const settlements: Promise<void>[] = [];
+  const assertClean = () => {
+    assert.deepEqual(failures, [], "HTTP fixture handler failed");
+  };
   const server = createServer((req, res) => {
     requests++;
-    void handler(req, res).catch((error) => {
-      failure = error;
+    try {
+      settlements.push(
+        Promise.resolve(handler(req, res)).catch((error: unknown) => {
+          failures.push(error);
+          res.destroy();
+        }),
+      );
+    } catch (error) {
+      failures.push(error);
       res.destroy();
-    });
+    }
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   const cfg = config({
     origin: "http://127.0.0.1:" + address.port,
     enrollment: {
@@ -54,12 +67,16 @@ async function peer(handler: (req: IncomingMessage, res: ServerResponse) => Prom
   return {
     cfg,
     requests: () => requests,
-    assertClean: () => {
-      if (failure) throw failure;
-    },
+    assertClean,
     async stop() {
       server.closeAllConnections();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await new Promise<void>((resolve) => {
+        server.close(() => {
+          resolve();
+        });
+      });
+      await Promise.all(settlements);
+      assertClean();
     },
   };
 }
@@ -73,7 +90,7 @@ for (const scenario of [
   { name: "delayed headers", headers: 250, gap: 0 },
   { name: "stream gap", headers: 0, gap: 250 },
 ]) {
-  test(
+  void test(
     "native wire: inference duration permits " + scenario.name + " beyond control timeout",
     { timeout: 5000 },
     async () => {
@@ -91,7 +108,9 @@ for (const scenario of [
       try {
         hop = await post(f.cfg, credential, route, body, undefined, 1500);
         const chunks: Buffer[] = [];
-        for await (const chunk of hop.response) chunks.push(Buffer.from(chunk as Uint8Array));
+        for await (const chunk of hop.response) {
+          chunks.push(Buffer.from(chunk as Uint8Array));
+        }
         assert.equal(hop.response.statusCode, 200);
         assert.equal(Buffer.concat(chunks).toString(), "data: first\n\ndata: final\n\n");
         assert.equal(hop.response.complete, true);
@@ -105,7 +124,7 @@ for (const scenario of [
   );
 }
 
-test(
+void test(
   "native wire: default control duration still rejects a peer withholding headers without retry",
   { timeout: 5000 },
   async () => {
@@ -118,21 +137,25 @@ test(
     });
     try {
       const pending = post(f.cfg, credential, route + "/read-owner", body);
-      void pending.catch(() => undefined);
-      await seen.promise;
-      await assert.rejects(
-        pending,
-        (error: unknown) => error instanceof KernelError && error.code === "unavailable",
-      );
-      assert.equal(f.requests(), 1);
-      f.assertClean();
+      const observer = pending.catch(() => {});
+      try {
+        await seen.promise;
+        await assert.rejects(
+          pending,
+          (error: unknown) => error instanceof KernelError && error.code === "unavailable",
+        );
+        assert.equal(f.requests(), 1);
+        f.assertClean();
+      } finally {
+        await observer;
+      }
     } finally {
       await f.stop();
     }
   },
 );
 
-test(
+void test(
   "native wire: explicit duration remains a hard deadline despite continuous stream activity",
   { timeout: 5000 },
   async () => {
@@ -144,7 +167,9 @@ test(
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.write("data: first\n\n");
       pulse = setInterval(() => res.write("data: keepalive\n\n"), 20);
-      res.once("close", () => clearInterval(pulse));
+      res.once("close", () => {
+        clearInterval(pulse);
+      });
     });
     let hop: Awaited<ReturnType<typeof post>> | undefined;
     try {
@@ -152,7 +177,9 @@ test(
       const response = hop.response;
       let chunks = 0;
       await assert.rejects(async () => {
-        for await (const _ of response) chunks++;
+        for await (const _ of response) {
+          chunks++;
+        }
       });
       assert.ok(chunks > 1);
       assert.equal(response.complete, false);

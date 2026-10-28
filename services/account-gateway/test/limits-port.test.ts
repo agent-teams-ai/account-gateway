@@ -31,7 +31,7 @@ const snapshot = {
   ],
 };
 
-test("cached limits compares physical identity across the source await", async () => {
+void test("cached limits compares physical identity across the source await", async () => {
   let identity = "physical-a";
   await assert.rejects(
     readCachedAccountLimits(
@@ -55,7 +55,7 @@ test("cached limits compares physical identity across the source await", async (
     (error) => error instanceof KernelError && error.code === "denied",
   );
 });
-test("cached limits reauthorizes even after an unavailable source result", async () => {
+void test("cached limits reauthorizes even after an unavailable source result", async () => {
   let allowed = true;
   await assert.rejects(
     readCachedAccountLimits(
@@ -73,7 +73,7 @@ test("cached limits reauthorizes even after an unavailable source result", async
     (error) => error instanceof KernelError && error.code === "denied",
   );
 });
-test("cached limits preserves known reset independently of unknown period and missing percentage", async () => {
+void test("cached limits preserves known reset independently of unknown period and missing percentage", async () => {
   const result = await readCachedAccountLimits(
     { authorize: async () => true, currentIdentity: async () => ({ generation: "a" }) },
     { contract: "account-limits/v2", read: async () => snapshot },
@@ -82,7 +82,7 @@ test("cached limits preserves known reset independently of unknown period and mi
   );
   assert.deepEqual(result.wire, snapshot);
 });
-test("cached limits rejects a foreign provider snapshot without revealing its windows", async () => {
+void test("cached limits rejects a foreign provider snapshot without revealing its windows", async () => {
   const result = await readCachedAccountLimits(
     { authorize: async () => true, currentIdentity: async () => ({ generation: "a" }) },
     {

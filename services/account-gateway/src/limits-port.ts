@@ -19,6 +19,7 @@ export interface AccountLimitsAuthority {
 export type AccountLimitsPortResult = {
   readonly wire: c.AccountLimits | c.AccountLimitsV2;
 };
+const empty = (): AccountLimitsPortResult => ({ wire: { status: "unsupported" } });
 /**
  * The sole cached consumer-facing limits port. It owns authorization, both
  * generation/identity fences and versioned wire validation.
@@ -32,9 +33,12 @@ export async function readCachedAccountLimits(
     readonly provider?: c.ProviderConnectionCapability["provider"]["identity"];
   },
 ): Promise<AccountLimitsPortResult> {
-  const empty = (): AccountLimitsPortResult => ({ wire: { status: "unsupported" } });
-  if (!(await authority.authorize(input))) throw new KernelError("denied");
-  if (!source || source.contract !== expected.contract) return empty();
+  if (!(await authority.authorize(input))) {
+    throw new KernelError("denied");
+  }
+  if (!source || source.contract !== expected.contract) {
+    return empty();
+  }
   const before = await authority.currentIdentity(input);
   let result: c.AccountLimits | c.AccountLimitsV2 = { status: "unavailable" };
   try {
@@ -42,7 +46,9 @@ export async function readCachedAccountLimits(
     const parsed = (
       source.contract === "account-limits/v2" ? c.accountLimitsV2 : c.accountLimits
     ).safeParse(observed);
-    if (parsed.success) result = parsed.data;
+    if (parsed.success) {
+      result = parsed.data;
+    }
   } catch {
     /* Preserve the safe union; still revalidate after the await. */
   }
@@ -61,10 +67,13 @@ export async function readCachedAccountLimits(
                   ? "claude"
                   : undefined),
           );
-    if (!matches) result = { status: "unavailable" };
+    if (!matches) {
+      result = { status: "unavailable" };
+    }
   }
   const after = await authority.currentIdentity(input);
-  if (!isDeepStrictEqual(before, after) || !(await authority.authorize(input)))
+  if (!isDeepStrictEqual(before, after) || !(await authority.authorize(input))) {
     throw new KernelError("denied");
+  }
   return { wire: result };
 }

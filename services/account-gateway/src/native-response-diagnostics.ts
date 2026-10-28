@@ -189,21 +189,24 @@ export function nativeResponseDiagnostics(
             ...shapeFields.map((key) => row[key]),
             ...unsupportedCodexFields.map((key) => fields[key]),
           ].every((value) => typeof value === "boolean")
-        )
+        ) {
           return;
+        }
         if (
-          (row.instructions_nonblank && !row.instructions_string) ||
-          (row.instructions_string && !row.instructions_present)
-        )
+          (row.instructions_nonblank === true && row.instructions_string === false) ||
+          (row.instructions_string === true && row.instructions_present === false)
+        ) {
           return;
+        }
         if (
-          !row.canonical_object &&
+          row.canonical_object === false &&
           [
             ...shapeFields.slice(1).map((key) => row[key]),
             ...unsupportedCodexFields.map((key) => fields[key]),
           ].some(Boolean)
-        )
+        ) {
           return;
+        }
         record =
           JSON.stringify({
             event: "gateway_native_codex_request_shape",
@@ -234,24 +237,30 @@ export function nativeResponseDiagnostics(
         );
         if (row.event === "gateway_native_oauth_connect_failure") {
           object(row, ["event", "phase"], ["http_status", "reason", ...oauthIntentFields]);
-          if (typeof row.phase !== "string" || !oauthPhases.has(row.phase)) return;
+          if (typeof row.phase !== "string" || !oauthPhases.has(row.phase)) {
+            return;
+          }
           const status = row.http_status;
           if (row.phase === "exchange_http_status") {
             if (
               !Number.isSafeInteger(status) ||
               (status as number) < 100 ||
               (status as number) > 599
-            )
+            ) {
               return;
-          } else if (Object.hasOwn(row, "http_status")) return;
+            }
+          } else if (Object.hasOwn(row, "http_status")) {
+            return;
+          }
           const reason = row.reason;
           if (
             Object.hasOwn(row, "reason") &&
             (row.phase !== "stage_conflict" ||
               typeof reason !== "string" ||
               !oauthConflictReasons.has(reason))
-          )
+          ) {
             return;
+          }
           let intent: object = {};
           if (oauthIntentFields.some((key) => Object.hasOwn(row, key))) {
             identifier(row.consumer);
@@ -292,48 +301,55 @@ export function nativeResponseDiagnostics(
             row.event !== "gateway_native_response_failure" ||
             typeof row.phase !== "string" ||
             !phases.has(row.phase)
-          )
+          ) {
             return;
+          }
           const status = row.http_status;
           if (
             Object.hasOwn(row, "http_status") &&
             (!Number.isSafeInteger(status) || (status as number) < 100 || (status as number) > 599)
-          )
+          ) {
             return;
+          }
           const category = row.provider_error_category;
           if (
             Object.hasOwn(row, "provider_error_category") &&
             (typeof category !== "string" || !providerErrorCategories.has(category))
-          )
+          ) {
             return;
+          }
           const shape = row.provider_error_shape;
           if (
             Object.hasOwn(row, "provider_error_shape") &&
             (typeof shape !== "string" || !providerErrorShapes.has(shape))
-          )
+          ) {
             return;
+          }
           const parameter = row.provider_error_parameter;
           if (
             Object.hasOwn(row, "provider_error_parameter") &&
             (typeof parameter !== "string" || !providerErrorParameters.has(parameter))
-          )
+          ) {
             return;
+          }
           const readReason = row.read_error_reason;
           if (
             Object.hasOwn(row, "read_error_reason") &&
             (row.phase !== "sse_read" ||
               typeof readReason !== "string" ||
               !readErrorReasons.has(readReason))
-          )
+          ) {
             return;
+          }
           const mediaCategory = row.upstream_media_category;
           if (
             Object.hasOwn(row, "upstream_media_category") &&
             (row.phase !== "invalid_content_type" ||
               typeof mediaCategory !== "string" ||
               !upstreamMediaCategories.has(mediaCategory))
-          )
+          ) {
             return;
+          }
           const bodyShape = row.upstream_body_shape;
           if (
             Object.hasOwn(row, "upstream_body_shape") &&
@@ -341,8 +357,9 @@ export function nativeResponseDiagnostics(
               mediaCategory !== "missing" ||
               typeof bodyShape !== "string" ||
               !upstreamBodyShapes.has(bodyShape))
-          )
+          ) {
             return;
+          }
           const bodyPrefix = row.upstream_body_prefix;
           if (
             Object.hasOwn(row, "upstream_body_prefix") &&
@@ -350,8 +367,9 @@ export function nativeResponseDiagnostics(
               mediaCategory !== "missing" ||
               typeof bodyPrefix !== "string" ||
               !upstreamBodyPrefixes.has(bodyPrefix))
-          )
+          ) {
             return;
+          }
           record =
             JSON.stringify({
               event: "gateway_native_response_failure",
@@ -381,10 +399,16 @@ export function nativeResponseDiagnostics(
         if (pending.length + end - start > 4096) {
           pending = Buffer.alloc(0);
           oversized = true;
-        } else pending = Buffer.concat([pending, chunk.subarray(start, end)]);
+        } else {
+          pending = Buffer.concat([pending, chunk.subarray(start, end)]);
+        }
       }
-      if (newline < 0) return;
-      if (!oversized) accept(pending);
+      if (newline < 0) {
+        return;
+      }
+      if (!oversized) {
+        accept(pending);
+      }
       pending = Buffer.alloc(0);
       oversized = false;
       start = newline + 1;

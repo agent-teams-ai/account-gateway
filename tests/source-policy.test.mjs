@@ -13,8 +13,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { createRequire } from "node:module";
 
-const cli = resolve("node_modules/@agent-teams/engineering-foundation/dist/cli.js");
+const foundationManifest = createRequire(import.meta.url).resolve(
+  "@agent-teams/engineering-foundation/package.json",
+);
+const foundationPackage = JSON.parse(readFileSync(foundationManifest, "utf8"));
+const cli = resolve(dirname(foundationManifest), foundationPackage.bin["agent-teams-foundation"]);
 const check = (consumer) =>
   spawnSync(
     process.execPath,
@@ -41,8 +46,9 @@ function fixture(body) {
       mkdirSync(dirname(target), { recursive: true });
       cpSync(path, target, { recursive: true });
     }
-    if (existsSync("node_modules"))
+    if (existsSync("node_modules")) {
       symlinkSync(resolve("node_modules"), join(root, "node_modules"), "dir");
+    }
     return body(root);
   } finally {
     rmSync(root, { recursive: true, force: true });

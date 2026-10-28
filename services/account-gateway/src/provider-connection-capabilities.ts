@@ -18,8 +18,9 @@ export function providerConnectionCapability(
             default: "function" as const,
           },
         })) ?? definition.models);
-  if (!selected.length || selected.length !== (modelIds?.length ?? definition.models.length))
+  if (!selected.length || selected.length !== (modelIds?.length ?? definition.models.length)) {
     throw new Error("unqualified_model");
+  }
   return c.providerConnectionCapability.parse({
     contract: c.PROVIDER_CONNECTIONS_CONTRACT,
     profileId: definition.profileId,
@@ -47,7 +48,9 @@ export function projectProviderConnections(
 ): c.ProviderConnectionCapabilities {
   const capabilities = profiles.flatMap((profile) => {
     const entry = providerConnectionDefinition(profile.profileId);
-    if (!entry || entry.protocol !== profile.protocol) return [];
+    if (!entry || entry.protocol !== profile.protocol) {
+      return [];
+    }
     try {
       return [providerConnectionCapability(entry, profile.modelIds)];
     } catch {

@@ -5,11 +5,11 @@ import assert from "node:assert/strict";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
 import { spawn, execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
-import pg from "pg";
+import { Pool } from "pg";
 import {
   createAccountLimitsV2Client,
   createManagementClient,
@@ -36,18 +36,18 @@ const report = (value: object): void => {
 };
 let phase = "guard";
 const servers: Server[] = [];
-let pool: pg.Pool | undefined;
+let pool: Pool | undefined;
 let child: ReturnType<typeof spawn> | undefined;
 let stopped = false;
 let childExit: Promise<number | null> | undefined;
 async function listen(server: Server): Promise<string> {
   servers.push(server);
-  await new Promise<void>((done, fail) => {
-    server.once("error", fail);
-    server.listen(0, "127.0.0.1", done);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
   });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   return "http://127.0.0.1:" + address.port;
 }
 async function bounded<T>(work: Promise<T>, milliseconds = 15_000): Promise<T> {
@@ -55,8 +55,10 @@ async function bounded<T>(work: Promise<T>, milliseconds = 15_000): Promise<T> {
   try {
     return await Promise.race([
       work,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("controlled joined timeout")), milliseconds);
+      new Promise<never>((resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error("controlled joined timeout"));
+        }, milliseconds);
       }),
     ]);
   } finally {
@@ -65,7 +67,7 @@ async function bounded<T>(work: Promise<T>, milliseconds = 15_000): Promise<T> {
 }
 function disposable(name: string, prefix: string): string {
   const raw = process.env[name];
-  assert.ok(raw);
+  assert.ok(raw !== undefined && raw !== "");
   const url = new URL(raw);
   assert.ok(["postgres:", "postgresql:"].includes(url.protocol));
   assert.equal(url.hostname, "127.0.0.1");
@@ -77,6 +79,18 @@ function disposable(name: string, prefix: string): string {
   assert.equal(url.search, "?sslmode=disable");
   return raw;
 }
+const sha256 = async (url: URL): Promise<string> =>
+  createHash("sha256")
+    .update(await readFile(url))
+    .digest("hex");
+
+const denied = (error: unknown): boolean =>
+  error instanceof GatewayError && error.diagnostic?.code === "forbidden";
+
+function isNonemptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
 async function run(): Promise<void> {
   assert.equal(process.env.AG_NATIVE_PROVIDER_JOINED_ALLOW, "disposable_pg17_10");
   const nativeDSN = disposable("AG_NATIVE_PROVIDER_JOINED_NATIVE_DSN", "native_provider_joined_");
@@ -86,7 +100,12 @@ async function run(): Promise<void> {
   );
   phase = "native-binary-input";
   const binary = process.env.AG_NATIVE_PROVIDER_JOINED_BINARY;
-  assert.ok(binary && isAbsolute(binary) && binary.includes("/tmp/native-provider-joined/"));
+  assert.ok(
+    binary !== undefined &&
+      binary !== "" &&
+      isAbsolute(binary) &&
+      binary.includes("/tmp/native-provider-joined/"),
+  );
   const binarySHA256 = createHash("sha256")
     .update(await readFile(binary))
     .digest("hex");
@@ -97,7 +116,7 @@ async function run(): Promise<void> {
     { encoding: "utf8", timeout: 5000, maxBuffer: 131072 },
   );
   const nativeHead = /vcs\.revision=([a-f0-9]{40})/.exec(buildInfo)?.[1];
-  assert.ok(nativeHead);
+  assert.ok(nativeHead !== undefined && nativeHead !== "");
   assert.match(
     buildInfo,
     /(?:^|\s)vcs\.modified=false(?:\s|$)/,
@@ -114,12 +133,9 @@ async function run(): Promise<void> {
     }).trim();
   assert.match(gatewayHead, /^[a-f0-9]{40}$/);
   const gatewaySourceArchiveSHA256 = process.env.AG_NATIVE_PROVIDER_JOINED_GATEWAY_SOURCE_SHA256;
-  if (gatewaySourceArchiveSHA256 !== undefined)
+  if (gatewaySourceArchiveSHA256 !== undefined) {
     assert.match(gatewaySourceArchiveSHA256, /^[a-f0-9]{64}$/);
-  const sha256 = async (url: URL): Promise<string> =>
-    createHash("sha256")
-      .update(await readFile(url))
-      .digest("hex");
+  }
   const sourceHashes = {
     harness: await sha256(new URL(import.meta.url)),
     nativeFixture: await sha256(
@@ -132,7 +148,7 @@ async function run(): Promise<void> {
   const managementCredential = randomBytes(32).toString("base64url"),
     callbackCredential = randomBytes(32).toString("base64url");
   phase = "gateway-scratch";
-  const scratchRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../tmp");
+  const scratchRoot = resolvePath(dirname(fileURLToPath(import.meta.url)), "../../../tmp");
   await mkdir(scratchRoot, { recursive: true });
   const scratch = await mkdtemp(join(scratchRoot, "native-provider-joined-"));
   const configFile = join(scratch, "native-config.json");
@@ -155,17 +171,20 @@ async function run(): Promise<void> {
     env: { GIN_MODE: "release" },
     stdio: ["pipe", "pipe", "pipe"],
   });
-  child.stdin!.on("error", () => undefined);
+  child.stdin!.on("error", () => {});
   // Native diagnostics are retained privately, never reflected into public results.
   let diagnostic = Buffer.alloc(0),
     nativeDiagnosticBytes = 0;
   child.stderr!.on("data", (bytes: Buffer) => {
     nativeDiagnosticBytes += bytes.byteLength;
-    if (diagnostic.byteLength < 8192)
+    if (diagnostic.byteLength < 8192) {
       diagnostic = Buffer.concat([diagnostic, bytes.subarray(0, 8192 - diagnostic.byteLength)]);
+    }
   });
   childExit = new Promise((resolve) => {
-    child!.once("error", () => resolve(-1));
+    child!.once("error", () => {
+      resolve(-1);
+    });
     child!.once("close", resolve);
   });
   const frames = createInterface({ input: child.stdout!, crlfDelay: Infinity })[
@@ -189,15 +208,17 @@ async function run(): Promise<void> {
     assert.ok(url.port);
   }
   phase = "kernel-database-guard";
-  pool = new pg.Pool({
+  pool = new Pool({
     connectionString: kernelDSN,
     max: 8,
     connectionTimeoutMillis: 5000,
     query_timeout: 5000,
   });
-  pool.on("error", () => undefined);
+  pool.on("error", () => {});
   const version = (
-    await pool.query("SELECT current_database() AS db,current_setting('server_version') AS version")
+    await pool.query<{ db: string; version: string }>(
+      "SELECT current_database() AS db,current_setting('server_version') AS version",
+    )
   ).rows[0];
   assert.equal(version.db, new URL(kernelDSN).pathname.slice(1));
   assert.match(version.version, /^17\.10(?:$| )/);
@@ -209,10 +230,11 @@ async function run(): Promise<void> {
   phase = "kernel-migrations";
   const migrations = (await readdir(new URL("../migrations/", import.meta.url)))
     .filter((f) => /^\d{3}_.*\.sql$/.test(f))
-    .sort();
+    .toSorted();
   assert.ok(migrations.length > 0);
-  for (const name of migrations)
+  for (const name of migrations) {
     await pool.query(await readFile(new URL("../migrations/" + name, import.meta.url), "utf8"));
+  }
   const kernel = new PostgresKernel(pool),
     secrets = new IntentSecrets(randomBytes(32), randomBytes(32));
   const store = new PostgresManagementStore(pool, secrets),
@@ -376,13 +398,11 @@ async function run(): Promise<void> {
     assert.equal(response.status, 200);
     return (await response.json()) as Stats;
   };
-  const denied = (error: unknown): boolean =>
-    error instanceof GatewayError && error.diagnostic?.code === "forbidden";
   phase = "safe-source-capabilities";
   const capabilities = await consumer.getProviderConnectionCapabilities();
   assert.deepEqual(
-    capabilities.capabilities.map((capability) => capability.profileId).sort(),
-    [...profileIds].sort(),
+    capabilities.capabilities.map((capability) => capability.profileId).toSorted(),
+    [...profileIds].toSorted(),
   );
   assert.equal(
     capabilities.capabilities.every(
@@ -417,7 +437,7 @@ async function run(): Promise<void> {
         denied,
       );
       const begun = await client.beginOAuth(command);
-      assert.ok(begun.authorizationURL);
+      assert.ok(isNonemptyString(begun.authorizationURL));
       assert.equal(begun.operation.state, "pending");
       assert.equal(new URL(begun.authorizationURL).origin, "https://auth.x.ai");
       const response = await controller("/grok/authorize", {
@@ -444,8 +464,9 @@ async function run(): Promise<void> {
       assert.deepEqual(await client.connect(keyCommand), applied);
     }
     assert.equal(applied.state, "applied");
-    if (applied.state !== "applied" || applied.result?.kind !== "account")
+    if (!Object.is(applied.state, "applied") || applied.result?.kind !== "account") {
       throw new Error("missing account");
+    }
     const account = await client.get(applied.result.accountRef);
     assert.equal(account.state, "active");
     const journal = await store.readJournal(context, command.operationId);
@@ -505,15 +526,16 @@ async function run(): Promise<void> {
     if (
       negativeAccess.operation.state !== "applied" ||
       negativeAccess.operation.result?.kind !== "execution"
-    )
+    ) {
       throw new Error("missing negative execution");
+    }
     const negativeExecution = createExecutionClient({
       role: "execution",
       origin,
       token: negativeAccess.bearer,
     });
     const negativeRef = negativeAccess.operation.result.executionRef;
-    for (const patch of [{ reasoning: { effort: "xhigh" } }, { service_tier: "priority" }])
+    for (const patch of [{ reasoning: { effort: "xhigh" } }, { service_tier: "priority" }]) {
       await assert.rejects(
         negativeExecution.request(negativeRef, {
           requestId: randomUUID(),
@@ -531,6 +553,7 @@ async function run(): Promise<void> {
         (error: unknown) =>
           error instanceof GatewayError && error.diagnostic?.code === "invalid_request",
       );
+    }
     assert.deepEqual(await stats(), before, "unsupported settings never enter any provider");
     await negativeExecution.close(negativeRef, { operationId: randomUUID(), reason: "completed" });
     phase = provider + "-native-tool-roundtrip";
@@ -581,8 +604,9 @@ async function run(): Promise<void> {
         limits,
         deadline: new Date(Date.now() + 30_000).toISOString(),
       });
-      if (access.operation.state !== "applied" || access.operation.result?.kind !== "execution")
+      if (access.operation.state !== "applied" || access.operation.result?.kind !== "execution") {
         throw new Error("missing execution");
+      }
       const executionRef = access.operation.result.executionRef;
       const execution = createExecutionClient({ role: "execution", origin, token: access.bearer });
       const request = async (input: unknown, tools?: unknown[]): Promise<string> => {
@@ -602,9 +626,13 @@ async function run(): Promise<void> {
           ),
         });
         assert.equal(result.kind, "stream");
-        if (result.kind !== "stream") throw new Error("missing stream");
+        if (!Object.is(result.kind, "stream")) {
+          throw new Error("missing stream");
+        }
         let output = "";
-        for await (const part of result.body) output += new TextDecoder().decode(part);
+        for await (const part of result.body) {
+          output += new TextDecoder().decode(part);
+        }
         assert.match(output, /response.completed/);
         return output;
       };
@@ -619,9 +647,18 @@ async function run(): Promise<void> {
       ]);
       assert.match(first, /function_call/);
       assert.match(first, /joined-call-1/);
-      const completed = first.split(/\r?\n/).filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trim()).filter((data) => data !== "" && data !== "[DONE]")
-        .map((data) => JSON.parse(data) as { type?: string; response?: { output?: Record<string, unknown>[] } })
+      const completed = first
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim())
+        .filter((data) => data !== "" && data !== "[DONE]")
+        .map(
+          (data) =>
+            JSON.parse(data) as {
+              type?: string;
+              response?: { output?: Record<string, unknown>[] };
+            },
+        )
         .find((event) => event.type === "response.completed");
       assert.ok(completed?.response?.output);
       const output = completed.response.output;
@@ -630,7 +667,7 @@ async function run(): Promise<void> {
       const call = calls[0];
       assert.equal(call.name, "joined_lookup");
       assert.equal(call.arguments, "{}");
-      assert.ok(call && typeof call.call_id === "string");
+      assert.ok(typeof call.call_id === "string");
       if (provider === "minimax") {
         const reasoning = output.find((item) => item.type === "reasoning");
         assert.deepEqual(reasoning?.content, [{ type: "reasoning_text", text: "fixture thought" }]);
@@ -664,7 +701,9 @@ async function run(): Promise<void> {
     await collect.arrayBuffer();
     const quota = await limitsClient.readAccountLimits(limitsInput);
     assert.equal(quota.status, "snapshot");
-    if (quota.status !== "snapshot") throw new Error("missing observed limits");
+    if (!Object.is(quota.status, "snapshot")) {
+      throw new Error("missing observed limits");
+    }
     assert.equal(quota.physicalGeneration, generation);
     assert.ok(quota.windows.length > 0);
     assert.equal(
@@ -708,7 +747,7 @@ async function run(): Promise<void> {
         operationId,
         expectedMetadataRevision: current.metadataRevision,
       });
-      assert.ok(begun.authorizationURL);
+      assert.ok(isNonemptyString(begun.authorizationURL));
       const response = await controller("/grok/authorize", {
         authorizeUrl: begun.authorizationURL,
       });
@@ -727,8 +766,9 @@ async function run(): Promise<void> {
       });
     }
     assert.equal(reconnected.state, "applied");
-    if (reconnected.state !== "applied" || reconnected.result?.kind !== "account")
+    if (!Object.is(reconnected.state, "applied") || reconnected.result?.kind !== "account") {
       throw new Error("missing reconnect");
+    }
     assert.equal(reconnected.result.accountRef, accountRef);
     const journal = await store.readJournal(context, operationId);
     assert.ok(journal);
@@ -752,20 +792,22 @@ async function run(): Promise<void> {
     const claim = await claimCleanup();
     // The production selector deliberately yields every second turn to refresh.
     if (!claim) {
-      if (++idleCleanupTurns === 2) break;
+      if (++idleCleanupTurns === 2) {
+        break;
+      }
       continue;
     }
     idleCleanupTurns = 0;
-    if (claim.scope.kind === "generation")
+    if (claim.scope.kind === "generation") {
       assert.equal(
         await control.management.cleanupClaim(context, claim),
         "erased",
         "every retained generation receives canonical native erasure ACK",
       );
-    else {
+    } else {
       assert.ok(claim.scope.transports.length <= 2);
       for (const item of claim.scope.transports) {
-        assert.ok(item.native && item.token);
+        assert.ok(item.native && isNonemptyString(item.token));
         assert.equal(item.native.originRef, enrollment.originRef);
         assert.equal(item.native.engineIncarnation, enrollment.engineIncarnation);
         await cancelFacadeTransport(
@@ -777,7 +819,9 @@ async function run(): Promise<void> {
       }
       await kernel.settleCleanup(context, claim.cleanupRef, worker, claim.token, true);
     }
-    if (count === 63) throw new Error("cleanup did not drain");
+    if (count === 63) {
+      throw new Error("cleanup did not drain");
+    }
   }
   const rrAcceptance =
     typeof Reflect.get(globalThis, Symbol.for("provider-joined-e2e.acceptProvider")) === "function";
@@ -786,16 +830,18 @@ async function run(): Promise<void> {
     const raw = Reflect.get(globalThis, Symbol.for("provider-joined-e2e.rrReceipts")) as unknown;
     assert.ok(Array.isArray(raw));
     assert.equal(raw.length, 4);
-    for (const item of raw) {
-      assert.ok(item && typeof item === "object");
+    const observations: readonly unknown[] = raw;
+    for (const item of observations) {
+      assert.ok(item !== null && typeof item === "object");
       const observed = item as Record<string, unknown>;
       assert.ok(
         tuples.some(
           (tuple) => tuple.profile === observed.profileId && tuple.model === observed.model,
         ),
       );
-      for (const name of ["actionArchiveSHA256", "codexBinarySHA256"])
+      for (const name of ["actionArchiveSHA256", "codexBinarySHA256"]) {
         assert.match(String(observed[name]), /^[a-f0-9]{64}$/);
+      }
       assert.match(String(observed.actionRef), /^[a-f0-9]{40}$/);
       assert.match(String(observed.codexVersion), /^\d+\.\d+\.\d+$/);
       assert.equal(observed.providerEntries, 2);
@@ -805,14 +851,16 @@ async function run(): Promise<void> {
         "declaredCustomTools",
         "returnedFunctionTools",
         "returnedCustomTools",
-      ])
+      ]) {
         assert.ok(Number.isSafeInteger(observed[name]) && (observed[name] as number) >= 0);
+      }
       assert.ok(
         (observed.declaredFunctionTools as number) > 0 &&
           (observed.returnedFunctionTools as number) > 0,
       );
-      if ((observed.declaredCustomTools as number) > 0)
+      if ((observed.declaredCustomTools as number) > 0) {
         assert.ok((observed.returnedCustomTools as number) > 0);
+      }
       assert.equal(observed.executionClosureAcknowledged, true);
       assert.equal(observed.reasoningOmitted, true);
       assert.equal(observed.fastOmitted, true);
@@ -902,14 +950,21 @@ try {
   });
   process.exitCode = 1;
 } finally {
-  if (child && !stopped) child.stdin!.end("stop\n");
-  if (childExit)
+  if (child && !Object.is(stopped, true)) {
+    child.stdin!.end("stop\n");
+  }
+  if (childExit) {
     await bounded(childExit, 5000).catch(() => {
       child?.kill("SIGTERM");
     });
-  for (const server of servers.reverse()) {
+  }
+  for (const server of servers.toReversed()) {
     server.closeAllConnections();
-    await new Promise<void>((done) => server.close(() => done()));
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        resolve();
+      });
+    });
   }
   await pool?.end();
 }

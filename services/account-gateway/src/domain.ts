@@ -22,21 +22,29 @@ export class KernelError extends Error {
 // Compare nanoseconds, including offsets and differently marshalled fractions.
 // Date is used only for the whole second, never to round fractional authority.
 export function instant(value: unknown): bigint {
-  if (typeof value !== "string" || value.length > 64) throw new KernelError("denied");
-  const match = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?(Z|[+-]\d\d:\d\d)$/.exec(value);
-  if (!match || value.startsWith("0000-")) throw new KernelError("denied");
-  const date = new Date(match[1] + "Z");
-  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 19) !== match[1])
+  if (typeof value !== "string" || value.length > 64) {
     throw new KernelError("denied");
+  }
+  const match = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?(Z|[+-]\d\d:\d\d)$/.exec(value);
+  if (!match || value.startsWith("0000-")) {
+    throw new KernelError("denied");
+  }
+  const date = new Date(match[1] + "Z");
+  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 19) !== match[1]) {
+    throw new KernelError("denied");
+  }
   let offset = 0;
   if (match[3] !== "Z") {
     const h = Number(match[3].slice(1, 3)),
       m = Number(match[3].slice(4));
-    if (h > 23 || m > 59) throw new KernelError("denied");
+    if (h > 23 || m > 59) {
+      throw new KernelError("denied");
+    }
     offset = (h * 60 + m) * (match[3][0] === "+" ? 1 : -1);
   }
   return (
-    BigInt(date.getTime() - offset * 60_000) * 1_000_000n + BigInt((match[2] ?? "").padEnd(9, "0"))
+    BigInt(date.getTime() - offset * 60_000) * 1_000_000n +
+    BigInt((match.at(2) ?? "").padEnd(9, "0"))
   );
 }
 export interface AccountIntent {
@@ -315,6 +323,9 @@ export const factDefaults: Readonly<DurableFactBounds> = Object.freeze({
   workerSlots: 16,
   issuerSlots: 32,
 });
+function objectInput(value: unknown): boolean {
+  return value !== null && typeof value === "object";
+}
 export function boundedFacts(input: DurableFactBounds): Readonly<DurableFactBounds> {
   const caps: DurableFactBounds = {
     maxServiceFacts: 100_000_000,
@@ -324,20 +335,22 @@ export function boundedFacts(input: DurableFactBounds): Readonly<DurableFactBoun
     issuerSlots: 1_024,
   };
   if (
-    !input ||
-    typeof input !== "object" ||
+    !objectInput(input) ||
     Object.keys(input).length !== Object.keys(caps).length ||
     Object.keys(input).some((key) => !Object.hasOwn(caps, key))
-  )
+  ) {
     throw new KernelError("invalid");
-  for (const key of Object.keys(caps) as (keyof DurableFactBounds)[])
+  }
+  for (const key of Object.keys(caps) as (keyof DurableFactBounds)[]) {
     integer(input[key], caps[key]);
+  }
   if (
     input.maxAccountFacts > input.maxConsumerFacts ||
     input.maxConsumerFacts > input.maxServiceFacts ||
     1 + input.workerSlots + input.issuerSlots > input.maxConsumerFacts
-  )
+  ) {
     throw new KernelError("invalid");
+  }
   return Object.freeze({ ...input });
 }
 const requestCeiling = 10_000;
@@ -355,28 +368,33 @@ export const defaults: Readonly<Bounds> = Object.freeze({
   maintenanceBatch: 100,
 });
 export function integer(value: unknown, max = 2_147_483_647): asserts value is number {
-  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > max)
+  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > max) {
     throw new KernelError("invalid");
+  }
 }
 export function revision(value: unknown): asserts value is number {
-  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new KernelError("invalid");
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new KernelError("invalid");
+  }
 }
 export function approvedLimits(input: ApprovedLimits, bounds: Readonly<Bounds>): ApprovedLimits {
   if (
-    !input ||
-    typeof input !== "object" ||
+    !objectInput(input) ||
     Object.keys(input).length !== 5 ||
     Object.keys(input).some(
       (key) => !["requests", "concurrency", "requestBytes", "outputBytes", "tokens"].includes(key),
     )
-  )
+  ) {
     throw new KernelError("invalid");
+  }
   integer(input.requests, bounds.maxRequests);
   integer(input.concurrency, bounds.maxConcurrent);
   integer(input.requestBytes, bounds.maxRequestBytes);
   integer(input.outputBytes, bounds.maxOutputBytes);
   integer(input.tokens, bounds.maxTokens);
-  if (input.concurrency > input.requests) throw new KernelError("invalid");
+  if (input.concurrency > input.requests) {
+    throw new KernelError("invalid");
+  }
   return {
     requests: input.requests,
     concurrency: input.concurrency,
@@ -398,26 +416,32 @@ export function boundedConfig(input: Bounds): Readonly<Bounds> {
     maintenanceBatch: 1_000,
   };
   if (
-    !input ||
-    typeof input !== "object" ||
+    !objectInput(input) ||
     Object.keys(input).length !== Object.keys(caps).length ||
     Object.keys(input).some((key) => !Object.hasOwn(caps, key))
-  )
+  ) {
     throw new KernelError("invalid");
-  for (const key of Object.keys(caps) as (keyof Bounds)[]) integer(input[key], caps[key]);
-  if (input.maxConcurrent > input.maxRequests) throw new KernelError("invalid");
+  }
+  for (const key of Object.keys(caps) as (keyof Bounds)[]) {
+    integer(input[key], caps[key]);
+  }
+  if (input.maxConcurrent > input.maxRequests) {
+    throw new KernelError("invalid");
+  }
   return Object.freeze({ ...input });
 }
 export function identifier(value: unknown, max = 128): asserts value is string {
-  if (typeof value !== "string" || !/^[a-zA-Z0-9_.:-]+$/.test(value) || value.length > max)
+  if (typeof value !== "string" || !/^[a-zA-Z0-9_.:-]+$/.test(value) || value.length > max) {
     throw new KernelError("invalid");
+  }
 }
 export function uuid(value: unknown): asserts value is string {
   if (
     typeof value !== "string" ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)
-  )
+  ) {
     throw new KernelError("invalid");
+  }
 }
 // All methods return a Promise, including rejection for invalid runtime input.
 // Pure configuration validation and construction remain synchronous.

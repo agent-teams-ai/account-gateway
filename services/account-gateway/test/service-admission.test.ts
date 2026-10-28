@@ -12,7 +12,7 @@ const flush = async () => {
   await Promise.resolve();
   await Promise.resolve();
 };
-test("control-only drain retains account retirement readback", () => {
+void test("control-only drain retains account retirement readback", () => {
   assert.equal(facadeControlRoute("GET", "/v1/accounts/account-a/retirement/operation-a"), true);
   assert.equal(facadeControlRoute("POST", "/v1/accounts/account-a/retirement/operation-a"), false);
   assert.equal(
@@ -27,35 +27,47 @@ function client(released: (error?: Error | boolean) => void): PoolClient {
   return { release: released } as PoolClient;
 }
 
-test("one physical owner bounds waiting data and leaves actual clients for control", async () => {
+void test("one physical owner bounds waiting data and leaves actual clients for control", async () => {
   let connects = 0;
   const pool = {
     connect: async () => {
       connects++;
-      return client(() => undefined);
+      return client(() => {});
     },
   } as unknown as Pool;
   const kernelCheckout = sharedCheckout(pool),
     storeCheckout = sharedCheckout(pool);
   assert.equal(kernelCheckout, storeCheckout);
   const held = await Promise.all(Array.from({ length: 6 }, () => kernelCheckout()));
-  const waiting = Array.from({ length: 8 }, () => storeCheckout().then((c) => c.release()));
+  const waiting = Array.from({ length: 8 }, () =>
+    storeCheckout().then((c) => {
+      c.release();
+      return;
+    }),
+  );
   await assert.rejects(storeCheckout());
   assert.equal(connects, 6); // Neither queued nor denied work entered pool.connect.
   const controls = await inServiceLane("control", () =>
     Promise.all([storeCheckout(), kernelCheckout()]),
   );
   assert.equal(connects, 8);
-  controls.forEach((c) => c.release());
-  held.forEach((c) => c.release());
+  controls.forEach((c) => {
+    c.release();
+  });
+  held.forEach((c) => {
+    c.release();
+  });
   await Promise.all(waiting);
 });
 
-test("timed out connect keeps its slot until late client release, exactly once", async (t) => {
+void test("timed out connect keeps its slot until late client release, exactly once", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const pending: ((value: PoolClient) => void)[] = [];
   const pool = {
-    connect: () => new Promise<PoolClient>((resolve) => pending.push(resolve)),
+    connect: () =>
+      new Promise<PoolClient>((resolve) => {
+        pending.push(resolve);
+      }),
   } as unknown as Pool;
   const checkout = sharedCheckout(pool);
   const acquisitions = Array.from({ length: 6 }, () => checkout());
@@ -81,24 +93,25 @@ test("timed out connect keeps its slot until late client release, exactly once",
   borrowed.release(true);
   borrowed.release();
   assert.deepEqual(lateFlags, [true]);
-  pending.slice(1, 6).forEach((resolve) =>
+  pending.slice(1, 6).forEach((resolve) => {
     resolve(
       client(() => {
         releases++;
       }),
-    ),
-  );
+    );
+  });
   await flush();
   assert.equal(releases, 6);
 });
 
-test("shutdown waits for the retained handler reservation and denies new work", async () => {
+void test("shutdown waits for the retained handler reservation and denies new work", async () => {
   const admission = new ServiceAdmission();
   const release = admission.reserve("data");
   assert.ok(release);
   let stopped = false;
   const drain = admission.stop().then(() => {
     stopped = true;
+    return;
   });
   await flush();
   assert.equal(stopped, false);
@@ -109,14 +122,15 @@ test("shutdown waits for the retained handler reservation and denies new work", 
   release(); // Repeated cleanup cannot underflow the ownership count.
 });
 
-test("protected usage reads admit only bounded list queries and exact observation paths", () => {
+void test("protected usage reads admit only bounded list queries and exact observation paths", () => {
   for (const path of [
     "/v1/usage",
     "/v1/usage?limit=100",
     "/v1/usage?afterCursor=abc_-&highWaterCursor=def_-&limit=1",
     "/v1/usage/00000000-0000-4000-8000-000000000001/request-1",
-  ])
+  ]) {
     assert.equal(facadeControlRoute("GET", path), true, path);
+  }
   for (const path of [
     "/v1/usage?",
     "/v1/usage?limit=1&limit=2",
@@ -130,7 +144,8 @@ test("protected usage reads admit only bounded list queries and exact observatio
     "/v1/accounts?limit=1",
     "/v1/operations/op?limit=1",
     "/v1/usage#fragment",
-  ])
+  ]) {
     assert.equal(facadeControlRoute("GET", path), false, path);
+  }
   assert.equal(facadeControlRoute("POST", "/v1/usage"), false);
 });

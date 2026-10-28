@@ -1,13 +1,13 @@
 // Synthetic Go peer over real TCP + real disposable SQL. This suite does not
 // qualify actual Go, provider protocol conversion, launcher, or RR assembly.
-import test, { before, after } from "node:test";
+import test, { before as beforeTests, after as afterTests } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { Server, ServerResponse } from "node:http";
 import { connect } from "node:net";
 import { readFile, readdir } from "node:fs/promises";
-import pg from "pg";
+import { Pool } from "pg";
 import { PostgresKernel } from "../src/postgres.ts";
 import { AccountManagement } from "../src/management.ts";
 import { IntentSecrets, PostgresManagementStore } from "../src/management-store.ts";
@@ -24,19 +24,35 @@ import { KernelError } from "../src/domain.ts";
 import type { NativeDispatchProof, PrivateAdmission } from "../src/domain.ts";
 import type { Descriptor, Receipt } from "../src/native-wire.ts";
 
-let pool: pg.Pool;
+let pool: Pool;
 // Each synthetic creation has its own native identity, as the native DB sequence does.
 let nextNativeAccountId = 1;
-before(async () => {
+function postgresSetupFailure(error: unknown): Error {
+  return error instanceof assert.AssertionError
+    ? error
+    : new Error("NOT_RUN: disposable PostgreSQL setup unavailable");
+}
+function refreshFixtureFailure(error: unknown): Error {
+  return error instanceof assert.AssertionError
+    ? error
+    : new Error("synthetic refresh fixture failed");
+}
+function isNonemptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+beforeTests(async () => {
   const dsn = process.env.AG_NATIVE_BRIDGE_TEST_DSN,
     database = process.env.AG_NATIVE_BRIDGE_DISPOSABLE_DB;
   if (
-    !dsn ||
-    !database ||
+    dsn === undefined ||
+    dsn === "" ||
+    database === undefined ||
+    database === "" ||
     !/^ag_kernel_test_[a-z0-9_]+$/.test(database) ||
     process.env.AG_KERNEL_TEST_ALLOW !== "disposable_pg17_10"
-  )
+  ) {
     throw new Error("NOT_RUN: NEW disposable PG17.10 native bridge database required");
+  }
   let u: URL;
   try {
     u = new URL(dsn);
@@ -49,13 +65,14 @@ before(async () => {
     u.pathname !== "/" + database ||
     u.search ||
     u.hash
-  )
+  ) {
     throw new Error("NOT_RUN: refusing remote or unspecified database");
-  pool = new pg.Pool({ connectionString: dsn, max: 8, connectionTimeoutMillis: 5000 });
-  pool.on("error", () => undefined);
+  }
+  pool = new Pool({ connectionString: dsn, max: 8, connectionTimeoutMillis: 5000 });
+  pool.on("error", () => {});
   try {
     const r = (
-      await pool.query(
+      await pool.query<{ db: string; version: string }>(
         "SELECT current_database() AS db,current_setting('server_version') AS version",
       )
     ).rows[0];
@@ -70,15 +87,20 @@ before(async () => {
       0,
     );
     const directory = new URL("../migrations/", import.meta.url);
-    for (const file of (await readdir(directory)).filter((f) => /^\d{3}_.*\.sql$/.test(f)).sort())
+    for (const file of (await readdir(directory))
+      .filter((f) => /^\d{3}_.*\.sql$/.test(f))
+      .toSorted()) {
       await pool.query(await readFile(new URL(file, directory), "utf8"));
-  } catch (e) {
-    if (e instanceof assert.AssertionError) throw e;
-    throw new Error("NOT_RUN: disposable PostgreSQL setup unavailable");
+    }
+  } catch (error) {
+    throw postgresSetupFailure(error);
   }
 });
-after(async () => {
-  await pool?.end();
+afterTests(async () => {
+  const ownedPool: unknown = pool;
+  if (ownedPool instanceof Pool) {
+    await ownedPool.end();
+  }
 });
 
 const profile = {
@@ -97,21 +119,27 @@ const credentials = {
   callbackCredential: "test-fixture-literal-callback",
 };
 async function listen(s: Server): Promise<string> {
-  await new Promise<void>((resolve) => s.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => {
+    s.listen(0, "127.0.0.1", resolve);
+  });
   const a = s.address();
-  assert.ok(a && typeof a === "object");
+  assert.ok(a !== null && typeof a === "object");
   return "http://127.0.0.1:" + a.port;
 }
 async function stop(s: Server): Promise<void> {
   s.closeAllConnections();
-  await new Promise<void>((resolve) => s.close(() => resolve()));
+  await new Promise<void>((resolve) => {
+    s.close(() => {
+      resolve();
+    });
+  });
 }
 
 // Decoder/transport risk only: the journal/current owner authority is exercised
 // once at the real F PostgreSQL boundary in oauth-enrollment-postgres.test.ts.
 // RED if this maintenance method accepts token/version DTOs, an identity alias,
 // a redirect replay, or the enrollment client's configurable 30s refresh deadline.
-test(
+void test(
   "private refresh HTTP: original four fields, finite safe ACK and one capped attempt",
   { timeout: 15_000 },
   async () => {
@@ -134,16 +162,20 @@ test(
         assert.equal(req.url, "/private/native/v1/oauth/refresh");
         assert.equal(req.headers.authorization, "Bearer " + control);
         const chunks: Buffer[] = [];
-        for await (const chunk of req) chunks.push(chunk as Buffer);
+        for await (const chunk of req) {
+          chunks.push(chunk as Buffer);
+        }
         sent.push(JSON.parse(Buffer.concat(chunks).toString()) as unknown);
         requestObserved.resolve();
-        if (reply === undefined) return; // Hold only this local fixture socket.
+        if (reply === undefined) {
+          return;
+        } // Hold only this local fixture socket.
         res.writeHead(status, {
           "content-type": "application/json",
           ...(status === 307 ? { location: "/other-route" } : {}),
         });
         res.end(reply);
-      })().catch((error) => {
+      })().catch((error: unknown) => {
         fixtureError = error;
         res.destroy();
       });
@@ -225,7 +257,7 @@ test(
       before = sent.length;
       requestObserved = Promise.withResolvers<void>();
       const pending = client.refresh(scope);
-      void pending.catch(() => undefined);
+      void pending.catch(() => {});
       await requestObserved.promise;
       // Input replacement after dispatch cannot alter the original identity tuple.
       const originalOperation = scope.operationId;
@@ -233,11 +265,10 @@ test(
       await assert.rejects(
         Promise.race([
           pending,
-          new Promise<never>((_, reject) => {
-            const timer = setTimeout(
-              () => reject(new Error("refresh exceeded 5s deadline allowance")),
-              6000,
-            );
+          new Promise<never>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              reject(new Error("refresh exceeded 5s deadline allowance"));
+            }, 6000);
             timer.unref();
           }),
         ]),
@@ -245,7 +276,10 @@ test(
       );
       assert.equal(originalOperation, expected.operation);
       assert.deepEqual(sent.slice(before), [expected]);
-      if (fixtureError) throw fixtureError;
+      const hasFixtureError = Boolean(fixtureError);
+      if (hasFixtureError) {
+        throw refreshFixtureFailure(fixtureError);
+      }
     } finally {
       await stop(peer);
     }
@@ -269,11 +303,11 @@ interface NativeInput {
   descriptor: Descriptor;
 }
 function latch() {
-  let resolve!: () => void;
-  const promise = new Promise<void>((r) => {
-    resolve = r;
+  let resolveLatch!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    resolveLatch = resolve;
   });
-  return { promise, resolve };
+  return { promise, resolve: resolveLatch };
 }
 function admissionBarrier(requestId: string) {
   return { requestId, reached: latch(), release: latch(), acked: latch(), latched: false };
@@ -283,14 +317,18 @@ async function waitFor(promise: Promise<void>): Promise<void> {
   try {
     await Promise.race([
       promise,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("fixture barrier timeout")), 4000);
+      new Promise<never>((resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error("fixture barrier timeout"));
+        }, 4000);
       }),
     ]);
   } finally {
     clearTimeout(timer);
   }
 }
+
+const ignoreEntry = (): void => {};
 
 async function fixture(
   mode: Mode = "complete",
@@ -311,7 +349,7 @@ async function fixture(
     profile: profile.profile,
     displayName: "Fixture",
   });
-  assert.ok(account.accountRef);
+  assert.ok(isNonemptyString(account.accountRef));
   const candidate = await kernel.startCandidate(context, operationId, worker);
   assert.ok(candidate);
   const scope = {
@@ -347,7 +385,7 @@ async function fixture(
     deadline: new Date(Date.now() + 45_000),
     limits,
   });
-  assert.ok(prepared.executionRef);
+  assert.ok(isNonemptyString(prepared.executionRef));
   const saved = await kernel.savedExecution(context, prepared.executionRef);
   let barrier: ReturnType<typeof admissionBarrier> | undefined;
   const currentWorkerLease = kernel.currentWorkerLease.bind(kernel);
@@ -357,13 +395,15 @@ async function fixture(
     // Pause the REAL facade callback at its lease read AFTER the SQL claim,
     // before NativeAuthority can receive/attach the returned closure proof.
     if (b && !b.latched) {
-      let persisted: NativeDispatchProof | undefined = undefined;
+      let persisted: NativeDispatchProof | undefined;
       try {
         persisted = await kernel.requestProof(context, saved.admission.executionRef, b.requestId);
       } catch (error) {
         // PostgreSQL requestProof throws on an absent request ROW. Only that
         // pre-claim absence can bypass the barrier; other SQL failures propagate.
-        if (!(error instanceof KernelError) || error.code !== "unknown") throw error;
+        if (!(error instanceof KernelError) || error.code !== "unknown") {
+          throw error;
+        }
       }
       if (persisted) {
         b.latched = true;
@@ -381,7 +421,7 @@ async function fixture(
   let heldResponse: ServerResponse | undefined,
     heldReceipt: Receipt | undefined,
     closeOnCancel = false;
-  let resolveEntry: () => void = () => undefined;
+  let resolveEntry: () => void = ignoreEntry;
   const entered = new Promise<void>((resolve) => {
     resolveEntry = resolve;
   });
@@ -397,7 +437,9 @@ async function fixture(
   const peer = createServer((req, res) => {
     void (async () => {
       const chunks: Buffer[] = [];
-      for await (const c of req) chunks.push(Buffer.from(c as Uint8Array));
+      for await (const c of req) {
+        chunks.push(Buffer.from(c as Uint8Array));
+      }
       const raw = Buffer.concat(chunks),
         action = req.url?.slice("/private/native/v1/transports".length) ?? "";
       if (action === "") {
@@ -423,7 +465,7 @@ async function fixture(
         };
         delete admit.payload;
         const admitting = call("admit", admit);
-        void admitting.catch(() => undefined);
+        void admitting.catch(() => {});
         let early: Receipt | undefined;
         const b = barrier;
         if (mode === "early-ack" && b?.requestId === input.requestRef) {
@@ -489,7 +531,7 @@ async function fixture(
         }
         permits++;
         const p = reply.dispatch.closure;
-        assert.ok(reply.leaseExpiresAt);
+        assert.ok(isNonemptyString(reply.leaseExpiresAt));
         const equivalent = reply.leaseExpiresAt.replace(
           /\.(\d{3})Z$/,
           (_, ms: string) => "." + ms + "000000Z",
@@ -518,8 +560,10 @@ async function fixture(
           ).status,
           403,
         );
-        const entered = !["noentry", "lost-admit-ack", "early-ack"].includes(mode);
-        if (entered) entries++;
+        const didEnter = !["noentry", "lost-admit-ack", "early-ack"].includes(mode);
+        if (didEnter) {
+          entries++;
+        }
         const r: Receipt = early ?? {
           consumerId: context.consumerId,
           executionRef: input.admission.executionRef,
@@ -527,26 +571,33 @@ async function fixture(
           native,
           proof: p,
           phase: "closed",
-          effect: entered ? "completed" : "effect_unknown",
+          effect: didEnter ? "completed" : "effect_unknown",
           sealed: true,
           acknowledged: false,
           lifetime: {
-            entered,
+            entered: didEnter,
             contextDone: !["unclosed", "held"].includes(mode),
             forwardingReturned: mode !== "held",
             bodyKnown: true,
             bodyClosed: !["closeFailed", "held"].includes(mode),
             closeFailed: mode === "closeFailed",
             completed:
-              entered && !["partial", "overflow", "unclosed", "closeFailed", "held"].includes(mode),
+              didEnter &&
+              !["partial", "overflow", "unclosed", "closeFailed", "held"].includes(mode),
             sealed: true,
           },
         };
-        if (["unclosed", "closeFailed", "held"].includes(mode)) r.phase = "entered";
-        if (!r.lifetime.completed) r.effect = "effect_unknown";
-        if (mode === "lost-admit-ack") delete r.proof;
+        if (["unclosed", "closeFailed", "held"].includes(mode)) {
+          r.phase = "entered";
+        }
+        if (!r.lifetime.completed) {
+          r.effect = "effect_unknown";
+        }
+        if (mode === "lost-admit-ack") {
+          delete r.proof;
+        }
         records.set(input.requestRef, r);
-        if (!entered) {
+        if (!didEnter) {
           // First receipt may precede ContextDone. Same-proof readback supplies
           // later positive closure; cached claim status remains dispatch_started.
           res.writeHead(202, { "content-type": "application/json" });
@@ -577,7 +628,9 @@ async function fixture(
           setTimeout(() => res.destroy(), 10);
           return;
         }
-        if (mode === "overflow") res.write(Buffer.alloc(limits.outputBytes + 1, 0x20));
+        if (mode === "overflow") {
+          res.write(Buffer.alloc(limits.outputBytes + 1, 0x20));
+        }
         res.end();
         return;
       }
@@ -640,7 +693,9 @@ async function fixture(
       res.writeHead(202, { "content-type": "application/json" });
       res.end(JSON.stringify({ ...r, proof: p }));
     })().catch(() => {
-      if (!res.headersSent) res.writeHead(500);
+      if (!res.headersSent) {
+        res.writeHead(500);
+      }
       res.end("{}");
     });
   });
@@ -755,11 +810,11 @@ async function fixture(
   };
   const occupied = async (requestId: string) =>
     (
-      await pool.query(
+      await pool.query<{ transport_occupied: boolean }>(
         "SELECT transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND id=$2",
         [context.consumerId, requestId],
       )
-    ).rows[0].transport_occupied as boolean;
+    ).rows[0].transport_occupied;
   return {
     context,
     kernel,
@@ -795,13 +850,13 @@ async function fixture(
     enableCancelClosure: () => {
       closeOnCancel = true;
     },
-    delegate: async (worker: string) => {
+    delegate: async (delegateWorker: string) => {
       const delegateAuthority = new NativeAuthority({
         kernel,
         store,
         config: {
           ...authority.configuration,
-          enrollment: { ...authority.configuration.enrollment, worker },
+          enrollment: { ...authority.configuration.enrollment, worker: delegateWorker },
         },
       });
       const listener = delegateAuthority.createServer();
@@ -813,13 +868,15 @@ async function fixture(
     stop: async () => {
       barrier?.release.resolve();
       await stop(facade);
-      for (const listener of callbackServers) await stop(listener);
+      for (const listener of callbackServers) {
+        await stop(listener);
+      }
       await stop(peer);
     },
   };
 }
 
-test("synthetic TCP/SQL: positive owner closure releases concurrency1 for two requests in the SAME OPEN execution", async () => {
+void test("synthetic TCP/SQL: positive owner closure releases concurrency1 for two requests in the SAME OPEN execution", async () => {
   const f = await fixture();
   try {
     for (let i = 0; i < 2; i++) {
@@ -838,7 +895,7 @@ test("synthetic TCP/SQL: positive owner closure releases concurrency1 for two re
     assert.deepEqual(f.stats(), { posts: 2, entries: 2, permits: 2, ackCalls: 2 });
     assert.equal(
       (
-        await pool.query(
+        await pool.query<{ request_count: number }>(
           "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
           [f.context.consumerId, f.saved.admission.executionRef],
         )
@@ -858,7 +915,7 @@ test("synthetic TCP/SQL: positive owner closure releases concurrency1 for two re
     await f.stop();
   }
 });
-test("synthetic TCP/SQL: EOF, CloseFailed, partial and output cap retain occupancy and fence fresh request IDs", async () => {
+void test("synthetic TCP/SQL: EOF, CloseFailed, partial and output cap retain occupancy and fence fresh request IDs", async () => {
   for (const mode of ["unclosed", "closeFailed", "partial", "overflow"] as const) {
     const f = await fixture(mode);
     try {
@@ -867,8 +924,9 @@ test("synthetic TCP/SQL: EOF, CloseFailed, partial and output cap retain occupan
         (await f.kernel.request(f.context, f.saved.admission.executionRef, r.requestId)).effect,
         "effect_unknown",
       );
-      if (mode === "unclosed" || mode === "closeFailed")
+      if (mode === "unclosed" || mode === "closeFailed") {
         assert.equal(await f.occupied(r.requestId), true);
+      }
       const again = await f.request();
       assert.equal(again.failed, true);
       assert.equal(f.stats().posts, 1);
@@ -878,7 +936,7 @@ test("synthetic TCP/SQL: EOF, CloseFailed, partial and output cap retain occupan
     }
   }
 });
-test("synthetic TCP/SQL: exact positive no-entry and sealed lost admit ACK spend one claim, never enter, then close independently", async () => {
+void test("synthetic TCP/SQL: exact positive no-entry and sealed lost admit ACK spend one claim, never enter, then close independently", async () => {
   for (const mode of ["noentry", "lost-admit-ack"] as const) {
     const f = await fixture(mode);
     try {
@@ -896,7 +954,7 @@ test("synthetic TCP/SQL: exact positive no-entry and sealed lost admit ACK spend
       assert.equal(f.stats().posts, 1);
       assert.equal(
         (
-          await pool.query(
+          await pool.query<{ request_count: number }>(
             "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
             [f.context.consumerId, f.saved.admission.executionRef],
           )
@@ -908,7 +966,7 @@ test("synthetic TCP/SQL: exact positive no-entry and sealed lost admit ACK spend
     }
   }
 });
-test("synthetic TCP/SQL: expired original owner may ACK immutable completed proof but cannot dispatch; foreign authority denies", async () => {
+void test("synthetic TCP/SQL: expired original owner may ACK immutable completed proof but cannot dispatch; foreign authority denies", async () => {
   const f = await fixture();
   try {
     const r = await f.request(),
@@ -952,7 +1010,7 @@ test("synthetic TCP/SQL: expired original owner may ACK immutable completed proo
       { ...p, token: randomUUID() },
       { ...p, worker: randomUUID() },
       { ...p, native: { ...p.native, engineIncarnation: randomUUID() } },
-    ])
+    ]) {
       assert.equal(
         (
           await f.call("owner-closure-authority", {
@@ -962,6 +1020,7 @@ test("synthetic TCP/SQL: expired original owner may ACK immutable completed proo
         ).status,
         403,
       );
+    }
     assert.equal(
       (await f.call("owner-closure-authority", { consumerId: "foreign-consumer", proof: p }))
         .status,
@@ -975,7 +1034,7 @@ test("synthetic TCP/SQL: expired original owner may ACK immutable completed proo
     await f.stop();
   }
 });
-test(
+void test(
   "synthetic TCP/SQL: owner closure before delegated ACK preserves exact claimed and done retries",
   { timeout: 30_000 },
   async () => {
@@ -983,7 +1042,7 @@ test(
     try {
       const requestId = randomUUID(),
         pending = f.request(requestId);
-      void pending.catch(() => undefined);
+      void pending.catch(() => {});
       await waitFor(f.entered);
       const p = await f.kernel.requestProof(f.context, f.saved.admission.executionRef, requestId);
       assert.ok(p);
@@ -1017,7 +1076,7 @@ test(
       f.releaseHeld();
       assert.equal((await pending).failed, false);
       const receipt = f.records.get(requestId);
-      assert.ok(receipt?.acknowledged);
+      assert.ok(receipt?.acknowledged === true);
       assert.equal(f.stats().ackCalls, 1);
       assert.equal(await f.occupied(requestId), false);
       const status = await f.kernel.request(f.context, p.executionRef, requestId);
@@ -1037,7 +1096,7 @@ test(
         deadline: new Date(Date.now() + 10_000),
         limits,
       });
-      assert.ok(other.executionRef);
+      assert.ok(isNonemptyString(other.executionRef));
       await f.kernel.close(f.context, randomUUID(), other.executionRef);
       const otherJob = await f.kernel.claimCleanup(f.context, f.worker);
       assert.ok(otherJob && otherJob.scope.kind === "execution");
@@ -1083,14 +1142,15 @@ test(
         );
       };
       for (const state of ["claimed", "done"] as const) {
-        if (state === "done")
+        if (state === "done") {
           await f.kernel.settleCleanup(f.context, job.cleanupRef, f.worker, job.token, true);
+        }
         assert.equal(
           (
-            await pool.query("SELECT state FROM ag_kernel.cleanup WHERE consumer=$1 AND ref=$2", [
-              f.context.consumerId,
-              job.cleanupRef,
-            ])
+            await pool.query<{ state: string }>(
+              "SELECT state FROM ag_kernel.cleanup WHERE consumer=$1 AND ref=$2",
+              [f.context.consumerId, job.cleanupRef],
+            )
           ).rows[0].state,
           state,
         );
@@ -1107,8 +1167,9 @@ test(
           { ...c, worker: randomUUID() },
           { ...c, cleanupRef: randomUUID() },
           otherLease,
-        ])
+        ]) {
           await ack(changed, 403);
+        }
         await ack(c, 403, openReceipt);
         await ack(c, 403, { ...receipt, lifetime: { ...receipt.lifetime, closeFailed: true } });
         await ack(c, 403, { ...receipt, proof: { ...p, token: randomUUID() } });
@@ -1118,8 +1179,9 @@ test(
           { ...p, worker: randomUUID() },
           { ...p, token: randomUUID() },
           { ...p, native: { ...p.native, requestNonce: randomUUID() } },
-        ])
+        ]) {
           await ack(c, 403, receipt, changed);
+        }
         await ack(c, 403, receipt, p, "foreign-consumer");
         await ack(c, 403, receipt, p, f.context.consumerId, credentials.cleanupCredential);
         // A closure retry never grants read/dispatch authority for an unoccupied
@@ -1149,7 +1211,7 @@ test(
         assert.deepEqual(await f.kernel.request(f.context, p.executionRef, requestId), status);
         assert.equal(
           (
-            await pool.query(
+            await pool.query<{ request_count: number }>(
               "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
               [f.context.consumerId, p.executionRef],
             )
@@ -1159,13 +1221,13 @@ test(
       }
       // Done readback is harmless after lease expiry only with its exact instant.
       const expired = (
-        await pool.query(
+        await pool.query<{ expires: string }>(
           `UPDATE ag_kernel.cleanup SET lease_until=clock_timestamp()-interval '1 second'
       WHERE consumer=$1 AND ref=$2 RETURNING to_char(lease_until AT TIME ZONE 'UTC',
         'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS expires`,
           [f.context.consumerId, job.cleanupRef],
         )
-      ).rows[0].expires as string;
+      ).rows[0].expires;
       await ack({ ...c, leaseExpiresAt: expired }, 200);
       await ack(c, 403);
       assert.equal(await f.occupied(requestId), false);
@@ -1177,7 +1239,7 @@ test(
     }
   },
 );
-test("synthetic TCP/SQL: an expired claimed lease denies an exact delegated duplicate with genuine closed receipt", async () => {
+void test("synthetic TCP/SQL: an expired claimed lease denies an exact delegated duplicate with genuine closed receipt", async () => {
   const f = await fixture();
   try {
     const r = await f.request();
@@ -1190,13 +1252,13 @@ test("synthetic TCP/SQL: an expired claimed lease denies an exact delegated dupl
     assert.ok(job && job.scope.kind === "execution");
     assert.equal(job.scope.executionRef, p.executionRef);
     const expired = (
-      await pool.query(
+      await pool.query<{ expires: string }>(
         `UPDATE ag_kernel.cleanup SET lease_until=clock_timestamp()-interval '1 second'
       WHERE consumer=$1 AND ref=$2 RETURNING to_char(lease_until AT TIME ZONE 'UTC',
         'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS expires`,
         [f.context.consumerId, job.cleanupRef],
       )
-    ).rows[0].expires as string;
+    ).rows[0].expires;
     const cleanup = {
       cleanupRef: job.cleanupRef,
       worker: f.worker,
@@ -1229,7 +1291,7 @@ test("synthetic TCP/SQL: an expired claimed lease denies an exact delegated dupl
     await f.stop();
   }
 });
-test("synthetic TCP/SQL: delegate needs the actual current cleanup row/token/execution scope; no guessed expiry", async () => {
+void test("synthetic TCP/SQL: delegate needs the actual current cleanup row/token/execution scope; no guessed expiry", async () => {
   const f = await fixture("unclosed");
   try {
     const r = await f.request(),
@@ -1258,7 +1320,7 @@ test("synthetic TCP/SQL: delegate needs the actual current cleanup row/token/exe
       { ...c, token: randomUUID() },
       { ...c, cleanupRef: randomUUID() },
       { ...c, leaseExpiresAt: new Date(Date.now() + 10_000).toISOString() },
-    ])
+    ]) {
       assert.equal(
         (
           await f.call("cleanup-authority", {
@@ -1269,6 +1331,7 @@ test("synthetic TCP/SQL: delegate needs the actual current cleanup row/token/exe
         ).status,
         403,
       );
+    }
     const other = await f.kernel.prepare(f.context, {
       operationId: randomUUID(),
       intentDigest: "other-fixture",
@@ -1283,7 +1346,7 @@ test("synthetic TCP/SQL: delegate needs the actual current cleanup row/token/exe
       deadline: new Date(Date.now() + 10_000),
       limits,
     });
-    assert.ok(other.executionRef);
+    assert.ok(isNonemptyString(other.executionRef));
     await f.kernel.close(f.context, randomUUID(), other.executionRef);
     const otherJob = await f.kernel.claimCleanup(f.context, f.worker);
     assert.ok(otherJob && otherJob.scope.kind === "execution");
@@ -1341,7 +1404,7 @@ test("synthetic TCP/SQL: delegate needs the actual current cleanup row/token/exe
     await f.stop();
   }
 });
-test("synthetic TCP/SQL: control HTTP rejects duplicate headers, aliases, duplicates, query, body cap and forged enrollment safely", async () => {
+void test("synthetic TCP/SQL: control HTTP rejects duplicate headers, aliases, duplicates, query, body cap and forged enrollment safely", async () => {
   const f = await fixture();
   try {
     const endpoint = new URL(f.callbackOrigin);
@@ -1357,9 +1420,13 @@ test("synthetic TCP/SQL: control HTTP rejects duplicate headers, aliases, duplic
           s.destroy();
           reject(new Error("fixture timeout"));
         });
-        s.on("error", () => resolve(Buffer.concat(chunks).toString()));
+        s.on("error", () => {
+          resolve(Buffer.concat(chunks).toString());
+        });
         s.on("data", (b) => chunks.push(b));
-        s.once("end", () => resolve(Buffer.concat(chunks).toString()));
+        s.once("end", () => {
+          resolve(Buffer.concat(chunks).toString());
+        });
         s.once("connect", () =>
           s.write(
             "POST " +
@@ -1414,7 +1481,7 @@ test("synthetic TCP/SQL: control HTTP rejects duplicate headers, aliases, duplic
     await f.stop();
   }
 });
-test("synthetic TCP/SQL: redirects do not replay inference, and uncertainty fences the original execution", async () => {
+void test("synthetic TCP/SQL: redirects do not replay inference, and uncertainty fences the original execution", async () => {
   const f = await fixture("redirect");
   try {
     await f.request();
@@ -1431,7 +1498,7 @@ test("synthetic TCP/SQL: redirects do not replay inference, and uncertainty fenc
     await f.stop();
   }
 });
-test("synthetic TCP/SQL: the complete association rejects each tuple/cap, nanosecond birth, nonce and issuer substitution", async () => {
+void test("synthetic TCP/SQL: the complete association rejects each tuple/cap, nanosecond birth, nonce and issuer substitution", async () => {
   const f = await fixture();
   try {
     const r = await f.request(),
@@ -1465,13 +1532,15 @@ test("synthetic TCP/SQL: the complete association rejects each tuple/cap, nanose
         ),
       },
     ];
-    for (const key of Object.keys(limits) as (keyof typeof limits)[])
+    for (const key of Object.keys(limits) as (keyof typeof limits)[]) {
       variants.push({ limits: { ...limits, [key]: limits[key] + 1 } });
-    for (const variant of variants)
+    }
+    for (const variant of variants) {
       assert.equal(
         (await f.call("admit", { ...tuple, admission: { ...admission, ...variant } })).status,
         403,
       );
+    }
     for (const descriptorPatch of [
       { account_id: descriptor.account_id + 1 },
       { generation: randomUUID() },
@@ -1479,12 +1548,13 @@ test("synthetic TCP/SQL: the complete association rejects each tuple/cap, nanose
       { profile: "openrouter-openai-responses-apikey-v1" },
       { base_url: "https://openrouter.ai/api/v1" },
       { model: "openai/gpt-5.4-mini" },
-    ])
+    ]) {
       assert.equal(
         (await f.call("admit", { ...tuple, descriptor: { ...descriptor, ...descriptorPatch } }))
           .status,
         403,
       );
+    }
     assert.equal(
       (await f.call("admit", { ...tuple, native: { ...p.native, requestNonce: randomUUID() } }))
         .status,
@@ -1494,7 +1564,7 @@ test("synthetic TCP/SQL: the complete association rejects each tuple/cap, nanose
     assert.equal(f.stats().entries, 1);
     assert.equal(
       (
-        await pool.query(
+        await pool.query<{ request_count: number }>(
           "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
           [f.context.consumerId, admission.executionRef],
         )
@@ -1505,12 +1575,12 @@ test("synthetic TCP/SQL: the complete association rejects each tuple/cap, nanose
     await f.stop();
   }
 });
-test("synthetic TCP/SQL: client abort fences the original attempt and cannot certify held native body closure", async () => {
+void test("synthetic TCP/SQL: client abort fences the original attempt and cannot certify held native body closure", async () => {
   const f = await fixture("held");
   try {
     const controller = new AbortController(),
       id = randomUUID();
-    const result = f.request(id, payload, controller.signal).catch(() => undefined);
+    const result = f.request(id, payload, controller.signal).catch(() => {});
     await f.entered;
     controller.abort();
     await result;
@@ -1520,8 +1590,11 @@ test("synthetic TCP/SQL: client abort fences the original attempt and cannot cer
       (await f.kernel.request(f.context, f.saved.admission.executionRef, id)).effect !==
         "effect_unknown";
       n++
-    )
-      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    ) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 10);
+      });
+    }
     assert.equal(
       (await f.kernel.request(f.context, f.saved.admission.executionRef, id)).effect,
       "effect_unknown",
@@ -1535,7 +1608,7 @@ test("synthetic TCP/SQL: client abort fences the original attempt and cannot cer
   }
 });
 
-test(
+void test(
   "synthetic TCP/SQL: current cleanup worker B closes expired original owner A without changing its proof or effect",
   { timeout: 30_000 },
   async () => {
@@ -1598,7 +1671,7 @@ test(
         { ...original, token: randomUUID() },
         { ...original, native: { ...original.native, requestNonce: randomUUID() } },
         { ...original, native: { ...original.native, generation: randomUUID() } },
-      ])
+      ]) {
         assert.equal(
           (
             await f.call("cleanup-authority", {
@@ -1609,6 +1682,7 @@ test(
           ).status,
           403,
         );
+      }
       assert.equal(
         (
           await f.call("cleanup-authority", {
@@ -1646,7 +1720,7 @@ test(
         deadline: new Date(Date.now() + 10_000),
         limits,
       });
-      assert.ok(fresh.executionRef);
+      assert.ok(isNonemptyString(fresh.executionRef));
       const saved = await f.kernel.savedExecution(f.context, fresh.executionRef);
       const claim = await f.kernel.claim(
         f.context,
@@ -1682,7 +1756,7 @@ test(
   },
 );
 
-test(
+void test(
   "synthetic TCP/SQL: repeated safe pre-POST preparation failures leave routing capacity for a fresh request",
   { timeout: 30_000 },
   async () => {
@@ -1694,11 +1768,13 @@ test(
         "DELETE FROM ag_management.physical_mappings WHERE consumer=$1 AND generation=$2",
         [f.context.consumerId, f.saved.generation],
       );
-      for (let n = 0; n < 6; n++) assert.equal((await f.request()).failed, true);
+      for (let n = 0; n < 6; n++) {
+        assert.equal((await f.request()).failed, true);
+      }
       assert.equal(f.stats().posts, 0);
       assert.equal(
         (
-          await pool.query(
+          await pool.query<{ count: number }>(
             "SELECT count(*)::int AS count FROM ag_kernel.requests WHERE consumer=$1",
             [f.context.consumerId],
           )
@@ -1707,7 +1783,7 @@ test(
       );
       assert.equal(
         (
-          await pool.query(
+          await pool.query<{ request_count: number }>(
             "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
             [f.context.consumerId, f.saved.admission.executionRef],
           )
@@ -1729,7 +1805,7 @@ test(
   },
 );
 
-test(
+void test(
   "synthetic TCP/SQL: no-permit limit refusals beyond maxPending retain SQL tombstones and recover after held closure",
   { timeout: 30_000 },
   async () => {
@@ -1737,7 +1813,7 @@ test(
     try {
       const heldId = randomUUID(),
         held = f.request(heldId);
-      void held.catch(() => undefined);
+      void held.catch(() => {});
       await waitFor(f.entered);
       const denied: string[] = [];
       for (let n = 0; n < 7; n++) {
@@ -1758,7 +1834,7 @@ test(
       assert.equal(await f.occupied(heldId), true);
       assert.equal(
         (
-          await pool.query(
+          await pool.query<{ request_count: number }>(
             "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
             [f.context.consumerId, f.saved.admission.executionRef],
           )
@@ -1784,7 +1860,7 @@ test(
       assert.equal(f.stats().permits, 2);
       assert.equal(
         (
-          await pool.query(
+          await pool.query<{ request_count: number }>(
             "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
             [f.context.consumerId, f.saved.admission.executionRef],
           )
@@ -1801,7 +1877,7 @@ test(
   },
 );
 
-test(
+void test(
   "synthetic TCP/SQL: authenticated ACK before actual facade callback returns proof is reusable without re-admit or second closure callback",
   { timeout: 30_000 },
   async () => {
@@ -1811,7 +1887,7 @@ test(
         const id = randomUUID(),
           barrier = f.armBarrier(id),
           pending = f.request(id);
-        void pending.catch(() => undefined);
+        void pending.catch(() => {});
         try {
           await waitFor(barrier.acked.promise);
           assert.equal(await f.occupied(id), false);
@@ -1838,7 +1914,7 @@ test(
           assert.equal(f.stats().permits, n);
           assert.equal(
             (
-              await pool.query(
+              await pool.query<{ request_count: number }>(
                 "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
                 [f.context.consumerId, f.saved.admission.executionRef],
               )

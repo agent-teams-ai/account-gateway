@@ -17,7 +17,7 @@ function sink() {
 
 // OAuth entry is spent on failure; the private operator needs its finite phase,
 // while tokens, provider text and identity metadata must remain excluded.
-test("native diagnostics retains closed OAuth phases and rejects private or misplaced fields", () => {
+void test("native diagnostics retains closed OAuth phases and rejects private or misplaced fields", () => {
   const f = sink(),
     expected: string[] = [];
   const phases = [
@@ -41,7 +41,9 @@ test("native diagnostics retains closed OAuth phases and rejects private or misp
       phase,
       ...(phase === "exchange_http_status" ? { http_status: 401 } : {}),
     });
-    for (const byte of Buffer.from(record + "\n")) f.feed(Buffer.from([byte]));
+    for (const byte of Buffer.from(record + "\n")) {
+      f.feed(Buffer.from([byte]));
+    }
     expected.push(record + "\n");
     for (const key of ["message", "token", "account_ref", "url", "provider_error_category"]) {
       f.feed(Buffer.from(record.replace("}", ',"' + key + '":"SECRET_SENTINEL"}') + "\n"));
@@ -59,14 +61,15 @@ test("native diagnostics retains closed OAuth phases and rejects private or misp
         "}",
     ),
     '{"event":"gateway_native_oauth_connect_failure","phase":"stage_identity","\\u0070hase":"stage_custody"}',
-  ])
+  ]) {
     f.feed(Buffer.from(record + "\n"));
+  }
   f.feed(Buffer.from(valid + "\n"));
   expected.push(valid + "\n");
   assert.deepEqual(f.records, expected);
 });
 
-test("native diagnostics forwards d718 OAuth intent references and closed conflict reasons without private fields", () => {
+void test("native diagnostics forwards d718 OAuth intent references and closed conflict reasons without private fields", () => {
   const f = sink();
   const refs = {
     consumer: "rr-production-fixture",
@@ -88,7 +91,9 @@ test("native diagnostics forwards d718 OAuth intent references and closed confli
   };
   const expected = [JSON.stringify(conflict) + "\n", JSON.stringify(exchange) + "\n"];
   for (const record of [conflict, exchange]) {
-    for (const byte of Buffer.from(JSON.stringify(record) + "\n")) f.feed(Buffer.from([byte]));
+    for (const byte of Buffer.from(JSON.stringify(record) + "\n")) {
+      f.feed(Buffer.from([byte]));
+    }
   }
   for (const record of [
     ...["subject", "owner_ref", "token", "callback", "error"].map((key) => ({
@@ -103,22 +108,27 @@ test("native diagnostics forwards d718 OAuth intent references and closed confli
     { ...conflict, generation: "SECRET_SENTINEL" },
     { event: conflict.event, phase: conflict.phase, account_ref: refs.account_ref },
     { event: "gateway_native_response_failure", phase: "transport", ...refs },
-  ])
+  ]) {
     f.feed(Buffer.from(JSON.stringify(record) + "\n"));
+  }
   f.feed(Buffer.from(valid + "\n"));
   expected.push(valid + "\n");
   assert.deepEqual(f.records, expected);
 });
 
 // Previously all native stderr records were discarded, hiding response failures.
-test("native response diagnostics forwards chunked records once in canonical form", () => {
+void test("native response diagnostics forwards chunked records once in canonical form", () => {
   const f = sink();
   const bytes = Buffer.from(
     ' {"http_status":502,"phase":"http_status","event":"gateway_native_response_failure"}\n',
   );
-  for (const byte of bytes) f.feed(Buffer.from([byte]));
+  for (const byte of bytes) {
+    f.feed(Buffer.from([byte]));
+  }
   f.feed(Buffer.from('{"event":"gateway_native_response_failure","phase":"transport"}\n'));
-  for (const byte of Buffer.from(categorized + "\n")) f.feed(Buffer.from([byte]));
+  for (const byte of Buffer.from(categorized + "\n")) {
+    f.feed(Buffer.from([byte]));
+  }
   assert.deepEqual(f.records, [
     valid + "\n",
     '{"event":"gateway_native_response_failure","phase":"transport"}\n',
@@ -128,7 +138,7 @@ test("native response diagnostics forwards chunked records once in canonical for
 
 // Native non-JSON failure diagnostics must survive arbitrary pipe chunking
 // without admitting private payload fields or extending the category vocabulary.
-test("native response diagnostics retains finite error body categories and rejects private extensions", () => {
+void test("native response diagnostics retains finite error body categories and rejects private extensions", () => {
   const f = sink();
   const categories = [
     "empty_error_body",
@@ -142,7 +152,9 @@ test("native response diagnostics retains finite error body categories and rejec
       '{"event":"gateway_native_response_failure","phase":"http_status","http_status":400,"provider_error_category":"' +
       category +
       '"}';
-    for (const byte of Buffer.from(record + "\n")) f.feed(Buffer.from([byte]));
+    for (const byte of Buffer.from(record + "\n")) {
+      f.feed(Buffer.from([byte]));
+    }
     expected.push(record + "\n");
     f.feed(Buffer.from(record.replace("}", ',"body":"SECRET_SENTINEL"}') + "\n"));
     f.feed(Buffer.from(record.replace("}", ',"provider_error_category":"unknown"}') + "\n"));
@@ -157,7 +169,7 @@ test("native response diagnostics retains finite error body categories and rejec
 
 // The private projection must retain closed structural facts without changing
 // the semantic category or revealing provider event names and parameter paths.
-test("native response diagnostics retains optional finite error shapes and parameter families", () => {
+void test("native response diagnostics retains optional finite error shapes and parameter families", () => {
   const f = sink();
   const expected: string[] = [];
   const shapes = [
@@ -172,7 +184,9 @@ test("native response diagnostics retains optional finite error shapes and param
     const record = categorized
       .replace("responses_lite_required", "unknown")
       .replace("}", ',"provider_error_shape":"' + shape + '"}');
-    for (const byte of Buffer.from(record + "\n")) f.feed(Buffer.from([byte]));
+    for (const byte of Buffer.from(record + "\n")) {
+      f.feed(Buffer.from([byte]));
+    }
     expected.push(record + "\n");
   }
   const parameters = [
@@ -212,7 +226,9 @@ test("native response diagnostics retains optional finite error shapes and param
       parameter +
       '","provider_error_shape":"response_error_object",' +
       categorized.slice(1);
-    for (const byte of Buffer.from(reordered + "\n")) f.feed(Buffer.from([byte]));
+    for (const byte of Buffer.from(reordered + "\n")) {
+      f.feed(Buffer.from([byte]));
+    }
     expected.push(record + "\n");
   }
   f.feed(Buffer.from(valid + "\n" + categorized + "\n"));
@@ -220,7 +236,7 @@ test("native response diagnostics retains optional finite error shapes and param
   assert.deepEqual(f.records, expected);
 });
 
-test("native response diagnostics drops private or ambiguous structural projections and resumes", () => {
+void test("native response diagnostics drops private or ambiguous structural projections and resumes", () => {
   const f = sink();
   const projected = categorized.replace(
     "}",
@@ -247,14 +263,16 @@ test("native response diagnostics drops private or ambiguous structural projecti
       "Provider_Error_Parameter",
     ].map((key) => projected.replace("}", ',"' + key + '":"SECRET_SENTINEL"}')),
   ];
-  for (const line of unsafe) f.feed(Buffer.from(line + "\n"));
+  for (const line of unsafe) {
+    f.feed(Buffer.from(line + "\n"));
+  }
   f.feed(Buffer.from(projected + "\n"));
   assert.deepEqual(f.records, [projected + "\n"]);
 });
 
 // Red if arbitrary native stderr, secret fields, ambiguous JSON or unsupported
 // phases cross the operator log boundary, even beside a legitimate record.
-test("native response diagnostics discards unsafe records and resumes at newline", () => {
+void test("native response diagnostics discards unsafe records and resumes at newline", () => {
   const f = sink();
   const unsafe = [
     "Authorization: Bearer SECRET_SENTINEL",
@@ -284,12 +302,14 @@ test("native response diagnostics discards unsafe records and resumes at newline
     categorized.replace("}", ',"body":"SECRET_SENTINEL"}'),
     "x".repeat(4097),
   ];
-  for (const line of unsafe) f.feed(Buffer.from(line + "\n"));
+  for (const line of unsafe) {
+    f.feed(Buffer.from(line + "\n"));
+  }
   f.feed(Buffer.from(valid + "\n"));
   assert.deepEqual(f.records, [valid + "\n"]);
 });
 
-test("native response diagnostics drops oversized and unfinished chunked lines", () => {
+void test("native response diagnostics drops oversized and unfinished chunked lines", () => {
   const f = sink();
   f.feed(Buffer.alloc(4096, 120));
   f.feed(Buffer.from("x" + valid));
@@ -299,7 +319,7 @@ test("native response diagnostics drops oversized and unfinished chunked lines",
 
 // Red if the private decoder drops the new native read reason or accepts it
 // outside sse_read, where it would misrepresent a deadline or another failure.
-test("native response diagnostics retains chunked closed SSE read reasons and legacy records", () => {
+void test("native response diagnostics retains chunked closed SSE read reasons and legacy records", () => {
   const f = sink();
   const legacy = '{"event":"gateway_native_response_failure","phase":"sse_read","http_status":200}';
   const expected = [legacy + "\n"];
@@ -320,13 +340,15 @@ test("native response diagnostics retains chunked closed SSE read reasons and le
       '{"read_error_reason":"' +
       reason +
       '","http_status":200,"phase":"sse_read","event":"gateway_native_response_failure"}';
-    for (const byte of Buffer.from(reordered + "\n")) f.feed(Buffer.from([byte]));
+    for (const byte of Buffer.from(reordered + "\n")) {
+      f.feed(Buffer.from([byte]));
+    }
     expected.push(canonical + "\n");
   }
   assert.deepEqual(f.records, expected);
 });
 
-test("native response diagnostics rejects malformed or misplaced SSE read reasons and resumes", () => {
+void test("native response diagnostics rejects malformed or misplaced SSE read reasons and resumes", () => {
   const f = sink();
   const record =
     '{"event":"gateway_native_response_failure","phase":"sse_read","http_status":200,"read_error_reason":"idle_expired"}';
@@ -342,14 +364,16 @@ test("native response diagnostics rejects malformed or misplaced SSE read reason
     record.replace("}", ',"body":"SECRET_SENTINEL"}'),
     record.replace("read_error_reason", "Read_Error_Reason"),
   ];
-  for (const line of unsafe) f.feed(Buffer.from(line + "\n"));
+  for (const line of unsafe) {
+    f.feed(Buffer.from(line + "\n"));
+  }
   f.feed(Buffer.from(record + "\n" + valid + "\n"));
   assert.deepEqual(f.records, [record + "\n", valid + "\n"]);
 });
 
 // Red if the real native media classification is lost at the private pipe
 // boundary, or existing records become dependent on the optional addition.
-test("native response diagnostics retains closed media categories through split bytes and legacy records", () => {
+void test("native response diagnostics retains closed media categories through split bytes and legacy records", () => {
   const f = sink();
   const legacy =
     '{"event":"gateway_native_response_failure","phase":"invalid_content_type","http_status":200}';
@@ -361,19 +385,23 @@ test("native response diagnostics retains closed media categories through split 
       '{"upstream_media_category":"' +
       category +
       '","http_status":200,"phase":"invalid_content_type","event":"gateway_native_response_failure"}';
-    for (const byte of Buffer.from(reordered + "\n")) f.feed(Buffer.from([byte]));
+    for (const byte of Buffer.from(reordered + "\n")) {
+      f.feed(Buffer.from([byte]));
+    }
     expected.push(record + "\n");
   }
   const jsonError = legacy.replace(
     "}",
     ',"provider_error_category":"model_rejected","provider_error_shape":"flat_error_object","provider_error_parameter":"model","upstream_media_category":"json"}',
   );
-  for (const byte of Buffer.from(jsonError + "\n")) f.feed(Buffer.from([byte]));
+  for (const byte of Buffer.from(jsonError + "\n")) {
+    f.feed(Buffer.from([byte]));
+  }
   expected.push(jsonError + "\n");
   assert.deepEqual(f.records, expected);
 });
 
-test("native response diagnostics rejects raw, malformed, duplicate or misplaced media and resumes", () => {
+void test("native response diagnostics rejects raw, malformed, duplicate or misplaced media and resumes", () => {
   const f = sink();
   const record =
     '{"event":"gateway_native_response_failure","phase":"invalid_content_type","http_status":200,"upstream_media_category":"html"}';
@@ -399,21 +427,25 @@ test("native response diagnostics rejects raw, malformed, duplicate or misplaced
       record.replace("}", ',"' + key + '":"SECRET_SENTINEL"}'),
     ),
   ];
-  for (const line of unsafe) f.feed(Buffer.from(line + "\n"));
+  for (const line of unsafe) {
+    f.feed(Buffer.from(line + "\n"));
+  }
   f.feed(Buffer.from(record + "\n" + valid + "\n"));
   assert.deepEqual(f.records, [record + "\n", valid + "\n"]);
 });
 
 // Missing-media body observations are finite diagnostics; every record still
 // describes a rejected response and must not leak the inspected body.
-test("native response diagnostics retains body shapes only for missing media and rejects private extensions", () => {
+void test("native response diagnostics retains body shapes only for missing media and rejects private extensions", () => {
   const f = sink(),
     expected: string[] = [];
   const missing =
     '{"event":"gateway_native_response_failure","phase":"invalid_content_type","http_status":200,"upstream_media_category":"missing"}';
   for (const shape of ["empty", "json", "sse", "html", "other"]) {
     const record = missing.replace("}", ',"upstream_body_shape":"' + shape + '"}');
-    for (const byte of Buffer.from(record + "\n")) f.feed(Buffer.from([byte]));
+    for (const byte of Buffer.from(record + "\n")) {
+      f.feed(Buffer.from([byte]));
+    }
     expected.push(record + "\n");
   }
   const jsonError = missing.replace(
@@ -443,19 +475,23 @@ test("native response diagnostics retains body shapes only for missing media and
       record.replace("}", ',"' + key + '":"SECRET_SENTINEL"}'),
     ),
   ];
-  for (const line of unsafe) f.feed(Buffer.from(line + "\n"));
+  for (const line of unsafe) {
+    f.feed(Buffer.from(line + "\n"));
+  }
   f.feed(Buffer.from(missing + "\n" + valid + "\n"));
   expected.push(missing + "\n", valid + "\n");
   assert.deepEqual(f.records, expected);
 });
 
-test("native response diagnostics retains finite missing-media prefixes and rejects raw or misplaced values", () => {
+void test("native response diagnostics retains finite missing-media prefixes and rejects raw or misplaced values", () => {
   const f = sink();
   const compressed =
     '{"event":"gateway_native_response_failure","phase":"invalid_content_type","http_status":200,"upstream_media_category":"missing","upstream_body_prefix":"gzip_prefix"}';
   const truncated =
     '{"event":"gateway_native_response_failure","phase":"invalid_content_type","http_status":200,"provider_error_category":"body_limit","upstream_media_category":"missing","upstream_body_shape":"other","upstream_body_prefix":"json_prefix"}';
-  for (const byte of Buffer.from(compressed + "\n" + truncated + "\n")) f.feed(Buffer.from([byte]));
+  for (const byte of Buffer.from(compressed + "\n" + truncated + "\n")) {
+    f.feed(Buffer.from([byte]));
+  }
   f.feed(Buffer.from(compressed.replace("gzip_prefix", "SECRET_SENTINEL") + "\n"));
   f.feed(
     Buffer.from(
@@ -470,7 +506,7 @@ test("native response diagnostics retains finite missing-media prefixes and reje
 });
 
 // Matches the actual protected native HTTP400 emission, through pipe chunking.
-test("native private Codex request shape reaches operator sink with scalar facts only", () => {
+void test("native private Codex request shape reaches operator sink with scalar facts only", () => {
   const f = sink();
   const fields = [
     "max_output_tokens",
@@ -497,7 +533,9 @@ test("native private Codex request shape reaches operator sink with scalar facts
     unsupported_fields_present: Object.fromEntries(fields.map((key) => [key, false])),
   };
   const record = JSON.stringify(row);
-  for (const byte of Buffer.from(record + "\n")) f.feed(Buffer.from([byte]));
+  for (const byte of Buffer.from(record + "\n")) {
+    f.feed(Buffer.from([byte]));
+  }
   for (const key of ["body", "message", "token", "account_ref", "model"]) {
     f.feed(Buffer.from(JSON.stringify({ ...row, [key]: "SECRET_SENTINEL" }) + "\n"));
     f.feed(

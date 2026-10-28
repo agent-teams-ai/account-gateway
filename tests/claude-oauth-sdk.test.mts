@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import {
   oauthBeginResponse,
@@ -29,7 +29,7 @@ const authorizationURL =
 
 // Red if a provider-supplied capability can change endpoints, scopes, or methods,
 // or if a manual completion can be confused with Codex's callback URL.
-test("Claude browser handoff and manual authorization code have closed secret contracts", () => {
+void test("Claude browser handoff and manual authorization code have closed secret contracts", () => {
   assert.equal(claudeOAuthAuthorizationURL.parse(authorizationURL), authorizationURL);
   for (const changed of [
     authorizationURL.replace("claude.com", "fixture.invalid"),
@@ -40,8 +40,9 @@ test("Claude browser handoff and manual authorization code have closed secret co
     authorizationURL.replace("state=" + "a".repeat(64), "state=" + "A".repeat(64)),
     authorizationURL.replace("code_challenge=", "code_challenge=%FF"),
     authorizationURL + "#",
-  ])
+  ]) {
     assert.equal(claudeOAuthAuthorizationURL.safeParse(changed).success, false);
+  }
   const value = "fixture-code#" + "a".repeat(64);
   assert.deepEqual(secretSubmission.parseClaudeOAuthAuthorizationCode(value), {
     code: "fixture-code",
@@ -55,8 +56,9 @@ test("Claude browser handoff and manual authorization code have closed secret co
     "x".repeat(8193) + "#" + "a".repeat(64),
     "é".repeat(4097) + "#" + "a".repeat(64),
     "x\u0000#" + "a".repeat(64),
-  ])
+  ]) {
     assert.equal(secretSubmission.claudeOAuthAuthorizationCode.safeParse(invalid).success, false);
+  }
   assert.equal(
     secretSubmission.oauthComplete.safeParse({
       operationId: "op",
@@ -81,26 +83,43 @@ test("Claude browser handoff and manual authorization code have closed secret co
   );
 });
 
-test("Claude SDK sends one secret completion and does not retry a lost acknowledgement", async (t) => {
+void test("Claude SDK sends one secret completion and does not retry a lost acknowledgement", async (t) => {
   const requests: unknown[] = [];
-  const server = createServer(async (request, response) => {
-    const chunks: Buffer[] = [];
-    for await (const chunk of request) chunks.push(chunk);
+  const settlements: Promise<void>[] = [];
+  const failures: unknown[] = [];
+  async function handleRequest(request: IncomingMessage, response: ServerResponse) {
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of request) {
+      const bytes: unknown = chunk;
+      assert.ok(bytes instanceof Uint8Array);
+      chunks.push(bytes);
+    }
+    const body: unknown = JSON.parse(Buffer.concat(chunks).toString());
     requests.push({
       method: request.method,
       path: request.url,
-      body: JSON.parse(Buffer.concat(chunks).toString()),
+      body,
     });
     response.destroy();
+  }
+  const server = createServer((request, response) => {
+    settlements.push(
+      handleRequest(request, response).catch((error: unknown) => {
+        failures.push(error);
+        response.destroy();
+      }),
+    );
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
-  t.after(() => {
+  t.after(async () => {
     server.closeAllConnections();
     server.close();
+    await Promise.all(settlements);
+    assert.deepEqual(failures, [], "HTTP fixture handler failed");
   });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   const client = createManagementClient({
     role: "management",
     origin: `http://127.0.0.1:${address.port}`,
