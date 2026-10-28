@@ -1,9 +1,10 @@
+import type { NodeDiagnostic } from './node-diagnostics.ts';
 import { isProcessRuntimeError } from 'node-or-bun';
 export interface Failure {
   code: string;
   step: string;
   guard?: { path: string; uid: number; gid: number; mode: string; symlink: boolean };
-  process?: { exitCode: number | null; signal: string | null; stdoutSha256: string; stderrSha256: string; safePhase?: string; fixturePhase?: string };
+  process?: { exitCode: number | null; signal: string | null; stdoutSha256: string|null; stderrSha256: string|null; stdoutBytes?:number;stderrBytes?:number;capture?:'complete'|'partial'|'unavailable';node?:NodeDiagnostic; safePhase?: string; fixturePhase?: string };
 }
 export class QualificationFailure extends Error {
   readonly facts: Failure;

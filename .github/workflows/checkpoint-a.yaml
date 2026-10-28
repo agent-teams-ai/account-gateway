@@ -78,12 +78,12 @@ jobs:
           mkdir "$packet/node_modules"
           node --input-type=module - "$GITHUB_WORKSPACE/gateway" "$packet" <<'NODE'
           import {createRequire} from 'node:module'; import{dirname,join}from'node:path';import{symlinkSync,writeFileSync,realpathSync,readFileSync}from'node:fs';
-          const [g,p]=process.argv.slice(2),r=createRequire(join(g,'package.json')),f=r.resolve('@agent-teams/engineering-foundation/package.json'),n=realpathSync(join(dirname(f),'../../node-or-bun'));if(JSON.parse(readFileSync(join(n,'package.json'),'utf8')).version!=='0.2.2')throw Error('nob-version');
-          symlinkSync(n,join(p,'node_modules/node-or-bun'));
-          writeFileSync(join(p,'tsconfig.cloud.json'),JSON.stringify({compilerOptions:{target:'ES2023',module:'NodeNext',moduleResolution:'NodeNext',strict:true,noEmit:true,allowImportingTsExtensions:true,erasableSyntaxOnly:true,types:['node'],typeRoots:[join(g,'node_modules/@types')],skipLibCheck:true},files:['operator.ts','tap.ts','tap.test.ts','toolchain.ts','toolchain.test.ts','failure.ts','failure.test.ts','stage-receipts.ts','stage-receipts.test.ts','build-contract.ts','reuse-build.ts','reuse-build.test.ts']}));
+          const [g,p]=process.argv.slice(2),r=createRequire(join(g,'package.json')),f=r.resolve('@agent-teams/engineering-foundation/package.json'),n=realpathSync(join(dirname(f),'../../node-or-bun'));if(JSON.parse(readFileSync(join(n,'package.json'),'utf8')).version!=='0.2.2')throw Error('nob-version');const y=realpathSync(join(dirname(f),'../../yaml'));if(JSON.parse(readFileSync(join(y,'package.json'),'utf8')).version!=='2.9.0')throw Error('yaml-version');
+          symlinkSync(n,join(p,'node_modules/node-or-bun'));symlinkSync(y,join(p,'node_modules/yaml'));
+          writeFileSync(join(p,'tsconfig.cloud.json'),JSON.stringify({compilerOptions:{target:'ES2023',module:'NodeNext',moduleResolution:'NodeNext',strict:true,noEmit:true,allowImportingTsExtensions:true,erasableSyntaxOnly:true,types:['node'],typeRoots:[join(g,'node_modules/@types')],skipLibCheck:true},files:['operator.ts','tap.ts','tap.test.ts','toolchain.ts','toolchain.test.ts','failure.ts','failure.test.ts','stage-receipts.ts','stage-receipts.test.ts','build-contract.ts','reuse-build.ts','reuse-build.test.ts','node-diagnostics.ts','node-diagnostics.test.ts']}));
           NODE
           node "$GITHUB_WORKSPACE/gateway/node_modules/typescript/bin/tsc" -p "$packet/tsconfig.cloud.json"
-          node --test "$packet/tap.test.ts" "$packet/toolchain.test.ts" "$packet/failure.test.ts" "$packet/stage-receipts.test.ts" "$packet/reuse-build.test.ts"
+          node --test "$packet/tap.test.ts" "$packet/toolchain.test.ts" "$packet/failure.test.ts" "$packet/stage-receipts.test.ts" "$packet/reuse-build.test.ts" "$packet/node-diagnostics.test.ts"
       - name: Authenticate immutable native artifacts without rebuilding Go
         env:
           GH_TOKEN: ${{ github.token }}

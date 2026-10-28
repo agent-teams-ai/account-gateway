@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 const keys = {
   'runtime.json': ['kind','gatewayCommit','nativeCommit','node','pgImage','buildReceipt','reports','tapEvidence','pythonPidfd','nodeExecutableSHA256','externalProviderCalls'],
-  'failure.json': ['outcome','phase','primary','cleanup'],
+  'failure.json': ['outcome','phase','primary','cleanup','operatorFrames'],
   'cleanup.json': ['kind','postgresStartAttempted','postgresStopVerified','stopCommand','statusBefore','statusAfter'],
 } as const;
 export function validateReceipt(name: keyof typeof keys, bytes: Buffer): void {

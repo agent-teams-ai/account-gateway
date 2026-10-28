@@ -1,5 +1,5 @@
 // Finite Gateway Host TEST policy. Never import this operator in product code.
-import { createProcessExecutor } from 'node-or-bun';
+import { createProcessExecutor, isProcessRuntimeError } from 'node-or-bun';
 import { createNodeProcessAdapter } from 'node-or-bun/node';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, chmodSync, readdirSync, lstatSync } from 'node:fs';
@@ -10,6 +10,8 @@ import { qualifyGoPins } from './toolchain.ts';
 import { QualificationFailure, safeFailure, failureOutcome } from './failure.ts';
 import type { Failure } from './failure.ts';
 import type { BuildReceipt } from './build-contract.ts';
+import { diagnoseNode, loadSources, fixtureMetadata, frames as sourceFrames } from './node-diagnostics.ts';
+import type { Source, TestFile, Frame } from './node-diagnostics.ts';
 const gatewayCommit = '5a1ad4a00a8941f1263d927ab23297bafa640661';
 const expectedAssemblyFixtureSHA256 = '6179f4af873275aabdefd3a270cc338b47abff14379134ab4f65d4c02de59047';
 const nativeCommit = '32cd6f50e76c29b578ee013900484c56013814bc';
@@ -27,11 +29,19 @@ const phase=option('--phase'),gateway=resolve(option('--gateway')),native=resolv
 const env: Record<string,string> = {};
 for (const k of ['PATH','HOME','TMPDIR','GOPATH','GOCACHE','GOMODCACHE','SSL_CERT_FILE','SSL_CERT_DIR','NODE_EXTRA_CA_CERTS']) { const v=process.env[k];if(v)env[k]=v; }
 Object.assign(env,{GOTOOLCHAIN:'local',GOENV:'off',GOWORK:'off',CGO_ENABLED:'0',NODE_DISABLE_COMPILE_CACHE:'1'});
+let diagnosticSources:Source[]=[];let operatorFrames:Frame[]=[];let completedSuites:{file:TestFile;tests:number;stdoutSha256:string;stderrSha256?:string;stdoutBytes?:number;stderrBytes?:number}[]=[];let lastNodeProcess:Failure['process']|undefined;
 let step='guard';let lastFailure:unknown;let primaryFailure:Failure|undefined;let cleanupFailure:Failure|undefined;
 async function run(command: string,args: readonly string[],cwd=gateway,extra: Record<string,string>={},timeoutMs=600_000): Promise<string> {
   step=command.split('/').at(-1) ?? 'command';
-  const r=await exec.run({command,args,cwd,environment:{...env,...extra},timeoutMs,strictUtf8:true});
-  if(r.exitCode!==0||r.signal!==null){const safePhase=/\"phase\":\s*\"([a-z][a-z0-9-]{0,80})\"/.exec(r.stdout)?.[1];const fixturePhase=/service fixture: ([a-z][a-z ]{0,80})/.exec(r.stdout)?.[1];lastFailure={exitCode:r.exitCode,signal:r.signal,stdoutSha256:createHash('sha256').update(r.stdout).digest('hex'),stderrSha256:createHash('sha256').update(r.stderr).digest('hex'),safePhase,fixturePhase};throw new QualificationFailure({code:'command-failed-'+step,step,process:lastFailure as NonNullable<Failure['process']>});}
+  const facts=(stdout:string,stderr:string,exitCode:number|null,signal:string|null,capture:'complete'|'partial'):NonNullable<Failure['process']>=>{
+    const node=command===process.execPath?diagnoseNode(command,args,stdout,stderr,diagnosticSources,completedSuites.map(s=>({...s}))):undefined;
+    if(node)node.fixtureMetadata=fixtureMetadata();
+    return{exitCode,signal,stdoutSha256:createHash('sha256').update(stdout).digest('hex'),stderrSha256:createHash('sha256').update(stderr).digest('hex'),stdoutBytes:Buffer.byteLength(stdout),stderrBytes:Buffer.byteLength(stderr),capture,...(node?{node}:{})};
+  };
+  let r;try{r=await exec.run({command,args,cwd,environment:{...env,...extra},timeoutMs,strictUtf8:true});}
+  catch(error){if(isProcessRuntimeError(error)){const observed=error.facts.observedExit;if(error.output)lastFailure=facts(error.output.stdout,error.output.stderr,observed?.exitCode??null,observed?.signal??null,'partial');else{const node=command===process.execPath?diagnoseNode(command,args,'','',diagnosticSources,completedSuites.map(s=>({...s}))):undefined;if(node)node.fixtureMetadata=fixtureMetadata();lastFailure={exitCode:observed?.exitCode??null,signal:observed?.signal??null,stdoutSha256:null,stderrSha256:null,capture:'unavailable',...(node?{node}:{})};}throw new QualificationFailure({code:'process-'+error.code,step,process:lastFailure as NonNullable<Failure['process']>});}throw error;}
+  const captured=facts(r.stdout,r.stderr,r.exitCode,r.signal,'complete');if(captured.node)lastNodeProcess=captured;
+  if(r.exitCode!==0||r.signal!==null){lastFailure=captured;throw new QualificationFailure({code:'command-failed-'+step,step,process:captured});}
   return r.stdout.trim(); // Never export raw stderr, provider bodies or configurations.
 }
 function json(path:string,value:unknown):void { writeFileSync(path,JSON.stringify(value,null,2)+'\n',{flag:'wx',mode:0o600}); }
@@ -83,6 +93,7 @@ async function runtime():Promise<void>{
   check(b.kind==='gateway-native4-build/v1'&&b.gatewayCommit===gatewayCommit&&b.nativeCommit===nativeCommit,'build-tuple');check(hash(join(build,'gateway-source.tar'))===b.gatewaySourceArchiveSHA256&&hash(option('--go'))===b.goExecutableSHA256&&hash(process.execPath)===b.nodeExecutableSHA256,'runtime-toolchain-or-archive');check(JSON.stringify(b.sourceHashes)===JSON.stringify(sourceHashes()),'runtime-source-hashes');
   for(const [f,digest]of Object.entries(b.gatewayTrackedHashes)){check(!f.startsWith('/')&&!f.split('/').includes('..')&&hash(join(gateway,f))===digest,'runtime-tracked-source');}
   for(const [name,v]of Object.entries(b.binaries))check(hash(join(build,name))===v.sha256,'runtime-binary-hash');
+  diagnosticSources=loadSources(gateway,b.gatewayTrackedHashes);for(const file of ['operator.ts','failure.ts','node-diagnostics.ts']){const absolute=new URL('./'+file,import.meta.url).pathname,bytes=readFileSync(absolute);diagnosticSources.push({file:'test-native4/'+file,absolute,text:bytes.toString('utf8'),sha256:createHash('sha256').update(bytes).digest('hex')});}
   const pg='/usr/lib/postgresql/17/bin';env.PATH=pg+':'+(env.PATH??'/usr/bin:/bin');check((await run(join(pg,'psql'),['--version'])).includes('17.10'),'psql-version');check((await run(join(pg,'pg_dump'),['--version'])).includes('17.10'),'pgdump-version');
   // Fresh image filesystem, no reused cluster, no network interface except loopback.
   const pgdata='/var/lib/postgresql/native4';fresh(pgdata);await run('chown',['postgres:postgres',pgdata]);
@@ -105,7 +116,7 @@ async function runtime():Promise<void>{
     const ak='ag_kernel_test_assembly_'+suffix,an='native_bootstrap_assembly_'+suffix;await create(ak);await create(an);
     const tapEvidence:Record<string,{tests:number;sha256:string}>={};
     const reports:Record<string,{passed:true}>={};
-    const suite=async(file:string,extra:Record<string,string>):Promise<void>=>{const tap=await run(process.execPath,['--test','--test-reporter=tap',file],gateway,extra,180_000);const { tests }=qualifyTap(tap);tapEvidence[file]={tests,sha256:createHash('sha256').update(tap).digest('hex')};};
+    const suite=async(file:string,extra:Record<string,string>):Promise<void>=>{const tap=await run(process.execPath,['--test','--test-reporter=tap',file],gateway,extra,180_000);let tests:number;try{({tests}=qualifyTap(tap));}catch(error){throw new QualificationFailure({code:'suite-incomplete',step:'node-tap-qualification',process:lastNodeProcess});}tapEvidence[file]={tests,sha256:createHash('sha256').update(tap).digest('hex')};completedSuites.push({file:file as TestFile,tests,stdoutSha256:lastNodeProcess!.stdoutSha256!,stderrSha256:lastNodeProcess!.stderrSha256!,stdoutBytes:lastNodeProcess!.stdoutBytes,stderrBytes:lastNodeProcess!.stderrBytes});};
     await suite(files[2]!,{AG_ASSEMBLY_ALLOW:'disposable_root_pg17_10',AG_ASSEMBLY_KERNEL_DSN:dsn(ak),AG_ASSEMBLY_NATIVE_DSN:dsn(an)});reports.assembly={passed:true};
     const sk='ag_service_entry_kernel_'+id,sn='ag_service_entry_native_'+id;await create(sk);await create(sn);
     // Original byte-for-byte numbered Gateway SQL and native repository migrator.
@@ -133,7 +144,7 @@ async function runtime():Promise<void>{
     check(JSON.stringify(b.sourceHashes)===JSON.stringify(sourceHashes()),'final-source-change');
     runtimeReceipt={kind:'gateway-native4-runtime/v1',gatewayCommit,nativeCommit,node:process.version,pgImage,buildReceipt:hash(join(build,'build.json')),reports,tapEvidence,pythonPidfd,nodeExecutableSHA256:hash(process.execPath),externalProviderCalls:false};
   } catch(error) {
-    primaryFailure??=safeFailure(error,step);throw error;
+    if(!primaryFailure){primaryFailure=safeFailure(error,step);operatorFrames=sourceFrames(error instanceof Error?error.stack??'':'',diagnosticSources);}throw error;
   } finally {
     let postgresStopVerified=false;let stopCommand:{attempted:boolean;exitCode:number|null;signal:string|null}={attempted:false,exitCode:null,signal:null};let statusBefore:{exitCode:number|null;signal:string|null;noServerRunning:boolean}|undefined;let statusAfter:typeof statusBefore;
     const pgStatus=async()=>{const result=await exec.run({command:'gosu',args:['postgres',join(pg,'pg_ctl'),'-D',pgdata,'status'],cwd:gateway,environment:env,timeoutMs:5000,strictUtf8:true});return {exitCode:result.exitCode,signal:result.signal,noServerRunning:result.stdout.includes('no server running')};};
@@ -149,4 +160,4 @@ async function runtime():Promise<void>{
   check(runtimeReceipt,'runtime-incomplete');json(join(output,'runtime.json'),runtimeReceipt);
 }
 try{check(['build','runtime'].includes(phase),'phase');if(phase==='build')await build();else await runtime();}
-catch(error){primaryFailure??=cleanupFailure??safeFailure(error,step);const diagnostic={outcome:'fail',phase,...failureOutcome(primaryFailure,cleanupFailure)};let failureReceiptWritten=false;try{if(existsSync(output)){json(join(output,'failure.json'),diagnostic);failureReceiptWritten=true;}}catch{cleanupFailure??={code:'failure-receipt-write-failed',step:'failure-receipt'};}process.stderr.write(JSON.stringify({outcome:'fail',phase,...failureOutcome(primaryFailure,cleanupFailure),failureReceiptWritten})+'\n');process.exitCode=1;}
+catch(error){if(!primaryFailure){primaryFailure=cleanupFailure??safeFailure(error,step);operatorFrames=sourceFrames(error instanceof Error?error.stack??'':'',diagnosticSources);}const diagnostic={outcome:'fail',phase,operatorFrames,...failureOutcome(primaryFailure,cleanupFailure)};let failureReceiptWritten=false;try{if(existsSync(output)){json(join(output,'failure.json'),diagnostic);failureReceiptWritten=true;}}catch{cleanupFailure??={code:'failure-receipt-write-failed',step:'failure-receipt'};}process.stderr.write(JSON.stringify({outcome:'fail',phase,operatorFrames,...failureOutcome(primaryFailure,cleanupFailure),failureReceiptWritten})+'\n');process.exitCode=1;}

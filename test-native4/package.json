@@ -1,1 +1,8 @@
-{"private":true,"type":"module","dependencies":{"node-or-bun":"0.2.2"}}
+{
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "node-or-bun": "0.2.2",
+    "yaml": "2.9.0"
+  }
+}
