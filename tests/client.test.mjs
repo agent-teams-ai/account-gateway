@@ -76,7 +76,9 @@ const json = (res, body, status = 200) => {
 };
 const read = async (req) => {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  for await (const chunk of req) {
+    chunks.push(chunk);
+  }
   return Buffer.concat(chunks);
 };
 const rejects = (promise, code, effect) =>
@@ -87,6 +89,15 @@ const rejects = (promise, code, effect) =>
       error.code === code &&
       error.effect === effect &&
       !JSON.stringify({ message: error.message, ...error }).includes("private-sentinel"),
+  );
+
+const rejectRequest = (promise) =>
+  assert.rejects(
+    promise,
+    (error) =>
+      error.code === "invalid_response" &&
+      error.effect === "effect_unknown" &&
+      error.requestRef === "stable-request",
   );
 
 test("retirement readback binds identity and rejects contradictory closure counts", async (t) => {
@@ -284,7 +295,7 @@ test("all thirteen facade routes, exact native bytes and stable readback identit
       return;
     }
     if (req.method === "GET") {
-      if (req.url === "/v1/profiles")
+      if (req.url === "/v1/profiles") {
         json(res, {
           profiles: [
             {
@@ -295,9 +306,11 @@ test("all thirteen facade routes, exact native bytes and stable readback identit
             },
           ],
         });
-      else if (req.url.startsWith("/v1/accounts?")) json(res, { accounts: [account] });
-      else if (req.url === "/v1/accounts/account-a") json(res, account);
-      else
+      } else if (req.url.startsWith("/v1/accounts?")) {
+        json(res, { accounts: [account] });
+      } else if (req.url === "/v1/accounts/account-a") {
+        json(res, account);
+      } else {
         json(res, {
           operationRef: "op-a",
           state: "applied",
@@ -308,18 +321,22 @@ test("all thirteen facade routes, exact native bytes and stable readback identit
             authorizationEpoch: 1,
           },
         });
+      }
       return;
     }
     const body = JSON.parse(await read(req));
     assert.equal(body.operationId, "op-a");
-    if (req.url === "/v1/executions") assert.equal(body.bindingRevision, 7);
+    if (req.url === "/v1/executions") {
+      assert.equal(body.bindingRevision, 7);
+    }
     assert.ok(
       req.url.endsWith("/close")
         ? req.headers.authorization === "Bearer fixture-run"
         : req.headers.authorization === "Bearer fixture-control",
     );
-    if (req.method === "PATCH" || req.url.endsWith("/reconnect") || req.url.endsWith("/disable"))
+    if (req.method === "PATCH" || req.url.endsWith("/reconnect") || req.url.endsWith("/disable")) {
       assert.equal(body.expectedMetadataRevision, 2);
+    }
     json(res, { operationRef: body.operationId, state: "pending" }, 202);
   });
   await m.profiles();
@@ -459,8 +476,9 @@ test("strict success and error allowlists, bounds and redirect redaction", async
       json(res, { operationRef: "op-a", state: "pending", credential: "private-sentinel" }, 202);
       return;
     }
-    if (mode === "error") json(res, { ...safe(), nativeId: "private-sentinel" }, 404);
-    else if (mode === "nested")
+    if (mode === "error") {
+      json(res, { ...safe(), nativeId: "private-sentinel" }, 404);
+    } else if (mode === "nested") {
       json(res, {
         operationRef: "op-a",
         state: "applied",
@@ -472,15 +490,18 @@ test("strict success and error allowlists, bounds and redirect redaction", async
           token: "private-sentinel",
         },
       });
-    else json(res, { ...account, credential: "private-sentinel" });
+    } else {
+      json(res, { ...account, credential: "private-sentinel" });
+    }
   });
   await rejects(
     m.disable("account-a", { operationId: "op-a", expectedMetadataRevision: 2 }),
     "invalid_response",
     "effect_unknown",
   );
-  for (mode of ["redirect", "oversize", "error", "account"])
+  for (mode of ["redirect", "oversize", "error", "account"]) {
     await rejects(m.get("account-a"), "invalid_response", "effect_unknown");
+  }
   mode = "nested";
   await rejects(m.operation("op-a"), "invalid_response", "effect_unknown");
   assert.equal(redirected, 0);
@@ -493,8 +514,11 @@ test("lost acknowledgements retain known IDs; readback 404 remains ambiguous; no
   const { management: m, execution: e } = await fixture(t, async (req, res) => {
     if (req.method === "POST") {
       await read(req);
-      if (req.url.endsWith("/requests")) dispatches++;
-      else mutations++;
+      if (req.url.endsWith("/requests")) {
+        dispatches++;
+      } else {
+        mutations++;
+      }
       res.destroy();
       return;
     }
@@ -555,7 +579,9 @@ test("streaming exposes first bytes, propagates cancellation, bounds output, cou
   );
   await Promise.race([
     closeObserved,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("cancel not observed")), 1000)),
+    new Promise((_resolve, reject) => {
+      setTimeout(() => reject(new Error("cancel not observed")), 1000);
+    }),
   ]);
   assert.equal(dispatches, 1);
 });
@@ -766,7 +792,9 @@ test(
     });
     const responses = channel("undici:request:headers");
     const observe = (event) => {
-      if (event.request.path === "/v1/accounts/account-a/disable") headersObserved();
+      if (event.request.path === "/v1/accounts/account-a/disable") {
+        headersObserved();
+      }
     };
     responses.subscribe(observe);
     t.after(() => responses.unsubscribe(observe));
@@ -791,7 +819,9 @@ test(
     );
     await received;
     // Drain fetch header-resolution microtasks before aborting its partial body read.
-    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => {
+      setImmediate(resolve);
+    });
     controller.abort();
     await rejected;
     assert.equal(mutations, 1);
@@ -801,13 +831,22 @@ test(
 // Regression: optional list fields become literal "undefined" on the wire.
 test("list omits explicit undefined values from its HTTP query", async (t) => {
   const observed = [];
-  const { management: m } = await fixture(t, (req, res) => {
+  const { management: m, origin } = await fixture(t, (req, res) => {
     observed.push(req.url);
     json(res, { accounts: [] });
   });
   await m.list();
   await m.list({ ownerRef: undefined, cursor: undefined, limit: undefined });
-  assert.deepEqual(observed, ["/v1/accounts", "/v1/accounts"]);
+  const lifecycle = sdk.createLifecycleClient({
+    origin,
+    role: "management",
+    token: "fixture-control",
+    capability: "account-gateway/account-lifecycle/v2",
+    clientContract: "account-gateway-client/account-lifecycle/v2",
+  });
+  await lifecycle.list();
+  await lifecycle.list({ ownerRef: undefined, cursor: undefined, limit: undefined });
+  assert.deepEqual(observed, ["/v1/accounts", "/v1/accounts", "/v2/accounts", "/v2/accounts"]);
 });
 
 // Regression: nested error identities/effects invite a replay after ambiguous dispatch.
@@ -824,14 +863,6 @@ test("request and operation readback reject contradictory nested diagnostics wit
     ...safe("upstream_failure", "effect_unknown"),
     requestRef: "stable-request",
   };
-  const rejectRequest = (promise) =>
-    assert.rejects(
-      promise,
-      (error) =>
-        error.code === "invalid_response" &&
-        error.effect === "effect_unknown" &&
-        error.requestRef === "stable-request",
-    );
   // Isolate identity, effect and timed retry contradictions, rather than relying on one bad field.
   for (const status of [
     { ...ambiguous, effect: "not_dispatched" },
@@ -875,10 +906,10 @@ test("request and operation readback reject contradictory nested diagnostics wit
     response = { operationRef: "stable-op", state: "unknown", error };
     await assert.rejects(
       m.operation("stable-op"),
-      (error) =>
-        error.code === "invalid_response" &&
-        error.effect === "effect_unknown" &&
-        error.operationRef === "stable-op",
+      (diagnostic) =>
+        diagnostic.code === "invalid_response" &&
+        diagnostic.effect === "effect_unknown" &&
+        diagnostic.operationRef === "stable-op",
     );
   }
   response = { ...ambiguous, error: requestError };
@@ -955,8 +986,11 @@ test("applied preparation and lost-ack operation GET retain the selected account
       assert.deepEqual(body.accountRefs, ["account-a", "account-b"]);
       const result = { operationRef: body.operationId, state: "applied", result: selected };
       applied.set(body.operationId, result);
-      if (body.operationId === "prepare-lost") res.destroy();
-      else json(res, result);
+      if (body.operationId === "prepare-lost") {
+        res.destroy();
+      } else {
+        json(res, result);
+      }
       return;
     }
     if (req.method === "GET" && req.url.startsWith("/v1/operations/")) {
@@ -1068,10 +1102,12 @@ test("malformed selected preparation results fail closed on POST and operation G
     delete omitted[field];
     invalid.push(omitted);
   }
-  for (const accountRef of ["", "../private-sentinel", "a".repeat(129), 1, null])
+  for (const accountRef of ["", "../private-sentinel", "a".repeat(129), 1, null]) {
     invalid.push({ ...selected, accountRef });
-  for (const authorizationEpoch of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "17", null])
+  }
+  for (const authorizationEpoch of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "17", null]) {
     invalid.push({ ...selected, authorizationEpoch });
+  }
   for (const field of [
     "credential",
     "admission",
@@ -1079,8 +1115,9 @@ test("malformed selected preparation results fail closed on POST and operation G
     "nativeId",
     "prompt",
     "output",
-  ])
+  ]) {
     invalid.push({ ...selected, [field]: { value: "private-sentinel" } });
+  }
   const rejectMalformed = (promise) =>
     assert.rejects(promise, (error) => {
       assert.ok(error instanceof sdk.GatewayError);
@@ -1277,4 +1314,113 @@ test("stream safe errors retain the actual HTTP status without losing effect ide
       error.requestRef === "request-a" &&
       error.diagnostic?.code === "forbidden",
   );
+});
+
+test("callback lexical corpus preserves control, Unicode, byte and field boundaries", () => {
+  const secret = sdk.secretSubmission;
+  const state = "a".repeat(64);
+  const codex = "http://localhost:1455/auth/callback?";
+  const grok = "http://127.0.0.1:56121/callback?";
+  for (const code of ["ordinary", "a😀z", "a\u200bz", "é"]) {
+    const query = new URLSearchParams({ code, state });
+    assert.deepEqual(secret.parseOAuthCallbackURL(codex + query), { code, state });
+    assert.deepEqual(secret.parseGrokManualCallbackURL(grok + query), { code, state });
+    assert.deepEqual(secret.parseClaudeOAuthAuthorizationCode(`${code}#${state}`), { code, state });
+  }
+  for (const point of [
+    ...Array.from({ length: 32 }, (_, index) => index),
+    ...Array.from({ length: 33 }, (_, index) => index + 127),
+  ]) {
+    const control = String.fromCharCode(point);
+    for (const code of [`${control}code`, `code${control}`, `co${control}de`]) {
+      assert.equal(secret.oauthCallbackCode.safeParse(code).success, false);
+      assert.equal(secret.grokOAuthAuthorizationCode.safeParse(code).success, false);
+      assert.equal(secret.claudeOAuthCallbackCode.safeParse(code).success, false);
+      const query = new URLSearchParams({ code, state });
+      assert.equal(secret.parseOAuthCallbackURL(codex + query), undefined);
+      assert.equal(secret.parseGrokManualCallbackURL(grok + query), undefined);
+    }
+    assert.equal(
+      secret.parseOAuthCallbackURL(`${codex}code=co${control}de&state=${state}`),
+      undefined,
+    );
+    assert.equal(
+      secret.parseGrokManualCallbackURL(`${grok}code=co${control}de&state=${state}`),
+      undefined,
+    );
+  }
+  assert.equal(secret.oauthCallbackCode.safeParse("a b").success, true);
+  assert.equal(secret.oauthCallbackCode.safeParse("a\u2028b").success, true);
+  assert.equal(secret.claudeOAuthCallbackCode.safeParse("a b").success, false);
+  assert.equal(secret.claudeOAuthCallbackCode.safeParse("a\u2028b").success, false);
+  for (const code of ["\ud800", "\udfff", "a\ud800z", " code", "code "]) {
+    assert.equal(secret.oauthCallbackCode.safeParse(code).success, false);
+    assert.equal(secret.grokOAuthAuthorizationCode.safeParse(code).success, false);
+    assert.equal(secret.claudeOAuthCallbackCode.safeParse(code).success, false);
+  }
+  for (const code of ["é".repeat(2048), "😀".repeat(1024)]) {
+    assert.equal(secret.oauthCallbackCode.safeParse(code).success, true);
+    assert.equal(secret.oauthCallbackCode.safeParse(`${code}a`).success, false);
+  }
+  assert.equal(secret.claudeOAuthCallbackCode.safeParse("é".repeat(4096)).success, true);
+  assert.equal(secret.claudeOAuthCallbackCode.safeParse("é".repeat(4096) + "a").success, false);
+  for (const value of [
+    undefined,
+    null,
+    0,
+    {},
+    "",
+    "code",
+    `#${state}`,
+    "code#",
+    `code#${state}#`,
+    `code#${state}#extra`,
+  ]) {
+    assert.equal(secret.parseClaudeOAuthAuthorizationCode(value), undefined);
+  }
+  for (const query of [
+    `code=&state=${state}`,
+    "code=code&state=",
+    `code=code&state=${state}&code=other`,
+    `code=code&state=${state}&state=${state}`,
+    `code=code&state=${state}&scope=one&scope=two`,
+    `c%6fde=code&state=${state}`,
+    `code=code&%73tate=${state}`,
+    `code=%&state=${state}`,
+    `code=%C0%AF&state=${state}`,
+    `code=code&state=${state}&unknown=value`,
+    `code=code&state=${state}#fragment`,
+    `code=code\\&state=${state}`,
+  ]) {
+    assert.equal(secret.parseOAuthCallbackURL(codex + query), undefined);
+    assert.equal(secret.parseGrokManualCallbackURL(grok + query), undefined);
+  }
+  assert.deepEqual(secret.parseOAuthCallbackURL(`${codex}code=%23&state=${state}`), {
+    code: "#",
+    state,
+  });
+  assert.equal(secret.parseGrokManualCallbackURL(`${grok}code=%23&state=${state}`), undefined);
+  assert.deepEqual(secret.parseOAuthCallbackURL(`${codex}code=code&state=${state}&scope=`), {
+    code: "code",
+    state,
+  });
+});
+
+test("client configuration reads getters once without retaining their objects", () => {
+  let originReads = 0;
+  let tokenReads = 0;
+  const settings = {
+    role: "management",
+    get origin() {
+      originReads += 1;
+      return "http://127.0.0.1:1";
+    },
+    get token() {
+      tokenReads += 1;
+      return "synthetic-control";
+    },
+  };
+  sdk.createManagementClient(settings);
+  assert.equal(originReads, 1);
+  assert.equal(tokenReads, 1);
 });

@@ -114,35 +114,50 @@ const deny = (): never => {
   throw new ServiceError("config_denied");
 };
 function text(v: unknown): string {
-  if (typeof v !== "string") return deny();
+  if (typeof v !== "string") {
+    return deny();
+  }
   return v;
 }
 function path(v: unknown): string {
   const p = text(v);
-  if (!isAbsolute(p) || normalize(p) !== p || p.includes("\0")) return deny();
+  if (!isAbsolute(p) || normalize(p) !== p || p.includes("\0")) {
+    return deny();
+  }
   return p;
 }
 // Protected ancestors prevent replacement between validation and native exec.
 function protectedPath(p: string, kind: "file" | "directory" | "executable"): void {
   for (let a = dirname(p); ; a = dirname(a)) {
     const s = lstatSync(a);
-    if (!s.isDirectory() || s.uid !== 0 || s.mode & 0o022) deny();
-    if (a === "/") break;
+    if (!s.isDirectory() || s.uid !== 0 || s.mode & 0o022) {
+      deny();
+    }
+    if (a === "/") {
+      break;
+    }
   }
   const s = lstatSync(p);
-  if (s.uid !== 0 || s.mode & 0o022) deny();
+  if (s.uid !== 0 || s.mode & 0o022) {
+    deny();
+  }
   if (kind === "directory") {
-    if (!s.isDirectory() || (s.mode & 0o777) !== 0o700) deny();
+    if (!s.isDirectory() || (s.mode & 0o777) !== 0o700) {
+      deny();
+    }
   } else if (
     !s.isFile() ||
     s.nlink !== 1 ||
     (kind === "file" ? (s.mode & 0o777) !== 0o600 : !(s.mode & 0o100))
-  )
+  ) {
     deny();
+  }
 }
 export function keyBytes(s: string): Buffer {
   const b = Buffer.from(s, "base64");
-  if (b.length !== 32 || b.toString("base64") !== s) return deny();
+  if (b.length !== 32 || b.toString("base64") !== s) {
+    return deny();
+  }
   return b;
 }
 function origin(v: unknown): string {
@@ -156,12 +171,13 @@ function origin(v: unknown): string {
     Number(u.port) < 1024 ||
     u.username ||
     u.password
-  )
+  ) {
     return deny();
+  }
   return s;
 }
 function freeze<T>(v: T): T {
-  if (v && typeof v === "object") {
+  if (v !== null && typeof v === "object") {
     Object.values(v).forEach(freeze);
     Object.freeze(v);
   }
@@ -185,12 +201,15 @@ function captureEnrollmentConfig(
       !Array.isArray(r.modelScope) ||
       r.modelScope.length !== 1 ||
       r.modelScope[0] !== profile.model
-    )
+    ) {
       return deny();
+    }
     const supplied = ["qualificationRef", "limits", "providerTokenUpperBound"].filter((k) =>
       Object.hasOwn(r, k),
     );
-    if (supplied.length && supplied.length !== 3) return deny();
+    if (supplied.length && supplied.length !== 3) {
+      return deny();
+    }
     const qualified = supplied.length
       ? captureProfile({
           ...profile,
@@ -220,8 +239,9 @@ export function captureOAuthEnrollmentConfig(value: unknown): OAuthEnrollmentCon
 }
 export function captureClaudeOAuthEnrollmentConfig(value: unknown): ClaudeOAuthEnrollmentConfig {
   const config = captureEnrollmentConfig(value, claudeOAuthProfile) as ClaudeOAuthEnrollmentConfig;
-  if ((config.limits?.tokens ?? 0) > 65_536 || (config.providerTokenUpperBound ?? 0) > 65_536)
+  if ((config.limits?.tokens ?? 0) > 65_536 || (config.providerTokenUpperBound ?? 0) > 65_536) {
     return deny();
+  }
   return config;
 }
 export function captureGrokOAuthEnrollmentConfig(value: unknown): GrokOAuthEnrollmentConfig {
@@ -260,8 +280,9 @@ export function captureGrokOAuthEnrollmentConfig(value: unknown): GrokOAuthEnrol
       r.authorizationOrigin !== "https://auth.x.ai" ||
       r.redirectPolicy !== "manual_loopback" ||
       r.redirectURI !== "http://127.0.0.1:56121/callback"
-    )
+    ) {
       return deny();
+    }
     return Object.freeze({
       ...base,
       profile: "grok-subscription-responses-oauth-v1" as const,
@@ -284,8 +305,9 @@ export function captureAccountLifecycle(
     if (
       r.contract !== lifecycleContract ||
       (r.writeGate !== "enabled" && r.writeGate !== "disabled")
-    )
+    ) {
       return deny();
+    }
     return Object.freeze({ contract: lifecycleContract, writeGate: r.writeGate });
   } catch {
     return deny();
@@ -326,7 +348,9 @@ function captureProfile(value: unknown): ServiceProfile {
     createdAt: "2000-01-01T00:00:00Z",
   });
   integer(profile.providerTokenUpperBound, 10_000_000);
-  if (profile.limits.tokens > profile.providerTokenUpperBound) deny();
+  if (profile.limits.tokens > profile.providerTokenUpperBound) {
+    deny();
+  }
   const definition = providerConnectionDefinition(profile.profile);
   if (
     definition &&
@@ -334,9 +358,19 @@ function captureProfile(value: unknown): ServiceProfile {
     (definition.baseURL !== profile.baseURL ||
       (definition.provider.identity !== "openrouter" &&
         !definition.models.some((model) => model.modelId === profile.model)))
-  )
+  ) {
     deny();
+  }
   return freeze(profile);
+}
+function qualifiedEnrollment(
+  value: Pick<OAuthEnrollmentConfig, "limits" | "qualificationRef" | "providerTokenUpperBound">,
+): boolean {
+  return (
+    Boolean(value.limits) &&
+    Boolean(value.qualificationRef) &&
+    Boolean(value.providerTokenUpperBound)
+  );
 }
 // Pure server configuration capture is shared by startup and source HTTP tests.
 // The singleton stays compatible; only the optional second tuple is fixed.
@@ -355,9 +389,10 @@ export function captureServiceProfiles(
     const first = captureProfile(input.profile);
     if (
       first.profile !== "openai-responses-apikey-v1" &&
-      !providerConnectionDefinition(first.profile)?.authMethods.includes("api_key")
-    )
+      providerConnectionDefinition(first.profile)?.authMethods.includes("api_key") !== true
+    ) {
       return deny();
+    }
     const profiles = [first];
     if (input.secondProfile !== undefined) {
       const p = captureProfile(input.secondProfile);
@@ -365,13 +400,15 @@ export function captureServiceProfiles(
         p.profile === first.profile ||
         p.profile !== openRouterProfile.profile ||
         p.baseURL !== openRouterProfile.baseURL
-      )
+      ) {
         return deny();
+      }
       profiles.push(p);
     }
     if (input.providerProfiles !== undefined) {
-      if (!Array.isArray(input.providerProfiles) || input.providerProfiles.length > 3)
+      if (!Array.isArray(input.providerProfiles) || input.providerProfiles.length > 3) {
         return deny();
+      }
       for (const raw of input.providerProfiles) {
         const p = captureProfile(raw);
         if (
@@ -379,14 +416,17 @@ export function captureServiceProfiles(
             p.profile,
           ) ||
           profiles.some((old) => old.profile === p.profile)
-        )
+        ) {
           return deny();
+        }
         profiles.push(p);
       }
     }
     if (input.oauthEnrollment !== undefined) {
       const o = captureOAuthEnrollmentConfig(input.oauthEnrollment);
-      if (!o.limits || !o.qualificationRef || !o.providerTokenUpperBound) return deny();
+      if (!qualifiedEnrollment(o)) {
+        return deny();
+      }
       profiles.push(
         captureProfile({
           ...codexOAuthProfile,
@@ -398,7 +438,9 @@ export function captureServiceProfiles(
     }
     if (input.claudeOAuthEnrollment !== undefined) {
       const o = captureClaudeOAuthEnrollmentConfig(input.claudeOAuthEnrollment);
-      if (!o.limits || !o.qualificationRef || !o.providerTokenUpperBound) return deny();
+      if (!qualifiedEnrollment(o)) {
+        return deny();
+      }
       profiles.push(
         captureProfile({
           ...claudeOAuthProfile,
@@ -410,7 +452,9 @@ export function captureServiceProfiles(
     }
     if (input.grokOAuthEnrollment !== undefined) {
       const o = captureGrokOAuthEnrollmentConfig(input.grokOAuthEnrollment);
-      if (!o.limits || !o.qualificationRef || !o.providerTokenUpperBound) return deny();
+      if (!qualifiedEnrollment(o)) {
+        return deny();
+      }
       profiles.push(
         captureProfile({
           ...grokOAuthProfile,
@@ -431,17 +475,24 @@ export function captureServiceBearers(
   profiles: readonly ServiceProfile[],
 ): ServiceConfig["bearers"] {
   try {
-    if (!Array.isArray(value) || !value.length || value.length > 128) return deny();
-    const bearers = value.map((value) => {
-      const b = value as ManagementBearer | RunControlBearer | ConsumerControlBearer;
+    if (!Array.isArray(value) || !value.length || value.length > 128) {
+      return deny();
+    }
+    const bearers = value.map((entry) => {
+      const b = entry as ManagementBearer | RunControlBearer | ConsumerControlBearer;
       const role = b.role;
       if (role === "consumer-control") {
         object(b, ["token", "role", "consumerId", "profileIds", "limits", "maxRunMs"]);
-        const supplied = b.profileIds;
-        if (!Array.isArray(supplied)) return deny();
+        const profileIdsSource = b.profileIds;
+        const supplied = profileIdsSource;
+        if (!Array.isArray(supplied)) {
+          return deny();
+        }
         const length = supplied.length;
-        if (length < 1 || length > 128) return deny();
-        const profileIds = Array.from({ length }, (_, i) => supplied[i]);
+        if (length < 1 || length > 128) {
+          return deny();
+        }
+        const profileIds = Array.from({ length }, (_, i) => profileIdsSource[i]);
         const limits = { ...b.limits };
         object(limits, ["requests", "concurrency", "requestBytes", "outputBytes", "tokens"]);
         return {
@@ -474,27 +525,35 @@ export function captureServiceBearers(
           "limits",
           "maxRunMs",
         ]);
-      } else
+      } else {
         object(b, ["token", "role", "consumerId", "ownerRefs", "profileIds", "limits", "maxRunMs"]);
+      }
       return b;
     });
     const mapping = new FacadeBearers(bearers);
     const captured = bearers.map((b) => {
       const token = b.token;
       const grant = mapping.resolve(token);
-      if (!grant || grant.role === "execution") return deny();
+      if (!grant || grant.role === "execution") {
+        return deny();
+      }
       return { token, ...grant };
     });
     for (const b of captured) {
-      if (b.consumerId !== consumerId) deny();
+      if (b.consumerId !== consumerId) {
+        deny();
+      }
       if (
         b.role === "management" &&
         b.profileIds !== undefined &&
         b.profileIds.some((id) => !profiles.some((p) => p.profile === id))
-      )
+      ) {
         deny();
+      }
       const ids = b.role === "management" ? [b.preparation.profileId] : b.profileIds;
-      if (!Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length) deny();
+      if (!Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length) {
+        deny();
+      }
       const grant = b.role === "management" ? b.preparation : b;
       // Consumer output is a budget envelope over its selected profiles. Each
       // admission still checks both the grant and the selected physical cap.
@@ -505,8 +564,10 @@ export function captureServiceBearers(
             )
           : undefined;
       for (const id of ids) {
-        const p = profiles.find((p) => p.profile === id);
-        if (!p) return deny();
+        const p = profiles.find((profile) => profile.profile === id);
+        if (!p) {
+          return deny();
+        }
         approvedLimits(grant.limits, {
           ...defaults,
           maxRequests: p.limits.requests,
@@ -527,7 +588,9 @@ export function captureServiceBearers(
 // No provider credential or native custody bytes are read here.
 export function loadServiceConfig(file: string): ServiceConfig {
   try {
-    if (process.geteuid?.() !== 0) return deny();
+    if (process.geteuid?.() !== 0) {
+      return deny();
+    }
     protectedPath(path(file), "file");
     const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     let bytes: Buffer;
@@ -539,8 +602,9 @@ export function loadServiceConfig(file: string): ServiceConfig {
         s.nlink !== 1 ||
         (s.mode & 0o777) !== 0o600 ||
         s.size > 65_536
-      )
+      ) {
         return deny();
+      }
       bytes = Buffer.alloc(65_537);
       // readFileSync would permit growth after fstat; bounded positional read below.
       bytes = readBounded(fd, bytes);
@@ -625,8 +689,9 @@ export function loadServiceConfig(file: string): ServiceConfig {
     protectedPath(native.executable, "executable");
     protectedPath(native.bootstrapFile, "file");
     protectedPath(native.authorityDir, "directory");
-    if (!/^[a-f0-9]{64}$/.test(native.sha256) || imageHash(native.executable) !== native.sha256)
+    if (!/^[a-f0-9]{64}$/.test(native.sha256) || imageHash(native.executable) !== native.sha256) {
       deny();
+    }
     const consumer = {
       consumerId: text(c.consumerId),
       managementCredential: text(c.managementCredential),
@@ -637,7 +702,9 @@ export function loadServiceConfig(file: string): ServiceConfig {
     identifier(consumer.consumerId);
     const profile = captureProfile(r.profile),
       secondProfile = r.secondProfile === undefined ? undefined : captureProfile(r.secondProfile);
-    if (r.providerProfiles !== undefined && !Array.isArray(r.providerProfiles)) return deny();
+    if (r.providerProfiles !== undefined && !Array.isArray(r.providerProfiles)) {
+      return deny();
+    }
     const providerProfiles =
       r.providerProfiles === undefined ? undefined : r.providerProfiles.map(captureProfile);
     const profiles = captureServiceProfiles({
@@ -654,7 +721,9 @@ export function loadServiceConfig(file: string): ServiceConfig {
       facadeHMAC: text(k.facadeHMAC),
     };
     Object.values(keys).forEach(keyBytes);
-    if (new Set(Object.values(keys)).size !== 3) deny();
+    if (new Set(Object.values(keys)).size !== 3) {
+      deny();
+    }
     const bearers = captureServiceBearers(r.bearers, consumer.consumerId, profiles);
     const credentials = [
       consumer.managementCredential,
@@ -666,14 +735,19 @@ export function loadServiceConfig(file: string): ServiceConfig {
     if (
       credentials.some((t) => !/^[A-Za-z0-9._~-]{16,1024}$/.test(t)) ||
       new Set(credentials).size !== credentials.length
-    )
+    ) {
       deny();
+    }
     const kernelDSN = text(r.kernelDSN),
       u = new URL(kernelDSN);
-    if (!["postgres:", "postgresql:"].includes(u.protocol) || u.pathname.length < 2) deny();
+    if (!["postgres:", "postgresql:"].includes(u.protocol) || u.pathname.length < 2) {
+      deny();
+    }
     const facadeOrigin = origin(r.facadeOrigin),
       callbackOrigin = origin(r.callbackOrigin);
-    if (new Set([facadeOrigin, callbackOrigin, native.origin]).size !== 3) deny();
+    if (new Set([facadeOrigin, callbackOrigin, native.origin]).size !== 3) {
+      deny();
+    }
     return freeze({
       kernelDSN,
       durableFacts,
@@ -702,7 +776,9 @@ function readBounded(fd: number, b: Buffer): Buffer {
     count = readSync(fd, b, size, b.length - size, size);
     size += count;
   } while (count && size < b.length);
-  if (size > 65_536) return deny();
+  if (size > 65_536) {
+    return deny();
+  }
   return b.subarray(0, size);
 }
 function imageHash(file: string): string {
@@ -716,18 +792,23 @@ function imageHash(file: string): string {
       s.mode & 0o022 ||
       !(s.mode & 0o100) ||
       s.size > 134_217_728
-    )
+    ) {
       return deny();
+    }
     const hash = createHash("sha256"),
       b = Buffer.alloc(65_536);
     let size = 0,
       n: number;
     while ((n = readSync(fd, b, 0, b.length, size)) > 0) {
       size += n;
-      if (size > 134_217_728) return deny();
+      if (size > 134_217_728) {
+        return deny();
+      }
       hash.update(b.subarray(0, n));
     }
-    if (size !== s.size) return deny();
+    if (size !== s.size) {
+      return deny();
+    }
     return hash.digest("hex");
   } finally {
     closeSync(fd);

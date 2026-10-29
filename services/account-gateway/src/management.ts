@@ -184,9 +184,28 @@ export interface OAuthBeginResult {
   readonly authorizationURL?: string;
   readonly deviceAuthorization?: OAuthDeviceAuthorization;
 }
-function deviceMethod(method: OAuthMethod | undefined): Pick<AccountIntent, "oauthMethod"> {
-  if (method !== undefined && method !== "device_code" && method !== "browser")
+function truthy(value: unknown): boolean {
+  return Boolean(value);
+}
+function nonempty(value: string | undefined): value is string {
+  return Boolean(value);
+}
+function signalAborted(signal: AbortSignal | undefined): boolean {
+  return Boolean(signal?.aborted);
+}
+function pendingOperation(value: OperationStatus): boolean {
+  return value.state === "pending";
+}
+function descriptorQualification(value: { readonly qualification: unknown }): unknown {
+  return value.qualification;
+}
+function retainedContract(value: RetainedCustodyProof): unknown {
+  return value.contract;
+}
+function deviceMethod(method: unknown): Pick<AccountIntent, "oauthMethod"> {
+  if (method !== undefined && method !== "device_code" && method !== "browser") {
     throw new KernelError("invalid");
+  }
   return method === "device_code" ? { oauthMethod: method } : {};
 }
 function oauthScope(j: CandidateJournal): OAuthScope {
@@ -323,9 +342,12 @@ function key(value: unknown): asserts value is string {
     Buffer.byteLength(value, "utf8") < 1 ||
     Buffer.byteLength(value, "utf8") > 4096 ||
     value.trim() !== value ||
-    /[\u0000\r\n]/.test(value)
-  )
+    value.includes("\0") ||
+    value.includes("\r") ||
+    value.includes("\n")
+  ) {
     throw new KernelError("invalid");
+  }
 }
 function name(value: unknown): asserts value is string {
   if (
@@ -334,8 +356,9 @@ function name(value: unknown): asserts value is string {
     value.length < 1 ||
     value.length > 128 ||
     Buffer.byteLength(value, "utf8") > 400
-  )
+  ) {
     throw new KernelError("invalid");
+  }
 }
 export function exactCandidate(j: CandidateJournal, d: PhysicalCandidate): boolean {
   return (
@@ -383,22 +406,26 @@ export function physicalCandidate(input: PhysicalCandidate): PhysicalCandidate {
     d.baseURL.length > 2048 ||
     typeof d.model !== "string" ||
     !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(d.model)
-  )
+  ) {
     throw new KernelError("invalid");
+  }
   const year = Number(d.createdAt.slice(0, 4)),
     month = Number(d.createdAt.slice(5, 7)),
     day = Number(d.createdAt.slice(8, 10));
   const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
   const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-  if (year < 1 || day > days[month - 1]) throw new KernelError("invalid");
+  if (year < 1 || day > days[month - 1]) {
+    throw new KernelError("invalid");
+  }
   let url: URL;
   try {
     url = new URL(d.baseURL);
   } catch {
     throw new KernelError("invalid");
   }
-  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash)
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
     throw new KernelError("invalid");
+  }
   return Object.freeze(d);
 }
 
@@ -429,7 +456,9 @@ export class AccountManagement {
     retainedCustody?: RetainedCustodyVerifier;
   }) {
     uuid(options.worker);
-    if (!options.profiles.length || options.profiles.length > 128) throw new KernelError("invalid");
+    if (!options.profiles.length || options.profiles.length > 128) {
+      throw new KernelError("invalid");
+    }
     const profiles = new Map<string, ManagedProfile>();
     const oauthProviders = new Map<string, Readonly<OAuthEnrollmentOptions>>();
     for (const entry of [
@@ -444,8 +473,9 @@ export class AccountManagement {
         entry.profile.baseURL !== definition.baseURL ||
         entry.profile.model !== definition.model ||
         oauthProviders.has(entry.profile.profile)
-      )
+      ) {
         throw new KernelError("invalid");
+      }
       oauthProviders.set(
         entry.profile.profile,
         Object.freeze({ ...entry, profile: Object.freeze({ ...entry.profile }) }),
@@ -470,14 +500,19 @@ export class AccountManagement {
         createdAt: "2000-01-01T00:00:00Z",
         ...p,
       });
-      if (profiles.has(p.profile)) throw new KernelError("invalid");
+      if (profiles.has(p.profile)) {
+        throw new KernelError("invalid");
+      }
       profiles.set(p.profile, p);
     }
     if (
       profiles.size > 128 ||
-      [...profiles.keys()].some((id) => oauthProfileDefinition(id) && !oauthProviders.has(id))
-    )
+      [...profiles.keys()].some(
+        (id) => truthy(oauthProfileDefinition(id)) && !oauthProviders.has(id),
+      )
+    ) {
       throw new KernelError("invalid");
+    }
     this.kernel = options.kernel;
     this.store = options.store;
     this.custody = options.custody;
@@ -494,10 +529,18 @@ export class AccountManagement {
     signal?: AbortSignal,
   ): Promise<"idle" | "deferred" | "observed"> {
     const ctx = captureContext(context);
-    if (signal?.aborted || cleanupAcquired || this.refreshInFlight || !this.store.nextOAuthRefresh)
+    if (
+      signalAborted(signal) ||
+      cleanupAcquired ||
+      this.refreshInFlight ||
+      !this.store.nextOAuthRefresh
+    ) {
       return "idle";
+    }
     const refreshable = [...this.oauthProviders.values()].filter((entry) => entry.refresh);
-    if (!refreshable.length) return "idle";
+    if (!refreshable.length) {
+      return "idle";
+    }
     const oauth = refreshable[this.refreshProfileCursor++ % refreshable.length];
     const refreshNative = oauth.refresh!;
     this.refreshInFlight = true;
@@ -522,11 +565,14 @@ export class AccountManagement {
         mapping.profile.model !== oauth.profile.model ||
         mapping.profile.qualificationRef !== oauth.profile.qualificationRef ||
         !exactCandidate(mapping, physicalCandidate(mapping.descriptor))
-      )
+      ) {
         throw new KernelError("conflict");
+      }
       let result: OAuthRefreshReadback;
       try {
-        if (signal?.aborted) return "idle";
+        if (signalAborted(signal)) {
+          return "idle";
+        }
         result = await refreshNative.refresh(oauthScope(mapping));
       } catch {
         return "deferred";
@@ -535,8 +581,9 @@ export class AccountManagement {
         result.operationId !== mapping.operationId ||
         result.accountRef !== mapping.accountRef ||
         !["idle", "prepared", "entered", "completed", "unknown"].includes(result.state)
-      )
+      ) {
         return "deferred";
+      }
       return result.state === "unknown" ? "deferred" : "observed";
     } finally {
       this.refreshInFlight = false;
@@ -563,10 +610,12 @@ export class AccountManagement {
     identifier(intent.profile, 64);
     name(intent.displayName);
     if (
-      !this.supportsOAuthProfile(intent.profile!) ||
-      (input.method === "device_code" && !oauthProfileDefinition(intent.profile!)?.deviceCode)
-    )
+      !this.supportsOAuthProfile(intent.profile) ||
+      (input.method === "device_code" &&
+        !truthy(oauthProfileDefinition(intent.profile)?.deviceCode))
+    ) {
       throw new KernelError("denied");
+    }
     return this.beginOAuthIntent(ctx, intent);
   }
   async beginOAuthReconnect(
@@ -585,12 +634,14 @@ export class AccountManagement {
     identifier(intent.operationId);
     uuid(intent.accountRef);
     revision(intent.expectedRevision);
-    const account = await this.kernel.account(ctx, intent.accountRef!);
+    const account = await this.kernel.account(ctx, intent.accountRef);
     if (
       !this.supportsOAuthProfile(account.profile) ||
-      (input.method === "device_code" && !oauthProfileDefinition(account.profile)?.deviceCode)
-    )
+      (input.method === "device_code" &&
+        !truthy(oauthProfileDefinition(account.profile)?.deviceCode))
+    ) {
       throw new KernelError("denied");
+    }
     return this.beginOAuthIntent(ctx, intent);
   }
   private async beginOAuthIntent(
@@ -600,18 +651,27 @@ export class AccountManagement {
     // No secret is staged in TS SQL. Native owns PKCE/state and token custody.
     intent.intentDigest = this.custody.digest({ context: ctx, intent });
     const operation = await this.kernel.beginAccount(ctx, Object.freeze(intent));
-    if (operation.state !== "pending") return Object.freeze({ operation });
-    if (!operation.accountRef) throw new KernelError("unavailable");
+    if (operation.state !== "pending") {
+      return Object.freeze({ operation });
+    }
+    if (!nonempty(operation.accountRef)) {
+      throw new KernelError("unavailable");
+    }
     const account = await this.kernel.account(ctx, operation.accountRef);
     if (
       intent.kind === "create" &&
       (account.ownerRef !== intent.ownerRef || account.profile !== intent.profile)
-    )
+    ) {
       throw new KernelError("conflict");
-    if (!this.supportsOAuthProfile(account.profile)) throw new KernelError("denied");
+    }
+    if (!this.supportsOAuthProfile(account.profile)) {
+      throw new KernelError("denied");
+    }
     const oauth = this.oauthProviders.get(account.profile)!;
     const old = await this.store.readJournal(ctx, intent.operationId);
-    if (old) return Object.freeze({ operation: await this.oauthReadback(ctx, old) });
+    if (old) {
+      return Object.freeze({ operation: await this.oauthReadback(ctx, old) });
+    }
     const permit = await this.kernel.startCandidate(ctx, intent.operationId, this.worker);
     if (!permit) {
       // Another request can be between permit and journal. Do not create a new
@@ -624,8 +684,9 @@ export class AccountManagement {
       });
     }
     try {
-      if (permit.profile !== oauth.profile.profile || permit.operationRef !== intent.operationId)
+      if (permit.profile !== oauth.profile.profile || permit.operationRef !== intent.operationId) {
         throw new KernelError("conflict");
+      }
       const scope: CandidateScope = Object.freeze({
         consumerId: ctx.consumerId,
         operationId: intent.operationId,
@@ -683,45 +744,54 @@ export class AccountManagement {
       "authorizationCode" in callback
         ? typeof callback.authorizationCode !== "string"
         : typeof callback.state !== "string" || typeof callback.code !== "string"
-    )
+    ) {
       throw new KernelError("invalid");
+    }
     const operation = await this.kernel.operation(ctx, operationId);
-    if (operation.oauthMethod === "device_code") throw new KernelError("denied");
+    if (operation.oauthMethod === "device_code") {
+      throw new KernelError("denied");
+    }
     const journal = await this.store.readJournal(ctx, operationId);
     const oauth = journal && this.oauthProviders.get(journal.profile.profile);
     if (
       !oauth ||
-      !journal ||
+      !truthy(journal) ||
       journal.consumerId !== ctx.consumerId ||
       journal.operationId !== operationId ||
       journal.ownerRef !== ownerRef ||
       !["create", "reconnect"].includes(journal.purpose) ||
       operation.accountRef !== journal.accountRef ||
-      operation.executionRef ||
+      truthy(operation.executionRef) ||
       journal.profile.profile !== oauth.profile.profile ||
       journal.profile.baseURL !== oauth.profile.baseURL ||
       journal.profile.model !== oauth.profile.model ||
       journal.profile.qualificationRef !== oauth.profile.qualificationRef
-    )
+    ) {
       throw new KernelError("denied");
+    }
     if (
       "authorizationCode" in callback &&
       oauthProfileDefinition(journal.profile.profile)?.family !== "grok"
-    )
+    ) {
       throw new KernelError("denied");
+    }
     const account = await this.kernel.account(ctx, journal.accountRef);
-    if (account.ownerRef !== ownerRef || account.profile !== journal.profile.profile)
+    if (account.ownerRef !== ownerRef || account.profile !== journal.profile.profile) {
       throw new KernelError("denied");
+    }
     // Reuse only this immutable create/reconnect journal. Reconciliation can permanently
     // spend its authority; completion never creates or takes over a candidate.
     await this.kernel.reconcile(ctx);
     const current = await this.kernel.operation(ctx, operationId);
-    if (current.state !== "pending" || journal.worker !== this.worker) return current;
+    if (current.state !== "pending" || journal.worker !== this.worker) {
+      return current;
+    }
     if (
       !this.store.pendingOAuthRefresh ||
       !(await this.store.pendingOAuthRefresh(ctx, this.worker, oauthScope(journal), oauth.profile))
-    )
+    ) {
       return this.kernel.unknownCandidate(ctx, operationId, journal.worker);
+    }
     const scope = oauthScope(journal);
     let read: OAuthReadback;
     try {
@@ -729,15 +799,21 @@ export class AccountManagement {
     } catch {
       return this.kernel.unknownCandidate(ctx, operationId, journal.worker);
     }
-    if (!exactOAuthReadback(scope, read))
+    if (!exactOAuthReadback(scope, read)) {
       return this.kernel.unknownCandidate(ctx, operationId, journal.worker);
+    }
     // Entered/completed/expired/unknown native intents are readback only. Native
     // rechecks the live owner grant and performs the sole EnterConnect CAS.
-    if (read.state !== "prepared") return this.oauthReadback(ctx, journal, read);
+    if (read.state !== "prepared") {
+      return this.oauthReadback(ctx, journal, read);
+    }
     const fresh = await this.kernel.operation(ctx, operationId);
-    if (fresh.accountRef !== journal.accountRef || fresh.executionRef)
+    if (fresh.accountRef !== journal.accountRef || truthy(fresh.executionRef)) {
       throw new KernelError("denied");
-    if (fresh.state !== "pending") return fresh;
+    }
+    if (fresh.state !== "pending") {
+      return fresh;
+    }
     let completed: OAuthReadback;
     try {
       completed = await oauth.native.complete(scope, callback);
@@ -746,8 +822,9 @@ export class AccountManagement {
     }
     // A lost/invalid ACK burns Gateway authority too; a later prepared read
     // cannot cause an automatic replay of the sensitive completion body.
-    if (!exactOAuthReadback(scope, completed) || completed.state === "prepared")
+    if (!exactOAuthReadback(scope, completed) || completed.state === "prepared") {
       return this.kernel.unknownCandidate(ctx, operationId, journal.worker);
+    }
     return this.oauthReadback(ctx, journal, completed);
   }
   async pollDeviceOAuth(context: TrustedContext, input: OAuthPollInput): Promise<OperationStatus> {
@@ -761,43 +838,49 @@ export class AccountManagement {
     const oauth = journal && this.oauthProviders.get(journal.profile.profile);
     if (
       !oauth ||
-      !oauthProfileDefinition(oauth.profile.profile)?.deviceCode ||
+      !truthy(oauthProfileDefinition(oauth.profile.profile)?.deviceCode) ||
       operation.oauthMethod !== "device_code" ||
-      !journal ||
+      !truthy(journal) ||
       journal.consumerId !== ctx.consumerId ||
       journal.operationId !== operationId ||
       journal.ownerRef !== ownerRef ||
       !["create", "reconnect"].includes(journal.purpose) ||
       operation.accountRef !== journal.accountRef ||
-      operation.executionRef ||
+      truthy(operation.executionRef) ||
       journal.profile.profile !== oauth.profile.profile ||
       journal.profile.baseURL !== oauth.profile.baseURL ||
       journal.profile.model !== oauth.profile.model ||
       journal.profile.qualificationRef !== oauth.profile.qualificationRef
-    )
+    ) {
       throw new KernelError("denied");
+    }
     const account = await this.kernel.account(ctx, journal.accountRef);
-    if (account.ownerRef !== ownerRef || account.profile !== journal.profile.profile)
+    if (account.ownerRef !== ownerRef || account.profile !== journal.profile.profile) {
       throw new KernelError("denied");
+    }
     await this.kernel.reconcile(ctx);
     const current = await this.kernel.operation(ctx, operationId);
-    if (current.state !== "pending" || journal.worker !== this.worker) return current;
+    if (current.state !== "pending" || journal.worker !== this.worker) {
+      return current;
+    }
     // Fresh candidate authority is checked again before the explicit native mutation.
     // Native owns the durable polling interval and sole token-exchange claim.
     const scope = oauthScope(journal);
     if (
       !this.store.pendingOAuthRefresh ||
       !(await this.store.pendingOAuthRefresh(ctx, this.worker, scope, oauth.profile))
-    )
+    ) {
       return this.kernel.unknownCandidate(ctx, operationId, journal.worker);
+    }
     let result: OAuthReadback;
     try {
       result = await oauth.native.poll(scope);
     } catch {
       return this.kernel.unknownCandidate(ctx, operationId, journal.worker);
     }
-    if (!exactOAuthReadback(scope, result))
+    if (!exactOAuthReadback(scope, result)) {
       return this.kernel.unknownCandidate(ctx, operationId, journal.worker);
+    }
     return this.oauthReadback(ctx, journal, result);
   }
   private async oauthReadback(
@@ -816,20 +899,31 @@ export class AccountManagement {
         journal.profile.model !== oauth.profile.model ||
         journal.profile.qualificationRef !== oauth.profile.qualificationRef ||
         !["create", "reconnect"].includes(journal.purpose)
-      )
+      ) {
         throw new KernelError("conflict");
+      }
       await this.kernel.reconcile(ctx);
       const current = await this.kernel.operation(ctx, journal.operationId);
-      if (current.operationRef !== journal.operationId || current.accountRef !== journal.accountRef)
+      if (
+        current.operationRef !== journal.operationId ||
+        current.accountRef !== journal.accountRef
+      ) {
         throw new KernelError("conflict");
-      if (current.state === "applied" || current.state === "rejected") return current;
+      }
+      if (current.state === "applied" || current.state === "rejected") {
+        return current;
+      }
       // Reconciliation/uncertainty permanently spent the original authority.
       // Later custody/qualification cannot turn unknown into a safe rejection,
       // reactivate a row or manufacture a fresh candidate. Cleanup stays scoped
       // to the original journal; absent physical proof it remains quarantined.
-      if (current.state === "unknown") return current;
+      if (current.state === "unknown") {
+        return current;
+      }
       // A new worker does not take over a live creating candidate or issue Begin.
-      if (current.state === "pending" && this.worker !== journal.worker) return current;
+      if (pendingOperation(current) && this.worker !== journal.worker) {
+        return current;
+      }
       const scope = oauthScope(journal);
       const result = begin ?? (await oauth.native.read(scope));
       if (
@@ -842,7 +936,9 @@ export class AccountManagement {
         throw new KernelError("conflict");
       }
       // Legitimate user interaction is waiting, not missing/unknown evidence.
-      if (result.state === "prepared" || result.state === "entered") return current;
+      if (result.state === "prepared" || result.state === "entered") {
+        return current;
+      }
       // Recover only the original live creating candidate through native F2.
       // Native validates completed custody and owns the durable one-use ledger;
       // an entered/unknown attempt is observed, never rearmed here.
@@ -853,7 +949,9 @@ export class AccountManagement {
           scope,
           oauth.profile,
         );
-        if (!recovery && journal.purpose === "reconnect") throw new KernelError("conflict");
+        if (!recovery && journal.purpose === "reconnect") {
+          throw new KernelError("conflict");
+        }
         if (
           !recovery ||
           recovery.worker !== journal.worker ||
@@ -867,8 +965,9 @@ export class AccountManagement {
           recovery.profile.baseURL !== journal.profile.baseURL ||
           recovery.profile.model !== journal.profile.model ||
           recovery.profile.qualificationRef !== journal.profile.qualificationRef
-        )
+        ) {
           return current;
+        }
         let refreshed: OAuthRefreshReadback;
         try {
           refreshed = await oauth.refresh.refresh(scope);
@@ -878,37 +977,54 @@ export class AccountManagement {
         if (
           refreshed.operationId !== scope.operationId ||
           refreshed.accountRef !== scope.accountRef
-        )
+        ) {
           return current;
-        if (refreshed.state === "unknown") throw new KernelError("conflict");
-        if (refreshed.state !== "idle" && refreshed.state !== "completed") return current;
+        }
+        if (refreshed.state === "unknown") {
+          throw new KernelError("conflict");
+        }
+        if (refreshed.state !== "idle" && refreshed.state !== "completed") {
+          return current;
+        }
       }
       // Completed custody (outcome "staged") still needs protected route proof.
       // An unavailable descriptor boundary preserves truthful pending.
-      if (!oauth.descriptor) return current;
+      if (!oauth.descriptor) {
+        return current;
+      }
       let source: OAuthDescriptor;
       try {
         source = await oauth.descriptor.describe(scope);
       } catch {
         return current;
       } // Unavailable route proof is not a connect failure.
-      if (source.operationId !== journal.operationId || source.accountRef !== journal.accountRef)
+      if (source.operationId !== journal.operationId || source.accountRef !== journal.accountRef) {
         throw new KernelError("conflict");
-      if (source.state === "staged" && source.qualification === "pending") {
-        if ("native" in source) throw new KernelError("conflict");
+      }
+      if (source.state === "staged" && descriptorQualification(source) === "pending") {
+        if ("native" in source) {
+          throw new KernelError("conflict");
+        }
         return current;
       }
-      if (source.state !== "qualified" || source.qualification !== "controlled-source-v1")
+      if (
+        source.state !== "qualified" ||
+        descriptorQualification(source) !== "controlled-source-v1"
+      ) {
         throw new KernelError("conflict");
+      }
       const descriptor = physicalCandidate(source.native);
-      if (!exactCandidate(journal, descriptor)) throw new KernelError("conflict");
+      if (!exactCandidate(journal, descriptor)) {
+        throw new KernelError("conflict");
+      }
       await this.store.saveMapping(Object.freeze({ ...journal, descriptor }));
       // Qualification can outlive the original worker lease. Observe durable
       // loss again before the logical account ACK. Native remains inert.
       await this.kernel.reconcile(ctx);
       const qualifiedOperation = await this.kernel.operation(ctx, journal.operationId);
-      if (qualifiedOperation.state === "applied" || qualifiedOperation.state === "rejected")
+      if (qualifiedOperation.state === "applied" || qualifiedOperation.state === "rejected") {
         return qualifiedOperation;
+      }
       // The native descriptor is the inert physical proof. The kernel decides
       // promotion versus quarantine atomically, including a late disable/lease.
       try {
@@ -940,8 +1056,9 @@ export class AccountManagement {
     identifier(intent.profile, 64);
     name(intent.displayName);
     key(apiKey);
-    if (!this.profiles.has(intent.profile) || this.supportsOAuthProfile(intent.profile))
+    if (!this.profiles.has(intent.profile) || this.supportsOAuthProfile(intent.profile)) {
       throw new KernelError("invalid");
+    }
     intent.intentDigest = this.custody.digest({ context: ctx, intent, apiKey });
     return this.connect(ctx, Object.freeze(intent), apiKey);
   }
@@ -968,12 +1085,20 @@ export class AccountManagement {
     apiKey: string,
   ): Promise<OperationStatus> {
     const operation = await this.kernel.beginAccount(ctx, intent);
-    if (operation.state !== "pending") return operation;
-    if (!operation.accountRef) throw new KernelError("unavailable");
+    if (operation.state !== "pending") {
+      return operation;
+    }
+    if (!nonempty(operation.accountRef)) {
+      throw new KernelError("unavailable");
+    }
     const account = await this.kernel.account(ctx, operation.accountRef);
     const profile = this.profiles.get(account.profile);
-    if (!profile) throw new KernelError("invalid");
-    if (this.supportsOAuthProfile(account.profile)) throw new KernelError("denied");
+    if (!profile) {
+      throw new KernelError("invalid");
+    }
+    if (this.supportsOAuthProfile(account.profile)) {
+      throw new KernelError("denied");
+    }
     const scope: CandidateScope = Object.freeze({
       consumerId: ctx.consumerId,
       operationId: intent.operationId,
@@ -987,8 +1112,9 @@ export class AccountManagement {
       await this.store.eraseIntent(old);
       return this.readback(ctx, old);
     }
-    if (!(await this.store.stage(scope, apiKey)))
+    if (!(await this.store.stage(scope, apiKey))) {
       return this.kernel.operation(ctx, intent.operationId);
+    }
     const permit = await this.kernel.startCandidate(ctx, intent.operationId, this.worker);
     if (!permit) {
       await this.store.eraseIntent(scope);
@@ -996,12 +1122,14 @@ export class AccountManagement {
       return spent ? this.readback(ctx, spent) : this.kernel.operation(ctx, intent.operationId);
     }
     try {
-      if (permit.profile !== profile.profile || permit.operationRef !== intent.operationId)
+      if (permit.profile !== profile.profile || permit.operationRef !== intent.operationId) {
         throw new KernelError("conflict");
+      }
       const journal = await this.store.journal(scope, permit.candidate, this.worker, profile);
       const credential = await this.store.credential(scope);
-      if (credential === undefined)
+      if (credential === undefined) {
         return await this.kernel.unknownCandidate(ctx, intent.operationId, this.worker);
+      }
       try {
         await this.native.create(journal, account.displayName, credential);
       } catch {
@@ -1025,27 +1153,36 @@ export class AccountManagement {
   ): Promise<OperationStatus> {
     try {
       const candidates = await this.native.read(journal);
-      if (candidates.length !== 1 || !["inactive", "active"].includes(candidates[0].state))
+      if (candidates.length !== 1 || !["inactive", "active"].includes(candidates[0].state)) {
         throw new KernelError("conflict");
+      }
       const descriptor = physicalCandidate(candidates[0]);
-      if (!exactCandidate(journal, descriptor)) throw new KernelError("conflict");
-      if (qualified && !sameCandidate(qualified, descriptor)) throw new KernelError("conflict");
+      if (!exactCandidate(journal, descriptor)) {
+        throw new KernelError("conflict");
+      }
+      if (qualified && !sameCandidate(qualified, descriptor)) {
+        throw new KernelError("conflict");
+      }
       const existing = await this.store.mapping(ctx, journal.generation);
       // An unexplained already-active row is not inert staging proof. Only a
       // persisted mapping from qualified staging permits activation recovery.
       if (
         candidates[0].state === "active" &&
         (!existing || !sameCandidate(existing.descriptor, descriptor))
-      )
+      ) {
         throw new KernelError("conflict");
-      if (candidates[0].state === "inactive" && !(await this.proof.verify(journal, descriptor)))
+      }
+      if (candidates[0].state === "inactive" && !(await this.proof.verify(journal, descriptor))) {
         throw new KernelError("conflict");
+      }
       const mapping = Object.freeze({ ...journal, descriptor });
       await this.store.saveMapping(mapping); // Durable binding/proof receipt precedes native activation and kernel promotion.
       if (qualified) {
         await this.kernel.reconcile(ctx);
         const current = await this.kernel.operation(ctx, journal.operationId);
-        if (current.state !== "pending") return current;
+        if (current.state !== "pending") {
+          return current;
+        }
       }
       if (activate && candidates[0].state === "inactive") {
         try {
@@ -1058,8 +1195,9 @@ export class AccountManagement {
           active.length !== 1 ||
           active[0].state !== "active" ||
           !sameCandidate(descriptor, physicalCandidate(active[0]))
-        )
+        ) {
           throw new KernelError("conflict");
+        }
       }
       // Final ACK atomically observes fences and binds exact cleanup identity,
       // including a disable committed after the pending check or activation.
@@ -1079,12 +1217,18 @@ export class AccountManagement {
     identifier(operationId);
     const operation = await this.kernel.operation(ctx, operationId);
     const journal = await this.store.readJournal(ctx, operationId);
-    if (!journal) return operation;
-    if (this.supportsOAuthProfile(journal.profile.profile)) return this.oauthReadback(ctx, journal);
+    if (!journal) {
+      return operation;
+    }
+    if (this.supportsOAuthProfile(journal.profile.profile)) {
+      return this.oauthReadback(ctx, journal);
+    }
     await this.store.eraseIntent(journal);
     await this.kernel.reconcile(ctx);
     const current = await this.kernel.operation(ctx, operationId);
-    if (current.state === "pending" && this.worker !== journal.worker) return current;
+    if (current.state === "pending" && this.worker !== journal.worker) {
+      return current;
+    }
     return this.readback(ctx, journal, this.worker, current.state === "pending");
   }
   async rename(context: TrustedContext, input: RenameInput): Promise<OperationStatus> {
@@ -1146,11 +1290,13 @@ export class AccountManagement {
     account: AccountStatus,
   ): Promise<ResumeCustodyAuthority | undefined> {
     try {
-      if (!this.kernel.accountCustody || !this.retainedCustody || account.state !== "suspended")
+      if (!this.kernel.accountCustody || !this.retainedCustody || account.state !== "suspended") {
         return undefined;
+      }
       const identity = await this.kernel.accountCustody(ctx, account.accountRef);
-      if (identity.revision !== account.revision || identity.epoch !== account.epoch)
+      if (identity.revision !== account.revision || identity.epoch !== account.epoch) {
         return undefined;
+      }
       const mapping = await this.store.mapping(ctx, identity.generation);
       if (
         !mapping ||
@@ -1161,19 +1307,21 @@ export class AccountManagement {
         mapping.descriptor.generation !== identity.generation ||
         mapping.descriptor.nativePhysicalIdentity !== identity.nativePhysicalIdentity ||
         !exactCandidate(mapping, physicalCandidate(mapping.descriptor))
-      )
+      ) {
         return undefined;
+      }
       const proof = await this.retainedCustody.verify(mapping);
       const authKind = oauthProfileDefinition(account.profile) ? "oauth" : "api_key";
       if (
         !proof ||
-        proof.contract !== "native-retained-custody/v1" ||
+        retainedContract(proof) !== "native-retained-custody/v1" ||
         proof.generation !== identity.generation ||
         proof.nativePhysicalIdentity !== identity.nativePhysicalIdentity ||
         proof.credentialKinds.length !== 1 ||
         proof.credentialKinds[0] !== authKind
-      )
+      ) {
         return undefined;
+      }
       return Object.freeze({
         ...proof,
         metadataRevision: account.revision,
@@ -1225,7 +1373,9 @@ export class AccountManagement {
     uuid(accountRef);
     identifier(operationId);
     const readback = await this.store.retirement(ctx, accountRef, operationId);
-    if (!readback) throw new KernelError("unknown");
+    if (!readback) {
+      throw new KernelError("unknown");
+    }
     return readback;
   }
   async policyClosure(
@@ -1235,7 +1385,9 @@ export class AccountManagement {
     const ctx = captureContext(context);
     identifier(operationId);
     const readback = await this.store.policyClosure(ctx, operationId);
-    if (!readback) throw new KernelError("unknown");
+    if (!readback) {
+      throw new KernelError("unknown");
+    }
     return readback;
   }
   async accounts(context: TrustedContext, query: AccountPageQuery = {}): Promise<AccountPage> {
@@ -1255,7 +1407,9 @@ export class AccountManagement {
     const ctx = captureContext(context);
     identifier(id);
     const operation = await this.kernel.operation(ctx, id);
-    if (operation.state !== "pending" && operation.state !== "unknown") return operation;
+    if (operation.state !== "pending" && operation.state !== "unknown") {
+      return operation;
+    }
     const journal = await this.store.readJournal(ctx, id);
     return journal && this.supportsOAuthProfile(journal.profile.profile)
       ? this.oauthReadback(
@@ -1269,7 +1423,9 @@ export class AccountManagement {
   async reconcile(context: TrustedContext): Promise<void> {
     const ctx = captureContext(context);
     const expired = await this.store.expire(ctx);
-    for (const j of expired) await this.kernel.unknownCandidate(ctx, j.operationId, j.worker);
+    for (const j of expired) {
+      await this.kernel.unknownCandidate(ctx, j.operationId, j.worker);
+    }
     await this.kernel.reconcile(ctx);
   }
   // Protected worker result, never a browser DTO. Execution jobs remain for B3.
@@ -1278,7 +1434,9 @@ export class AccountManagement {
   ): Promise<"idle" | "erased" | "quarantined" | "transport_pending"> {
     const ctx = captureContext(context);
     const claim = await this.kernel.claimCleanup(ctx, this.worker);
-    if (!claim) return "idle";
+    if (!claim) {
+      return "idle";
+    }
     return this.cleanupClaim(ctx, claim);
   }
   // Trusted facade dispatches an already owned kernel cleanup claim. No new lease or ledger.
@@ -1333,11 +1491,16 @@ export class AccountManagement {
         proof.generation !== mapping.generation ||
         proof.profile !== mapping.profile.profile ||
         proof.nativePhysicalIdentity !== mapping.descriptor.nativePhysicalIdentity
-      )
+      ) {
         throw new KernelError("conflict");
+      }
       const current = await this.native.read(mapping);
-      if (current.length !== 1 || !sameCandidate(mapping.descriptor, physicalCandidate(current[0])))
+      if (
+        current.length !== 1 ||
+        !sameCandidate(mapping.descriptor, physicalCandidate(current[0]))
+      ) {
         throw new KernelError("conflict");
+      }
       if (
         !(await this.store.cleanupAllowed(
           ctx,
@@ -1348,8 +1511,9 @@ export class AccountManagement {
           mapping.descriptor.nativePhysicalIdentity,
           mapping.profile.profile,
         ))
-      )
+      ) {
         throw new KernelError("denied");
+      }
       try {
         await this.native.setState(mapping, "inactive");
       } catch {
@@ -1360,8 +1524,9 @@ export class AccountManagement {
         inactive.length !== 1 ||
         inactive[0].state !== "inactive" ||
         !sameCandidate(mapping.descriptor, physicalCandidate(inactive[0]))
-      )
+      ) {
         throw new KernelError("conflict");
+      }
       if (
         !(await this.store.cleanupAllowed(
           ctx,
@@ -1372,8 +1537,9 @@ export class AccountManagement {
           mapping.descriptor.nativePhysicalIdentity,
           mapping.profile.profile,
         ))
-      )
+      ) {
         throw new KernelError("denied");
+      }
       await this.native.erase(mapping);
       succeeded = true;
     } catch {
@@ -1390,10 +1556,14 @@ export class AccountManagement {
     profile: string,
   ): Promise<boolean> {
     const oauth = this.oauthProviders.get(profile);
-    if (!oauth?.lifecycle || !this.store.oauthCleanup) return false;
+    if (!oauth?.lifecycle || !this.store.oauthCleanup) {
+      return false;
+    }
     const authority = Object.freeze({ cleanupRef, cleanupToken });
     const owned = await this.store.oauthCleanup(ctx, this.worker, authority, "read", oauth.profile);
-    if (!owned || owned.journal.generation !== generation) throw new KernelError("denied");
+    if (!owned || owned.journal.generation !== generation) {
+      throw new KernelError("denied");
+    }
     const journal = owned.journal,
       scope = oauthScope(journal);
     if (
@@ -1403,8 +1573,9 @@ export class AccountManagement {
       journal.profile.baseURL !== oauth.profile.baseURL ||
       !oauthProfileDefinition(profile)!.cleanupModels.includes(journal.profile.model) ||
       journal.profile.qualificationRef !== oauth.profile.qualificationRef
-    )
+    ) {
       throw new KernelError("conflict");
+    }
     const validate = (r: OAuthCleanupReadback): PhysicalCandidate | undefined => {
       if (
         r.operationId !== scope.operationId ||
@@ -1412,14 +1583,16 @@ export class AccountManagement {
         typeof r.credentialsErased !== "boolean" ||
         !["pending", "closed", "unknown"].includes(r.closure) ||
         (r.closure === "closed" && !r.credentialsErased)
-      )
+      ) {
         throw new KernelError("conflict");
+      }
       const d = r.native === undefined ? undefined : physicalCandidate(r.native);
       if (
         (d && !exactCandidate(journal, d)) ||
         (owned.native && (!d || !sameCandidate(owned.native, d)))
-      )
+      ) {
         throw new KernelError("conflict");
+      }
       return d;
     };
     let result = await oauth.lifecycle.cleanup(scope, authority, "read");
@@ -1442,8 +1615,9 @@ export class AccountManagement {
       oauth.profile,
       scope,
     );
-    if (!fresh || (descriptor && (!fresh.native || !sameCandidate(descriptor, fresh.native))))
+    if (!fresh || (descriptor && (!fresh.native || !sameCandidate(descriptor, fresh.native)))) {
       throw new KernelError("denied");
+    }
     if (!result.credentialsErased) {
       try {
         result = await oauth.lifecycle.cleanup(scope, authority, "erase");
@@ -1454,14 +1628,16 @@ export class AccountManagement {
       if (
         (descriptor && (!erased || !sameCandidate(descriptor, erased))) ||
         (!descriptor && erased)
-      )
-        return false; // Newly discovered birth needs its own proof phase.
+      ) {
+        return false;
+      } // Newly discovered birth needs its own proof phase.
     }
     // Final committed claim read precedes kernel settlement; no HTTP awaits follow.
     if (
       !(await this.store.oauthCleanup(ctx, this.worker, authority, "erase", oauth.profile, scope))
-    )
+    ) {
       return false;
+    }
     return result.credentialsErased && result.closure === "closed";
   }
 }
@@ -1479,7 +1655,9 @@ export async function accountLimitsTarget(
   ctx: TrustedContext,
   input: AccountLimitsSelector,
 ): Promise<PhysicalCandidate> {
-  if (!kernel.accountLimitsIdentity) throw new KernelError("unavailable");
+  if (!kernel.accountLimitsIdentity) {
+    throw new KernelError("unavailable");
+  }
   uuid(input.accountRef);
   identifier(input.ownerRef);
   identifier(input.profileId, 64);
@@ -1490,8 +1668,9 @@ export async function accountLimitsTarget(
     current.ownerRef !== input.ownerRef ||
     current.profile !== input.profileId ||
     current.epoch !== input.expectedAuthorizationEpoch
-  )
+  ) {
     throw new KernelError("denied");
+  }
   const mapping = await store.mapping(ctx, current.generation);
   if (
     !mapping ||
@@ -1501,8 +1680,9 @@ export async function accountLimitsTarget(
     mapping.profile.profile !== current.profile ||
     mapping.descriptor.nativePhysicalIdentity !== current.nativePhysicalIdentity ||
     !exactCandidate(mapping, physicalCandidate(mapping.descriptor))
-  )
+  ) {
     throw new KernelError("denied");
+  }
   const after = await kernel.accountLimitsIdentity(ctx, input.accountRef);
   if (
     !["active", "suspended"].includes(after.state) ||
@@ -1511,7 +1691,8 @@ export async function accountLimitsTarget(
     after.epoch !== current.epoch ||
     after.generation !== current.generation ||
     after.nativePhysicalIdentity !== current.nativePhysicalIdentity
-  )
+  ) {
     throw new KernelError("denied");
+  }
   return mapping.descriptor;
 }

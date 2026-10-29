@@ -1,6 +1,6 @@
 import test from "node:test";
 import type { TestContext } from "node:test";
-import type { IncomingMessage, ServerResponse, RequestListener } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
@@ -8,28 +8,54 @@ const sdk = await import("../packages/account-gateway/dist/http/index.js");
 const c = await import("../packages/account-gateway/dist/contracts/index.js");
 
 async function read(req: IncomingMessage): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk);
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of req) {
+    const bytes: unknown = chunk;
+    assert.ok(bytes instanceof Uint8Array);
+    chunks.push(bytes);
+  }
   return Buffer.concat(chunks).toString();
 }
 function json(res: ServerResponse, body: unknown, status = 200) {
   res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
   res.end(JSON.stringify(body));
 }
-async function fixture(t: TestContext, handler: RequestListener) {
-  const server = createServer(handler);
+async function fixture(
+  t: TestContext,
+  handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>,
+) {
+  const settlements: Promise<void>[] = [];
+  const failures: unknown[] = [];
+  const server = createServer((req, res) => {
+    try {
+      const completion = handler.call(server, req, res);
+      if (completion !== undefined) {
+        settlements.push(
+          completion.catch((error: unknown) => {
+            failures.push(error);
+            res.destroy();
+          }),
+        );
+      }
+    } catch (error: unknown) {
+      failures.push(error);
+      res.destroy();
+    }
+  });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
-  t.after(() => {
+  t.after(async () => {
     server.closeAllConnections();
     server.close();
+    await Promise.all(settlements);
+    assert.deepEqual(failures, [], "HTTP fixture handler failed");
   });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   return `http://127.0.0.1:${address.port}`;
 }
 
-test("legacy v1 readers reject suspended wire state and do not gain lifecycle methods", () => {
+void test("legacy v1 readers reject suspended wire state and do not gain lifecycle methods", () => {
   assert.equal(c.accountState.safeParse("suspended").success, false);
   assert.equal(
     c.account.safeParse({
@@ -68,7 +94,7 @@ test("legacy v1 readers reject suspended wire state and do not gain lifecycle me
   );
 });
 
-test("versioned capability/write gate requires explicit client convergence", async (t) => {
+void test("versioned capability/write gate requires explicit client convergence", async () => {
   const capability = {
     contract: c.LIFECYCLE_CAPABILITY_CONTRACT,
     clientContract: c.LIFECYCLE_CLIENT_CONTRACT,
@@ -90,8 +116,9 @@ test("versioned capability/write gate requires explicit client convergence", asy
     { clientContract: "legacy-client/v1" as typeof c.LIFECYCLE_CLIENT_CONTRACT },
     { operations: ["resume", "suspend"] },
     { custody: { ...capability.custody, oauth: "assumed-ready" } },
-  ])
+  ]) {
     assert.equal(c.lifecycleCapability.safeParse({ ...capability, ...changed }).success, false);
+  }
   const origin = "http://127.0.0.1:1",
     token = "fixture-control-token";
   assert.throws(
@@ -119,7 +146,7 @@ test("versioned capability/write gate requires explicit client convergence", asy
   );
 });
 
-test("lifecycle client sends both version gates and strictly binds exact operation/account readback", async (t) => {
+void test("lifecycle client sends both version gates and strictly binds exact operation/account readback", async (t) => {
   const capability = {
     contract: c.LIFECYCLE_CAPABILITY_CONTRACT,
     clientContract: c.LIFECYCLE_CLIENT_CONTRACT,
@@ -159,11 +186,16 @@ test("lifecycle client sends both version gates and strictly binds exact operati
     observed.push(req.url);
     assert.equal(req.headers[c.LIFECYCLE_CAPABILITY_HEADER], c.LIFECYCLE_CAPABILITY_CONTRACT);
     assert.equal(req.headers[c.LIFECYCLE_CLIENT_HEADER], c.LIFECYCLE_CLIENT_CONTRACT);
-    if (req.method === "POST") bodies.push(JSON.parse(await read(req)));
-    if (req.url === "/v2/capabilities/account-lifecycle") json(res, capability);
-    else if (req.url === "/v2/accounts/account-a") json(res, account);
-    else if (req.url === "/v2/accounts/account-a/suspend") json(res, applied);
-    else if (req.url === "/v2/accounts/account-a/resume")
+    if (req.method === "POST") {
+      bodies.push(JSON.parse(await read(req)));
+    }
+    if (req.url === "/v2/capabilities/account-lifecycle") {
+      json(res, capability);
+    } else if (req.url === "/v2/accounts/account-a") {
+      json(res, account);
+    } else if (req.url === "/v2/accounts/account-a/suspend") {
+      json(res, applied);
+    } else if (req.url === "/v2/accounts/account-a/resume") {
       json(res, {
         ...applied,
         operationRef: "resume-a",
@@ -179,8 +211,9 @@ test("lifecycle client sends both version gates and strictly binds exact operati
           },
         },
       });
-    else if (req.url === "/v2/operations/suspend-a") json(res, applied);
-    else
+    } else if (req.url === "/v2/operations/suspend-a") {
+      json(res, applied);
+    } else {
       json(
         res,
         {
@@ -191,6 +224,7 @@ test("lifecycle client sends both version gates and strictly binds exact operati
         },
         404,
       );
+    }
   });
   const client = sdk.createLifecycleClient({
     origin,
@@ -220,7 +254,7 @@ test("lifecycle client sends both version gates and strictly binds exact operati
   ]);
 });
 
-test("lifecycle client rejects cross-account responses and missing operation cannot establish no effect", async (t) => {
+void test("lifecycle client rejects cross-account responses and missing operation cannot establish no effect", async (t) => {
   const account = {
     accountRef: "foreign-account",
     ownerRef: "owner-a",
@@ -234,7 +268,7 @@ test("lifecycle client rejects cross-account responses and missing operation can
   };
   const origin = await fixture(t, (req, res) => {
     req.resume();
-    if (req.url?.startsWith("/v2/operations/"))
+    if (req.url?.startsWith("/v2/operations/") === true) {
       json(
         res,
         {
@@ -245,7 +279,7 @@ test("lifecycle client rejects cross-account responses and missing operation can
         },
         404,
       );
-    else if (req.method === "POST")
+    } else if (req.method === "POST") {
       json(res, {
         operationRef: "suspend-a",
         state: "applied",
@@ -257,7 +291,9 @@ test("lifecycle client rejects cross-account responses and missing operation can
         },
         result: { kind: "account_lifecycle", account },
       });
-    else json(res, account);
+    } else {
+      json(res, account);
+    }
   });
   const client = sdk.createLifecycleClient({
     origin,

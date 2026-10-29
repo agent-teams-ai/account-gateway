@@ -9,9 +9,11 @@ async function snapshot(root, prefix = "") {
   const result = {};
   for (const entry of await readdir(root, { withFileTypes: true })) {
     const name = prefix + entry.name;
-    if (entry.isDirectory())
+    if (entry.isDirectory()) {
       Object.assign(result, await snapshot(root + "/" + entry.name, name + "/"));
-    else result[name] = digest(await readFile(root + "/" + entry.name));
+    } else {
+      result[name] = digest(await readFile(root + "/" + entry.name));
+    }
   }
   return result;
 }
@@ -118,8 +120,9 @@ async function repositoryCorpus() {
     "AGENTS.md",
     "docs.config.yaml",
     ".docs-protocol",
-  ])
+  ]) {
     await cp(path, root + "/" + path, { recursive: true });
+  }
   return root;
 }
 // Regression: the actual governed repository docs accept conflicting metadata.

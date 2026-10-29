@@ -6,7 +6,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { createInterface } from "node:readline";
 import type { Server } from "node:http";
-import pg from "pg";
+import { Pool } from "pg";
 import * as c from "@agent-teams/account-gateway/contracts";
 import { createLifecycleClient } from "@agent-teams/account-gateway/http";
 import { KernelError, identifier, uuid } from "../src/domain.ts";
@@ -34,15 +34,20 @@ interface Fixture {
 let phase = "input",
   kind = "none";
 let diagnostic: Record<string, string | number> | undefined;
-let pool: pg.Pool | undefined;
+let pool: Pool | undefined;
 const servers: Server[] = [];
 const report = (value: object): void => {
   process.stdout.write(JSON.stringify(value) + "\n");
 };
+function isNonemptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
 const limits = { requests: 4, concurrency: 1, requestBytes: 4096, outputBytes: 4096, tokens: 100 };
 const token = (name: string): string => {
   const value = process.env[name];
-  assert.ok(value && /^joined-test-[A-Za-z0-9._~-]{8,128}$/.test(value));
+  assert.ok(
+    value !== undefined && value !== "" && /^joined-test-[A-Za-z0-9._~-]{8,128}$/.test(value),
+  );
   return value;
 };
 function loopback(value: string): URL {
@@ -61,7 +66,7 @@ async function listen(server: Server): Promise<string> {
     server.listen(0, "127.0.0.1", resolve);
   });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   return "http://127.0.0.1:" + address.port;
 }
 async function continueAfterReady(): Promise<void> {
@@ -94,7 +99,9 @@ async function qualify(): Promise<void> {
   assert.equal(process.env.AG_NATIVE_RETAINED_JOINED_ALLOW, "disposable_pg17_10");
   const file = process.env.AG_NATIVE_RETAINED_JOINED_FIXTURE,
     dsn = process.env.AG_NATIVE_RETAINED_JOINED_DSN;
-  assert.ok(file && isAbsolute(file) && dsn);
+  assert.ok(
+    file !== undefined && file !== "" && isAbsolute(file) && dsn !== undefined && dsn !== "",
+  );
   const url = new URL(dsn);
   assert.ok(["postgres:", "postgresql:"].includes(url.protocol));
   assert.equal(url.hostname, "127.0.0.1");
@@ -132,10 +139,12 @@ async function qualify(): Promise<void> {
   const managementCredential = token("AG_NATIVE_RETAINED_JOINED_CONTROL");
   const callbackCredential = token("AG_NATIVE_RETAINED_JOINED_CALLBACK");
   phase = "database";
-  pool = new pg.Pool({ connectionString: dsn, max: 8, connectionTimeoutMillis: 5000 });
-  pool.on("error", () => undefined);
+  pool = new Pool({ connectionString: dsn, max: 8, connectionTimeoutMillis: 5000 });
+  pool.on("error", () => {});
   const version = (
-    await pool.query("SELECT current_database() AS db,current_setting('server_version') AS version")
+    await pool.query<{ db: string; version: string }>(
+      "SELECT current_database() AS db,current_setting('server_version') AS version",
+    )
   ).rows[0];
   assert.equal(version.db, url.pathname.slice(1));
   assert.match(version.version, /^17\.10(?:$| )/);
@@ -144,10 +153,13 @@ async function qualify(): Promise<void> {
       .rowCount,
     0,
   );
-  for (const file of (await readdir(new URL("../migrations/", import.meta.url)))
+  for (const migration of (await readdir(new URL("../migrations/", import.meta.url)))
     .filter((f) => /^\d{3}_.*\.sql$/.test(f))
-    .sort())
-    await pool.query(await readFile(new URL("../migrations/" + file, import.meta.url), "utf8"));
+    .toSorted()) {
+    await pool.query(
+      await readFile(new URL("../migrations/" + migration, import.meta.url), "utf8"),
+    );
+  }
   const kernel = new PostgresKernel(pool),
     secrets = new IntentSecrets(randomBytes(32), randomBytes(32));
   const store = new PostgresManagementStore(pool, secrets),
@@ -305,11 +317,11 @@ async function qualify(): Promise<void> {
       lifecycle: { contract: c.LIFECYCLE_CAPABILITY_CONTRACT, writeGate: "enabled" },
     }),
   );
-  const lifecycleFor = (token: string) =>
+  const lifecycleFor = (bearer: string) =>
     createLifecycleClient({
       role: "management",
       origin,
-      token,
+      token: bearer,
       capability: c.LIFECYCLE_CAPABILITY_CONTRACT,
       clientContract: c.LIFECYCLE_CLIENT_CONTRACT,
     });
@@ -338,7 +350,7 @@ async function qualify(): Promise<void> {
         limits,
       });
       assert.equal(operation.state, "applied");
-      assert.ok(operation.executionRef);
+      assert.ok(isNonemptyString(operation.executionRef));
       return {
         ref: operation.executionRef,
         saved: await kernel.savedExecution(context, operation.executionRef),
@@ -360,7 +372,7 @@ async function qualify(): Promise<void> {
     assert.equal(suspended.resumeCustody, "verified");
     diagnostic = undefined;
     phase = "purpose-isolation";
-    if (account.authKind === "oauth")
+    if (account.authKind === "oauth") {
       for (const route of ["oauth-owner-authority", "oauth-refresh-authority"]) {
         const response = await fetch(callbackOrigin + "/private/native/v1/" + route, {
           method: "POST",
@@ -380,6 +392,7 @@ async function qualify(): Promise<void> {
         diagnostic = undefined;
         await response.arrayBuffer();
       }
+    }
     assert.deepEqual(
       (await store.mapping(context, account.descriptor.generation))?.descriptor,
       account.descriptor,
@@ -387,7 +400,7 @@ async function qualify(): Promise<void> {
     assert.equal(
       Number(
         (
-          await pool.query(
+          await pool.query<{ n: string }>(
             "SELECT count(*) AS n FROM ag_kernel.cleanup WHERE consumer=$1 AND generation=$2",
             [context.consumerId, account.descriptor.generation],
           )
@@ -486,9 +499,13 @@ try {
   });
   process.exitCode = 1;
 } finally {
-  for (const server of servers.reverse()) {
+  for (const server of servers.toReversed()) {
     server.closeAllConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        resolve();
+      });
+    });
   }
   await pool?.end();
 }

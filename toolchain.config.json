@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "profile": "typescript-node",
+  "typecheck": {
+    "projects": [
+      "tsconfig.tests.json",
+      "tsconfig.consumer-pin.json",
+      "services/account-gateway/tsconfig.json"
+    ]
+  },
+  "lint": {
+    "config": ".oxlintrc.json",
+    "paths": [
+      "packages/account-gateway/src",
+      "services/account-gateway/src",
+      "services/account-gateway/test",
+      "scripts",
+      "tests"
+    ]
+  },
+  "format": {
+    "paths": [
+      "packages/account-gateway/src",
+      "services/account-gateway/src",
+      "services/account-gateway/test",
+      "scripts",
+      "tests",
+      "package.json",
+      "toolchain.config.json",
+      ".oxlintrc.json",
+      "tsconfig.json",
+      "tsconfig.build.json",
+      "tsconfig.tests.json",
+      "tsconfig.consumer-pin.json",
+      "packages/account-gateway/package.json",
+      "services/account-gateway/package.json",
+      "services/account-gateway/tsconfig.json"
+    ]
+  }
+}

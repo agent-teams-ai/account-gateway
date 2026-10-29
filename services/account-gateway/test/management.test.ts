@@ -68,21 +68,48 @@ function nativeBody(d: PhysicalCandidate, state: "inactive" | "active" = "inacti
     probes_enabled: false,
   };
 }
+type LocalListener =
+  | ((req: IncomingMessage, res: ServerResponse) => void)
+  | ((req: IncomingMessage, res: ServerResponse) => Promise<void>);
 async function local(
-  handler: (req: IncomingMessage, res: ServerResponse) => void,
+  handler: LocalListener,
 ): Promise<{ origin: string; close: () => Promise<void> }> {
-  const server = createServer(handler);
+  const completions: Promise<unknown>[] = [];
+  const failures: unknown[] = [];
+  const server = createServer((req, res) => {
+    try {
+      const result: unknown = Reflect.apply<unknown, [IncomingMessage, ServerResponse], unknown>(
+        handler,
+        server,
+        [req, res],
+      );
+      const settled = Promise.resolve(result).catch((error: unknown) => {
+        failures.push(error);
+        res.destroy();
+      });
+      completions.push(settled);
+    } catch (error: unknown) {
+      failures.push(error);
+      res.destroy();
+    }
+  });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", resolve);
   });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   return {
     origin: "http://127.0.0.1:" + address.port,
     close: async () => {
       server.closeAllConnections();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await new Promise<void>((resolve) => {
+        server.close(() => {
+          resolve();
+        });
+      });
+      await Promise.all(completions);
+      assert.equal(failures.length, 0, "local HTTP fixture handler failed");
     },
   };
 }
@@ -98,12 +125,17 @@ const client = (
   });
 const code =
   (expected: string) =>
-  (e: unknown): boolean =>
-    e instanceof NativeFailure && e.code === expected && e.classification === "uncertain";
+  (e: unknown): boolean => {
+    if (!(e instanceof NativeFailure) || e.code !== expected) {
+      return false;
+    }
+    assert.equal(e.classification, "uncertain");
+    return true;
+  };
 
 // A native peer returning a device identifier, substituted provider origin or
 // replayed handoff must fail before any capability reaches a consumer.
-test("device native boundary validates fresh handoff and keeps read/poll scope secret-free", async () => {
+void test("device native boundary validates fresh handoff and keeps read/poll scope secret-free", async () => {
   const j = journal(),
     wire = {
       operation: j.operationId,
@@ -125,22 +157,24 @@ test("device native boundary validates fresh handoff and keeps read/poll scope s
   };
   let response: unknown = { ...ack, device_authorization: handoff };
   const requests: { path: string | undefined; body: unknown }[] = [];
-  const server = await local((req, res) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => {
-      requests.push({ path: req.url, body: JSON.parse(Buffer.concat(chunks).toString()) });
-      res.end(JSON.stringify(response));
-    });
+  const server = await local(async (req, res): Promise<void> => {
+    const chunks: Uint8Array[] = [];
+    for await (const part of req) {
+      const chunk: unknown = part;
+      assert.ok(chunk instanceof Uint8Array);
+      chunks.push(chunk);
+    }
+    requests.push({ path: req.url, body: JSON.parse(Buffer.concat(chunks).toString()) });
+    res.end(JSON.stringify(response));
   });
   try {
-    const client = new NativeOAuthEnrollmentClient({
+    const oauthClient = new NativeOAuthEnrollmentClient({
       origin: server.origin,
       consumerId: j.consumerId,
       ownerRef: j.ownerRef,
       controlCredential: "synthetic-control",
     });
-    assert.deepEqual((await client.begin(j, "device_code")).deviceAuthorization, {
+    assert.deepEqual((await oauthClient.begin(j, "device_code")).deviceAuthorization, {
       userCode: "ABCD-EFGH",
       verificationURL: "https://auth.openai.com/codex/device",
       expiresAt: "2099-01-01T00:00:00Z",
@@ -158,20 +192,20 @@ test("device native boundary validates fresh handoff and keeps read/poll scope s
       { expires_at: "invalid" },
     ]) {
       response = { ...ack, device_authorization: { ...handoff, ...patch } };
-      await assert.rejects(client.begin(j, "device_code"), code("invalid_readback"));
+      await assert.rejects(oauthClient.begin(j, "device_code"), code("invalid_readback"));
     }
     response = { ...ack, device_authorization: handoff };
-    await assert.rejects(client.read(j), code("invalid_readback"));
-    await assert.rejects(client.poll(j), code("invalid_readback"));
+    await assert.rejects(oauthClient.read(j), code("invalid_readback"));
+    await assert.rejects(oauthClient.poll(j), code("invalid_readback"));
     response = ack;
-    assert.equal((await client.read(j)).state, "prepared");
-    assert.equal((await client.poll(j)).state, "prepared");
+    assert.equal((await oauthClient.read(j)).state, "prepared");
+    assert.equal((await oauthClient.poll(j)).state, "prepared");
     assert.deepEqual(requests.slice(-2), [
       { path: "/private/native/v1/oauth/connect/read", body: wire },
       { path: "/private/native/v1/oauth/connect/poll", body: wire },
     ]);
     const calls = requests.length;
-    await assert.rejects(client.poll({ ...j, ownerRef: "other-owner" }), code("denied"));
+    await assert.rejects(oauthClient.poll({ ...j, ownerRef: "other-owner" }), code("denied"));
     assert.equal(requests.length, calls, "owner mismatch never enters HTTP");
   } finally {
     await server.close();
@@ -181,12 +215,12 @@ test("device native boundary validates fresh handoff and keeps read/poll scope s
 // RED on the former TS adapter with actual Go handler first and cached success
 // bodies. Root produces these using the native signed-custody/account-check test.
 const joinedFixture = process.env.AG_OAUTH_JOINED_DESCRIPTOR_FIXTURE_DIR;
-test(
+void test(
   "joined Go protected descriptor first and cached success reaches TS consumer",
-  { skip: !joinedFixture },
+  { skip: joinedFixture === undefined || joinedFixture === "" },
   async () => {
-    assert.ok(joinedFixture && isAbsolute(joinedFixture));
-    const scope = JSON.parse(
+    assert.ok(joinedFixture !== undefined && joinedFixture !== "" && isAbsolute(joinedFixture));
+    const joinedScope = JSON.parse(
       await readFile(join(joinedFixture, "scope.json"), "utf8"),
     ) as OAuthScope;
     const expected = JSON.parse(await readFile(join(joinedFixture, "expected.json"), "utf8")) as {
@@ -203,7 +237,7 @@ test(
     assert.equal(expected.profile, codexOAuthProfile.profile);
     assert.equal(expected.base_url, codexOAuthProfile.baseURL);
     assert.equal(expected.model, codexOAuthProfile.model);
-    assert.equal(expected.generation, scope.generation);
+    assert.equal(expected.generation, joinedScope.generation);
     let response = await readFile(join(joinedFixture, "first.json"));
     const server = await local((req, res) => {
       assert.equal(req.method, "POST");
@@ -212,23 +246,23 @@ test(
       req.on("end", () => res.end(response));
     });
     try {
-      const client = new NativeOAuthEnrollmentClient({
+      const oauthClient = new NativeOAuthEnrollmentClient({
         origin: server.origin,
-        consumerId: scope.consumerId,
-        ownerRef: scope.ownerRef,
+        consumerId: joinedScope.consumerId,
+        ownerRef: joinedScope.ownerRef,
         controlCredential: "joined-fixture-control",
       });
       for (const file of ["first.json", "cached.json"]) {
         response = await readFile(join(joinedFixture, file));
-        assert.deepEqual(await client.describe(scope), {
-          operationId: scope.operationId,
-          accountRef: scope.accountRef,
+        assert.deepEqual(await oauthClient.describe(joinedScope), {
+          operationId: joinedScope.operationId,
+          accountRef: joinedScope.accountRef,
           state: "qualified",
           qualification: "controlled-source-v1",
           native: {
             nativeId: expected.account_id,
-            generation: scope.generation,
-            nativePhysicalIdentity: scope.generation,
+            generation: joinedScope.generation,
+            nativePhysicalIdentity: joinedScope.generation,
             createdAt: expected.created_at,
             profile: codexOAuthProfile.profile,
             baseURL: codexOAuthProfile.baseURL,
@@ -244,8 +278,8 @@ test(
 
 // Regression: the genuine staged/source-qualified tuple was rejected, while
 // fabricated qualified/qualified or substituted birth could gain admission.
-for (const profile of [codexOAuthProfile, claudeOAuthProfile])
-  test(
+for (const profile of [codexOAuthProfile, claudeOAuthProfile]) {
+  void test(
     profile.profile + " descriptor HTTP accepts native provenance and denies other finite tuples",
     async () => {
       const j = { ...journal(), profile: { ...profile, qualificationRef: "fixture-only" } },
@@ -331,11 +365,12 @@ for (const profile of [codexOAuthProfile, claudeOAuthProfile])
       }
     },
   );
+}
 
 // Regression: credential erasure was treated as transport/effect closure, or
 // cleanup sent native IDs/private enrollment operations instead of scoped claims.
-for (const profile of [codexOAuthProfile, claudeOAuthProfile])
-  test(
+for (const profile of [codexOAuthProfile, claudeOAuthProfile]) {
+  void test(
     profile.profile + " cleanup HTTP preserves erased-but-unknown and validates closed receipts",
     async () => {
       const j = { ...journal(), profile: { ...profile, qualificationRef: "fixture-only" } },
@@ -382,14 +417,14 @@ for (const profile of [codexOAuthProfile, claudeOAuthProfile])
         });
       });
       try {
-        const client = new NativeOAuthLifecycleClient({
+        const oauthClient = new NativeOAuthLifecycleClient({
           origin: server.origin,
           consumerId: j.consumerId,
           ownerRef: j.ownerRef,
           profileId: profile.profile,
           controlCredential: "synthetic-cleanup",
         });
-        assert.deepEqual(await client.cleanup(j, authority, "erase"), {
+        assert.deepEqual(await oauthClient.cleanup(j, authority, "erase"), {
           operationId: j.operationId,
           accountRef: j.accountRef,
           credentialsErased: true,
@@ -398,7 +433,7 @@ for (const profile of [codexOAuthProfile, claudeOAuthProfile])
         });
         const { native: _native, ...unbound } = { ...receipt, closure: "closed" };
         response = JSON.stringify(unbound);
-        assert.deepEqual(await client.cleanup(j, authority, "erase"), {
+        assert.deepEqual(await oauthClient.cleanup(j, authority, "erase"), {
           operationId: j.operationId,
           accountRef: j.accountRef,
           credentialsErased: true,
@@ -412,16 +447,20 @@ for (const profile of [codexOAuthProfile, claudeOAuthProfile])
           { ...receipt, native: { ...native, generation: randomUUID() } },
         ]) {
           response = JSON.stringify(invalid);
-          await assert.rejects(client.cleanup(j, authority, "erase"), code("invalid_readback"));
+          await assert.rejects(
+            oauthClient.cleanup(j, authority, "erase"),
+            code("invalid_readback"),
+          );
         }
       } finally {
         await server.close();
       }
     },
   );
+}
 
 // Regression: rebinding ciphertext to another scope or altering GCM bytes must never disclose a key.
-test("transient AEAD binds every scope primitive and rejects tamper and server key rotation", () => {
+void test("transient AEAD binds every scope primitive and rejects tamper and server key rotation", () => {
   const custody = secrets(),
     s = scope(),
     envelope = custody.seal(s, "fixture-key");
@@ -462,7 +501,7 @@ test("transient AEAD binds every scope primitive and rejects tamper and server k
 });
 
 // Regression: same stable operation with a changed key or accepted primitive cannot retain its old result.
-test("server HMAC binds exact intent, submitted key, consumer and operation", () => {
+void test("server HMAC binds exact intent, submitted key, consumer and operation", () => {
   const custody = secrets();
   const accepted = {
     context: { consumerId: "synthetic-consumer" },
@@ -491,7 +530,7 @@ test("server HMAC binds exact intent, submitted key, consumer and operation", ()
 });
 
 // Regression: a lost POST ACK must use generation-specific GET, without implicit HTTP retry or bearer forwarding.
-test("real local HTTP lost create ACK is uncertain and readback preserves native birth precision", async () => {
+void test("real local HTTP lost create ACK is uncertain and readback preserves native birth precision", async () => {
   const j = journal(),
     d = descriptor(j);
   let creates = 0;
@@ -500,7 +539,7 @@ test("real local HTTP lost create ACK is uncertain and readback preserves native
   let received: Record<string, unknown> | undefined;
   const server = await local((req, res) => {
     paths.push(req.method + " " + req.url);
-    authorizations.push(req.headers.authorization === "Bearer " + "synthetic-control");
+    authorizations.push(req.headers.authorization === "Bearer synthetic-control");
     if (req.method === "POST") {
       creates++;
       const chunks: Buffer[] = [];
@@ -528,7 +567,7 @@ test("real local HTTP lost create ACK is uncertain and readback preserves native
     assert.equal(rows[0].nativePhysicalIdentity, j.generation);
     assert.equal(authorizations.every(Boolean), true);
     assert.ok(received);
-    assert.deepEqual(Object.keys(received).sort(), [
+    assert.deepEqual(Object.keys(received).toSorted(), [
       "account_ref",
       "api_key",
       "generation",
@@ -544,7 +583,7 @@ test("real local HTTP lost create ACK is uncertain and readback preserves native
 });
 
 // Regression: redirect/error bodies could leak credentials or send them to a second origin; 401 cannot mean NoEffect.
-test("redirect and 401 stay sanitized, uncertain and never followed", async () => {
+void test("redirect and 401 stay sanitized, uncertain and never followed", async () => {
   let escaped = 0,
     requests = 0;
   const target = await local((_req, res) => {
@@ -579,12 +618,15 @@ test("redirect and 401 stay sanitized, uncertain and never followed", async () =
 });
 
 // Regression: streamed oversized/malformed native output and a stalled socket must not escape bounds/deadline or reflect a body.
-test("HTTP readback enforces byte cap, JSON integrity and whole-request deadline", async () => {
+void test("HTTP readback enforces byte cap, JSON integrity and whole-request deadline", async () => {
   let calls = 0;
   const server = await local((_req, res) => {
     calls++;
-    if (calls === 1) res.end("x".repeat(513));
-    else if (calls === 2) res.end("synthetic-invalid-json");
+    if (calls === 1) {
+      res.end("x".repeat(513));
+    } else if (calls === 2) {
+      res.end("synthetic-invalid-json");
+    }
   });
   try {
     const native = client(server.origin, { bodyBytes: 512, deadlineMs: 100 }),
@@ -599,7 +641,7 @@ test("HTTP readback enforces byte cap, JSON integrity and whole-request deadline
 });
 
 // Regression: caller-selected external HTTP origin, admin route or cross-consumer credential use must never open a socket.
-test("fixed private origin, candidate-only path and authenticated consumer binding fail closed", async () => {
+void test("fixed private origin, candidate-only path and authenticated consumer binding fail closed", async () => {
   assert.throws(() => client("http://public.invalid"), KernelError);
   assert.throws(() => client("https://private.invalid/callback"), KernelError);
   assert.throws(() => client("https://private.invalid/admin"), KernelError);
@@ -620,7 +662,7 @@ test("fixed private origin, candidate-only path and authenticated consumer bindi
 });
 
 // Regression: private descriptor validation must reject lossy numbers and malformed births without timestamp normalization.
-test("private physical identity rejects imprecise numeric ID and preserves exact timestamp text", () => {
+void test("private physical identity rejects imprecise numeric ID and preserves exact timestamp text", () => {
   const j = journal(),
     d = descriptor(j);
   assert.equal(physicalCandidate(d).createdAt, "2026-10-03T04:05:06.123456789+00:00");
@@ -643,7 +685,7 @@ test("private physical identity rejects imprecise numeric ID and preserves exact
 });
 
 // Regression: JSON.parse rounds fractional native identity tokens to an accepted integer.
-test("native HTTP readback validates original account_id tokens without rounding", async () => {
+void test("native HTTP readback validates original account_id tokens without rounding", async () => {
   const j = journal();
   const body = (token: string): string =>
     `{"descriptor":{"account_id":${token},"generation":"${j.generation}",` +
@@ -687,7 +729,7 @@ test("native HTTP readback validates original account_id tokens without rounding
 });
 
 // Regression: arrays, repeated/escaped identity members and non-inert flags could turn ambiguous native output into promotion proof.
-test("existing private Go wire rejects ambiguous shape, duplicate identity and unsafe candidate flags", async () => {
+void test("existing private Go wire rejects ambiguous shape, duplicate identity and unsafe candidate flags", async () => {
   const j = journal(),
     body = nativeBody(descriptor(j));
   const valid = JSON.stringify(body);
@@ -705,7 +747,9 @@ test("existing private Go wire rejects ambiguous shape, duplicate identity and u
   const server = await local((_req, res) => res.end(variants[calls++]));
   try {
     const native = client(server.origin);
-    for (const _variant of variants) await assert.rejects(native.read(j), code("invalid_readback"));
+    for (const variant of variants) {
+      await assert.rejects(native.read(j), code("invalid_readback"), variant);
+    }
     assert.equal(calls, 8);
   } finally {
     await server.close();
@@ -713,7 +757,7 @@ test("existing private Go wire rejects ambiguous shape, duplicate identity and u
 });
 
 // Regression: cleanup could send DELETE/ID-only bodies, erase an active row or accept a malformed native erasure ACK.
-test("candidate state and erasure use exact native descriptor names and precision", async () => {
+void test("candidate state and erasure use exact native descriptor names and precision", async () => {
   const j = journal(),
     d = descriptor(j),
     mapping = { ...j, descriptor: d };
@@ -730,7 +774,9 @@ test("candidate state and erasure use exact native descriptor names and precisio
       if (req.method === "PUT") {
         state = body.state!;
         res.end(JSON.stringify(nativeBody(d, state)));
-      } else res.end(JSON.stringify({ state: "tombstoned", credentials_erased: false }));
+      } else {
+        res.end(JSON.stringify({ state: "tombstoned", credentials_erased: false }));
+      }
     });
   });
   try {
@@ -763,7 +809,7 @@ test("candidate state and erasure use exact native descriptor names and precisio
 });
 
 // Regression: malformed headers or an oversized key could exhaust the private HTTP boundary or expose native parser diagnostics.
-test("actual HTTP header bound and ingress key bound fail with classified errors", async () => {
+void test("actual HTTP header bound and ingress key bound fail with classified errors", async () => {
   let calls = 0;
   const server = await local((_req, res) => {
     calls++;
@@ -782,8 +828,8 @@ test("actual HTTP header bound and ingress key bound fail with classified errors
 });
 
 // Independent wire tests catch wrong protocol/descriptor/purpose acceptance.
-for (const profile of [undefined, codexOAuthProfile, claudeOAuthProfile])
-  test(
+for (const profile of [undefined, codexOAuthProfile, claudeOAuthProfile]) {
+  void test(
     "retained custody HTTP binds exact " +
       (profile?.profile ?? "API-key") +
       " scope and rejects unknown peers",
@@ -843,12 +889,12 @@ for (const profile of [undefined, codexOAuthProfile, claudeOAuthProfile])
         });
       });
       try {
-        const client = new NativeRetainedCustodyClient({
+        const oauthClient = new NativeRetainedCustodyClient({
           origin: server.origin,
           consumerId: j.consumerId,
           controlCredential: "synthetic-control",
         });
-        assert.deepEqual(await client.verify(mapping), {
+        assert.deepEqual(await oauthClient.verify(mapping), {
           contract: "native-retained-custody/v1",
           generation: j.generation,
           nativePhysicalIdentity: j.generation,
@@ -872,12 +918,12 @@ for (const profile of [undefined, codexOAuthProfile, claudeOAuthProfile])
           { secret: "must-not-escape" },
         ]) {
           reply = { ...(valid as object), ...changed };
-          await assert.rejects(client.verify(mapping), code("invalid_readback"));
+          await assert.rejects(oauthClient.verify(mapping), code("invalid_readback"));
         }
         reply = valid;
         const before = calls;
         await assert.rejects(
-          client.verify({ ...mapping, consumerId: "foreign-consumer" }),
+          oauthClient.verify({ ...mapping, consumerId: "foreign-consumer" }),
           code("denied"),
         );
         assert.equal(calls, before);
@@ -886,19 +932,22 @@ for (const profile of [undefined, codexOAuthProfile, claudeOAuthProfile])
       }
     },
   );
+}
 
-test("Grok plain-code native completion preserves the saved scope and rejects other profiles before HTTP", async () => {
+void test("Grok plain-code native completion preserves the saved scope and rejects other profiles before HTTP", async () => {
   const j = journal(),
     requests: { path: string | undefined; body: unknown }[] = [];
-  const server = await local((req, res) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => {
-      requests.push({ path: req.url, body: JSON.parse(Buffer.concat(chunks).toString()) });
-      res.end(
-        JSON.stringify({ operation: j.operationId, account_ref: j.accountRef, state: "completed" }),
-      );
-    });
+  const server = await local(async (req, res): Promise<void> => {
+    const chunks: Uint8Array[] = [];
+    for await (const part of req) {
+      const chunk: unknown = part;
+      assert.ok(chunk instanceof Uint8Array);
+      chunks.push(chunk);
+    }
+    requests.push({ path: req.url, body: JSON.parse(Buffer.concat(chunks).toString()) });
+    res.end(
+      JSON.stringify({ operation: j.operationId, account_ref: j.accountRef, state: "completed" }),
+    );
   });
   try {
     const options = {
@@ -907,7 +956,7 @@ test("Grok plain-code native completion preserves the saved scope and rejects ot
       ownerRef: j.ownerRef,
       controlCredential: "synthetic-control",
     };
-    const client = new NativeOAuthEnrollmentClient({
+    const oauthClient = new NativeOAuthEnrollmentClient({
       ...options,
       profileId: "grok-subscription-responses-oauth-v1",
       grokBrowserPolicy: {
@@ -916,7 +965,7 @@ test("Grok plain-code native completion preserves the saved scope and rejects ot
       },
     });
     assert.equal(
-      (await client.complete(j, { authorizationCode: "displayed-code" })).state,
+      (await oauthClient.complete(j, { authorizationCode: "displayed-code" })).state,
       "completed",
     );
     const wire = {
@@ -931,7 +980,7 @@ test("Grok plain-code native completion preserves the saved scope and rejects ot
         body: { ...wire, authorizationCode: "displayed-code" },
       },
     ]);
-    await client.complete(j, { state: "a".repeat(64), code: "legacy-code" });
+    await oauthClient.complete(j, { state: "a".repeat(64), code: "legacy-code" });
     assert.deepEqual(requests[1]?.body, { ...wire, state: "a".repeat(64), code: "legacy-code" });
     for (const profileId of [codexOAuthProfile.profile, claudeOAuthProfile.profile]) {
       const other = new NativeOAuthEnrollmentClient({ ...options, profileId });
@@ -946,10 +995,14 @@ test("Grok plain-code native completion preserves the saved scope and rejects ot
       "bad&query",
       " bad",
       "é".repeat(2049),
-    ])
-      await assert.rejects(client.complete(j, { authorizationCode }), code("bounded"));
+    ]) {
+      await assert.rejects(oauthClient.complete(j, { authorizationCode }), code("bounded"));
+    }
     await assert.rejects(
-      client.complete({ ...j, ownerRef: "other-owner" }, { authorizationCode: "displayed-code" }),
+      oauthClient.complete(
+        { ...j, ownerRef: "other-owner" },
+        { authorizationCode: "displayed-code" },
+      ),
       code("denied"),
     );
     assert.equal(requests.length, 2, "invalid code, wrong provider and owner never dispatch");

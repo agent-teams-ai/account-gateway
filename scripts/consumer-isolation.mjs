@@ -7,7 +7,7 @@ const moduleFor = (root) => import(pathToFileURL(resolve(root, "compiled/closure
 const [a, b] = await Promise.all(process.argv.slice(2).map(moduleFor));
 const server = createServer((req, res) => {
   res.setHeader("content-type", "application/json");
-  if (req.headers.authorization === "Bearer consumer-a" && req.url === "/v1/accounts/account-a")
+  if (req.headers.authorization === "Bearer consumer-a" && req.url === "/v1/accounts/account-a") {
     res.end(
       JSON.stringify({
         accountRef: "account-a",
@@ -19,7 +19,7 @@ const server = createServer((req, res) => {
         authorizationEpoch: 1,
       }),
     );
-  else if (
+  } else if (
     req.headers.authorization === "Bearer consumer-a" &&
     req.url === "/v2/accounts/account-a"
   ) {

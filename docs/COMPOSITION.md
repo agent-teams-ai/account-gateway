@@ -14,8 +14,8 @@ seed and its integrity-bearing npm lock; artifact behavior still requires the
 exact packed SDK to pass the installed-consumer gate.
 
 The reviewed Get Modular Consumer Module Standard source revision is
-b70ba39304ac71964175c42a77309406a7c30ca2, full-document SHA-256
-11a389b223506dc303fa986a7a37350b847013d85beb2de9d74cb8c97363e824.
+8305ea6409757da8e60dca074dce163d95c85e88, full-document SHA-256
+3c5814ebf1ab1bd17688e49955aa0baa2ee91dd3a369adcea4d38aaccd53ba86.
 The [pending CMS profile](../architecture/consumer-module-adoption.json) and
 [full-document delta review](../architecture/evidence/cms-pin-review.json) bind
 that exact revision to retained non-authoritative bytes. This pin update reviews
@@ -24,6 +24,39 @@ Core/Assembly 0.2.0 pair. The offline topology gate rejects pin/evidence drift,
 and `pnpm test:consumer-pin` checks its TypeScript and rejecting fixtures in both
 `test:static` and `test`. These checks qualify document integrity only.
 The gate owns the approved revision tuple in code; changing it requires a reviewed pin update.
+
+The 2026-10-25 guidance review changes only Get Modular producer examples to
+`bun run` for assembly, resources, conformance and observation checks. Gateway
+continues using its own pinned pnpm workspace and qualification commands. This
+producer documentation change does not adopt Bun as the Gateway package manager.
+
+The root `tsconfig.json` is the real solution discovery index over SDK emission,
+root tests, consumer-pin checks and the private service. SDK emission keeps its
+existing options and source/output boundaries in `tsconfig.build.json`; the
+existing build script still invokes the pinned official compiler on that project.
+Stack checks the three standalone test, pin and service projects separately.
+`pnpm check:toolchain-config` rejects missing/duplicate discovery edges, coordinated
+service-scope deletion and broadened or weakened SDK emission settings.
+
+Oxlint typed lint discovers `tsconfig.json` and follows project references. Its
+[`--tsconfig` flag](https://oxc.rs/docs/guide/usage/linter/cli.html) controls import
+resolution and does not select typed-lint programs. Named ordinary projects must
+therefore remain reachable through this solution index; inferred error-typed
+Node imports are not source-any debt to hide with assertions.
+
+`scripts/consumer-limits-check.mts` remains the unchanged exact-archive consumer
+checker owned by `scripts/qualify-consumers.sh`. The private root declares its
+public SDK workspace dev dependency, and the existing consumer-pin strict project
+owns the whole checker. The SDK build must precede root type and typed-lint checks;
+no root typed exclusion or external delegation replaces that ownership.
+
+Fresh NodeNext and ESNext/Bundler archive consumers passed public installed Stack
+doctor, whole-checker and generated-closure typechecks, typed lint and the original
+runtime assertions. The retained installed Node 26 root result also covers the
+whole checker on the reviewed `0ea19fe`-based prepared source. These results bind
+their exact source and archive; a changed main tuple requires new validation.
+Checkpoint A runs public lint and format checks after SDK emission, and the
+configuration guard rejects removing either command or moving them before build.
 
 Current CMS activation remains pending: accept a local adoption decision and exact
 boundary/legacy/exception inventory, qualify descriptor/module-entry/group and

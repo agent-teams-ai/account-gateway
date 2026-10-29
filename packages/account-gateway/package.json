@@ -1,15 +1,13 @@
 {
   "name": "@agent-teams/account-gateway",
-  "private": true,
   "version": "0.1.0",
-  "type": "module",
+  "private": true,
   "files": [
     "dist",
     "README.md"
   ],
-  "engines": {
-    "node": ">=24.21.0 <25 || >=26.10.0 <27"
-  },
+  "type": "module",
+  "sideEffects": false,
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -32,9 +30,11 @@
     }
   },
   "dependencies": {
-    "@get-modular/core": "0.2.0",
     "@get-modular/assembly": "0.2.0",
-    "zod": "4.6.5"
+    "@get-modular/core": "0.2.0",
+    "zod": "4.6.7"
   },
-  "sideEffects": false
+  "engines": {
+    "node": ">=24.21.0 <25 || >=26.10.0 <27"
+  }
 }
