@@ -52,7 +52,9 @@ async function initialize(configuration: Configuration) {
       maxHeaderSize: 16_384,
       headersTimeout: 5000,
       requestTimeout: 5000,
-      keepAliveTimeout: 1000,
+      // Completion loads keep healthy pooled connections for the bounded stand;
+      // stop() destroys every socket. Stale-connection faults have a separate gate.
+      keepAliveTimeout: bounds.wallMs,
     },
     (req, res) => {
       let requestId = "unidentified",

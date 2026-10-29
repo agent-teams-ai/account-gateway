@@ -669,9 +669,9 @@ void test("native diagnostics drops secret, malformed, partial or misplaced tran
   }
   unsafe.push(record.replace('"connection_reset"', '"connection_reset_SECRET_SENTINEL"'));
   unsafe.push(record.replace('"reused"', '"reused_SECRET_SENTINEL"'));
-  unsafe.push(record.replace("}", ',"transport_error_reason":"eof"}'));
-  unsafe.push(record.replace("}", ',"\\u0074ransport_error_reason":"eof"}'));
-  unsafe.push(record.replace("}", ',"upstream_request_written":false}'));
+  unsafe.push(record.slice(0, -1) + ',"transport_error_reason":"eof"}');
+  unsafe.push(record.slice(0, -1) + ',"\\u0074ransport_error_reason":"eof"}');
+  unsafe.push(record.slice(0, -1) + ',"upstream_request_written":false}');
   for (const line of unsafe) {
     f.feed(Buffer.from(line + "\n"));
   }
