@@ -2,10 +2,18 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import { digestFile, joinedFiles, joinedSourceHashes } from "./joined-evidence.ts";
+import {
+  digestFile,
+  joinedFiles,
+  joinedSourceHashes,
+  isNonemptyString,
+} from "./joined-evidence.ts";
 
 function check(value: unknown, code: string): asserts value {
-  if (!value) throw new Error(code);
+  const accepted = Boolean(value);
+  if (!accepted) {
+    throw new Error(code);
+  }
 }
 function command(binary: string, args: string[], cwd: string) {
   const child = spawnSync(binary, args, {
@@ -45,14 +53,14 @@ try {
   const nativeCommit = options.get("--native-commit"),
     gatewayCommit = options.get("--gateway-commit");
   check(
-    repo &&
-      native &&
-      output &&
-      go &&
+    isNonemptyString(repo) &&
+      isNonemptyString(native) &&
+      isNonemptyString(output) &&
+      isNonemptyString(go) &&
       [repo, native, output, go].every(isAbsolute) &&
-      nativeCommit &&
+      isNonemptyString(nativeCommit) &&
       /^[a-f0-9]{40}$/.test(nativeCommit) &&
-      gatewayCommit &&
+      isNonemptyString(gatewayCommit) &&
       /^[a-f0-9]{40}$/.test(gatewayCommit),
     "joined-build-inputs",
   );

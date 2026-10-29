@@ -494,11 +494,12 @@ async function mutateAtConsumerLock<T>(
   }
 }
 
-test("SQL009 snapshots do not create unknown consumers or spend facts", async () => {
+void test("SQL009 snapshots do not create unknown consumers or spend facts", async () => {
   const ctx = context(),
     ref = randomUUID(),
     owner = randomUUID();
-  const before = (await admin.query("SELECT used FROM ag_kernel.fact_budget")).rows[0].used;
+  const before = (await admin.query<{ used: string }>("SELECT used FROM ag_kernel.fact_budget"))
+    .rows[0].used;
   assert.deepEqual(await a.accounts(ctx), { accounts: [] });
   for (const read of [
     () => a.account(ctx, ref),
@@ -512,20 +513,23 @@ test("SQL009 snapshots do not create unknown consumers or spend facts", async ()
   }
   assert.equal(
     (
-      await admin.query(
+      await admin.query<{ n: number }>(
         "SELECT count(*)::integer AS n FROM ag_kernel.consumers WHERE consumer=$1",
         [ctx.consumerId],
       )
     ).rows[0].n,
     0,
   );
-  assert.equal((await admin.query("SELECT used FROM ag_kernel.fact_budget")).rows[0].used, before);
+  assert.equal(
+    (await admin.query<{ used: string }>("SELECT used FROM ag_kernel.fact_budget")).rows[0].used,
+    before,
+  );
   const issuer = await a.issuer(ctx);
   assert.equal(await b.issuer(ctx), issuer);
   assert.deepEqual(await b.accounts(ctx), { accounts: [] });
 });
 
-test(
+void test(
   "SQL009 blocked consumer mutation permits unrelated charging and snapshots",
   { timeout: 25_000 },
   async () => {
@@ -533,7 +537,8 @@ test(
       unrelated = context();
     const account = await connected(blocked);
     await b.issuer(unrelated);
-    const before = (await admin.query("SELECT used FROM ag_kernel.fact_budget")).rows[0].used;
+    const before = (await admin.query<{ used: string }>("SELECT used FROM ag_kernel.fact_budget"))
+      .rows[0].used;
     const gate = await admin.connect();
     let pending: Promise<PromiseSettledResult<OperationStatus>[]> | undefined;
     try {
@@ -552,23 +557,32 @@ test(
       ]);
       const result = await Promise.race([
         progress,
-        new Promise<never>((_, reject) =>
-          timeout.addEventListener("abort", () => reject(new Error("unrelated SQL work blocked")), {
-            once: true,
-          }),
-        ),
+        new Promise<never>((_resolve, reject) => {
+          timeout.addEventListener(
+            "abort",
+            () => {
+              reject(new Error("unrelated SQL work blocked"));
+            },
+            {
+              once: true,
+            },
+          );
+        }),
       ]);
       assert.equal(result[0].state, "pending");
       assert.equal(result[1].accountRef, account.accountRef);
       assert.equal(
-        (await gate.query("SELECT used FROM ag_kernel.fact_budget")).rows[0].used,
+        (await gate.query<{ used: string }>("SELECT used FROM ag_kernel.fact_budget")).rows[0].used,
         String(BigInt(before) + 8n),
       );
       await gate.query("COMMIT");
       const [settled] = await pending;
       assert.equal(settled.status, "fulfilled");
       const totals = (
-        await admin.query(`SELECT b.used,1+sum(c.fact_used) AS expected
+        await admin.query<{
+          used: string;
+          expected: string;
+        }>(`SELECT b.used,1+sum(c.fact_used) AS expected
       FROM ag_kernel.fact_budget b CROSS JOIN ag_kernel.consumers c GROUP BY b.used`)
       ).rows[0];
       assert.equal(totals.used, totals.expected);
@@ -581,7 +595,7 @@ test(
   },
 );
 
-test(
+void test(
   "SQL009 noncharging mutations and saved authority progress while the service budget is locked",
   { timeout: 25_000 },
   async () => {
@@ -598,7 +612,8 @@ test(
       reservation(),
     );
     assert.ok(claim.dispatch);
-    const before = (await admin.query("SELECT used FROM ag_kernel.fact_budget")).rows[0].used;
+    const before = (await admin.query<{ used: string }>("SELECT used FROM ag_kernel.fact_budget"))
+      .rows[0].used;
     const gate = await admin.connect();
     try {
       await gate.query("BEGIN");
@@ -629,17 +644,20 @@ test(
       })();
       await Promise.race([
         progress,
-        new Promise<never>((_, reject) =>
+        new Promise<never>((_resolve, reject) => {
           timeout.addEventListener(
             "abort",
-            () => reject(new Error("noncharging SQL work blocked")),
+            () => {
+              reject(new Error("noncharging SQL work blocked"));
+            },
             { once: true },
-          ),
-        ),
+          );
+        }),
       ]);
       await gate.query("COMMIT");
       assert.equal(
-        (await admin.query("SELECT used FROM ag_kernel.fact_budget")).rows[0].used,
+        (await admin.query<{ used: string }>("SELECT used FROM ag_kernel.fact_budget")).rows[0]
+          .used,
         before,
       );
       await a.fence(ctx, op(), execution.input.policySubject, execution.input.policyRevision);
@@ -660,9 +678,10 @@ test(
   },
 );
 
-test("SQL009 simultaneous direct bootstrap charges one consumer exactly once", async () => {
+void test("SQL009 simultaneous direct bootstrap charges one consumer exactly once", async () => {
   const ctx = context();
-  const before = (await admin.query("SELECT used FROM ag_kernel.fact_budget")).rows[0].used;
+  const before = (await admin.query<{ used: string }>("SELECT used FROM ag_kernel.fact_budget"))
+    .rows[0].used;
   const gate = await admin.connect();
   let insertions: Promise<PromiseSettledResult<QueryResult>[]> | undefined;
   try {
@@ -694,11 +713,13 @@ test("SQL009 simultaneous direct bootstrap charges one consumer exactly once", a
     await insertions;
   }
   const row = (
-    await admin.query("SELECT fact_used FROM ag_kernel.consumers WHERE consumer=$1", [
-      ctx.consumerId,
-    ])
+    await admin.query<{ fact_used: string }>(
+      "SELECT fact_used FROM ag_kernel.consumers WHERE consumer=$1",
+      [ctx.consumerId],
+    )
   ).rows[0];
-  const after = (await admin.query("SELECT used FROM ag_kernel.fact_budget")).rows[0].used;
+  const after = (await admin.query<{ used: string }>("SELECT used FROM ag_kernel.fact_budget"))
+    .rows[0].used;
   assert.equal(BigInt(after) - BigInt(before), BigInt(row.fact_used));
   assert.equal(
     BigInt(row.fact_used),
@@ -706,7 +727,7 @@ test("SQL009 simultaneous direct bootstrap charges one consumer exactly once", a
   );
 });
 
-test("SQL010 SQL and native v2 nonce derivation share an exact binding vector", async () => {
+void test("SQL010 SQL and native v2 nonce derivation share an exact binding vector", async () => {
   const ctx = { consumerId: "fixture-consumer" },
     native = {
       originRef: "sandbox-native-origin",
@@ -718,13 +739,10 @@ test("SQL010 SQL and native v2 nonce derivation share an exact binding vector", 
   assert.equal(requestBoundNonce(ctx, native, ref, id), expected);
   assert.equal(
     (
-      await admin.query("SELECT ag_kernel.request_bound_nonce($1,$2,$3,$4,$5) AS nonce", [
-        ctx.consumerId,
-        native.originRef,
-        native.engineIncarnation,
-        ref,
-        id,
-      ])
+      await admin.query<{ nonce: string }>(
+        "SELECT ag_kernel.request_bound_nonce($1,$2,$3,$4,$5) AS nonce",
+        [ctx.consumerId, native.originRef, native.engineIncarnation, ref, id],
+      )
     ).rows[0].nonce,
     expected,
   );
@@ -735,7 +753,8 @@ test("SQL010 SQL and native v2 nonce derivation share an exact binding vector", 
     owner = await worker(actual),
     run = await prepared(actual, account.accountRef!);
   const binding = boundReservation(actual, run.result.executionRef!, "original-binding");
-  const before = (await admin.query("SELECT used FROM ag_kernel.fact_budget")).rows[0].used;
+  const before = (await admin.query<{ used: string }>("SELECT used FROM ag_kernel.fact_budget"))
+    .rows[0].used;
   let code: unknown;
   try {
     await admin.query(
@@ -757,10 +776,13 @@ test("SQL010 SQL and native v2 nonce derivation share an exact binding vector", 
     code = (error as { code?: unknown }).code;
   }
   assert.equal(code, "23514", "SQL independently rejects moving a v2 nonce to a different request");
-  assert.equal((await admin.query("SELECT used FROM ag_kernel.fact_budget")).rows[0].used, before);
+  assert.equal(
+    (await admin.query<{ used: string }>("SELECT used FROM ag_kernel.fact_budget")).rows[0].used,
+    before,
+  );
 });
 
-test("SQL010 explicit settled readback expires in bounded batches without reviving its namespace", async () => {
+void test("SQL010 explicit settled readback expires in bounded batches without reviving its namespace", async () => {
   const ctx = context(),
     owner = await worker(ctx),
     retention = { requestReadbackRetentionMs: 300 };
@@ -831,12 +853,20 @@ test("SQL010 explicit settled readback expires in bounded batches without revivi
     "completed",
     "occupied transports retain readback",
   );
-  for (const proof of proofs.values()) await kernel.acknowledgeTransportClosed(ctx, owner, proof);
+  for (const proof of proofs.values()) {
+    await kernel.acknowledgeTransportClosed(ctx, owner, proof);
+  }
   const job = await kernel.claimCleanup(ctx, owner);
   assert.ok(job?.scope.kind === "execution");
   await kernel.settleCleanup(ctx, job.cleanupRef, owner, job.token, true);
   const before = (
-    await admin.query(
+    await admin.query<{
+      consumer: string;
+      account: string;
+      service: string;
+      retention: string;
+      deadline: Date;
+    }>(
       `SELECT c.fact_used AS consumer,a.fact_used AS account,b.used AS service,
     e.request_readback_retention_ms AS retention,e.deadline FROM ag_kernel.executions e
     JOIN ag_kernel.consumers c ON c.consumer=e.consumer JOIN ag_kernel.accounts a ON a.consumer=e.consumer AND a.ref=e.account_ref
@@ -920,7 +950,7 @@ test("SQL010 explicit settled readback expires in bounded batches without revivi
     0,
   );
   const after = (
-    await admin.query(
+    await admin.query<{ consumer: string; account: string; service: string }>(
       `SELECT c.fact_used AS consumer,a.fact_used AS account,b.used AS service
     FROM ag_kernel.consumers c JOIN ag_kernel.accounts a ON a.consumer=c.consumer CROSS JOIN ag_kernel.fact_budget b
     WHERE c.consumer=$1 AND a.ref=$2`,
@@ -928,14 +958,18 @@ test("SQL010 explicit settled readback expires in bounded batches without revivi
     )
   ).rows[0];
   // The new execution/prepare adds four retained units; expired request details release three.
-  for (const scope of ["consumer", "account", "service"])
+  for (const scope of ["consumer", "account", "service"] as const) {
     assert.equal(BigInt(after[scope]), BigInt(before[scope]) + 1n);
+  }
   assert.deepEqual(await kernel.prepare(ctx, run.input), run.result);
   assert.deepEqual(await kernel.operation(ctx, run.input.operationId), run.result);
   assert.deepEqual((await kernel.savedExecution(ctx, ref)).admission, run.admission);
   assert.equal((await kernel.savedExecution(ctx, ref)).dispatchAllowed, false);
   const totals = (
-    await admin.query(`SELECT used,(SELECT 1+sum(fact_used) FROM ag_kernel.consumers) AS expected
+    await admin.query<{
+      used: string;
+      expected: string;
+    }>(`SELECT used,(SELECT 1+sum(fact_used) FROM ag_kernel.consumers) AS expected
     FROM ag_kernel.fact_budget`)
   ).rows[0];
   assert.equal(totals.used, totals.expected);
@@ -961,7 +995,7 @@ test("SQL010 explicit settled readback expires in bounded batches without revivi
   assert.equal(code, "23514", "retirement marker is irreversible");
 });
 
-test("SQL010 retirement retains unknown, occupied, uncleaned, legacy and disabled request details", async () => {
+void test("SQL010 retirement retains unknown, occupied, uncleaned, legacy and disabled request details", async () => {
   const ctx = context(),
     owner = await worker(ctx);
   const kernel = new PostgresKernel(poolA, defaults, factDefaults, {
@@ -975,18 +1009,21 @@ test("SQL010 retirement retains unknown, occupied, uncleaned, legacy and disable
     const native = kind === "legacy" ? reservation() : boundReservation(ctx, ref, kind);
     const claim = await selected.claim(ctx, ref, kind, owner, run.admission, native);
     assert.ok(claim.dispatch);
-    if (kind === "unknown") await selected.effect(ctx, ref, kind, owner, "effect_unknown");
-    else {
+    if (kind === "unknown") {
+      await selected.effect(ctx, ref, kind, owner, "effect_unknown");
+    } else {
       await selected.effect(ctx, ref, kind, owner, "response_started");
       await selected.effect(ctx, ref, kind, owner, "completed");
     }
-    if (kind !== "occupied")
+    if (kind !== "occupied") {
       await selected.acknowledgeTransportClosed(ctx, owner, claim.dispatch.closure);
+    }
     await selected.close(ctx, op(), ref);
     const job = await selected.claimCleanup(ctx, owner);
     assert.ok(job?.scope.kind === "execution");
-    if (kind !== "occupied" && kind !== "uncleaned")
+    if (kind !== "occupied" && kind !== "uncleaned") {
       await selected.settleCleanup(ctx, job.cleanupRef, owner, job.token, true);
+    }
     await delay(30);
     await selected.reconcile(ctx);
     assert.equal(
@@ -996,7 +1033,7 @@ test("SQL010 retirement retains unknown, occupied, uncleaned, legacy and disable
     assert.deepEqual(await selected.requestProof(ctx, ref, kind), claim.dispatch.closure);
     assert.equal(
       (
-        await admin.query(
+        await admin.query<{ request_details_retired_at: Date | null }>(
           "SELECT request_details_retired_at FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
           [ctx.consumerId, ref],
         )
@@ -1006,7 +1043,7 @@ test("SQL010 retirement retains unknown, occupied, uncleaned, legacy and disable
   }
 });
 
-test("SQL011 a retirement turn reclaims multiple small namespaces within one row and namespace budget", async () => {
+void test("SQL011 a retirement turn reclaims multiple small namespaces within one row and namespace budget", async () => {
   const ctx = context(),
     kernel = new PostgresKernel(poolA, { ...defaults, maintenanceBatch: 3 }, factDefaults, {
       requestReadbackRetentionMs: 20,
@@ -1039,9 +1076,10 @@ test("SQL011 a retirement turn reclaims multiple small namespaces within one row
     ctx.consumerId,
   ]);
   const accountBefore = (
-    await admin.query("SELECT ref,fact_used FROM ag_kernel.accounts WHERE consumer=$1", [
-      ctx.consumerId,
-    ])
+    await admin.query<{ ref: string; fact_used: string }>(
+      "SELECT ref,fact_used FROM ag_kernel.accounts WHERE consumer=$1",
+      [ctx.consumerId],
+    )
   ).rows;
   await kernel.reconcile(ctx);
   assert.equal(
@@ -1080,23 +1118,28 @@ test("SQL011 a retirement turn reclaims multiple small namespaces within one row
     before - 5,
   );
   const accountAfter = (
-    await admin.query("SELECT ref,fact_used FROM ag_kernel.accounts WHERE consumer=$1", [
-      ctx.consumerId,
-    ])
+    await admin.query<{ ref: string; fact_used: string }>(
+      "SELECT ref,fact_used FROM ag_kernel.accounts WHERE consumer=$1",
+      [ctx.consumerId],
+    )
   ).rows;
-  for (const account of accountAfter)
+  for (const account of accountAfter) {
     assert.equal(
       BigInt(account.fact_used),
       BigInt(accountBefore.find((row) => row.ref === account.ref)!.fact_used) - 1n,
     );
+  }
   const totals = (
-    await admin.query(`SELECT used,(SELECT 1+sum(fact_used) FROM ag_kernel.consumers) AS expected
+    await admin.query<{
+      used: string;
+      expected: string;
+    }>(`SELECT used,(SELECT 1+sum(fact_used) FROM ag_kernel.consumers) AS expected
     FROM ag_kernel.fact_budget`)
   ).rows[0];
   assert.equal(totals.used, totals.expected);
 });
 
-test("SQL012 once-selected retirement bounds empty namespaces and refunds only rows removed across turns", async () => {
+void test("SQL012 once-selected retirement bounds empty namespaces and refunds only rows removed across turns", async () => {
   const ctx = context(),
     kernel = new PostgresKernel(poolA, { ...defaults, maintenanceBatch: 3 }, factDefaults, {
       requestReadbackRetentionMs: 20,
@@ -1150,7 +1193,7 @@ test("SQL012 once-selected retirement bounds empty namespaces and refunds only r
   await delay(30);
   const counters = async () =>
     (
-      await admin.query(
+      await admin.query<{ used: string; consumer_used: string; account_used: string }>(
         `SELECT s.used,c.fact_used AS consumer_used,a.fact_used AS account_used
     FROM ag_kernel.fact_budget s CROSS JOIN ag_kernel.consumers c JOIN ag_kernel.accounts a ON a.consumer=c.consumer
     WHERE c.consumer=$1 AND a.ref=$2`,
@@ -1178,12 +1221,13 @@ test("SQL012 once-selected retirement bounds empty namespaces and refunds only r
       5 - removed,
     );
     const after = await counters();
-    for (const key of ["used", "consumer_used", "account_used"])
+    for (const key of ["used", "consumer_used", "account_used"] as const) {
       assert.equal(
         BigInt(after[key]),
         BigInt(before[key]) - BigInt(removed),
         "turn " + turn + " refunds exactly deleted request units at each level",
       );
+    }
     if (turn === 1) {
       assert.equal(
         await count(
@@ -1194,7 +1238,7 @@ test("SQL012 once-selected retirement bounds empty namespaces and refunds only r
       );
       assert.equal(
         (
-          await admin.query(
+          await admin.query<{ request_details_retired_at: Date | null }>(
             "SELECT request_details_retired_at FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
             [ctx.consumerId, ref],
           )
@@ -1219,7 +1263,7 @@ test("SQL012 once-selected retirement bounds empty namespaces and refunds only r
   }
 });
 
-test("trusted profile account caps admit 32 parallel requests across executions without widening default or adjacent profiles", async () => {
+void test("trusted profile account caps admit 32 parallel requests across executions without widening default or adjacent profiles", async () => {
   const bounds = { ...defaults, maxConcurrent: 32 },
     caps = [
       { profile: "mimo-test", concurrency: 32 },
@@ -2799,7 +2843,7 @@ void test("restart reconciles only lost claims; explicit restore rotates and qua
 
 // Red if cleanup dies with capability/owner, two workers settle the same lease,
 // a stale token settles reclaimed work, or cleanup reactivates a disabled account.
-test("service cleanup batches durable closed executions within a bounded turn and yields to OAuth", async () => {
+void test("service cleanup batches durable closed executions within a bounded turn and yields to OAuth", async () => {
   const ctx = context(),
     account = await connected(ctx),
     w = await worker(ctx);
@@ -2827,7 +2871,7 @@ test("service cleanup batches durable closed executions within a bounded turn an
     ]);
   const settle = async (claim: CleanupClaim) => {
     assert.equal(claim.scope.kind, "execution");
-    if (claim.scope.kind === "execution") assert.equal(claim.scope.transports.length, 0);
+    assert.equal(claim.scope.transports.length, 0);
     await a.settleCleanup(ctx, claim.cleanupRef, w, claim.token, true);
     return true;
   };
@@ -2837,7 +2881,9 @@ test("service cleanup batches durable closed executions within a bounded turn an
     source.composeServiceCleanupTurn?.(a, ctx, w, settle) ??
     (async () => {
       const claim = await a.claimCleanup(ctx, w);
-      if (claim) await settle(claim);
+      if (claim) {
+        await settle(claim);
+      }
       return !!claim;
     });
   assert.equal(await turn(), true);
@@ -2852,12 +2898,14 @@ test("service cleanup batches durable closed executions within a bounded turn an
     "the next tick remains available to OAuth even with cleanup queued",
   );
   assert.equal(await done(), first);
-  for (let n = 0; n < 8 && (await done()) < 10; n++) await turn();
+  for (let n = 0; n < 8 && (await done()) < 10; n++) {
+    await turn();
+  }
   assert.equal(await done(), 10);
   assert.equal(await occupancy(ctx, account.accountRef!), 0);
 });
 
-test("service cleanup ends a batch at unresolved transport ownership and never substitutes closure proof", async () => {
+void test("service cleanup ends a batch at unresolved transport ownership and never substitutes closure proof", async () => {
   const ctx = context(),
     account = await connected(ctx),
     w = await worker(ctx);
@@ -2877,7 +2925,7 @@ test("service cleanup ends a batch at unresolved transport ownership and never s
   const turn = serviceComposition.composeServiceCleanupTurn(a, ctx, w, async (claim) => {
     attempts++;
     assert.equal(claim.scope.kind, "execution");
-    if (claim.scope.kind === "execution") assert.equal(claim.scope.transports.length, 1);
+    assert.equal(claim.scope.transports.length, 1);
     await assert.rejects(
       a.settleCleanup(ctx, claim.cleanupRef, w, claim.token, true),
       isCode("conflict"),
@@ -2903,7 +2951,7 @@ test("service cleanup ends a batch at unresolved transport ownership and never s
   );
 });
 
-test("disable and idempotent close persist bounded scoped cleanup across worker loss", async () => {
+void test("disable and idempotent close persist bounded scoped cleanup across worker loss", async () => {
   const ctx = context(),
     account = await connected(ctx),
     e = await prepared(ctx, account.accountRef!);

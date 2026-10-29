@@ -57,7 +57,7 @@ function fixture(control = policy(), key = randomBytes(32)) {
   return { control, key, bearers, issuer, rows, kernel, mint, reads: () => reads };
 }
 
-test("execution issuance exceeds historical registry limit and hydrates stable fenced tuples after restart", async () => {
+void test("execution issuance exceeds historical registry limit and hydrates stable fenced tuples after restart", async () => {
   const f = fixture();
   const issued = Array.from({ length: 300 }, () => f.mint());
   assert.equal(new Set(issued.map((x) => x.token)).size, 300);
@@ -77,7 +77,7 @@ test("execution issuance exceeds historical registry limit and hydrates stable f
   }
 });
 
-test("execution capability binds signing key, configured issuer token/policy, consumer and original admission", async () => {
+void test("execution capability binds signing key, configured issuer token/policy, consumer and original admission", async () => {
   const f = fixture(),
     { token, row } = f.mint();
   const grant = await f.bearers.resolveExecution(token, f.kernel);
@@ -105,7 +105,7 @@ test("execution capability binds signing key, configured issuer token/policy, co
   assert.equal(await f.bearers.resolveExecution(token, f.kernel), undefined);
 });
 
-test("legacy configured execution credentials remain scoped while expired minted capabilities cannot be issued", async () => {
+void test("legacy configured execution credentials remain scoped while expired minted capabilities cannot be issued", async () => {
   const f = fixture(),
     row = saved();
   const legacy = new FacadeBearers([
@@ -125,53 +125,54 @@ test("legacy configured execution credentials remain scoped while expired minted
   );
 });
 
-test("trusted native profile limits accept approved64 concurrency while rejecting65", () => {
-  const build = (concurrency: number) =>
-    new NativeAuthority({
-      kernel: {} as never,
-      store: {} as never,
-      profileLimits: [
+const build = (concurrency: number) =>
+  new NativeAuthority({
+    kernel: {} as never,
+    store: {} as never,
+    profileLimits: [
+      {
+        profile: "profile",
+        limits: {
+          requests: 128,
+          concurrency,
+          requestBytes: 4096,
+          outputBytes: 4096,
+          tokens: 100,
+        },
+      },
+    ],
+    config: {
+      origin: "http://127.0.0.1:1",
+      enrollment: {
+        originRef: "synthetic-origin",
+        engineIncarnation: randomUUID(),
+        worker: randomUUID(),
+        qualificationRef: "synthetic",
+      },
+      consumers: [
         {
-          profile: "profile",
-          limits: {
-            requests: 128,
-            concurrency,
-            requestBytes: 4096,
-            outputBytes: 4096,
-            tokens: 100,
-          },
+          consumerId: "synthetic-consumer",
+          executionCredential: "synthetic-execution-token",
+          cleanupCredential: "synthetic-cleanup-token",
+          callbackCredential: "synthetic-callback-token",
         },
       ],
-      config: {
-        origin: "http://127.0.0.1:1",
-        enrollment: {
-          originRef: "synthetic-origin",
-          engineIncarnation: randomUUID(),
-          worker: randomUUID(),
+      profiles: [
+        {
+          profile: "profile",
+          baseURL: "https://fixture.invalid",
+          model: "synthetic-model",
           qualificationRef: "synthetic",
+          requestBytes: 4096,
+          outputBytes: 4096,
+          tokens: 100,
+          providerTokenUpperBound: 100,
         },
-        consumers: [
-          {
-            consumerId: "synthetic-consumer",
-            executionCredential: "synthetic-execution-token",
-            cleanupCredential: "synthetic-cleanup-token",
-            callbackCredential: "synthetic-callback-token",
-          },
-        ],
-        profiles: [
-          {
-            profile: "profile",
-            baseURL: "https://fixture.invalid",
-            model: "synthetic-model",
-            qualificationRef: "synthetic",
-            requestBytes: 4096,
-            outputBytes: 4096,
-            tokens: 100,
-            providerTokenUpperBound: 100,
-          },
-        ],
-      },
-    });
+      ],
+    },
+  });
+
+void test("trusted native profile limits accept approved64 concurrency while rejecting65", () => {
   assert.doesNotThrow(() => build(32));
   assert.doesNotThrow(() => build(64));
   assert.throws(() => build(65));

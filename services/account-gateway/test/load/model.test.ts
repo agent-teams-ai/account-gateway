@@ -9,7 +9,7 @@ import {
 } from "./model.ts";
 import type { Attempt, LedgerEvent, Proof } from "./model.ts";
 
-test("independent provider reconciliation refuses duplicates, false no-spend and missing closure", () => {
+void test("independent provider reconciliation refuses duplicates, false no-spend and missing closure", () => {
   const a: Attempt = {
     requestId: "r",
     executionRef: "e",
@@ -67,7 +67,7 @@ test("independent provider reconciliation refuses duplicates, false no-spend and
     ]).includes("unexpected-effect-or-client-stream-failure"),
   );
 });
-test("closure needs original full proof and physical body closure independently of effect", () => {
+void test("closure needs original full proof and physical body closure independently of effect", () => {
   const p: Proof = {
     executionRef: "e",
     requestRef: "r",
@@ -101,6 +101,15 @@ test("closure needs original full proof and physical body closure independently 
     false,
   );
   assert.equal(
+    closureProjection({ ...r, proof: { ...p, native: null } }, "c", p).exactProof,
+    false,
+  );
+  assert.deepEqual(closureProjection(null, "c", p), {
+    exactProof: false,
+    nativeClosed: false,
+    nativeAcknowledged: false,
+  });
+  assert.equal(
     closureProjection({ ...r, native: { ...p.native, requestNonce: "neighbor" } }, "c", p)
       .exactProof,
     false,
@@ -111,7 +120,7 @@ test("closure needs original full proof and physical body closure independently 
     false,
   );
 });
-test("seeded request identities repeat only for the same complete run tuple; diagnostics discard private error bodies", () => {
+void test("seeded request identities repeat only for the same complete run tuple; diagnostics discard private error bodies", () => {
   const id = identifier("run", 42, 3);
   assert.match(id, /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-a[a-f0-9]{3}-[a-f0-9]{12}$/);
   assert.equal(id, identifier("run", 42, 3));
@@ -120,7 +129,7 @@ test("seeded request identities repeat only for the same complete run tuple; dia
   assert.equal(safeError(new Error("secret provider body")), "unclassified-failure");
   assert.equal(safeError(new Error("load:bounded-input")), "bounded-input");
 });
-test("arrival evidence distinguishes its target from delayed actual SDK starts and positively classified refusals", () => {
+void test("arrival evidence distinguishes its target from delayed actual SDK starts and positively classified refusals", () => {
   const base: Attempt = {
     requestId: "r",
     executionRef: "e",
@@ -160,7 +169,7 @@ test("arrival evidence distinguishes its target from delayed actual SDK starts a
   assert.equal(ambiguous.unsettledOrFailed, 1);
   assert.equal(ambiguous.observedOfferedRate, 0, "one observation cannot establish a start rate");
 });
-test("authorization and validation failures cannot masquerade as workload capacity refusals", () => {
+void test("authorization and validation failures cannot masquerade as workload capacity refusals", () => {
   const attempt: Attempt = {
     requestId: "r",
     executionRef: "e",
@@ -179,16 +188,17 @@ test("authorization and validation failures cannot masquerade as workload capaci
     assert.ok(reconcile(wrong, []).includes("unexpected-preclaim-refusal"));
     assert.equal(arrivalObservation([wrong], 1000, 0, 10).safeRefusals, 0);
   }
-  for (const sqlCode of ["fenced", "deadline", "limit"])
+  for (const sqlCode of ["fenced", "deadline", "limit"]) {
     assert.ok(
       reconcile(
         { ...attempt, preclaimRefused: false, effect: "not_dispatched", sqlCode },
         [],
       ).includes("unexpected-durable-refusal"),
     );
+  }
 });
 
-test("native attempt observations bind entered, completion and effect to the exact original proof without exporting proof material", () => {
+void test("native attempt observations bind entered, completion and effect to the exact original proof without exporting proof material", () => {
   const p: Proof = {
     executionRef: "e",
     requestRef: "r",
@@ -246,11 +256,12 @@ test("native attempt observations bind entered, completion and effect to the exa
     { ...r, effect: "completed" },
   ]) {
     const rejected = closureProjection(invalid, "c", p);
-    for (const key of ["nativeEntered", "nativeCompleted", "nativeEffect"])
+    for (const key of ["nativeEntered", "nativeCompleted", "nativeEffect"]) {
       assert.equal(Object.hasOwn(rejected, key), false);
+    }
   }
 });
-test("zero provider entries and authenticated native closure never excuse an unintentional unknown effect", () => {
+void test("zero provider entries and authenticated native closure never excuse an unintentional unknown effect", () => {
   const a: Attempt = {
     requestId: "r",
     executionRef: "e",

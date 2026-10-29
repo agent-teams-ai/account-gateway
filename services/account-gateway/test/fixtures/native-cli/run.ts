@@ -18,11 +18,16 @@ import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isNonemptyString } from "./joined-evidence.ts";
+import type { ClientPins, InstalledClients } from "./joined-evidence.ts";
 import { clientTests, goTestEvidence, repositoryTests as repositoryTestNames } from "./evidence.ts";
 
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 function check(condition: unknown, code: string): asserts condition {
-  if (!condition) throw new Error(code);
+  const accepted = Boolean(condition);
+  if (!accepted) {
+    throw new Error(code);
+  }
 }
 class CommandFailure extends Error {
   readonly output: string;
@@ -55,7 +60,9 @@ async function command(
       try {
         process.kill(-child.pid!, "SIGKILL");
       } catch {}
-    } else output += chunk.toString("utf8");
+    } else {
+      output += chunk.toString("utf8");
+    }
   };
   child.stdout.on("data", capture);
   child.stderr.on("data", capture);
@@ -68,8 +75,13 @@ async function command(
   const code = await new Promise<number | null>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", resolve);
-  }).finally(() => clearTimeout(timer));
-  if (expired || overflow || code !== (options.expected ?? 0)) throw new CommandFailure(output);
+  }).finally(() => {
+    clearTimeout(timer);
+  });
+  const commandFailed = () => expired || overflow;
+  if (commandFailed() || code !== (options.expected ?? 0)) {
+    throw new CommandFailure(output);
+  }
   return output;
 }
 async function port() {
@@ -79,8 +91,12 @@ async function port() {
     server.listen(0, "127.0.0.1", resolve);
   });
   const address = server.address();
-  check(address && typeof address !== "string", "local-port");
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  check(address !== null && typeof address !== "string", "local-port");
+  await new Promise<void>((resolve) => {
+    server.close(() => {
+      resolve();
+    });
+  });
   return address.port;
 }
 async function main() {
@@ -101,10 +117,10 @@ async function main() {
     artifacts = args.get("--artifacts");
   const repositoryTests = args.get("--repository-test-binary");
   check(
-    pgBin &&
-      binary &&
-      clientsFile &&
-      artifacts &&
+    isNonemptyString(pgBin) &&
+      isNonemptyString(binary) &&
+      isNonemptyString(clientsFile) &&
+      isNonemptyString(artifacts) &&
       [pgBin, binary, clientsFile, artifacts].every(isAbsolute),
     "absolute-inputs-required",
   );
@@ -136,9 +152,11 @@ async function main() {
     });
     socket.once("error", (error) => {
       socket.destroy();
-      "code" in error && error.code === "ENETUNREACH"
-        ? resolve()
-        : reject(new Error("external-probe-failed"));
+      if ("code" in error && error.code === "ENETUNREACH") {
+        resolve();
+      } else {
+        reject(new Error("external-probe-failed"));
+      }
     });
   });
   const network = {
@@ -150,8 +168,8 @@ async function main() {
   const evidence = join(artifacts, "network.json");
   writeFileSync(evidence, JSON.stringify(network), { mode: 0o600 });
   const pinnedBytes = readFileSync(fileURLToPath(new URL("./pins.json", import.meta.url))),
-    pins = JSON.parse(pinnedBytes.toString());
-  const clients = JSON.parse(readFileSync(clientsFile, "utf8"));
+    pins = JSON.parse(pinnedBytes.toString()) as ClientPins;
+  const clients = JSON.parse(readFileSync(clientsFile, "utf8")) as InstalledClients;
   check(
     clients.pinsSHA256 === sha256(pinnedBytes) && clients.clients.length === 2,
     "client-receipt-pins",
@@ -216,7 +234,7 @@ async function main() {
       env[`GATEWAY_NATIVE_CLIENT_${client}_DSN`] =
         `postgresql://postgres@127.0.0.1:${pgPort}/${name}?sslmode=disable`;
     }
-    if (repositoryTests) {
+    if (isNonemptyString(repositoryTests)) {
       for (const [variable, prefix] of [
         ["GATEWAY_NATIVE_CLAUDE_TEST_DSN", "gateway_claude_test_"],
         ["GATEWAY_NATIVE_CLAUDE_STREAM_TEST_DSN", "gateway_claude_stream_test_"],
@@ -237,7 +255,9 @@ async function main() {
           { timeout: 110_000 },
         );
       } catch (error) {
-        if (error instanceof CommandFailure) repositoryLog = error.output;
+        if (error instanceof CommandFailure) {
+          repositoryLog = error.output;
+        }
         throw error;
       }
       check(
@@ -265,7 +285,9 @@ async function main() {
         { timeout: 110_000 },
       );
     } catch (error) {
-      if (error instanceof CommandFailure) testLog = error.output;
+      if (error instanceof CommandFailure) {
+        testLog = error.output;
+      }
       throw error;
     }
     check(
@@ -296,12 +318,13 @@ async function main() {
       JSON.stringify(goTestEvidence(testLog, clientTests), null, 2) + "\n",
       { mode: 0o600 },
     );
-    if (repositoryTests)
+    if (isNonemptyString(repositoryTests)) {
       writeFileSync(
         join(artifacts, "repository-test.log"),
         JSON.stringify(goTestEvidence(repositoryLog, repositoryTestNames), null, 2) + "\n",
         { mode: 0o600 },
       );
+    }
     const result = {
       kind: "gateway-native-client-qualification/v1",
       outcome: success && stopped ? "pass" : "fail",
@@ -309,7 +332,7 @@ async function main() {
       nativeCommit: args.get("--native-commit"),
       gatewayCommit: args.get("--gateway-commit"),
       testBinarySHA256: sha256(readFileSync(binary)),
-      repositoryTestBinarySHA256: repositoryTests
+      repositoryTestBinarySHA256: isNonemptyString(repositoryTests)
         ? sha256(readFileSync(repositoryTests))
         : undefined,
       pinsSHA256: sha256(pinnedBytes),
@@ -333,7 +356,7 @@ async function main() {
     process.stdout.write(JSON.stringify(result) + "\n");
   }
 }
-main().catch((error) => {
+main().catch((error: unknown) => {
   process.stderr.write(
     JSON.stringify({
       outcome: "fail",

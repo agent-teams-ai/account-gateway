@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { childFailureFacts } from "./provision.ts";
 
-test("operator rejects unsupported trust modes before any fixture provisioning", () => {
+void test("operator rejects unsupported trust modes before any fixture provisioning", () => {
   const root = mkdtempSync("/tmp/ag-load-mode-");
   try {
     for (const mode of ["bind", "host"]) {
@@ -35,7 +35,7 @@ test("operator rejects unsupported trust modes before any fixture provisioning",
         .trim()
         .split("\n")
         .filter((line) => line.startsWith("{"))
-        .map((line) => JSON.parse(line));
+        .map((line) => JSON.parse(line) as unknown);
       assert.deepEqual(events, [
         {
           event: "fullstack_operator_failure",
@@ -54,7 +54,7 @@ test("operator rejects unsupported trust modes before any fixture provisioning",
   }
 });
 
-test("operator failure facts retain only capped sanitized native response records including TAP-prefixed lines", () => {
+void test("operator failure facts retain only capped sanitized native response records including TAP-prefixed lines", () => {
   const response = {
     event: "gateway_native_response_failure",
     phase: "transport",
@@ -105,7 +105,7 @@ test("operator failure facts retain only capped sanitized native response record
   });
   assert.deepEqual(empty.nativeResponseFailures, []);
 });
-test("operator native diagnostics reject incomplete records and remain inside the existing one-megabyte input cap", () => {
+void test("operator native diagnostics reject incomplete records and remain inside the existing one-megabyte input cap", () => {
   const response = JSON.stringify({ event: "gateway_native_response_failure", phase: "transport" });
   const status = { exitCode: 1, timedOut: false, outputOverflow: false };
   assert.deepEqual(childFailureFacts(response, status).nativeResponseFailures, []);

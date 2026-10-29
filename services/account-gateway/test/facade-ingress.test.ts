@@ -17,7 +17,12 @@ import type {
 import { randomBytes, randomUUID } from "node:crypto";
 import { createServer, request } from "node:http";
 import type { Server } from "node:http";
-import { facadeControlRoute, facadeBoundedReadRoute } from "../src/service-admission.ts";
+import {
+  facadeControlRoute,
+  facadeBoundedReadRoute,
+  NativeControlAdmission,
+  admitNativeCallback,
+} from "../src/service-admission.ts";
 import { createFacade, FacadeBearers } from "../src/facade.ts";
 import type { ManagementBearer } from "../src/facade.ts";
 import { IntentSecrets } from "../src/management-store.ts";
@@ -31,7 +36,6 @@ import type {
 } from "../src/management.ts";
 import { NativeFailure, NativeOAuthEnrollmentClient } from "../src/native-client.ts";
 import type { NativeAuthority } from "../src/native-authority.ts";
-import { NativeControlAdmission, admitNativeCallback } from "../src/service-admission.ts";
 import {
   composeServiceControl,
   composeServiceNative,
@@ -3402,20 +3406,23 @@ void test("source HTTP: Claude browser completion follows saved profile and qual
 void test("source HTTP: public execution callbacks hydrate authority, claim once and settle after revoke without pending routing state", async () => {
   let usageFault = true,
     recorded: lifecycleWire.UsageObservation | null = null;
+  const currentRecorded = (): lifecycleWire.UsageObservation | null => recorded;
   const callbackGate = new NativeControlAdmission(1, 0);
   const usage: UsageJournal = {
     observe: async () => recorded,
     append: async (_ctx, fact) => {
-      if (usageFault) throw new KernelError("unavailable");
+      if (usageFault) {
+        throw new KernelError("unavailable");
+      }
       recorded = fact;
     },
     list: async () => {
       throw new Error("not used");
     },
   };
-  const f = await sourceHTTP(false, false, usage, (req, res, work, refused) =>
-    admitNativeCallback(callbackGate, req, res, work, refused),
-  );
+  const f = await sourceHTTP(false, false, usage, (req, res, work, refused) => {
+    admitNativeCallback(callbackGate, req, res, work, refused);
+  });
   try {
     const creationId = randomUUID();
     const creation = await f.publicCall("/v1/accounts", {
@@ -3532,7 +3539,7 @@ void test("source HTTP: public execution callbacks hydrate authority, claim once
     const permit = (await admitted.json()) as {
       dispatch: { closure: NativeDispatchProof };
     };
-    assert.ok(permit.dispatch);
+    assert.ok(Boolean(permit.dispatch));
     // A later local invocation may be refused before inspecting an existing
     // accepted request. Its receipt cannot overwrite or settle that old effect.
     const releaseGate = await callbackGate.acquire(Date.now() + 5000),
@@ -3641,8 +3648,9 @@ void test("source HTTP: public execution callbacks hydrate authority, claim once
       ).status,
       200,
     );
-    assert.ok(recorded);
-    assert.equal((recorded as lifecycleWire.UsageObservation).revision, 2);
+    const completedUsage = currentRecorded();
+    assert.ok(completedUsage !== null);
+    assert.equal(completedUsage.revision, 2);
     assert.equal(
       (await f.kernel.request(f.context, proof.executionRef, proof.requestRef)).effect,
       "completed",

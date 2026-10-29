@@ -101,6 +101,7 @@ export function composeServiceCleanupTurn(
   signal?: AbortSignal,
 ) {
   let refreshTurn = false;
+  const aborted = (): boolean => signal?.aborted === true;
   return async () => {
     if (refreshTurn) {
       refreshTurn = false;
@@ -108,12 +109,18 @@ export function composeServiceCleanupTurn(
     }
     const started = performance.now();
     let acquired = false;
-    for (let count = 0; count < 8 && !signal?.aborted; count++) {
-      if (count && performance.now() - started >= 1000) break;
+    for (let count = 0; count < 8 && !aborted(); count++) {
+      if (count && performance.now() - started >= 1000) {
+        break;
+      }
       const claim = await kernel.claimCleanup(ctx, worker);
-      if (!claim) break;
+      if (!claim) {
+        break;
+      }
       acquired = refreshTurn = true;
-      if (signal?.aborted || !(await settle(claim))) break;
+      if (aborted() || !(await settle(claim))) {
+        break;
+      }
     }
     return acquired;
   };
@@ -927,9 +934,9 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     const handlersSettled = Promise.all([
       admission.stop(),
       nativeControls.stop(),
-      Promise.all([nativePreclaims.stop(), nativeCritical.stop(), nativeSettlements.stop()]).then(
-        () => undefined,
-      ),
+      nativePreclaims.stop(),
+      nativeCritical.stop(),
+      nativeSettlements.stop(),
     ]);
     readbackAbort.abort();
     denyAdmission();
@@ -1154,7 +1161,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
       enrollment,
       usage,
     );
-    handler = authority.createServer((req, res, work, refusedBeforeWork) =>
+    handler = authority.createServer((req, res, work, refusedBeforeWork) => {
       admitNativeCallback(
         nativeCallbackPurpose(req.url) === "settlement"
           ? nativeSettlements
@@ -1165,8 +1172,8 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
         res,
         work,
         refusedBeforeWork,
-      ),
-    );
+      );
+    });
     install();
     startupStage = "ready";
     await waitFor(() => ready, 10_000);
@@ -1211,7 +1218,9 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
       ctx,
       worker,
       async (claim) => {
-        if (isStopping()) return false; // An acquired lease remains outstanding until expiry.
+        if (isStopping()) {
+          return false;
+        } // An acquired lease remains outstanding until expiry.
         if (claim.scope.kind === "generation") {
           maintenancePhase = "cleanup_generation";
           return (await management.cleanupClaim(ctx, claim)) === "erased";
@@ -1250,7 +1259,9 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
             closed = false;
           }
         }
-        if (isStopping()) return false;
+        if (isStopping()) {
+          return false;
+        }
         maintenancePhase = "cleanup_settlement";
         await kernel.settleCleanup(ctx, claim.cleanupRef, worker, claim.token, closed);
         return closed;
@@ -1260,13 +1271,19 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     async function tick(): Promise<void> {
       maintenancePhase = "heartbeat";
       await kernel.heartbeat(ctx, worker);
-      if (isStopping()) return;
+      if (isStopping()) {
+        return;
+      }
       maintenancePhase = "reconcile";
       await management.reconcile(ctx);
-      if (isStopping()) return;
+      if (isStopping()) {
+        return;
+      }
       maintenancePhase = "cleanup_claim";
       const claimed = await cleanupTurn();
-      if (isStopping()) return;
+      if (isStopping()) {
+        return;
+      }
       maintenancePhase = "oauth_refresh";
       await management.refreshOAuth(ctx, claimed, readbackAbort.signal);
     }

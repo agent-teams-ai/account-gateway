@@ -28,6 +28,14 @@ import type { UsageJournal } from "../src/usage.ts";
 import { physicallyClosed, receipt as nativeReceipt } from "../src/native-wire.ts";
 import type { ServiceConfig } from "../src/service-config.ts";
 
+type RequestObservationRow = {
+  id: string;
+  effect: string;
+  transport_occupied: boolean;
+  closure_acked_at: unknown;
+  usage_revision: number;
+};
+
 const report = (value: object): void => {
   process.stdout.write(JSON.stringify(value) + "\n");
 };
@@ -117,7 +125,7 @@ async function run(): Promise<void> {
   if (cliBinary !== undefined) {
     assert.ok(isAbsolute(cliBinary));
     const expectedNative = process.env.AG_NATIVE_DEVICE_JOINED_NATIVE_COMMIT;
-    assert.ok(expectedNative && /^[a-f0-9]{40}$/.test(expectedNative));
+    assert.ok(expectedNative !== undefined && /^[a-f0-9]{40}$/.test(expectedNative));
     assert.equal(nativeHead, expectedNative);
     const pins = JSON.parse(
       await readFile(new URL("./fixtures/native-cli/pins.json", import.meta.url), "utf8"),
@@ -132,7 +140,7 @@ async function run(): Promise<void> {
       .digest("hex");
     assert.equal(cliSHA256, pin.binarySHA256);
     const evidencePath = process.env.AG_LOAD_NETWORK_EVIDENCE;
-    assert.ok(evidencePath && isAbsolute(evidencePath));
+    assert.ok(evidencePath !== undefined && evidencePath !== "" && isAbsolute(evidencePath));
     const evidence = JSON.parse(await readFile(evidencePath, "utf8")) as {
       networkNamespace?: string;
     };
@@ -147,13 +155,14 @@ async function run(): Promise<void> {
     assert.equal((await readFile("/proc/net/route", "utf8")).trim().split("\n").length, 1);
   }
   const gatewayRoot = fileURLToPath(new URL("../../../", import.meta.url));
-  const gatewayHead = cliBinary
-    ? (process.env.AG_NATIVE_DEVICE_JOINED_GATEWAY_COMMIT ?? "")
-    : execFileSync("git", ["rev-parse", "HEAD"], {
-        cwd: gatewayRoot,
-        encoding: "utf8",
-        timeout: 5000,
-      }).trim();
+  const gatewayHead =
+    cliBinary !== undefined
+      ? (process.env.AG_NATIVE_DEVICE_JOINED_GATEWAY_COMMIT ?? "")
+      : execFileSync("git", ["rev-parse", "HEAD"], {
+          cwd: gatewayRoot,
+          encoding: "utf8",
+          timeout: 5000,
+        }).trim();
   assert.match(gatewayHead, /^[a-f0-9]{40}$/);
   const sourceHashes = {
     harness: await sha256(new URL(import.meta.url)),
@@ -171,11 +180,13 @@ async function run(): Promise<void> {
   const scratchRoot =
     process.env.AG_NATIVE_DEVICE_JOINED_SCRATCH_ROOT ??
     resolvePath(dirname(fileURLToPath(import.meta.url)), "../../../tmp");
-  if (cliBinary)
+  if (cliBinary !== undefined) {
     assert.ok(
-      process.env.AG_NATIVE_DEVICE_JOINED_SCRATCH_ROOT,
+      process.env.AG_NATIVE_DEVICE_JOINED_SCRATCH_ROOT !== undefined &&
+        process.env.AG_NATIVE_DEVICE_JOINED_SCRATCH_ROOT !== "",
       "CLI mode requires task-owned scratch",
     );
+  }
   assert.ok(isAbsolute(scratchRoot));
   await mkdir(scratchRoot, { recursive: true, mode: 0o700 });
   const scratch = await mkdtemp(join(scratchRoot, "native-device-joined-"));
@@ -204,7 +215,9 @@ async function run(): Promise<void> {
     nativeDiagnosticBytes = 0;
   child.stderr!.on("data", (bytes: Buffer) => {
     nativeDiagnosticBytes += bytes.length;
-    if (diagnostic.length < 8192) diagnostic += bytes.toString();
+    if (diagnostic.length < 8192) {
+      diagnostic += bytes.toString();
+    }
   });
   childExit = new Promise((resolve) => {
     child!.once("error", () => {
@@ -267,9 +280,9 @@ async function run(): Promise<void> {
   const limits = {
     requests: 4,
     concurrency: 1,
-    requestBytes: cliBinary ? 1_048_576 : 4096,
-    outputBytes: cliBinary ? 1_048_576 : 4096,
-    tokens: cliBinary ? 65536 : 100,
+    requestBytes: cliBinary !== undefined ? 1_048_576 : 4096,
+    outputBytes: cliBinary !== undefined ? 1_048_576 : 4096,
+    tokens: cliBinary !== undefined ? 65536 : 100,
   };
   const limitsToken = randomBytes(32).toString("base64url");
   const publicToken = randomBytes(32).toString("base64url"),
@@ -343,17 +356,17 @@ async function run(): Promise<void> {
   const control = composeServiceControl(cfg, kernel, store, secrets, worker);
   const journalUsage = new PostgresUsageJournal(pool, randomBytes(32));
   let terminalUsageStarted: (() => void) | undefined;
-  const terminalUsageSeen = new Promise<void>((done) => {
-    terminalUsageStarted = done;
+  const terminalUsageSeen = new Promise<void>((resolve) => {
+    terminalUsageStarted = resolve;
   });
-  const terminalUsagePermit = new Promise<void>((done) => {
-    releaseTerminalUsage = done;
+  const terminalUsagePermit = new Promise<void>((resolve) => {
+    releaseTerminalUsage = resolve;
   });
   const usage: UsageJournal = {
     observe: journalUsage.observe.bind(journalUsage),
     list: journalUsage.list.bind(journalUsage),
     async append(ctx, fact) {
-      if (cliBinary && fact.revision === 2 && fact.effect === "completed") {
+      if (cliBinary !== undefined && fact.revision === 2 && fact.effect === "completed") {
         terminalUsageStarted!();
         await terminalUsagePermit;
       }
@@ -367,7 +380,7 @@ async function run(): Promise<void> {
     kernel,
     store,
     enrollment,
-    cliBinary ? usage : undefined,
+    cliBinary !== undefined ? usage : undefined,
   );
   const callbackOrigin = await listen(authority.createServer());
   const origin = await listen(
@@ -381,7 +394,7 @@ async function run(): Promise<void> {
       transport,
       accountLimits: control.accountLimits,
       intentHmacKey: randomBytes(32),
-      ...(cliBinary ? { usage } : {}),
+      ...(cliBinary !== undefined ? { usage } : {}),
     }),
   );
   child.stdin!.write(
@@ -580,7 +593,7 @@ async function run(): Promise<void> {
     "rename keeps observation and principal version",
   );
   let cliEvidence: Record<string, unknown> | undefined;
-  if (cliBinary) {
+  if (cliBinary !== undefined) {
     phase = "actual-codex-cli-through-real-authority";
     const inferenceOrigin = configured.inferenceOrigin;
     assert.equal(typeof inferenceOrigin, "string");
@@ -607,8 +620,9 @@ async function run(): Promise<void> {
     });
     assert.equal(access.operation.state, "applied");
     assert.equal(access.operation.result?.kind, "execution");
-    if (access.operation.result?.kind !== "execution")
+    if (!Object.is(access.operation.result.kind, "execution")) {
       throw new Error("missing execution authority");
+    }
     const executionRef = access.operation.result.executionRef;
     const requestedModel = "gpt-5.4";
     assert.notEqual(requestedModel, codexOAuthProfile.model);
@@ -651,8 +665,9 @@ async function run(): Promise<void> {
       overflow = false,
       timedOut = false,
       cliExited = false;
+    const clientState = () => ({ cliExited, overflow, timedOut });
     const killCLI = () => {
-      if (!cliExited && cliChild?.pid) {
+      if (!cliExited && cliChild?.pid !== undefined && cliChild.pid > 0) {
         try {
           process.kill(-cliChild.pid, "SIGKILL");
         } catch {}
@@ -663,7 +678,9 @@ async function run(): Promise<void> {
       if (outputBytes > 4_194_304) {
         overflow = true;
         killCLI();
-      } else output += bytes.toString();
+      } else {
+        output += bytes.toString();
+      }
     });
     cliChild.stderr!.on("data", (bytes: Buffer) => {
       diagnosticBytes += bytes.length;
@@ -673,21 +690,23 @@ async function run(): Promise<void> {
       }
     });
     const heartbeat = setInterval(() => {
-      void kernel.heartbeat(context, worker).catch(() => killCLI());
+      void kernel.heartbeat(context, worker).catch(() => {
+        killCLI();
+      });
     }, 5000);
     const timeout = setTimeout(() => {
       timedOut = true;
       killCLI();
     }, 55_000);
-    const cliExit = new Promise<number | null>((done, fail) => {
-      cliChild!.once("error", fail);
+    const cliExit = new Promise<number | null>((resolve, reject) => {
+      cliChild!.once("error", reject);
       cliChild!.once("close", (code) => {
         cliExited = true;
-        done(code);
+        resolve(code);
       });
     });
     // Capture a rejected spawn even while awaiting the independent SQL gate.
-    void cliExit.catch(() => undefined);
+    void cliExit.catch(() => {});
     let exit: number | null;
     let originalProof: Awaited<ReturnType<PostgresKernel["requestProof"]>>;
     try {
@@ -701,7 +720,7 @@ async function run(): Promise<void> {
         45_000,
       );
       const held = (
-        await pool.query(
+        await pool.query<RequestObservationRow>(
           `SELECT r.id,r.effect,r.transport_occupied,r.closure_acked_at,
         (SELECT max(revision) FROM ag_kernel.usage_observations u WHERE u.consumer=r.consumer AND u.execution_ref=r.execution_ref AND u.request_ref=r.id) AS usage_revision
         FROM ag_kernel.requests r WHERE r.consumer=$1 AND r.execution_ref=$2`,
@@ -722,7 +741,7 @@ async function run(): Promise<void> {
       originalProof = await kernel.requestProof(context, executionRef, held[0].id);
       assert.ok(originalProof);
       assert.equal(originalProof.worker, worker);
-      assert.equal(originalProof.native?.generation, journal.generation);
+      assert.equal(originalProof.native.generation, journal.generation);
       const heldRead = await fetch(
         ready.nativeOrigin + "/private/native/v1/transports/read-owner",
         {
@@ -765,7 +784,7 @@ async function run(): Promise<void> {
         await refused.arrayBuffer();
       }
       const afterRefusals = (
-        await pool.query(
+        await pool.query<RequestObservationRow>(
           "SELECT transport_occupied,closure_acked_at FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
           [consumerId, executionRef, held[0].id],
         )
@@ -781,7 +800,13 @@ async function run(): Promise<void> {
       );
       const terminalBeforeDurability = output.split("\n").some((line) => {
         try {
-          return JSON.parse(line).type === "turn.completed";
+          const parsed: unknown = JSON.parse(line);
+          return (
+            parsed !== null &&
+            typeof parsed === "object" &&
+            "type" in parsed &&
+            parsed.type === "turn.completed"
+          );
         } catch {
           return false;
         }
@@ -795,13 +820,15 @@ async function run(): Promise<void> {
       exit = await cliExit;
     } finally {
       releaseTerminalUsage!();
-      if (!cliExited) killCLI();
+      if (!clientState().cliExited) {
+        killCLI();
+      }
       clearInterval(heartbeat);
       clearTimeout(timeout);
       cliChild = undefined;
     }
     assert.ok(
-      exit === 0 && !overflow && !timedOut,
+      exit === 0 && !clientState().overflow && !clientState().timedOut,
       "pinned CLI must succeed with bounded private diagnostics",
     );
     let completed = false,
@@ -809,22 +836,25 @@ async function run(): Promise<void> {
     for (const line of output.split("\n")) {
       let event: { type?: string; item?: { type?: string; text?: string } };
       try {
-        event = JSON.parse(line);
+        event = JSON.parse(line) as typeof event;
       } catch {
         continue;
       }
-      if (event.type === "turn.completed") completed = true;
+      if (event.type === "turn.completed") {
+        completed = true;
+      }
       if (
         event.type === "item.completed" &&
         event.item?.type === "agent_message" &&
         event.item.text === "Controlled local fixture reply."
-      )
+      ) {
         answered = true;
+      }
     }
     output = "";
     assert.ok(completed && answered, "pinned CLI must parse the controlled terminal SSE result");
     const rows = (
-      await pool.query(
+      await pool.query<RequestObservationRow>(
         `SELECT id,effect,transport_occupied,closure_acked_at FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2`,
         [consumerId, executionRef],
       )
@@ -832,7 +862,7 @@ async function run(): Promise<void> {
     assert.equal(rows.length, 1);
     assert.equal(rows[0].effect, "completed");
     assert.equal(rows[0].transport_occupied, false);
-    assert.ok(rows[0].closure_acked_at);
+    assert.ok(Boolean(rows[0].closure_acked_at));
     const proof = await kernel.requestProof(context, executionRef, rows[0].id);
     assert.ok(proof);
     assert.deepEqual(proof, originalProof);
@@ -882,7 +912,7 @@ async function run(): Promise<void> {
     assert.equal(cleanup.scope.transports.length, 0);
     await kernel.settleCleanup(context, cleanup.cleanupRef, worker, cleanup.token, true);
     const terminal = (
-      await pool.query(
+      await pool.query<{ occupied: number; open: number; unresolved: number }>(
         `SELECT (SELECT count(*)::int FROM ag_kernel.requests WHERE consumer=$1 AND transport_occupied) AS occupied,
       (SELECT count(*)::int FROM ag_kernel.executions WHERE consumer=$1 AND state='open') AS open,
       (SELECT count(*)::int FROM ag_kernel.cleanup WHERE consumer=$1 AND state<>'done') AS unresolved`,
@@ -934,7 +964,9 @@ async function run(): Promise<void> {
   assert.equal(closed.plaintextCredentials, 0);
   assert.equal(closed.retainedDeviceMaterial, 0);
   assert.equal(await bounded(childExit), 0);
-  if (!cliBinary) assert.equal(diagnostic, "");
+  if (cliBinary === undefined) {
+    assert.equal(diagnostic, "");
+  }
   phase = "completed";
   const receipt = {
     phase,
@@ -963,7 +995,7 @@ async function run(): Promise<void> {
     provider: final,
     plaintextCredentials: 0,
     retainedDeviceMaterial: 0,
-    inferenceRequests: cliBinary ? 1 : 0,
+    inferenceRequests: cliBinary !== undefined ? 1 : 0,
     ...(cliEvidence ? { actualCLI: cliEvidence, nativeDiagnosticBytes } : {}),
   };
   await writeFile(join(scratch, "receipt.json"), JSON.stringify(receipt, null, 2) + "\n");
@@ -994,7 +1026,7 @@ try {
   process.exitCode = 1;
 } finally {
   releaseTerminalUsage?.();
-  if (cliChild?.pid) {
+  if (cliChild?.pid !== undefined && cliChild.pid > 0) {
     try {
       process.kill(-cliChild.pid, "SIGKILL");
     } catch {}

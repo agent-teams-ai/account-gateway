@@ -659,15 +659,23 @@ async function fixture(
           setTimeout(() => res.destroy(), 10);
           return;
         }
-        if (mode === "overflow") res.write(Buffer.alloc(limits.outputBytes + 1, 0x20));
+        if (mode === "overflow") {
+          res.write(Buffer.alloc(limits.outputBytes + 1, 0x20));
+        }
         if (mode === "large") {
           const closed = new AbortController(),
-            onClose = () => closed.abort();
+            onClose = () => {
+              closed.abort();
+            };
           res.once("close", onClose);
           try {
             for (const frame of streamFrames) {
-              if (res.destroyed) return;
-              if (!res.write(frame)) await once(res, "drain", { signal: closed.signal });
+              if (res.destroyed) {
+                return;
+              }
+              if (!res.write(frame)) {
+                await once(res, "drain", { signal: closed.signal });
+              }
             }
           } finally {
             res.removeListener("close", onClose);
@@ -769,9 +777,9 @@ async function fixture(
     },
   });
   const callbackBudget = new NativeControlAdmission(8, 22);
-  const callbacks = authority.createServer((req, res, work) =>
-    admitNativeCallback(callbackBudget, req, res, work),
-  );
+  const callbacks = authority.createServer((req, res, work) => {
+    admitNativeCallback(callbackBudget, req, res, work);
+  });
   callbackOrigin = await listen(callbacks);
   const callbackServers = [callbacks];
   const enrollment = await call("enrollment", {
@@ -787,7 +795,9 @@ async function fixture(
       ? {
           request: async (input) => {
             const response = await transport.request(input);
-            if (response.kind !== "stream") return response;
+            if (response.kind !== "stream") {
+              return response;
+            }
             return {
               ...response,
               body: (async function* () {
@@ -929,9 +939,9 @@ async function fixture(
           enrollment: { ...authority.configuration.enrollment, worker: delegateWorker },
         },
       });
-      const listener = delegateAuthority.createServer((req, res, work) =>
-        admitNativeCallback(callbackBudget, req, res, work),
-      );
+      const listener = delegateAuthority.createServer((req, res, work) => {
+        admitNativeCallback(callbackBudget, req, res, work);
+      });
       callbackServers.push(listener);
       callbackOrigin = await listen(listener);
       return new NativeHTTPTransport(delegateAuthority);
@@ -940,14 +950,16 @@ async function fixture(
     stop: async () => {
       barrier?.release.resolve();
       await stop(facade);
-      for (const listener of callbackServers) await stop(listener);
+      for (const listener of callbackServers) {
+        await stop(listener);
+      }
       await stop(peer);
       await callbackBudget.stop();
     },
   };
 }
 
-test(
+void test(
   "synthetic TCP/SQL: coalesced native HTTP reads preserve bounded delivery, exact bytes and acknowledged EOF",
   { timeout: 15_000 },
   async () => {
@@ -1000,7 +1012,7 @@ test(
   },
 );
 
-test(
+void test(
   "synthetic TCP/SQL: trusted preparation, first byte and terminal EOF survive a saturated data checkout lane",
   { timeout: 15_000 },
   async () => {
@@ -1022,7 +1034,7 @@ test(
     };
     const requestId = randomUUID(),
       request = f.request(requestId);
-    void request.catch(() => undefined);
+    void request.catch(() => {});
     const held: PoolClient[] = [],
       waiting: Promise<void>[] = [];
     try {
@@ -1032,16 +1044,19 @@ test(
         ...(await Promise.all(Array.from({ length: 6 }, () => inServiceLane("data", checkout)))),
       );
       const backends = await Promise.all(
-        held.map((client) => client.query("SELECT pg_backend_pid() AS pid")),
+        held.map((client) => client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")),
       );
       assert.equal(
-        new Set(backends.map((result) => result.rows[0].pid)).size,
+        new Set(backends.map((result) => result.rows.at(0)?.pid)).size,
         6,
         "six real physical data clients",
       );
       for (let n = 0; n < 8; n++) {
-        const pending = inServiceLane("data", checkout).then((client) => client.release());
-        void pending.catch(() => undefined);
+        const pending = (async () => {
+          const client = await inServiceLane("data", checkout);
+          client.release();
+        })();
+        void pending.catch(() => {});
         waiting.push(pending);
       }
       await assert.rejects(
@@ -1070,15 +1085,17 @@ test(
       assert.deepEqual(f.stats(), { posts: 1, entries: 1, permits: 1, ackCalls: 1 });
     } finally {
       resume.resolve();
-      held.forEach((client) => client.release());
+      held.forEach((client) => {
+        client.release();
+      });
       await Promise.allSettled(waiting);
       await f.stop();
-      await request.catch(() => undefined);
+      await request.catch(() => {});
     }
   },
 );
 
-test("synthetic TCP/SQL: positive owner closure releases concurrency1 for two requests in the SAME OPEN execution", async () => {
+void test("synthetic TCP/SQL: positive owner closure releases concurrency1 for two requests in the SAME OPEN execution", async () => {
   const f = await fixture();
   try {
     for (let i = 0; i < 2; i++) {
@@ -2172,7 +2189,7 @@ async function publicExecutionFixture(
     profile: selectedProfile.profile,
     displayName: "Fixture",
   });
-  assert.ok(account.accountRef);
+  assert.ok(isNonemptyString(account.accountRef));
   const candidate = await kernel.startCandidate(context, operationId, worker);
   assert.ok(candidate);
   const journal = await store.journal(
@@ -2212,7 +2229,7 @@ async function publicExecutionFixture(
     deadline: new Date(Date.now() + 45_000),
     limits,
   });
-  assert.ok(prepared.executionRef);
+  assert.ok(isNonemptyString(prepared.executionRef));
   const saved = await kernel.savedExecution(context, prepared.executionRef);
   const controlToken = "synthetic-public-control-" + randomUUID();
   const bearers = new FacadeBearers([
@@ -2227,7 +2244,8 @@ async function publicExecutionFixture(
   ]);
   bearers.configureExecutionKey(randomBytes(32));
   const control = bearers.resolve(controlToken);
-  assert.ok(control && control.role === "consumer-control");
+  assert.ok(control);
+  assert.equal(control.role, "consumer-control");
   const executionBearer = bearers.upsertExecution(control, saved);
   const authority = new NativeAuthority({
     kernel,
@@ -2334,8 +2352,9 @@ void test("public native callbacks retain alternate OpenRouter attribution and e
       originalProof.executionRef,
       originalProof.requestRef,
     );
-    assert.equal(initial?.model, requestedModel);
-    assert.equal(initial?.effect, "dispatch_started");
+    assert.ok(initial);
+    assert.equal(initial.model, requestedModel);
+    assert.equal(initial.effect, "dispatch_started");
     const replay = await f.call("public-admit", { ...f.tuple, requestedModel });
     assert.equal(replay.status, 200);
     nativeObject(await replay.json(), ["consumerId", "admission", "status"]);
@@ -2415,11 +2434,12 @@ void test("public native callbacks retain alternate OpenRouter attribution and e
       originalProof.executionRef,
       originalProof.requestRef,
     );
-    assert.equal(observed?.model, requestedModel);
-    assert.equal(observed?.effect, "completed");
-    assert.equal(observed?.completeness, "complete");
-    assert.equal(observed?.inputTokens, 7);
-    assert.equal(observed?.outputTokens, 3);
+    assert.ok(observed);
+    assert.equal(observed.model, requestedModel);
+    assert.equal(observed.effect, "completed");
+    assert.equal(observed.completeness, "complete");
+    assert.equal(observed.inputTokens, 7);
+    assert.equal(observed.outputTokens, 3);
     const occupied = await pool.query<{ transport_occupied: boolean }>(
       "SELECT transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
       [f.context.consumerId, originalProof.executionRef, originalProof.requestRef],

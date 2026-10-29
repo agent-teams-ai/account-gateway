@@ -13,7 +13,7 @@ import { connect } from "node:net";
 import type { Socket } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import { monitorEventLoopDelay } from "node:perf_hooks";
-import pg from "pg";
+import { Pool } from "pg";
 import {
   createManagementClient,
   createConsumerControlClient,
@@ -38,6 +38,7 @@ import {
   safeError,
   arrivalObservation,
   capacityRefusal,
+  isNonemptyString,
 } from "./model.ts";
 import type { Attempt, LedgerEvent, Proof, Scenario, Outcome } from "./model.ts";
 import { loadFixture, sourceManifest, sha256 } from "./fixture.ts";
@@ -98,13 +99,16 @@ function sdkArtifactManifest() {
     files: { path: string; sha256: string }[] = [];
   let inspected = 0;
   const walk = (directory: string) => {
-    for (const name of readdirSync(directory).sort()) {
-      if (name === "node_modules") continue;
+    for (const name of readdirSync(directory).toSorted()) {
+      if (name === "node_modules") {
+        continue;
+      }
       const path = join(directory, name),
         state = lstatSync(path);
       check(++inspected <= 512 && !state.isSymbolicLink(), "sdk-artifact-layout");
-      if (state.isDirectory()) walk(path);
-      else if (state.isFile() && name.endsWith(".js")) {
+      if (state.isDirectory()) {
+        walk(path);
+      } else if (state.isFile() && name.endsWith(".js")) {
         check(files.length < 256 && state.size < bounds.streamBytes, "sdk-artifact-bound");
         files.push({ path: relative(root, path), sha256: sha256(readFileSync(path)) });
       }
@@ -134,8 +138,12 @@ async function freeOrigin() {
     server.listen(0, "127.0.0.1", resolve);
   });
   const address = server.address();
-  check(address && typeof address === "object", "free-origin");
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  check(address !== null && typeof address === "object", "free-origin");
+  await new Promise<void>((resolve) => {
+    server.close(() => {
+      resolve();
+    });
+  });
   return "http://127.0.0.1:" + address.port;
 }
 async function until(predicate: () => boolean | Promise<boolean>, ms: number, phase: string) {
@@ -151,7 +159,7 @@ function provider(f: Fixture, credential: string) {
     [fileURLToPath(new URL("./provider.ts", import.meta.url))],
     { cwd: "/", env: {}, stdio: ["pipe", "pipe", "ignore"], detached: false },
   );
-  child.stdin.on("error", () => undefined);
+  child.stdin.on("error", () => {});
   const events: LedgerEvent[] = [],
     armed = new Set<string>();
   let ready = "",
@@ -226,12 +234,14 @@ function provider(f: Fixture, credential: string) {
       send({ command: "release", requestId });
     },
     async stop() {
-      if (child.stdin.writable) child.stdin.end('{"command":"stop"}\n');
+      if (child.stdin.writable) {
+        child.stdin.end('{"command":"stop"}\n');
+      }
       try {
         check((await bounded(exited, 5000, "provider-stop")) === 0, "provider-exit");
       } catch (error) {
         child.kill("SIGKILL");
-        await bounded(exited, 1000, "provider-kill").catch(() => undefined);
+        await bounded(exited, 1000, "provider-kill").catch(() => {});
         throw error;
       }
     },
@@ -300,12 +310,23 @@ function terminal(bytes: Buffer) {
   );
 }
 
-test(
+function requireCompletions(group: readonly Attempt[], expected?: number) {
+  check(
+    group.filter((a) => a.effect === "completed").length >= (expected ?? 1),
+    "expected-completions",
+  );
+  check(
+    group.every((a) => a.effect === "completed" || capacityRefusal(a)),
+    "unexpected-load-effect",
+  );
+}
+
+void test(
   "bounded actual production service, production native CLI, SDK, PG17.10 and controlled TLS load",
   { timeout: bounds.wallMs },
   async (t) => {
     const manifestPath = process.env.AG_LOAD_MANIFEST;
-    check(manifestPath, "explicit-manifest-required");
+    check(isNonemptyString(manifestPath), "explicit-manifest-required");
     const f = loadFixture(manifestPath),
       source = sourceManifest(workspace),
       sdkArtifact = sdkArtifactManifest(),
@@ -313,8 +334,13 @@ test(
     const eventLoop = monitorEventLoopDelay({ resolution: 20 });
     eventLoop.enable();
     const selector = process.env.AG_LOAD_SCENARIOS;
-    check(!selector || scenarios.includes(selector as Scenario), "scenario-selector");
-    const selected: readonly Scenario[] = selector ? [selector as Scenario] : baselineScenarios;
+    check(
+      !isNonemptyString(selector) || scenarios.includes(selector as Scenario),
+      "scenario-selector",
+    );
+    const selected: readonly Scenario[] = isNonemptyString(selector)
+      ? [selector as Scenario]
+      : baselineScenarios;
     const scaled = selected.some((s) =>
       ["scale-streams", "scale-arrivals", "sustained-arrivals", "large-context"].includes(s),
     );
@@ -346,21 +372,21 @@ test(
       sampling = false,
       samplingWork: Promise<void> = Promise.resolve();
     let sampleTimer: ReturnType<typeof setInterval> | undefined;
-    const kernel = new pg.Pool({
+    const kernel = new Pool({
       connectionString: f.kernelDSN,
       max: 4,
       connectionTimeoutMillis: 5000,
       query_timeout: 5000,
       statement_timeout: 5000,
     });
-    const nativeDB = new pg.Pool({
+    const nativeDB = new Pool({
       connectionString: f.nativeDSN,
       max: 1,
       connectionTimeoutMillis: 5000,
       query_timeout: 5000,
     });
-    kernel.on("error", () => undefined);
-    nativeDB.on("error", () => undefined);
+    kernel.on("error", () => {});
+    nativeDB.on("error", () => {});
     const dummy = token(),
       upstream = provider(f, dummy);
     let service: Service | undefined, stopped: string | undefined, setupFailure: string | undefined;
@@ -381,7 +407,9 @@ test(
     let management: ReturnType<typeof createManagementClient>,
       control: ReturnType<typeof createConsumerControlClient>;
     async function sample() {
-      if (sampling) return;
+      if (sampling) {
+        return;
+      }
       sampling = true;
       try {
         const memory = process.memoryUsage(),
@@ -396,11 +424,12 @@ test(
           nodeCPUUserMicros: cpu.user,
           nodeCPUSystemMicros: cpu.system,
         };
-        if (eventLoop.count)
+        if (eventLoop.count) {
           Object.assign(observation, {
             eventLoopP99Ms: eventLoop.percentile(99) / 1e6,
             eventLoopMaxMs: eventLoop.max / 1e6,
           });
+        }
         eventLoop.reset();
         if (service) {
           try {
@@ -413,8 +442,12 @@ test(
               const status = readFileSync("/proc/" + binding.pid + "/status", "utf8").match(
                 /^VmRSS:\s+(\d+) kB$/m,
               );
-              if (status) observation.nativeRSS = Number(status[1]) * 1024;
-            } else observation.nativeBindingChanged = true;
+              if (status) {
+                observation.nativeRSS = Number(status[1]) * 1024;
+              }
+            } else {
+              observation.nativeBindingChanged = true;
+            }
           } catch {
             observation.nativeUnavailable = true;
           }
@@ -422,7 +455,7 @@ test(
         const queryAt = Date.now();
         try {
           const sql = (
-            await kernel.query(
+            await kernel.query<{ occupied: number; active: number; lock_waiters: number }>(
               `SELECT (SELECT count(*)::int FROM ag_kernel.requests WHERE consumer=$1 AND transport_occupied) AS occupied,
           (SELECT count(*)::int FROM pg_stat_activity WHERE datname=current_database() AND state='active') AS active,
           (SELECT count(*)::int FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock') AS lock_waiters`,
@@ -460,7 +493,7 @@ test(
     }
     async function readTerminalCounts(): Promise<Record<string, number>> {
       return (
-        await kernel.query(
+        await kernel.query<Record<string, number>>(
           `SELECT
       (SELECT count(*)::int FROM ag_kernel.executions WHERE consumer=$1 AND state='open') AS open,
       (SELECT count(*)::int FROM ag_kernel.executions WHERE consumer=$1 AND state='closed') AS closed,
@@ -473,14 +506,15 @@ test(
     }
     function captureProof(r: SQLRequest): Proof | undefined {
       if (
-        !r.closure_token ||
-        !r.worker ||
-        !r.native_origin_ref ||
-        !r.engine_incarnation ||
-        !r.request_nonce ||
-        !r.descriptor_generation
-      )
+        !isNonemptyString(r.closure_token) ||
+        !isNonemptyString(r.worker) ||
+        !isNonemptyString(r.native_origin_ref) ||
+        !isNonemptyString(r.engine_incarnation) ||
+        !isNonemptyString(r.request_nonce) ||
+        !isNonemptyString(r.descriptor_generation)
+      ) {
         return;
+      }
       const p: Proof = {
         executionRef: r.execution_ref,
         requestRef: r.id,
@@ -498,18 +532,24 @@ test(
         !original || JSON.stringify(original) === JSON.stringify(p),
         "original-claim-proof-changed",
       );
-      if (!original) originalProofs.set(r.id, p);
+      if (!original) {
+        originalProofs.set(r.id, p);
+      }
       return original ?? p;
     }
     async function observe(a: Attempt) {
       const r = await row(a.requestId);
       a.providerEntries = entries(upstream.events, a.requestId);
-      if (!r) return;
+      if (!r) {
+        return;
+      }
       a.effect = r.effect;
       a.sqlCode = r.code ?? undefined;
       a.occupied = r.transport_occupied;
       const p = captureProof(r);
-      if (!p) return;
+      if (!p) {
+        return;
+      }
       try {
         const response = await fetch(nativeOrigin + "/private/native/v1/transports/read-owner", {
           method: "POST",
@@ -526,12 +566,13 @@ test(
         const b = Buffer.from(await response.arrayBuffer());
         check(b.length <= 32_768, "native-read-bound");
         Object.assign(a, closureProjection(JSON.parse(b.toString("utf8")), consumerId, p));
-        if (service)
+        if (service) {
           check(
             p.native.originRef === service.binding.originRef &&
               p.native.engineIncarnation === service.binding.incarnation,
             "original-live-native-binding",
           );
+        }
       } catch {
         a.exactProof = false;
       }
@@ -541,17 +582,21 @@ test(
       do {
         // Read-only observation has its own finite concurrency. It must not flood
         // the eight native control handlers whose availability is being measured.
-        for (let index = 0; index < group.length; index += 4)
+        for (let index = 0; index < group.length; index += 4) {
           await Promise.all(group.slice(index, index + 4).map(observe));
+        }
         if (
           group.every(
             (a) =>
               a.occupied !== true &&
               (!entries(upstream.events, a.requestId) ||
-                (a.nativeClosed && a.nativeAcknowledged && a.exactProof)),
+                (Boolean(a.nativeClosed) &&
+                  Boolean(a.nativeAcknowledged) &&
+                  a.exactProof === true)),
           )
-        )
+        ) {
           return;
+        }
         await delay(50);
       } while (Date.now() < deadline);
       throw new Error("load:exact-closure-drain");
@@ -563,7 +608,9 @@ test(
             executionCount < bounds.executions + bounds.churnPreparations,
           "churn-preparation-bound",
         );
-      } else check(executionCount < bounds.executions, "execution-bound");
+      } else {
+        check(executionCount < bounds.executions, "execution-bound");
+      }
       const input: Prepare = {
         operationId: next(),
         invocationRef: next(),
@@ -602,20 +649,27 @@ test(
       }
     }
     async function recover(original: Prepared) {
-      if (original.executionRef) return;
+      if (isNonemptyString(original.executionRef)) {
+        return;
+      }
       // Read-only idempotent operation lookup recovers an accepted preparation
       // whose bearer issuance was refused. No second preparation is attempted.
       const operation = await control.operation(original.input.operationId);
-      if (operation.state === "applied" && operation.result?.kind === "execution")
+      if (operation.state === "applied" && operation.result?.kind === "execution") {
         original.executionRef = operation.result.executionRef;
+      }
     }
     async function closePrepared(original: Prepared) {
-      if (original.closed) return;
+      if (original.closed === true) {
+        return;
+      }
       original.closeStage = "recover-original";
-      if (!original.executionRef) await recover(original);
-      check(original.executionRef, "recover-original-preparation");
+      if (!isNonemptyString(original.executionRef)) {
+        await recover(original);
+      }
+      check(isNonemptyString(original.executionRef), "recover-original-preparation");
       const reason = attempts.some(
-        (a) => a.executionRef === original.executionRef && a.intentionalCancel,
+        (a) => a.executionRef === original.executionRef && a.intentionalCancel !== undefined,
       )
         ? "cancelled"
         : "completed";
@@ -636,7 +690,7 @@ test(
         // Only cap-denied original refs lack an execution bearer. Their unique
         // original policy subject has existing consumer-control fence authority;
         // fencing it queues real cleanup without manufacturing a bearer or ACK.
-        check(original.refused, "unissued-close-scope");
+        check(Boolean(original.refused), "unissued-close-scope");
         original.closeStage = "sdk-original-subject-fence";
         const operation = await control.fence({
           operationId: input.operationId,
@@ -654,14 +708,15 @@ test(
     }
     async function closeAndWait(group: readonly Prepared[], name: string) {
       const began = Date.now();
-      for (let index = 0; index < group.length; index += 8)
+      for (let index = 0; index < group.length; index += 8) {
         await Promise.all(group.slice(index, index + 8).map(closePrepared));
-      const refs = group.map((p) => p.executionRef).filter((ref): ref is string => !!ref);
+      }
+      const refs = group.map((p) => p.executionRef).filter((ref): ref is string => Boolean(ref));
       let counts: Record<string, number> = {};
       await until(
         async () => {
           counts = (
-            await kernel.query(
+            await kernel.query<Record<string, number>>(
               `SELECT
         (SELECT count(*)::int FROM ag_kernel.executions WHERE consumer=$1 AND ref=ANY($2::uuid[]) AND state='open') AS open,
         (SELECT count(*)::int FROM ag_kernel.executions WHERE consumer=$1 AND ref=ANY($2::uuid[]) AND state='closed') AS closed,
@@ -744,7 +799,11 @@ test(
       });
       const work = (async () => {
         try {
-          const payload = body(f.runId, a.requestId, scenario === "large-context" ? 1_000_000 : 0);
+          const payload = body(
+            f.runId,
+            a.requestId,
+            Object.is(scenario, "large-context") ? 1_000_000 : 0,
+          );
           a.startedAt = Date.now(); // Actual SDK entry, after provider arming and body construction.
           const response = await client.request(
             execution.executionRef,
@@ -772,7 +831,9 @@ test(
         } catch (error) {
           a.response = "error";
           a.error = safeError(error);
-          if (error instanceof GatewayError) a.safeCode = error.diagnostic?.code;
+          if (error instanceof GatewayError) {
+            a.safeCode = error.diagnostic?.code;
+          }
           a.preclaimRefused =
             error instanceof GatewayError &&
             error.code === "safe_error" &&
@@ -810,7 +871,9 @@ test(
             header = Buffer.concat([header, chunk]);
             check(header.length < 131_072, "raw-header-bound");
             const end = header.indexOf("\r\n\r\n");
-            if (end < 0) return;
+            if (end < 0) {
+              return;
+            }
             const head = header.subarray(0, end).toString("ascii");
             check(
               head.startsWith("HTTP/1.1 200") && head.toLowerCase().includes("text/event-stream"),
@@ -822,7 +885,9 @@ test(
             a.bytes += header.length - end - 4;
             header = Buffer.alloc(0);
             socket.pause();
-          } else a.bytes += chunk.length;
+          } else {
+            a.bytes += chunk.length;
+          }
           totalBytes += chunk.length;
           check(
             a.bytes <= bounds.streamBytes + 131_072 && totalBytes <= bounds.totalBytes,
@@ -863,19 +928,9 @@ test(
         },
       };
     }
-    function requireCompletions(group: readonly Attempt[], expected?: number) {
-      check(
-        group.filter((a) => a.effect === "completed").length >= (expected ?? 1),
-        "expected-completions",
-      );
-      check(
-        group.every((a) => a.effect === "completed" || capacityRefusal(a)),
-        "unexpected-load-effect",
-      );
-    }
     try {
       const state = (
-        await kernel.query(
+        await kernel.query<{ db: string; version: string }>(
           "SELECT current_database() AS db,current_setting('server_version') AS version",
         )
       ).rows[0];
@@ -892,7 +947,7 @@ test(
         "new-kernel-database",
       );
       const nativeState = (
-        await nativeDB.query(
+        await nativeDB.query<{ db: string; version: string }>(
           "SELECT current_database() AS db,current_setting('server_version') AS version",
         )
       ).rows[0];
@@ -905,10 +960,11 @@ test(
       const directory = new URL("../../migrations/", import.meta.url),
         migrationFiles = readdirSync(directory)
           .filter((name) => /^\d{3}_.*\.sql$/.test(name))
-          .sort();
+          .toSorted();
       check(migrationFiles.length >= 8, "complete-kernel-migration-set");
-      for (const name of migrationFiles)
+      for (const name of migrationFiles) {
         await kernel.query(readFileSync(new URL(name, directory), "utf8"));
+      }
       const baseURL = await upstream.origin();
       facadeOrigin = await freeOrigin();
       callbackOrigin = await freeOrigin();
@@ -1141,9 +1197,9 @@ test(
                 details.secondsPerRate = 2;
                 for (const rate of [1, 4, 8, 16, 32]) {
                   const runs: Awaited<ReturnType<typeof launch>>[] = [],
-                    phase = Date.now();
+                    arrivalPhase = Date.now();
                   for (let i = 0; i < rate * 2; i++) {
-                    const offeredAt = phase + Math.floor((i * 1000) / rate);
+                    const offeredAt = arrivalPhase + Math.floor((i * 1000) / rate);
                     await delay(Math.max(0, offeredAt - Date.now()));
                     runs.push(
                       await launch(
@@ -1165,7 +1221,9 @@ test(
                 );
                 details.cleanup = cleanupObservations.at(-1);
                 executions.length = 0;
-                for (const accountRef of accounts) executions.push(await prepare(accountRef));
+                for (const accountRef of accounts) {
+                  executions.push(await prepare(accountRef));
+                }
                 details.freshExecutions = executions.length;
               } else if (scenario === "slow-reader") {
                 const execution = await prepare(accounts[0]),
@@ -1189,8 +1247,9 @@ test(
                         (e) =>
                           e.event === "budget" || e.event === "close" || e.event === "violation",
                       )
-                    )
+                    ) {
                       break;
+                    }
                     await delay(25);
                   }
                   details.pauseMs = Date.now() - run.attempt.firstByteAt!;
@@ -1234,7 +1293,7 @@ test(
                   "cancel-provider-entry",
                 );
                 const original = await row(run.attempt.requestId);
-                check(original?.transport_occupied, "cancel-original-occupied");
+                check(original?.transport_occupied === true, "cancel-original-occupied");
                 run.socket.destroy();
                 await until(() => run.ended, 3000, "raw-disconnect-close");
                 await drain([run.attempt]);
@@ -1275,7 +1334,8 @@ test(
                 sdk.attempt.intentionalCancel = "sdk-abort";
                 await until(
                   () =>
-                    !!sdk.attempt.firstByteAt &&
+                    sdk.attempt.firstByteAt !== undefined &&
+                    sdk.attempt.firstByteAt !== 0 &&
                     entries(upstream.events, sdk.attempt.requestId) === 1,
                   10_000,
                   "sdk-cancel-first-byte",
@@ -1345,7 +1405,9 @@ test(
                   details.heldProviderEntries = 16;
                   details.excessAttempts = overflow.length;
                   const closing = held.slice(0, 8);
-                  for (const r of closing) r.attempt.intentionalCancel = "sdk-close";
+                  for (const r of closing) {
+                    r.attempt.intentionalCancel = "sdk-close";
+                  }
                   await closeAndWait(
                     prepared.filter((p) =>
                       executions.slice(0, 8).some((e) => e.executionRef === p.executionRef),
@@ -1361,7 +1423,9 @@ test(
                   details.concurrentSDKCloses = 8;
                   details.closeCleanup = cleanupObservations.at(-1);
                 } finally {
-                  for (const r of held) upstream.release(r.attempt.requestId);
+                  for (const r of held) {
+                    upstream.release(r.attempt.requestId);
+                  }
                   await Promise.all(held.map((r) => r.work));
                 }
                 await drain(attempts.slice(before));
@@ -1377,17 +1441,16 @@ test(
               } else if (scenario === "bearer-churn") {
                 const beforeEntries = upstream.events.filter((e) => e.event === "entry").length,
                   issued: Execution[] = [];
-                for (let i = 0; i < bounds.churnPreparations; i++)
+                for (let i = 0; i < bounds.churnPreparations; i++) {
                   issued.push(await prepare(accounts[i % accounts.length], true));
+                }
                 check(issued.length === 130 && executionCount > 128, "stateless-bearer-churn");
-                const durableExecutions = Number(
-                  (
-                    await kernel.query(
-                      "SELECT count(*)::int AS n FROM ag_kernel.executions WHERE consumer=$1",
-                      [consumerId],
-                    )
-                  ).rows[0].n,
-                );
+                const durableExecutions = (
+                  await kernel.query<{ n: number }>(
+                    "SELECT count(*)::int AS n FROM ag_kernel.executions WHERE consumer=$1",
+                    [consumerId],
+                  )
+                ).rows[0].n;
                 check(durableExecutions === executionCount, "churn-exact-durable-executions");
                 const original = executions[31],
                   readback = await control.runAccess(original.prepare);
@@ -1436,19 +1499,21 @@ test(
                       );
                       held.push(...batch);
                       await until(
-                        () => batch.every((r) => !!r.attempt.firstByteAt),
+                        () =>
+                          batch.every(
+                            (r) =>
+                              r.attempt.firstByteAt !== undefined && r.attempt.firstByteAt !== 0,
+                          ),
                         10_000,
                         "scale-stream-admission",
                       );
                     }
-                    const occupied = Number(
-                      (
-                        await kernel.query(
-                          "SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1 AND transport_occupied",
-                          [consumerId],
-                        )
-                      ).rows[0].n,
-                    );
+                    const occupied = (
+                      await kernel.query<{ n: number }>(
+                        "SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1 AND transport_occupied",
+                        [consumerId],
+                      )
+                    ).rows[0].n;
                     check(
                       occupied === level &&
                         held.every((r) => entries(upstream.events, r.attempt.requestId) === 1),
@@ -1472,25 +1537,27 @@ test(
                       );
                       maximumControlMs = Math.max(maximumControlMs, Date.now() - progressAt);
                       check(
-                        Number(
-                          (
-                            await kernel.query(
-                              "SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1 AND transport_occupied",
-                              [consumerId],
-                            )
-                          ).rows[0].n,
-                        ) === level,
+                        (
+                          await kernel.query<{ n: number }>(
+                            "SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1 AND transport_occupied",
+                            [consumerId],
+                          )
+                        ).rows[0].n === level,
                         "scale-held-occupancy",
                       );
                       await sample();
                     } while (Date.now() - heldAt < holdMs);
                     check(
-                      held.every((r) => !r.attempt.finishedAt),
+                      held.every(
+                        (r) => r.attempt.finishedAt === undefined || r.attempt.finishedAt === 0,
+                      ),
                       "scale-streams-remain-open",
                     );
                     const releaseAt = Date.now();
                     // Simultaneous completion exercises bounded settlement queuing.
-                    for (const run of held) upstream.release(run.attempt.requestId);
+                    for (const run of held) {
+                      upstream.release(run.attempt.requestId);
+                    }
                     await Promise.all(held.map((r) => r.work));
                     await drain(held.map((r) => r.attempt));
                     requireCompletions(
@@ -1507,7 +1574,9 @@ test(
                       completed: held.filter((r) => r.attempt.effect === "completed").length,
                     });
                   } finally {
-                    for (const run of held) upstream.release(run.attempt.requestId);
+                    for (const run of held) {
+                      upstream.release(run.attempt.requestId);
+                    }
                     await Promise.all(held.map((r) => r.work));
                   }
                 }
@@ -1569,7 +1638,7 @@ test(
                       const completedDuringWindow = started.filter(
                         ({ attempt: a }) =>
                           a.effect === "completed" &&
-                          a.validatedStream &&
+                          a.validatedStream === true &&
                           a.finishedAt !== undefined &&
                           a.finishedAt >= start + offset &&
                           a.finishedAt < start + offset + 10_000,
@@ -1598,7 +1667,7 @@ test(
                 details.interpretation = sustained
                   ? "one-minute-continuity-with-measured-completions-and-safe-refusals"
                   : "arrival-overload-characterization-not-1000-rps-capacity-claim";
-              } else if (scenario === "large-context") {
+              } else if (Object.is(scenario, "large-context")) {
                 const achieved: Record<string, number>[] = [];
                 for (const level of [1, 8, 32, 64]) {
                   const start = Date.now(),
@@ -1627,15 +1696,18 @@ test(
                 !upstream.failed && !upstream.events.some((e) => e.event === "violation"),
                 "provider-ledger-valid",
               );
-              for (const a of group)
+              for (const a of group) {
                 faults.push(
                   ...reconcile(a, upstream.events).map((fault) => a.requestId + ":" + fault),
                 );
+              }
               check(faults.length === 0, "scenario-invariant");
             } catch (error) {
-              if (outcome !== "inconclusive") outcome = "fail";
+              if (outcome !== "inconclusive") {
+                outcome = "fail";
+              }
               faults.push(safeError(error));
-              throw new Error("load:" + scenario + "-" + outcome);
+              throw new Error("load:" + scenario + "-" + outcome, { cause: error });
             } finally {
               results.push({
                 scenario,
@@ -1661,23 +1733,27 @@ test(
         if (
           typeof stage === "string" &&
           ["starting", "ready", "heartbeat", "facade-listen"].includes(stage)
-        )
+        ) {
           setupDetails.startupStage = stage;
-        const cause = error.cause;
+        }
+        const cause: unknown = error.cause;
         if (
-          cause &&
+          cause !== null &&
           typeof cause === "object" &&
           "code" in cause &&
           typeof cause.code === "string" &&
           /^[A-Za-z0-9_]{1,40}$/.test(cause.code)
-        )
+        ) {
           setupDetails.causeCode = cause.code;
+        }
       }
-      throw new Error("load:" + setupFailure);
+      throw new Error("load:" + setupFailure, { cause: error });
     } finally {
       phase = "drain";
-      for (const socket of rawSockets) socket.destroy();
-      for (const event of upstream.events)
+      for (const socket of rawSockets) {
+        socket.destroy();
+      }
+      for (const event of upstream.events) {
         if (event.event === "entry") {
           try {
             upstream.release(event.requestId);
@@ -1685,11 +1761,10 @@ test(
             /* stopped provider */
           }
         }
-      await bounded(Promise.allSettled([...pending]), bounds.drainMs, "final-data-drain").catch(
-        () => {
-          setupFailure ??= "final-data-drain";
-        },
-      );
+      }
+      await bounded(Promise.allSettled(pending), bounds.drainMs, "final-data-drain").catch(() => {
+        setupFailure ??= "final-data-drain";
+      });
       if (service) {
         await drain(attempts).catch(() => {
           setupFailure ??= "final-exact-closure-drain";
@@ -1705,11 +1780,12 @@ test(
               "final-no-open-or-unresolved-work",
             );
             await drain(attempts);
-            for (const a of attempts)
+            for (const a of attempts) {
               check(
                 reconcile(a, upstream.events).length === 0,
                 "final-effects-and-closure-preserved",
               );
+            }
           } catch (error) {
             setupFailure ??= "final-durable-cleanup";
             setupDetails.cleanupCode = safeError(error);
@@ -1733,16 +1809,19 @@ test(
           .trim()
           .split("\n")
           .filter(Boolean)
-          .map((line) => JSON.parse(line));
+          .map((line) => JSON.parse(line) as unknown);
         ledgerMatches = JSON.stringify(disk) === JSON.stringify(upstream.events);
       } catch {
         setupFailure ??= "provider-ledger-file";
       }
       const finalSource = sourceManifest(workspace);
       const finalSDKArtifact = sdkArtifactManifest();
-      if (finalSource.sha256 !== source.sha256) setupFailure ??= "source-changed-during-run";
-      if (finalSDKArtifact.sha256 !== sdkArtifact.sha256)
+      if (finalSource.sha256 !== source.sha256) {
+        setupFailure ??= "source-changed-during-run";
+      }
+      if (finalSDKArtifact.sha256 !== sdkArtifact.sha256) {
         setupFailure ??= "sdk-artifact-changed-during-run";
+      }
       save("attempts.json", attempts);
       save(
         "preparations.json",
@@ -1755,8 +1834,8 @@ test(
           executionRef: p.executionRef,
           closeOperationId: p.closeOperationId,
           issued: !!p.execution,
-          refused: !!p.refused,
-          closed: !!p.closed,
+          refused: Boolean(p.refused),
+          closed: Boolean(p.closed),
           closeStage: p.closeStage,
           acknowledgementState: p.acknowledgementState,
         })),
@@ -1771,7 +1850,7 @@ test(
         0,
       );
       const pass =
-        !setupFailure &&
+        !isNonemptyString(setupFailure) &&
         ledgerMatches &&
         stopped === "retired" &&
         results.length === selected.length &&

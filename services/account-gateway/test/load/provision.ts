@@ -14,11 +14,11 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { connect, createServer } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
-import { bounds, check, scenarios, baselineScenarios } from "./model.ts";
+import { bounds, check, scenarios, baselineScenarios, isNonemptyString } from "./model.ts";
 import { sha256 } from "./fixture.ts";
 import type { Fixture } from "./fixture.ts";
 import { nativeSourceCommit, migrationAdapterSource } from "./build-native-fixture.ts";
@@ -136,9 +136,13 @@ export function childFailureFacts(
   // private and is never attached to the immutable qualification artifact.
   const nativeResponseFailures: Record<string, unknown>[] = [];
   const collectNative = nativeResponseDiagnostics((record) => {
-    if (nativeResponseFailures.length >= 8) return;
+    if (nativeResponseFailures.length >= 8) {
+      return;
+    }
     const value = JSON.parse(record) as Record<string, unknown>;
-    if (value.event === "gateway_native_response_failure") nativeResponseFailures.push(value);
+    if (value.event === "gateway_native_response_failure") {
+      nativeResponseFailures.push(value);
+    }
   });
   collectNative(Buffer.from(text.replace(/^[\t ]*# ?/gm, "")));
   const allowed = (pattern: RegExp, codes: ReadonlySet<string>) =>
@@ -161,8 +165,8 @@ export function childFailureFacts(
     loadCodes: allowed(/\bload:([a-z0-9-]+)\b/g, earlyLoadCodes),
     loaderCodes: allowed(/\b(ERR_[A-Z0-9_]+)\b/g, loaderCodes),
     systemCodes: allowed(/\b([A-Z][A-Z0-9_]+)\b/g, systemCodes),
-    timedOut: status.timedOut === true,
-    outputOverflow: status.outputOverflow === true,
+    timedOut: status.timedOut,
+    outputOverflow: status.outputOverflow,
     nativeResponseFailures,
   };
 }
@@ -185,7 +189,9 @@ setInterval(()=>{},1000);`;
 let requestedStop = false;
 const terminate = () => {
   requestedStop = true;
-  for (const child of captured) child.kill("SIGTERM");
+  for (const child of captured) {
+    child.kill("SIGTERM");
+  }
 };
 process.once("SIGTERM", terminate);
 process.once("SIGINT", terminate);
@@ -211,13 +217,14 @@ async function command(
     uid: options.uid,
     gid: options.gid,
   };
-  const child = options.group
-    ? spawn(process.execPath, ["-e", custody, executable, ...args], {
-        ...common,
-        detached: true,
-        stdio: ["ignore", "pipe", "pipe", "ipc"],
-      })
-    : spawn(executable, args, { ...common, detached: false, stdio: ["ignore", "pipe", "pipe"] });
+  const child =
+    options.group === true
+      ? spawn(process.execPath, ["-e", custody, executable, ...args], {
+          ...common,
+          detached: true,
+          stdio: ["ignore", "pipe", "pipe", "ipc"],
+        })
+      : spawn(executable, args, { ...common, detached: false, stdio: ["ignore", "pipe", "pipe"] });
   captured.add(child);
   let output = "",
     diagnostics = "",
@@ -230,62 +237,87 @@ async function command(
     bytes += data.length;
     if (bytes > 1_048_576) {
       overflow = true;
-      child.kill(options.group ? "SIGTERM" : "SIGKILL");
+      child.kill(options.group === true ? "SIGTERM" : "SIGKILL");
     } else {
       const text = data.toString("utf8");
-      if (stdout) output += text;
+      if (stdout) {
+        output += text;
+      }
       diagnostics += text;
     }
   };
-  child.stdout!.on("data", (data) => collect(data, true));
-  child.stderr!.on("data", (data) => collect(data, false));
+  child.stdout!.on("data", (data: Buffer) => {
+    collect(data, true);
+  });
+  child.stderr!.on("data", (data: Buffer) => {
+    collect(data, false);
+  });
   const closed = new Promise<number | null>((resolve) => {
     child.once("error", (error) => {
       spawnCode = (error as NodeJS.ErrnoException).code;
       resolve(null);
     });
     child.once("close", (code, signal) => {
-      if (!groupResult) childSignal = signal;
+      if (!groupResult) {
+        childSignal = signal;
+      }
       resolve(code);
     });
   });
   const timer = setTimeout(() => {
     timedOut = true;
-    child.kill(options.group ? "SIGTERM" : "SIGKILL");
+    child.kill(options.group === true ? "SIGTERM" : "SIGKILL");
   }, options.timeout ?? 60_000);
-  const result = options.group
-    ? Promise.race([
-        closed.then(() => 1),
-        new Promise<number | null>((resolve) => {
-          child.once("message", (value) => {
-            const message = value as {
-              kind?: unknown;
-              code?: unknown;
-              signal?: unknown;
-              spawnCode?: unknown;
-            };
-            groupResult = true;
-            childSignal = message.signal;
-            spawnCode = message.spawnCode;
-            resolve(
-              message.kind === "result" && (message.code === null || Number.isInteger(message.code))
-                ? (message.code as number | null)
-                : 1,
-            );
-          });
-        }),
-      ])
-    : closed;
-  const code = await result.finally(async () => {
+  const result =
+    options.group === true
+      ? Promise.race([
+          closed.then(() => 1),
+          new Promise<number | null>((resolve) => {
+            child.once("message", (value) => {
+              const message = value as {
+                kind?: unknown;
+                code?: unknown;
+                signal?: unknown;
+                spawnCode?: unknown;
+              };
+              groupResult = true;
+              childSignal = message.signal;
+              spawnCode = message.spawnCode;
+              resolve(
+                message.kind === "result" &&
+                  (message.code === null || Number.isInteger(message.code))
+                  ? (message.code as number | null)
+                  : 1,
+              );
+            });
+          }),
+        ])
+      : closed;
+  let code: number | null;
+  try {
+    code = await result;
+  } finally {
     clearTimeout(timer);
-    if (options.group && child.exitCode === null && child.signalCode === null)
+    if (options.group === true && child.exitCode === null && child.signalCode === null) {
       child.kill("SIGTERM");
-    await Promise.race([closed.catch(() => undefined), delay(2000)]);
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }
+    await Promise.race([closed.catch(() => {}), delay(2000)]);
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+    }
     captured.delete(child);
-  });
-  if (options.log) writeFileSync(options.log, diagnostics, { mode: 0o600 });
-  if (code !== (options.expectedExit ?? 0) || timedOut || overflow || requestedStop)
+  }
+  if (isNonemptyString(options.log)) {
+    writeFileSync(options.log, diagnostics, { mode: 0o600 });
+  }
+  const failureFlags = () => ({ timedOut, overflow, requestedStop });
+  const flags = failureFlags();
+  if (
+    code !== (options.expectedExit ?? 0) ||
+    flags.timedOut ||
+    flags.overflow ||
+    flags.requestedStop
+  ) {
     throw new CommandFailure(
       childFailureFacts(diagnostics, {
         exitCode: code,
@@ -295,6 +327,7 @@ async function command(
         outputOverflow: overflow,
       }),
     );
+  }
   return output.trim();
 }
 export async function stopPostgres(pgBin: string, data: string, env: NodeJS.ProcessEnv) {
@@ -322,8 +355,12 @@ export async function stopPostgres(pgBin: string, data: string, env: NodeJS.Proc
   } catch {
     failures.push("postgres-fast-stop");
   }
-  if (await stopped()) return { stopped: true, failures };
-  if (!failures.length) failures.push("postgres-fast-stop-unconfirmed");
+  if (await stopped()) {
+    return { stopped: true, failures };
+  }
+  if (!failures.length) {
+    failures.push("postgres-fast-stop-unconfirmed");
+  }
   try {
     await command(join(pgBin, "pg_ctl"), ["-D", data, "-m", "immediate", "-w", "stop"], {
       ...options,
@@ -333,7 +370,9 @@ export async function stopPostgres(pgBin: string, data: string, env: NodeJS.Proc
     failures.push("postgres-immediate-stop");
   }
   const confirmed = await stopped();
-  if (!confirmed) failures.push("postgres-stop-unconfirmed");
+  if (!confirmed) {
+    failures.push("postgres-stop-unconfirmed");
+  }
   return { stopped: confirmed, failures };
 }
 async function freePort(): Promise<number> {
@@ -343,8 +382,12 @@ async function freePort(): Promise<number> {
     server.listen(0, "127.0.0.1", resolve);
   });
   const address = server.address();
-  check(address && typeof address !== "string", "operator-port");
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  check(address !== null && typeof address !== "string", "operator-port");
+  await new Promise<void>((resolve) => {
+    server.close(() => {
+      resolve();
+    });
+  });
   return address.port;
 }
 async function networkEvidence(
@@ -372,8 +415,11 @@ async function networkEvidence(
     });
     socket.once("error", (error) => {
       socket.destroy();
-      if ("code" in error && error.code === "ENETUNREACH") resolve();
-      else reject(new Error("load:operator-external-probe"));
+      if ("code" in error && error.code === "ENETUNREACH") {
+        resolve();
+      } else {
+        reject(new Error("load:operator-external-probe"));
+      }
     });
   });
   const tcpReceiveMemory = readFileSync("/proc/sys/net/ipv4/tcp_rmem", "utf8")
@@ -391,13 +437,14 @@ async function networkEvidence(
   // A multi-hop pipeline with a 32-MiB autotuned receiver can absorb the entire
   // qualified 8-MiB stream. The bounded experiment needs an explicit private
   // network-namespace profile, configured by the container operator, not here.
-  if (requireBackpressureProfile)
+  if (requireBackpressureProfile) {
     check(
       tcpReceiveMemory === "4096 16384 65536" &&
         tcpSendMemory === "4096 16384 65536" &&
         tcpReceiveAutotuning === "0",
       "operator-backpressure-profile-required",
     );
+  }
   return {
     interfaces: "lo only",
     ipv4Routes: "none",
@@ -445,10 +492,10 @@ async function main() {
     "operator-runtime",
   );
   check(
-    repo &&
-      receiptPath &&
-      pgBin &&
-      destination &&
+    isNonemptyString(repo) &&
+      isNonemptyString(receiptPath) &&
+      isNonemptyString(pgBin) &&
+      isNonemptyString(destination) &&
       [repo, receiptPath, pgBin, destination].every(isAbsolute),
     "operator-absolute-paths",
   );
@@ -584,12 +631,13 @@ async function main() {
       stage = "database_create";
       const kernelName = "ag_load_kernel_" + randomUUID().replaceAll("-", ""),
         nativeName = "ag_load_native_" + randomUUID().replaceAll("-", "");
-      for (const name of [kernelName, nativeName])
+      for (const name of [kernelName, nativeName]) {
         await command(
           join(pgBin, "createdb"),
           ["-h", "127.0.0.1", "-p", String(port), "-U", "postgres", name],
           { env },
         );
+      }
       const kernelDSN = `postgresql://postgres@127.0.0.1:${port}/${kernelName}`,
         nativeDSN = `postgresql://postgres@127.0.0.1:${port}/${nativeName}`;
       stage = "native_migrations";
@@ -681,7 +729,9 @@ async function main() {
         error instanceof Error && /^load:[a-z0-9-]+$/.test(error.message)
           ? error.message.slice(5)
           : "operator-failed";
-      if (error instanceof CommandFailure) commandFailure = error.facts;
+      if (error instanceof CommandFailure) {
+        commandFailure = error.facts;
+      }
     } finally {
       requestedStop = false; // Cleanup remains required after an operator signal.
       if (pgStarted) {
@@ -694,9 +744,13 @@ async function main() {
           failureStage ??= "postgres_stop";
         }
       }
-      for (const child of captured) child.kill("SIGTERM");
+      for (const child of captured) {
+        child.kill("SIGTERM");
+      }
       await delay(100);
-      for (const child of captured) child.kill("SIGKILL");
+      for (const child of captured) {
+        child.kill("SIGKILL");
+      }
       if (originalCA) {
         try {
           writeFileSync(caBundle, originalCA);
@@ -736,14 +790,20 @@ async function main() {
         );
         stage = "artifact_copy";
         for (const name of artifactNames) {
-          if (existsSync(join(artifacts, name))) output.copy(artifacts, name);
+          if (existsSync(join(artifacts, name))) {
+            output.copy(artifacts, name);
+          }
         }
       } finally {
-        if (postgresStopped) rmSync(pgRoot, { recursive: true, force: true });
+        if (postgresStopped) {
+          rmSync(pgRoot, { recursive: true, force: true });
+        }
         rmSync(owned, { recursive: true, force: true });
       }
     }
-    if (failureStage) stage = failureStage;
+    if (failureStage) {
+      stage = failureStage;
+    }
     check(success, "operator-qualification-failed");
     process.stdout.write(
       JSON.stringify({
@@ -758,8 +818,8 @@ async function main() {
     output.close();
   }
 }
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch((error) => {
+if (process.argv[1] && resolvePath(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error: unknown) => {
     process.stderr.write(
       JSON.stringify({
         event: "fullstack_operator_failure",

@@ -72,13 +72,17 @@ export function goTestEvidence(raw: string, allowed: readonly string[]) {
       /^--- (PASS|FAIL|SKIP): (Test[A-Za-z0-9_]{1,160}) \(([0-9]{1,5}(?:\.[0-9]{1,9})?)s\)$/.exec(
         line,
       );
-    if (!match || !names.has(match[2])) continue;
+    if (!match || !names.has(match[2])) {
+      continue;
+    }
     tests.push({
       name: match[2],
       outcome: match[1] as "PASS" | "FAIL" | "SKIP",
       seconds: Number(match[3]),
     });
-    if (tests.length >= 4096) break;
+    if (tests.length >= 4096) {
+      break;
+    }
   }
   return { kind: "gateway-go-test-evidence/v1", tests };
 }

@@ -16,7 +16,7 @@ import {
 } from "./service-admission.ts";
 import type { ServiceAdmission } from "./service-admission.ts";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
-import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { once } from "node:events";
 import * as c from "@agent-teams/account-gateway/contracts";
 import { secretSubmission } from "@agent-teams/account-gateway/http";
@@ -350,12 +350,15 @@ export class FacadeBearers {
   // Stable server-owned key, purpose separated from prepare intent digests.
   // The locator contains no native peer credential, private admission or body.
   configureExecutionKey(key: Uint8Array): void {
-    if (key.byteLength !== 32) throw new KernelError("invalid");
+    if (key.byteLength !== 32) {
+      throw new KernelError("invalid");
+    }
     const derived = createHmac("sha256", key)
       .update("account-gateway/execution-locator/v1")
       .digest();
-    if (this.#executionKey && !timingSafeEqual(this.#executionKey, derived))
+    if (this.#executionKey && !timingSafeEqual(this.#executionKey, derived)) {
       throw new KernelError("conflict");
+    }
     this.#executionKey = derived;
   }
   #issuerFingerprint(row: { hash: Buffer; grant: Grant }): string {
@@ -371,49 +374,64 @@ export class FacadeBearers {
   }
   async resolveExecution(token: string, kernel: ExecutionRead): Promise<Grant | undefined> {
     const configured = this.resolve(token);
-    if (configured) return configured;
-    if (!this.#executionKey || token.length > 1024) return;
+    if (configured) {
+      return configured;
+    }
+    if (!this.#executionKey || token.length > 1024) {
+      return;
+    }
     const parts = /^agx1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})$/.exec(token);
-    if (!parts) return;
+    if (!parts) {
+      return;
+    }
     const expected = createHmac("sha256", this.#executionKey).update(parts[1]).digest();
     const signature = Buffer.from(parts[2], "base64url");
     if (
       signature.length !== expected.length ||
       signature.toString("base64url") !== parts[2] ||
       !timingSafeEqual(signature, expected)
-    )
+    ) {
       return;
+    }
     try {
       const raw = Buffer.from(parts[1], "base64url");
-      if (raw.toString("base64url") !== parts[1]) return;
-      const value: unknown = JSON.parse(raw.toString("utf8"));
-      if (!Array.isArray(value) || value.length !== 5 || value.some((v) => typeof v !== "string"))
+      if (raw.toString("base64url") !== parts[1]) {
         return;
+      }
+      const value: unknown = JSON.parse(raw.toString("utf8"));
+      if (!Array.isArray(value) || value.length !== 5 || value.some((v) => typeof v !== "string")) {
+        return;
+      }
       const [issuer, consumerId, executionRef, savedFingerprint, expiresAt] = value as string[];
       identifier(consumerId);
       uuid(executionRef);
-      if (!/^[A-Za-z0-9_-]{43}$/.test(issuer) || !/^[A-Za-z0-9_-]{43}$/.test(savedFingerprint))
+      if (!/^[A-Za-z0-9_-]{43}$/.test(issuer) || !/^[A-Za-z0-9_-]{43}$/.test(savedFingerprint)) {
         return;
+      }
       const row = this.#entries.find(
-        (row) =>
-          (row.grant.role === "run-control" || row.grant.role === "consumer-control") &&
-          row.grant.consumerId === consumerId &&
-          this.#issuerFingerprint(row) === issuer,
+        (entry) =>
+          (entry.grant.role === "run-control" || entry.grant.role === "consumer-control") &&
+          entry.grant.consumerId === consumerId &&
+          this.#issuerFingerprint(entry) === issuer,
       );
-      if (!row || (row.grant.role !== "run-control" && row.grant.role !== "consumer-control"))
+      if (!row || (row.grant.role !== "run-control" && row.grant.role !== "consumer-control")) {
         return;
+      }
       const saved = savedCopy(await kernel.savedExecution({ consumerId }, executionRef));
       if (
         saved.admission.expiresAt !== expiresAt ||
         this.#savedFingerprint(saved) !== savedFingerprint ||
         !this.current(row.grant)
-      )
+      ) {
         return;
+      }
       const grant = Object.freeze({ role: "execution" as const, consumerId, saved });
       this.#executionIssuers.set(grant, row.grant);
       return grant;
     } catch (error) {
-      if (error instanceof KernelError && error.code === "unavailable") throw error;
+      if (error instanceof KernelError && error.code === "unavailable") {
+        throw error;
+      }
       return;
     }
   }
@@ -465,9 +483,13 @@ export class FacadeBearers {
     ) {
       throw new KernelError("denied");
     }
-    if (!this.#executionKey) throw new KernelError("unavailable");
-    const row = this.#entries.find((row) => row.grant === control);
-    if (!row) throw new KernelError("denied");
+    if (!this.#executionKey) {
+      throw new KernelError("unavailable");
+    }
+    const row = this.#entries.find((entry) => entry.grant === control);
+    if (!row) {
+      throw new KernelError("denied");
+    }
     const payload = Buffer.from(
       JSON.stringify([
         this.#issuerFingerprint(row),
@@ -479,7 +501,9 @@ export class FacadeBearers {
     ).toString("base64url");
     const signature = createHmac("sha256", this.#executionKey).update(payload).digest("base64url");
     const token = "agx1." + payload + "." + signature;
-    if (token.length > 1024) throw new KernelError("invalid");
+    if (token.length > 1024) {
+      throw new KernelError("invalid");
+    }
     return token;
   }
 }

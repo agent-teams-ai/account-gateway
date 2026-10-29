@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { joinedFailure, joinedReceipt } from "./joined-evidence.ts";
 
-test("joined client evidence requires real terminal proofs and discards arbitrary assertion and client values", () => {
+void test("joined client evidence requires real terminal proofs and discards arbitrary assertion and client values", () => {
   const expected = {
     nativeCommit: "a".repeat(40),
     gatewayCommit: "b".repeat(40),
@@ -76,6 +76,12 @@ test("joined client evidence requires real terminal proofs and discards arbitrar
       joinedReceipt(JSON.stringify(value), "codex", { ...expected, nativeCommit: "0".repeat(40) }),
     /joined-proof-invalid/,
   );
+  for (const malformed of [null, { ...value, sourceHashes: null }, { ...value, actualCLI: null }]) {
+    assert.throws(
+      () => joinedReceipt(JSON.stringify(malformed), "codex", expected),
+      /joined-proof-invalid/,
+    );
+  }
   const failed = joinedFailure(
     JSON.stringify({
       phase: "failed",

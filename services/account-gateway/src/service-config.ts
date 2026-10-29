@@ -589,8 +589,8 @@ export function captureServiceBearers(
 }
 export function captureRequestReadbackRetention(value: unknown): number {
   try {
-    integer(value as number, 31_536_000_000);
-    return value as number;
+    integer(value, 31_536_000_000);
+    return value;
   } catch {
     return deny();
   }

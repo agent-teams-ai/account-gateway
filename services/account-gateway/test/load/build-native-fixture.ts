@@ -5,6 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isNonemptyString } from "./model.ts";
 
 export const nativeSourceCommit = "a6bc1e36a1cd0d542af2806f3f8ae1e098e7cc76";
 export const migrationAdapterSource =
@@ -57,7 +58,10 @@ export const migrationAdapterSource =
   ].join("\n") + "\n";
 const digest = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
 function check(value: unknown, code: string): asserts value {
-  if (!value) throw new Error("fixture-build:" + code);
+  const accepted = Boolean(value);
+  if (!accepted) {
+    throw new Error("fixture-build:" + code);
+  }
 }
 function run(executable: string, args: string[], cwd: string, env = process.env): string {
   const result = spawnSync(executable, args, {
@@ -88,7 +92,10 @@ function main() {
     output = options.get("--output"),
     go = options.get("--go") ?? "go";
   check(
-    source && output && isAbsolute(source) && isAbsolute(output),
+    isNonemptyString(source) &&
+      isNonemptyString(output) &&
+      isAbsolute(source) &&
+      isAbsolute(output),
     "absolute-source-and-output-required",
   );
   check(process.platform === "linux", "linux-required");

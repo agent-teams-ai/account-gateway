@@ -98,7 +98,7 @@ export function arrivalObservation(
 export function capacityRefusal(attempt: Attempt): boolean {
   return attempt.effect === "not_dispatched"
     ? attempt.sqlCode === "concurrency_limit"
-    : !attempt.effect &&
+    : !isNonemptyString(attempt.effect) &&
         attempt.preclaimRefused === true &&
         attempt.safeCode === "admission_limited";
 }
@@ -110,7 +110,13 @@ export interface LedgerEvent {
   sequence: number;
 }
 export function check(value: unknown, phase: string): asserts value {
-  if (!value) throw new Error("load:" + phase);
+  const accepted = Boolean(value);
+  if (!accepted) {
+    throw new Error("load:" + phase);
+  }
+}
+export function isNonemptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
 }
 export function identifier(runId: string, seed: number, sequence: number): string {
   const h = createHash("sha256")
@@ -134,42 +140,63 @@ export function entries(events: readonly LedgerEvent[], requestId: string): numb
 export function reconcile(attempt: Attempt, events: readonly LedgerEvent[]): string[] {
   const count = entries(events, attempt.requestId),
     faults: string[] = [];
-  if (count > 1) faults.push("duplicate-provider-entry");
-  if (attempt.effect === "not_dispatched" && count !== 0) faults.push("denial-entered-provider");
-  if (attempt.effect === "completed" && count !== 1) faults.push("completed-without-one-entry");
-  if (count === 1 && !attempt.effect) faults.push("provider-entry-without-durable-effect");
-  if (attempt.preclaimRefused && attempt.safeCode !== "admission_limited")
+  if (count > 1) {
+    faults.push("duplicate-provider-entry");
+  }
+  if (attempt.effect === "not_dispatched" && count !== 0) {
+    faults.push("denial-entered-provider");
+  }
+  if (attempt.effect === "completed" && count !== 1) {
+    faults.push("completed-without-one-entry");
+  }
+  if (count === 1 && !isNonemptyString(attempt.effect)) {
+    faults.push("provider-entry-without-durable-effect");
+  }
+  if (attempt.preclaimRefused === true && attempt.safeCode !== "admission_limited") {
     faults.push("unexpected-preclaim-refusal");
-  if (attempt.effect === "not_dispatched" && !capacityRefusal(attempt))
+  }
+  if (attempt.effect === "not_dispatched" && !capacityRefusal(attempt)) {
     faults.push("unexpected-durable-refusal");
-  if (!attempt.effect && count === 0 && !capacityRefusal(attempt))
+  }
+  if (!isNonemptyString(attempt.effect) && count === 0 && !capacityRefusal(attempt)) {
     faults.push("unclassified-attempt");
+  }
   if (
     !attempt.intentionalCancel &&
-    attempt.effect &&
+    isNonemptyString(attempt.effect) &&
     attempt.effect !== "not_dispatched" &&
-    (attempt.effect !== "completed" || attempt.response !== "stream" || !attempt.validatedStream)
-  )
+    (attempt.effect !== "completed" ||
+      attempt.response !== "stream" ||
+      attempt.validatedStream !== true)
+  ) {
     faults.push("unexpected-effect-or-client-stream-failure");
-  if (attempt.occupied) faults.push("occupied-after-drain");
+  }
+  if (attempt.occupied === true) {
+    faults.push("occupied-after-drain");
+  }
   if (
-    (count === 1 || (attempt.effect && attempt.effect !== "not_dispatched")) &&
-    (!attempt.exactProof || !attempt.nativeClosed || !attempt.nativeAcknowledged)
-  )
+    (count === 1 || (isNonemptyString(attempt.effect) && attempt.effect !== "not_dispatched")) &&
+    (attempt.exactProof !== true ||
+      attempt.nativeClosed !== true ||
+      attempt.nativeAcknowledged !== true)
+  ) {
     faults.push("missing-exact-native-closure");
+  }
   return faults;
 }
 export function safeError(error: unknown): string {
-  if (error instanceof Error && /^load:[a-z0-9-]{1,100}$/.test(error.message))
+  if (error instanceof Error && /^load:[a-z0-9-]{1,100}$/.test(error.message)) {
     return error.message.slice(5);
+  }
   if (
-    error &&
+    error !== null &&
     typeof error === "object" &&
     "code" in error &&
     typeof error.code === "string" &&
     /^[a-z_]{1,40}$/.test(error.code)
-  )
+  ) {
     return error.code;
+  }
   return "unclassified-failure";
 }
 export async function bounded<T>(work: Promise<T>, ms: number, phase: string): Promise<T> {
@@ -177,8 +204,10 @@ export async function bounded<T>(work: Promise<T>, ms: number, phase: string): P
   try {
     return await Promise.race([
       work,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("load:" + phase)), ms);
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error("load:" + phase));
+        }, ms);
       }),
     ]);
   } finally {
@@ -198,47 +227,54 @@ export interface Proof {
   };
 }
 export function closureProjection(value: unknown, consumerId: string, p: Proof) {
-  const r = value as Record<string, unknown>,
-    proof = r?.proof as Proof | undefined;
-  const native = r?.native as Proof["native"] | undefined,
-    l = r?.lifetime as Record<string, unknown> | undefined;
+  const r = value as Record<string, unknown> | null | undefined;
+  const proof = r?.proof as
+    | (Partial<Omit<Proof, "native">> & { native?: Partial<Proof["native"]> | null })
+    | null
+    | undefined;
+  const native = r?.native as Proof["native"] | null | undefined;
+  const boundNative = proof?.native;
+  const l = r?.lifetime as Record<string, unknown> | null | undefined;
   const exactProof =
-    !!proof &&
+    r !== null &&
+    r !== undefined &&
+    proof !== null &&
+    proof !== undefined &&
     r.consumerId === consumerId &&
     r.executionRef === p.executionRef &&
     r.requestRef === p.requestRef &&
     ["executionRef", "requestRef", "worker", "token"].every(
       (k) => proof[k as keyof Proof] === p[k as keyof Proof],
     ) &&
-    !!native &&
-    !!proof.native &&
+    native !== null &&
+    native !== undefined &&
+    boundNative !== null &&
+    boundNative !== undefined &&
     Object.keys(p.native).every(
       (k) =>
         native[k as keyof Proof["native"]] === p.native[k as keyof Proof["native"]] &&
-        proof.native[k as keyof Proof["native"]] === p.native[k as keyof Proof["native"]],
+        boundNative[k as keyof Proof["native"]] === p.native[k as keyof Proof["native"]],
     );
-  // These are observations of the same original native proof, not a provider
-  // ledger substitute. Legacy or malformed receipts add no inferred facts.
+  // These observations belong only to the exact original native proof.
+  // They cannot substitute for the independent provider-entry ledger.
   const nativeFacts =
     exactProof &&
-    l &&
+    l !== null &&
+    l !== undefined &&
     typeof l.entered === "boolean" &&
     typeof l.completed === "boolean" &&
     (r.effect === "effect_unknown" || r.effect === "completed") &&
     (!l.completed || l.entered) &&
     (r.effect === "completed") === l.completed
-      ? {
-          nativeEntered: l.entered,
-          nativeCompleted: l.completed,
-          nativeEffect: r.effect as "effect_unknown" | "completed",
-        }
+      ? { nativeEntered: l.entered, nativeCompleted: l.completed, nativeEffect: r.effect }
       : {};
   return {
     exactProof,
     ...nativeFacts,
     nativeClosed:
-      !!l &&
-      r.phase === "closed" &&
+      l !== null &&
+      l !== undefined &&
+      r?.phase === "closed" &&
       l.contextDone === true &&
       l.forwardingReturned === true &&
       l.bodyKnown === true &&

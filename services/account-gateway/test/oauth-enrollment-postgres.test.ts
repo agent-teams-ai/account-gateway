@@ -1590,7 +1590,9 @@ void test("F maintenance: retained pending cleanup cannot starve another active 
       source.composeServiceCleanupTurn?.(f.kernel, f.context, f.worker, settle) ??
       (async () => {
         const claim = await f.kernel.claimCleanup(f.context, f.worker);
-        if (claim) await settle(claim);
+        if (claim) {
+          await settle(claim);
+        }
         return claim !== undefined;
       });
     for (let tick = 0; tick < 4; tick++) {

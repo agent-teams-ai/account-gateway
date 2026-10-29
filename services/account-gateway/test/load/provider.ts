@@ -41,9 +41,9 @@ function record(event: LedgerEvent["event"], requestId: string, bytes: number) {
   writeSync(ledger, line);
   emit(value);
 }
-async function initialize(input: Configuration) {
-  check(!cfg && /^[a-f0-9-]{36}$/.test(input.runId), "provider-configuration");
-  cfg = input;
+async function initialize(configuration: Configuration) {
+  check(cfg === undefined && /^[a-f0-9-]{36}$/.test(configuration.runId), "provider-configuration");
+  cfg = configuration;
   ledger = openSync(cfg.ledger, "wx", 0o600);
   server = createServer(
     {
@@ -58,6 +58,7 @@ async function initialize(input: Configuration) {
       let requestId = "unidentified",
         bytes = 0,
         closed = false;
+      const isClosed = () => closed;
       res.once("close", () => {
         closed = true;
         record("close", requestId, bytes);
@@ -67,7 +68,7 @@ async function initialize(input: Configuration) {
       void (async () => {
         const chunks: Buffer[] = [];
         let received = 0;
-        for await (const chunk of req) {
+        for await (const chunk of req as AsyncIterable<Buffer>) {
           received += Buffer.byteLength(chunk);
           check(received <= 1_048_576, "provider-input-bound");
           chunks.push(Buffer.from(chunk));
@@ -106,7 +107,9 @@ async function initialize(input: Configuration) {
         record("headers", requestId, bytes);
         let eventSequence = 0;
         const writeWire = async (wire: string) => {
-          if (closed) return false;
+          if (isClosed()) {
+            return false;
+          }
           const size = Buffer.byteLength(wire);
           bytes += size;
           total += size;
@@ -135,9 +138,11 @@ async function initialize(input: Configuration) {
               15_000,
               "provider-drain-deadline",
             );
-            if (!closed) record("drain", requestId, bytes);
+            if (!isClosed()) {
+              record("drain", requestId, bytes);
+            }
           }
-          return !closed;
+          return !isClosed();
         };
         const frame = (type: string, fields: object) =>
           writeWire(
@@ -192,7 +197,7 @@ async function initialize(input: Configuration) {
         if (plan.mode === "flood") {
           // Partial stream deliberately has no terminal completion. It is canceled
           // after the actual pause/resume experiment, never called a success.
-          for (let n = 0; n < 4096 && !closed && bytes + 4096 <= bounds.streamBytes; n++) {
+          for (let n = 0; n < 4096 && !isClosed() && bytes + 4096 <= bounds.streamBytes; n++) {
             if (
               !(await frame("response.output_text.delta", {
                 item_id: itemId,
@@ -201,12 +206,15 @@ async function initialize(input: Configuration) {
                 delta: "x".repeat(2048),
                 logprobs: [],
               }))
-            )
+            ) {
               return;
+            }
           }
-          if (!closed) {
+          if (!isClosed()) {
             record("budget", requestId, bytes);
-            await new Promise<void>((resolve) => release.set(requestId, resolve));
+            await new Promise<void>((resolve) => {
+              release.set(requestId, resolve);
+            });
           }
           return;
         }
@@ -217,20 +225,27 @@ async function initialize(input: Configuration) {
           delta: text,
           logprobs: [],
         });
-        if (plan.mode === "held" && !closed) {
+        if (plan.mode === "held" && !isClosed()) {
           let released = false;
-          const done = new Promise<void>((resolve) =>
+          const isReleased = () => released;
+          const done = new Promise<void>((resolve) => {
             release.set(requestId, () => {
               released = true;
               resolve();
-            }),
-          );
-          while (!closed && !released) {
+            });
+          });
+          while (!isClosed() && !isReleased()) {
             await Promise.race([done, delay(1000)]);
-            if (!closed && !released && !(await writeWire(": keepalive\n\n"))) return;
+            if (!isClosed() && !isReleased() && !(await writeWire(": keepalive\n\n"))) {
+              return;
+            }
           }
-        } else if (plan.delayMs) await delay(plan.delayMs);
-        if (closed) return;
+        } else if (plan.delayMs) {
+          await delay(plan.delayMs);
+        }
+        if (isClosed()) {
+          return;
+        }
         await frame("response.output_text.done", {
           item_id: itemId,
           output_index: 0,
@@ -249,7 +264,7 @@ async function initialize(input: Configuration) {
         res.end();
         record("end", requestId, bytes);
       })().catch(() => {
-        if (!closed) {
+        if (!isClosed()) {
           record("violation", requestId, bytes);
           res.destroy();
         }
@@ -258,24 +273,40 @@ async function initialize(input: Configuration) {
   );
   server.on("connection", (socket) => {
     sockets.add(socket);
-    socket.once("close", () => sockets.delete(socket));
+    socket.once("close", () => {
+      sockets.delete(socket);
+    });
   });
   await new Promise<void>((resolve, reject) => {
     server!.once("error", reject);
     server!.listen(0, "127.0.0.1", resolve);
   });
   const address = server.address();
-  check(address && typeof address === "object", "provider-listen");
+  check(address !== null && typeof address === "object", "provider-listen");
   emit({ event: "ready", origin: "https://127.0.0.1:" + address.port + "/v1" });
 }
 async function stop() {
-  if (terminating) return;
+  if (terminating) {
+    return;
+  }
   terminating = true;
-  for (const finish of release.values()) finish();
+  for (const finish of release.values()) {
+    finish();
+  }
   release.clear();
-  for (const socket of sockets) socket.destroy();
-  if (server?.listening) await new Promise<void>((resolve) => server!.close(() => resolve()));
-  if (ledger !== undefined) closeSync(ledger);
+  for (const socket of sockets) {
+    socket.destroy();
+  }
+  if (server?.listening === true) {
+    await new Promise<void>((resolve) => {
+      server!.close(() => {
+        resolve();
+      });
+    });
+  }
+  if (ledger !== undefined) {
+    closeSync(ledger);
+  }
   ledger = undefined;
 }
 const lines = createInterface({ input: process.stdin });
@@ -283,11 +314,13 @@ try {
   for await (const line of lines) {
     check(Buffer.byteLength(line) <= 32_768, "provider-command-bound");
     const command = JSON.parse(line) as Record<string, unknown>;
-    if (!cfg) await initialize(command as unknown as Configuration);
-    else if (command.command === "arm") {
-      const plan = command.plan as Plan;
+    if (cfg === undefined) {
+      await initialize(command as unknown as Configuration);
+    } else if (command.command === "arm") {
+      const plan = command.plan as Plan | null | undefined;
       check(
-        plan &&
+        plan !== null &&
+          plan !== undefined &&
           /^[a-f0-9-]{36}$/.test(plan.requestId) &&
           !plans.has(plan.requestId) &&
           plans.size < bounds.attempts &&
@@ -302,8 +335,11 @@ try {
     } else if (command.command === "release") {
       release.get(String(command.requestId))?.();
       release.delete(String(command.requestId));
-    } else if (command.command === "stop") break;
-    else throw new Error("load:provider-command");
+    } else if (command.command === "stop") {
+      break;
+    } else {
+      throw new Error("load:provider-command");
+    }
   }
 } catch {
   process.exitCode = 1;

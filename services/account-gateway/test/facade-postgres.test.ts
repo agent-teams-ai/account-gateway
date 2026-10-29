@@ -1906,12 +1906,13 @@ void test("consumer-control replacement during real SQL waits denies readback an
       const retired = f.bearers.resolve(control.token);
       assert.ok(retired);
       await lock.query("BEGIN");
-      if (mode === "readback")
+      if (mode === "readback") {
         await lock.query("LOCK TABLE ag_kernel.operations IN ACCESS EXCLUSIVE MODE");
-      else
+      } else {
         await lock.query("SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE", [
           f.context.consumerId,
         ]);
+      }
       const pid: number = (await lock.query<{ pid: number }>("SELECT pg_backend_pid() AS pid"))
         .rows[0].pid;
       const input = {

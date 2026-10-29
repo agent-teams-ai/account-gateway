@@ -111,9 +111,10 @@ function transport(
   ) {
     throw new GatewayError("invalid_input", "not_dispatched");
   }
-  const inferenceOrigin = settings.inferenceOrigin ? new URL(settings.inferenceOrigin) : origin;
+  const inferenceOrigin =
+    settings.inferenceOrigin === undefined ? origin : new URL(settings.inferenceOrigin);
   if (
-    (settings.inferenceOrigin && role !== "execution") ||
+    (settings.inferenceOrigin !== undefined && role !== "execution") ||
     inferenceOrigin.username ||
     inferenceOrigin.password ||
     inferenceOrigin.search ||

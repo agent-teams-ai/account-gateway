@@ -404,19 +404,33 @@ export class PostgresKernel implements DurableKernel {
     this.bounds = boundedConfig(bounds);
     this.facts = boundedFacts(facts);
     const retention = options.requestReadbackRetentionMs;
-    if (retention !== undefined) integer(retention, 31_536_000_000);
+    if (retention !== undefined) {
+      integer(retention, 31_536_000_000);
+    }
     this.requestReadbackRetentionMs = retention;
     if (options.accountConcurrencyByProfile !== undefined) {
       const source = options.accountConcurrencyByProfile;
-      if (!Array.isArray(source) || !source.length || source.length > 128)
+      if (!Array.isArray(source) || !source.length || source.length > 128) {
         throw new KernelError("invalid");
+      }
       const caps = new Map<string, number>();
-      for (const entry of source) {
+      for (const candidate of source) {
+        const entry: unknown = candidate;
+        if (
+          typeof entry !== "object" ||
+          entry === null ||
+          !("profile" in entry) ||
+          !("concurrency" in entry)
+        ) {
+          throw new KernelError("invalid");
+        }
         const profile = entry.profile,
           concurrency = entry.concurrency;
         identifier(profile, 64);
         integer(concurrency, Math.min(64, this.bounds.maxConcurrent));
-        if (caps.has(profile)) throw new KernelError("invalid");
+        if (caps.has(profile)) {
+          throw new KernelError("invalid");
+        }
         caps.set(profile, concurrency);
       }
       this.accountConcurrencyByProfile = caps;
@@ -1343,7 +1357,7 @@ export class PostgresKernel implements DurableKernel {
       },
     };
   }
-  private executionSnapshotSql = `SELECT e.*, i.issuer AS current_issuer,
+  private readonly executionSnapshotSql = `SELECT e.*, i.issuer AS current_issuer,
       (e.state='open' AND e.issuer=i.issuer
       AND e.deadline>clock_timestamp() AND a.state='active' AND a.epoch=e.account_epoch
       AND a.active_generation=e.generation AND a.profile=e.profile AND c.state='ready' AND c.profile=e.profile
@@ -1372,7 +1386,9 @@ export class PostgresKernel implements DurableKernel {
   ): Promise<DispatchSnapshot> {
     uuid(ref);
     uuid(worker);
-    if (id !== undefined) identifier(id);
+    if (id !== undefined) {
+      identifier(id);
+    }
     return this.read(context, async (tx) => {
       const e = await this.one<
         ExecutionRow & {
@@ -1391,7 +1407,9 @@ export class PostgresKernel implements DurableKernel {
         [tx.consumer, ref, worker, id ?? null],
       );
       const request = e.request;
-      if (id !== undefined && !request) throw new KernelError("unknown");
+      if (id !== undefined && !request) {
+        throw new KernelError("unknown");
+      }
       return {
         saved: this.saved(e),
         issuerEpoch: e.current_issuer,
@@ -1399,11 +1417,16 @@ export class PostgresKernel implements DurableKernel {
         ...(request
           ? {
               status: requestStatus(request),
-              ...(request.closure_token &&
-              request.native_origin_ref &&
-              request.engine_incarnation &&
-              request.request_nonce &&
-              request.descriptor_generation
+              ...(request.closure_token !== null &&
+              request.closure_token !== "" &&
+              request.native_origin_ref !== null &&
+              request.native_origin_ref !== "" &&
+              request.engine_incarnation !== null &&
+              request.engine_incarnation !== "" &&
+              request.request_nonce !== null &&
+              request.request_nonce !== "" &&
+              request.descriptor_generation !== null &&
+              request.descriptor_generation !== ""
                 ? { proof: dispatchProof(request) }
                 : {}),
             }

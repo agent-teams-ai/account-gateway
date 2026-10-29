@@ -12,6 +12,10 @@ import {
   upstreamTests,
 } from "./evidence.ts";
 
+function outputText(value: string | null | undefined): string {
+  return value ?? "";
+}
+
 const [source, artifacts] = process.argv.slice(2);
 if (
   !source ||
@@ -76,7 +80,7 @@ if (
       ],
       { cwd: source, encoding: "utf8", timeout: 600_000, maxBuffer: 4_194_304 },
     );
-    const raw = (child.stdout ?? "") + "\n" + (child.stderr ?? "");
+    const raw = outputText(child.stdout) + "\n" + outputText(child.stderr);
     const evidence = goTestEvidence(raw, lane.names);
     const passed = new Set(evidence.tests.filter((t) => t.outcome === "PASS").map((t) => t.name));
     const success =

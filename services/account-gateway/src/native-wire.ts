@@ -9,7 +9,7 @@ import { KernelError, identifier, uuid, approvedLimits, defaults, instant } from
 import type { NativeDispatchProof, PrivateAdmission, SavedExecution } from "./domain.ts";
 import type { PhysicalCandidate } from "./management.ts";
 import { strictJSON } from "./facade-ingress.ts";
-import type { NativeControlAdmission } from './service-admission.ts';
+import type { NativeControlAdmission } from "./service-admission.ts";
 
 export { instant };
 export const denied = (): never => {
@@ -462,35 +462,50 @@ export async function post(
   path: string,
   body: Uint8Array,
   signal?: AbortSignal,
-  duration = cfg.timeoutMs, admission?: NativeControlAdmission
+  duration = cfg.timeoutMs,
+  controlAdmission?: NativeControlAdmission,
 ): Promise<{ response: IncomingMessage; abort(): void; dispose(): void }> {
   const url = new URL(path, cfg.origin);
   const deadline = Date.now() + duration;
-  const release = await admission?.acquire(deadline, signal);
-  if (signal?.aborted || Date.now() >= deadline) { release?.(); throw new KernelError('unavailable'); }
+  const release = await controlAdmission?.acquire(deadline, signal);
+  if (signal?.aborted === true || Date.now() >= deadline) {
+    release?.();
+    throw new KernelError("unavailable");
+  }
   return new Promise((resolve, reject) => {
     let req: ReturnType<typeof httpRequest>;
     try {
       req = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, {
         method: "POST",
-      agent: false,
-      maxHeaderSize: 16_384,
-      signal,
-      headers: {
-        authorization: "Bearer " + credential,
-        "content-type": "application/json",
-        accept: "application/json",
-        "content-length": body.byteLength,
+        agent: false,
+        maxHeaderSize: 16_384,
+        signal,
+        headers: {
+          authorization: "Bearer " + credential,
+          "content-type": "application/json",
+          accept: "application/json",
+          "content-length": body.byteLength,
         },
       });
+    } catch {
+      release?.();
+      reject(new KernelError("unavailable"));
+      return;
     }
-    catch { release?.(); reject(new KernelError('unavailable')); return; }
     let physical = false;
-    req.once('socket', socket => {
+    req.once("socket", (socket) => {
       physical = true;
-      socket.once('close', () => { clearTimeout(timer); release?.(); });
+      socket.once("close", () => {
+        clearTimeout(timer);
+        release?.();
+      });
     });
-    req.once('close', () => { if (!physical) { clearTimeout(timer); release?.(); } });
+    req.once("close", () => {
+      if (!physical) {
+        clearTimeout(timer);
+        release?.();
+      }
+    });
     const remaining = Math.max(1, deadline - Date.now());
     const timer = setTimeout(() => req.destroy(new KernelError("unavailable")), remaining);
     req.setTimeout(remaining, () => req.destroy(new KernelError("unavailable")));

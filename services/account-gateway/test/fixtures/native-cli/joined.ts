@@ -23,10 +23,13 @@ import {
   joinedReceipt,
   joinedSourceHashes,
 } from "./joined-evidence.ts";
-import type { JoinedClient } from "./joined-evidence.ts";
+import type { ClientPins, InstalledClients, JoinedBuildReceipt } from "./joined-evidence.ts";
 
 function check(value: unknown, code: string): asserts value {
-  if (!value) throw new Error(code);
+  const accepted = Boolean(value);
+  if (!accepted) {
+    throw new Error(code);
+  }
 }
 class CommandFailure extends Error {
   readonly output: string;
@@ -63,7 +66,9 @@ async function command(
     if (size > 4_194_304) {
       overflow = true;
       kill();
-    } else output += bytes.toString("utf8");
+    } else {
+      output += bytes.toString("utf8");
+    }
   };
   child.stdout.on("data", capture);
   child.stderr.on("data", capture);
@@ -74,8 +79,13 @@ async function command(
   const code = await new Promise<number | null>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", resolve);
-  }).finally(() => clearTimeout(timer));
-  if (expired || overflow || code !== (options.expected ?? 0)) throw new CommandFailure(output);
+  }).finally(() => {
+    clearTimeout(timer);
+  });
+  const commandFailed = () => expired || overflow;
+  if (commandFailed() || code !== (options.expected ?? 0)) {
+    throw new CommandFailure(output);
+  }
   return output;
 }
 async function freePort() {
@@ -85,8 +95,12 @@ async function freePort() {
     server.listen(0, "127.0.0.1", resolve);
   });
   const address = server.address();
-  check(address && typeof address !== "string", "joined-port");
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  check(address !== null && typeof address !== "string", "joined-port");
+  await new Promise<void>((resolve) => {
+    server.close(() => {
+      resolve();
+    });
+  });
   return address.port;
 }
 async function main() {
@@ -120,8 +134,9 @@ async function main() {
     "joined-arguments",
   );
   const get = (key: string) => options.get(key)!;
-  for (const key of keys.filter((key) => !key.endsWith("-commit")))
+  for (const key of keys.filter((candidate) => !candidate.endsWith("-commit"))) {
     check(isAbsolute(get(key)), "joined-absolute-path");
+  }
   const repo = get("--repo"),
     pgBin = get("--pg-bin"),
     go = get("--go"),
@@ -156,9 +171,11 @@ async function main() {
     });
     socket.once("error", (error) => {
       socket.destroy();
-      "code" in error && error.code === "ENETUNREACH"
-        ? resolve()
-        : reject(new Error("joined-network-probe"));
+      if ("code" in error && error.code === "ENETUNREACH") {
+        resolve();
+      } else {
+        reject(new Error("joined-network-probe"));
+      }
     });
   });
   const network = {
@@ -170,13 +187,13 @@ async function main() {
   const networkFile = join(artifacts, "network.json");
   writeFileSync(networkFile, JSON.stringify(network), { mode: 0o600 });
   const pinsPath = fileURLToPath(new URL("./pins.json", import.meta.url)),
-    pins = JSON.parse(readFileSync(pinsPath, "utf8"));
-  const installed = JSON.parse(readFileSync(get("--clients"), "utf8"));
+    pins = JSON.parse(readFileSync(pinsPath, "utf8")) as ClientPins;
+  const installed = JSON.parse(readFileSync(get("--clients"), "utf8")) as InstalledClients;
   check(
     installed.pinsSHA256 === digestFile(pinsPath) && installed.clients.length === 2,
     "joined-client-receipt",
   );
-  const build = JSON.parse(readFileSync(get("--build-receipt"), "utf8")),
+  const build = JSON.parse(readFileSync(get("--build-receipt"), "utf8")) as JoinedBuildReceipt,
     sourceHashes = joinedSourceHashes(repo);
   check(
     build.kind === "gateway-joined-client-build/v1" &&
@@ -186,6 +203,8 @@ async function main() {
       JSON.stringify(build.sourceHashes) === JSON.stringify(sourceHashes),
     "joined-build-receipt",
   );
+  const binaries = build.binaries;
+  check(binaries !== null && binaries !== undefined, "joined-build-receipt");
   const clients = (["claude", "codex"] as const).map((id) => {
     const pin = pins.clients.find((p: { id: string }) => p.id === id),
       client = installed.clients.find((p: { id: string }) => p.id === id);
@@ -195,10 +214,10 @@ async function main() {
         client &&
         isAbsolute(client.executable) &&
         digestFile(client.executable) === pin.binarySHA256 &&
-        digestFile(binary) === build.binaries?.[id],
+        digestFile(binary) === binaries[id],
       "joined-binary-pin",
     );
-    return { id, pin, executable: client.executable as string, binary };
+    return { id, pin, executable: client.executable, binary };
   });
   const owned = mkdtempSync(join(tmpdir(), "gateway-joined-clients-"));
   chmodSync(owned, 0o755);
@@ -276,10 +295,10 @@ async function main() {
         { cwd: repo, timeout: 120_000 },
       );
       receipts.push(
-        joinedReceipt(output, client.id as JoinedClient, {
+        joinedReceipt(output, client.id, {
           nativeCommit,
           gatewayCommit,
-          binarySHA256: build.binaries[client.id],
+          binarySHA256: binaries[client.id],
           version: client.pin.version.replace(/-linux-x64$/, ""),
           clientSHA256: client.pin.binarySHA256,
           sourceHashes,
@@ -338,7 +357,7 @@ async function main() {
     check(success && stopped, "joined-qualification-failed");
   }
 }
-main().catch((error) => {
+main().catch((error: unknown) => {
   process.stderr.write(
     JSON.stringify({
       outcome: "fail",

@@ -25,7 +25,7 @@ test("prepare rejects oversized accountRefs before reading any element", () => {
   assert.equal(prepare.safeParse(preparation([])).success, false);
 
   let elementReads = 0;
-  const oversized = new Array(101);
+  const oversized = Array.from({ length: 101 });
   for (let index = 0; index < oversized.length; index++) {
     Object.defineProperty(oversized, index, {
       enumerable: true,

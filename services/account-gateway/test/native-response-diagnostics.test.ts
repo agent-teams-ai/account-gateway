@@ -597,9 +597,10 @@ void test("native diagnostics retains complete closed transport facts through ar
           upstream_response_started: connection === "reused",
           ...(entered === undefined ? {} : { native_entered: entered }),
         };
-        const reordered = Object.fromEntries(Object.entries(row).reverse());
-        for (const byte of Buffer.from(JSON.stringify(reordered) + "\n"))
+        const reordered = Object.fromEntries(Object.entries(row).toReversed());
+        for (const byte of Buffer.from(JSON.stringify(reordered) + "\n")) {
           f.feed(Buffer.from([byte]));
+        }
         expected.push(JSON.stringify(row) + "\n");
       }
     }
@@ -621,12 +622,14 @@ void test("native diagnostics drops secret, malformed, partial or misplaced tran
   const record = JSON.stringify(row);
   const unsafe: string[] = [];
   for (const key of ["transport_error_reason", "upstream_connection"]) {
-    for (const value of ["SECRET_SENTINEL", "unknown", null, 1, true, {}, []])
+    for (const value of ["SECRET_SENTINEL", "unknown", null, 1, true, {}, []]) {
       unsafe.push(JSON.stringify({ ...row, [key]: value }));
+    }
   }
   for (const key of ["upstream_request_written", "upstream_response_started", "native_entered"]) {
-    for (const value of ["SECRET_SENTINEL", "true", null, 0, 1, {}, []])
+    for (const value of ["SECRET_SENTINEL", "true", null, 0, 1, {}, []]) {
       unsafe.push(JSON.stringify({ ...row, [key]: value }));
+    }
   }
   for (const key of [
     "transport_error_reason",
@@ -639,13 +642,15 @@ void test("native diagnostics drops secret, malformed, partial or misplaced tran
     unsafe.push(JSON.stringify(partial));
   }
   unsafe.push(JSON.stringify({ event: row.event, phase: row.phase, native_entered: true }));
-  for (const phase of ["http_status", "deadline", "sse_read", "invalid_response", "body_read"])
+  for (const phase of ["http_status", "deadline", "sse_read", "invalid_response", "body_read"]) {
     unsafe.push(JSON.stringify({ ...row, phase }));
+  }
   for (const event of [
     "gateway_native_oauth_connect_failure",
     "gateway_native_codex_request_shape",
-  ])
+  ]) {
     unsafe.push(JSON.stringify({ ...row, event }));
+  }
   for (const key of [
     "error",
     "message",
@@ -659,14 +664,17 @@ void test("native diagnostics drops secret, malformed, partial or misplaced tran
     "tls_error",
     "__proto__",
     "Transport_Error_Reason",
-  ])
+  ]) {
     unsafe.push(JSON.stringify({ ...row, [key]: "SECRET_SENTINEL" }));
+  }
   unsafe.push(record.replace('"connection_reset"', '"connection_reset_SECRET_SENTINEL"'));
   unsafe.push(record.replace('"reused"', '"reused_SECRET_SENTINEL"'));
   unsafe.push(record.replace("}", ',"transport_error_reason":"eof"}'));
   unsafe.push(record.replace("}", ',"\\u0074ransport_error_reason":"eof"}'));
   unsafe.push(record.replace("}", ',"upstream_request_written":false}'));
-  for (const line of unsafe) f.feed(Buffer.from(line + "\n"));
+  for (const line of unsafe) {
+    f.feed(Buffer.from(line + "\n"));
+  }
   f.feed(Buffer.from(record + "\n" + valid + "\n"));
   assert.deepEqual(f.records, [record + "\n", valid + "\n"]);
   assert.equal(f.records.join("").includes("SECRET_SENTINEL"), false);

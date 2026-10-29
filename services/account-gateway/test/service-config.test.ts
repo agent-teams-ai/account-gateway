@@ -96,7 +96,7 @@ void test("service profile admits production budgets up to the code ceiling and 
   denied(() => captureServiceProfiles({ profile: serviceProfile(10_001) }));
 });
 
-test("explicit qualified concurrency stays within each selected profile and never changes the default", () => {
+void test("explicit qualified concurrency stays within each selected profile and never changes the default", () => {
   const base = serviceProfile(640);
   assert.equal(captureServiceProfiles({ profile: base })[0].limits.concurrency, 1);
   const qualified = captureServiceProfiles({
@@ -128,11 +128,12 @@ test("explicit qualified concurrency stays within each selected profile and neve
   );
 });
 
-test("request readback retention requires an explicit positive bounded duration", () => {
+void test("request readback retention requires an explicit positive bounded duration", () => {
   assert.equal(captureRequestReadbackRetention(1), 1);
   assert.equal(captureRequestReadbackRetention(31_536_000_000), 31_536_000_000);
-  for (const value of [undefined, null, 0, -1, 1.5, "60000", NaN, Infinity, 31_536_000_001])
+  for (const value of [undefined, null, 0, -1, 1.5, "60000", NaN, Infinity, 31_536_000_001]) {
     denied(() => captureRequestReadbackRetention(value));
+  }
 });
 
 // Red if configuration intersects output across profiles instead of capturing

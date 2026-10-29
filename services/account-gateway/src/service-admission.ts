@@ -46,12 +46,18 @@ export const nativeCallbackCapacity = Object.freeze({
 export function nativeCallbackPurpose(
   path: string | undefined,
 ): "preclaim" | "critical" | "settlement" {
-  if (path === "/private/native/v1/execution-settle") return "settlement";
+  if (path === "/private/native/v1/execution-settle") {
+    return "settlement";
+  }
   return path === "/private/native/v1/execution-authority" ||
     path === "/private/native/v1/public-admit" ||
     path === "/private/native/v1/admit"
     ? "preclaim"
     : "critical";
+}
+
+function signalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
 }
 
 // A permit is physical ownership: a timeout can remove a waiter, but cannot
@@ -74,8 +80,9 @@ export class NativeControlAdmission {
       !Number.isSafeInteger(waiting) ||
       waiting < 0 ||
       waiting > 128
-    )
+    ) {
       throw new KernelError("invalid");
+    }
     this.activeLimit = active;
     this.waitingLimit = waiting;
   }
@@ -88,17 +95,21 @@ export class NativeControlAdmission {
         signal?.removeEventListener("abort", deny);
       };
       const deny = () => {
-        if (settled) return;
+        if (settled) {
+          return;
+        }
         settled = true;
         detach();
         const index = this.waiting.indexOf(waiter);
-        if (index >= 0) this.waiting.splice(index, 1);
+        if (index >= 0) {
+          this.waiting.splice(index, 1);
+        }
         reject(new ServiceCapacityError());
       };
       const waiter = {
         deny,
         start: () => {
-          if (this.stopped || signal?.aborted || Date.now() >= deadline) {
+          if (this.stopped || signalAborted(signal) || Date.now() >= deadline) {
             deny();
             return;
           }
@@ -107,19 +118,26 @@ export class NativeControlAdmission {
           this.active++;
           let released = false;
           resolve(() => {
-            if (released) return;
+            if (released) {
+              return;
+            }
             released = true;
             this.active--;
-            while (!this.stopped && this.active < this.activeLimit && this.waiting.length)
+            while (!this.stopped && this.active < this.activeLimit && this.waiting.length) {
               this.waiting.shift()!.start();
-            if (!this.active) this.idle.splice(0).forEach((done) => done());
+            }
+            if (!this.active) {
+              this.idle.splice(0).forEach((done) => {
+                done();
+              });
+            }
           });
         },
       };
       if (
         !Number.isSafeInteger(deadline) ||
         this.stopped ||
-        signal?.aborted ||
+        signalAborted(signal) ||
         Date.now() >= deadline
       ) {
         deny();
@@ -136,13 +154,21 @@ export class NativeControlAdmission {
       this.waiting.push(waiter);
       timer = setTimeout(deny, Math.max(1, deadline - Date.now()));
       signal?.addEventListener("abort", deny, { once: true });
-      if (signal?.aborted) deny();
+      if (signalAborted(signal)) {
+        deny();
+      }
     });
   }
   stop(): Promise<void> {
     this.stopped = true;
-    for (const waiter of [...this.waiting]) waiter.deny();
-    return this.active ? new Promise((resolve) => this.idle.push(resolve)) : Promise.resolve();
+    for (const waiter of this.waiting.slice()) {
+      waiter.deny();
+    }
+    return this.active
+      ? new Promise<void>((resolve) => {
+          this.idle.push(resolve);
+        })
+      : Promise.resolve();
   }
 }
 
@@ -156,7 +182,9 @@ export function admitNativeCallback(
   refusedBeforeWork?: () => void,
 ): void {
   const abort = new AbortController();
-  const cancel = () => abort.abort();
+  const cancel = () => {
+    abort.abort();
+  };
   req.once("aborted", cancel);
   res.once("close", cancel);
   void admission
@@ -164,7 +192,10 @@ export function admitNativeCallback(
     .then(
       async (release) => {
         try {
-          if (!res.destroyed && !res.writableEnded) await inServiceLane("control", work);
+          if (!res.destroyed && !res.writableEnded) {
+            await inServiceLane("control", work);
+          }
+          return;
         } finally {
           release();
         }
@@ -184,8 +215,9 @@ export function admitNativeCallback(
     )
     .catch(() => {
       if (!res.destroyed && !res.writableEnded) {
-        if (res.headersSent) res.destroy();
-        else {
+        if (res.headersSent) {
+          res.destroy();
+        } else {
           res.writeHead(503, { connection: "close" });
           res.end();
         }

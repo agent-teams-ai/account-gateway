@@ -18,13 +18,19 @@ import {
 } from "../src/service-admission.ts";
 
 async function listen(server: Server): Promise<string> {
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
   const address = server.address();
-  assert.ok(address && typeof address !== "string");
+  assert.ok(address !== null && typeof address !== "string");
   return "http://127.0.0.1:" + address.port;
 }
 async function stop(server: Server): Promise<void> {
-  const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+  const closed = new Promise<void>((resolve) => {
+    server.close(() => {
+      resolve();
+    });
+  });
   server.closeAllConnections();
   await closed;
 }
@@ -82,7 +88,7 @@ async function wire(
   }
 }
 
-test(
+void test(
   "one shared queue bounds actual management and transport HTTP through response body closure",
   { timeout: 10_000 },
   async () => {
@@ -95,9 +101,14 @@ test(
     const peer = createServer((req, res) => {
       void (async () => {
         const chunks: Buffer[] = [];
-        for await (const chunk of req) chunks.push(chunk as Buffer);
-        const body = JSON.parse(Buffer.concat(chunks).toString()) as Record<string, string>;
+        for await (const chunk of req) {
+          chunks.push(chunk as Buffer);
+        }
+        const body = JSON.parse(Buffer.concat(chunks).toString()) as Partial<
+          Record<string, string>
+        >;
         const id = body.id ?? body.operation;
+        assert.ok(id !== undefined);
         assert.equal(received.has(id), false, "no replay");
         received.add(id);
         assert.match(req.headers.authorization ?? "", /^Bearer synthetic-/);
@@ -108,10 +119,15 @@ test(
         );
         res.writeHead(200, { "content-type": "application/json", connection: "close" });
         res.flushHeaders();
-        if (open) res.end(reply);
-        else held.push({ response: res, reply });
-        if (received.size === nativeControlCapacity.active) initial.resolve();
-      })().catch((error) => {
+        if (open) {
+          res.end(reply);
+        } else {
+          held.push({ response: res, reply });
+        }
+        if (received.size === nativeControlCapacity.active) {
+          initial.resolve();
+        }
+      })().catch((error: unknown) => {
         failure = error;
         res.destroy();
       });
@@ -137,7 +153,9 @@ test(
             admission,
           });
           requests.push(client.refresh(scope));
-        } else requests.push(wire(origin, admission, "transport-" + i));
+        } else {
+          requests.push(wire(origin, admission, "transport-" + i));
+        }
       }
       await initial.promise;
       await assert.rejects(wire(origin, admission, "overflow"));
@@ -153,7 +171,9 @@ test(
       await admission.stop();
       assert.equal(received.size, nativeControlCapacity.active + nativeControlCapacity.waiting);
       assert.equal(received.has("overflow"), false);
-      if (failure) throw failure;
+      if (failure !== undefined) {
+        throw failure instanceof Error ? failure : new Error("control fixture failed");
+      }
     } finally {
       open = true;
       held.forEach(({ response, reply }) => response.end(reply));
@@ -163,7 +183,7 @@ test(
   },
 );
 
-test(
+void test(
   "queued abort, queue overflow and deadline send no HTTP; queue time counts against the same wire deadline",
   { timeout: 10_000 },
   async () => {
@@ -175,7 +195,9 @@ test(
     const peer = createServer((req, res) => {
       void (async () => {
         const chunks: Buffer[] = [];
-        for await (const chunk of req) chunks.push(chunk as Buffer);
+        for await (const chunk of req) {
+          chunks.push(chunk as Buffer);
+        }
         const { id } = JSON.parse(Buffer.concat(chunks).toString()) as { id: string };
         received.push(id);
         res.writeHead(200, { "content-type": "application/json" });
@@ -183,7 +205,9 @@ test(
         if (id === "first") {
           held = res;
           first.resolve();
-        } else second.resolve();
+        } else {
+          second.resolve();
+        }
       })().catch(() => res.destroy());
     });
     const origin = await listen(peer);
@@ -212,13 +236,13 @@ test(
     } finally {
       held?.end("{}");
       await stop(peer);
-      await active.catch(() => undefined);
+      await active.catch(() => {});
       await admission.stop();
     }
   },
 );
 
-test(
+void test(
   "shutdown rejects queued and new controls, retaining an active HTTP socket until physical close",
   { timeout: 10_000 },
   async () => {
@@ -235,13 +259,14 @@ test(
     const origin = await listen(peer),
       abort = new AbortController();
     const active = wire(origin, admission, "active", 3000, abort.signal);
-    void active.catch(() => undefined);
+    void active.catch(() => {});
     try {
       await entered.promise;
       const queued = wire(origin, admission, "queued");
       let drained = false;
       const drain = admission.stop().then(() => {
         drained = true;
+        return null;
       });
       await assert.rejects(queued);
       await assert.rejects(wire(origin, admission, "new"));
@@ -260,7 +285,7 @@ test(
   },
 );
 
-test(
+void test(
   "native callbacks progress independently while every facade control owner awaits them",
   { timeout: 10_000 },
   async () => {
@@ -275,13 +300,15 @@ test(
       peak = 0,
       entered = 0,
       failure: unknown;
-    const callback = createServer((req, res) =>
+    const callback = createServer((req, res) => {
       admitNativeCallback(callbacks, req, res, async () => {
         assert.equal(req.headers.authorization, "Bearer synthetic-callback-credential");
         active++;
         peak = Math.max(peak, active);
         entered++;
-        if (entered === nativeCallbackCapacity.active) allActive.resolve();
+        if (entered === nativeCallbackCapacity.active) {
+          allActive.resolve();
+        }
         try {
           await release.promise;
           res.writeHead(200, { connection: "close" });
@@ -289,8 +316,8 @@ test(
         } finally {
           active--;
         }
-      }),
-    );
+      });
+    });
     callback.maxConnections = nativeCallbackCapacity.sockets;
     const callbackOrigin = await listen(callback);
     const call = async () => {
@@ -312,8 +339,9 @@ test(
         .then(() => {
           res.writeHead(200);
           res.end("{}");
+          return null;
         })
-        .catch((error) => {
+        .catch((error: unknown) => {
           failure = error;
           res.destroy();
         })
@@ -339,7 +367,9 @@ test(
       await Promise.all([...pending, ...additional]);
       assert.equal(entered, serviceCapacity.controlActive + serviceCapacity.dataActive);
       assert.equal(peak, nativeCallbackCapacity.active);
-      if (failure) throw failure;
+      if (failure !== undefined) {
+        throw failure instanceof Error ? failure : new Error("control fixture failed");
+      }
     } finally {
       release.resolve();
       await stop(facade);
@@ -350,11 +380,11 @@ test(
   },
 );
 
-test("callback work throwing after acquisition cannot emit a pre-work refusal", async () => {
+void test("callback work throwing after acquisition cannot emit a pre-work refusal", async () => {
   const gate = new NativeControlAdmission(1, 0);
   let work = 0,
     refused = 0;
-  const server = createServer((req, res) =>
+  const server = createServer((req, res) => {
     admitNativeCallback(
       gate,
       req,
@@ -368,8 +398,8 @@ test("callback work throwing after acquisition cannot emit a pre-work refusal", 
         res.writeHead(503);
         res.end("must-not-be-issued");
       },
-    ),
-  );
+    );
+  });
   const origin = await listen(server);
   try {
     const response = await fetch(origin);
@@ -383,7 +413,7 @@ test("callback work throwing after acquisition cannot emit a pre-work refusal", 
   }
 });
 
-test("preclaim callback saturation leaves accepted dispatch, closure and settlement progress independent", async () => {
+void test("preclaim callback saturation leaves accepted dispatch, closure and settlement progress independent", async () => {
   const preclaim = new NativeControlAdmission(2, 1),
     critical = new NativeControlAdmission(2, 1),
     settlement = new NativeControlAdmission(4, 1);
@@ -395,7 +425,9 @@ test("preclaim callback saturation leaves accepted dispatch, closure and settlem
       gate = purpose === "preclaim" ? preclaim : purpose === "critical" ? critical : settlement;
     admitNativeCallback(gate, req, res, async () => {
       if (purpose === "preclaim") {
-        if (++offers === 2) entered.resolve();
+        if (++offers === 2) {
+          entered.resolve();
+        }
         await release.promise;
       }
       res.writeHead(200, { connection: "close" });

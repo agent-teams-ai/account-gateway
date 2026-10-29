@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { KernelError } from "./domain.ts";
 import { inServiceLane } from "./service-admission.ts";
-import type { NativeControlAdmission } from './service-admission.ts';
+import type { NativeControlAdmission } from "./service-admission.ts";
 import type { CleanupAuthority, NativeDispatchProof, TrustedContext } from "./domain.ts";
 import type { NativeTransport } from "./facade.ts";
 import type { NativeAuthority, Association } from "./native-authority.ts";
@@ -28,7 +28,8 @@ export class NativeHTTPTransport implements NativeTransport {
   readonly #authority: NativeAuthority;
   readonly #controls?: NativeControlAdmission;
   constructor(authority: NativeAuthority, controls?: NativeControlAdmission) {
-    this.#authority = authority; this.#controls = controls;
+    this.#authority = authority;
+    this.#controls = controls;
   }
   async #control(
     ctx: TrustedContext,
@@ -47,7 +48,10 @@ export class NativeHTTPTransport implements NativeTransport {
       cfg,
       c ? consumer.cleanupCredential : consumer.executionCredential,
       path + "/" + action,
-      Buffer.from(JSON.stringify({ proof: p, ...(c ? { cleanup: c } : {}) })), undefined, cfg.timeoutMs, this.#controls
+      Buffer.from(JSON.stringify({ proof: p, ...(c ? { cleanup: c } : {}) })),
+      undefined,
+      cfg.timeoutMs,
+      this.#controls,
     );
     try {
       if (
@@ -65,24 +69,26 @@ export class NativeHTTPTransport implements NativeTransport {
     }
   }
   async #recover(a: Association): Promise<NativeDispatchProof | undefined> {
-    if (a.proof) { return a.proof; }
-    return inServiceLane('control', async () => {
-      const actual = await this.#authority.kernel.requestProof(
-      a.context,
-      a.saved.admission.executionRef,
-      a.requestId,
-    );
-    if (actual) {
-      const p = proof(actual);
-      await this.#authority.persisted(a.context, p);
-      if (
-        p.native.generation !== a.saved.generation ||
-        (a.native && p.native.requestNonce !== a.native.requestNonce)
-      ) {
-        return denied();
-      }
-      a.proof = p;
+    if (a.proof) {
+      return a.proof;
     }
+    return inServiceLane("control", async () => {
+      const actual = await this.#authority.kernel.requestProof(
+        a.context,
+        a.saved.admission.executionRef,
+        a.requestId,
+      );
+      if (actual) {
+        const p = proof(actual);
+        await this.#authority.persisted(a.context, p);
+        if (
+          p.native.generation !== a.saved.generation ||
+          (a.native && p.native.requestNonce !== a.native.requestNonce)
+        ) {
+          return denied();
+        }
+        a.proof = p;
+      }
       return a.proof;
     });
   }
@@ -170,7 +176,9 @@ export class NativeHTTPTransport implements NativeTransport {
     if (!first) {
       // Reading the original SQL status is harmless. A live or uncertain route
       // association never sends another inference POST, even under a new signal.
-      await inServiceLane('control', () => authority.kernel.request(a.context, a.saved.admission.executionRef, a.requestId));
+      await inServiceLane("control", () =>
+        authority.kernel.request(a.context, a.saved.admission.executionRef, a.requestId),
+      );
       return { kind: "status" };
     }
     let envelope: Buffer;
@@ -178,7 +186,7 @@ export class NativeHTTPTransport implements NativeTransport {
       // Public grant/body checks already completed at ingress. Original native
       // mapping/lease validation is protocol work; it holds no SQL checkout
       // across the subsequent HTTP call and cannot consume another data permit.
-      await inServiceLane('control', () => authority.prepare(a, bytes));
+      await inServiceLane("control", () => authority.prepare(a, bytes));
       envelope = Buffer.concat([
         Buffer.from(
           JSON.stringify({
@@ -297,6 +305,7 @@ export class NativeHTTPTransport implements NativeTransport {
       }
       const settleStream = () => this.#settle(a);
       const active = hop;
+      const isCanceled = () => a.signal.aborted || cancellation !== undefined;
       return {
         kind: "stream",
         cancel,
@@ -305,17 +314,21 @@ export class NativeHTTPTransport implements NativeTransport {
             started = false;
           try {
             for await (const chunk of response) {
-              if (a.signal.aborted || cancellation) return denied();
-              if (!(chunk instanceof Uint8Array)) return denied();
+              if (isCanceled()) {
+                return denied();
+              }
+              if (!(chunk instanceof Uint8Array)) {
+                return denied();
+              }
               size += chunk.byteLength;
-              if (size > a.saved.admission.limits.outputBytes) return denied();
+              if (size > a.saved.admission.limits.outputBytes) {
+                return denied();
+              }
               if (!started && chunk.byteLength) {
                 started = true;
-                const current = await inServiceLane('control', () => authority.kernel.request(
-                  a.context,
-                  a.saved.admission.executionRef,
-                  a.requestId,
-                ));
+                const current = await inServiceLane("control", () =>
+                  authority.kernel.request(a.context, a.saved.admission.executionRef, a.requestId),
+                );
                 if (current.effect === "dispatch_started") {
                   await a.callback.effect(a.proof!, "response_started");
                 }
@@ -323,11 +336,13 @@ export class NativeHTTPTransport implements NativeTransport {
               // IncomingMessage iteration may coalesce reads beyond its high-water
               // mark. Deliver bounded copies only as the facade pulls each slice.
               for (let offset = 0; offset < chunk.byteLength; offset += streamChunkBytes) {
-                if (a.signal.aborted || cancellation) return denied();
+                if (isCanceled()) {
+                  return denied();
+                }
                 yield new Uint8Array(chunk.subarray(offset, offset + streamChunkBytes));
               }
             }
-            if (!response.complete || a.signal.aborted || cancellation) {
+            if (!response.complete || isCanceled()) {
               return denied();
             }
             await inServiceLane("control", settleStream);

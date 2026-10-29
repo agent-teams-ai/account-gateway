@@ -587,13 +587,13 @@ void test("B3a mapping uniqueness, immutable precision/profile and consumer isol
   }
 });
 
-test("mapping snapshots progress under a held consumer write lock and hide uncommitted mappings", async () => {
+void test("mapping snapshots progress under a held consumer write lock and hide uncommitted mappings", async () => {
   const context = ctx(),
     command = input(),
     f = await fixture(context);
   const gate = await lockPool.connect();
   let pending: Promise<(CandidateMapping | undefined)[]> | undefined;
-  let observed: (CandidateMapping | undefined)[] | undefined;
+  let observed: (CandidateMapping | undefined)[] | null | undefined;
   let committed: CandidateMapping | undefined, fresh: CandidateJournal | undefined;
   try {
     await f.manager.create(context, command);
@@ -616,12 +616,12 @@ test("mapping snapshots progress under a held consumer write lock and hide uncom
       store.mapping(context, fresh.generation),
       store.mapping(context, randomUUID()),
     ]);
-    observed = await Promise.race([pending, delay(2000).then(() => undefined)]);
+    observed = await Promise.race([pending, delay(2000, null)]);
     await gate.query("COMMIT");
   } finally {
     await gate.query("ROLLBACK");
     gate.release();
-    await pending?.catch(() => undefined);
+    await pending?.catch(() => {});
     await f.close();
   }
   assert.ok(
@@ -633,7 +633,6 @@ test("mapping snapshots progress under a held consumer write lock and hide uncom
     [committed, undefined, undefined],
     "only committed immutable mappings are visible",
   );
-  assert.ok(fresh);
   assert.equal(
     (await store.mapping(context, fresh.generation))?.generation,
     fresh.generation,
