@@ -11,6 +11,7 @@ import type {
 } from "@agent-teams/account-gateway/contracts";
 import type { RetainedCustodyProof } from "./domain.ts";
 import { KernelError, identifier, uuid } from "./domain.ts";
+import type { NativeControlAdmission } from "./service-admission.ts";
 import { secretSubmission } from "@agent-teams/account-gateway/http";
 import {
   accountModelsRequest,
@@ -318,6 +319,7 @@ export interface NativeManagementOptions {
   readonly deadlineMs?: number;
   readonly bodyBytes?: number;
   readonly headerBytes?: number;
+  readonly admission?: NativeControlAdmission;
 }
 // One concrete bounded transport shared by the two private control adapters.
 // It carries no enrollment policy and never performs a second HTTP attempt.
@@ -328,6 +330,7 @@ class NativeControlHTTP {
   readonly #deadlineMs: number;
   readonly #bodyBytes: number;
   readonly #headerBytes: number;
+  readonly #admission?: NativeControlAdmission;
   constructor(options: NativeManagementOptions) {
     let origin: URL;
     try {
@@ -379,6 +382,7 @@ class NativeControlHTTP {
     this.#deadlineMs = deadlineMs;
     this.#bodyBytes = bodyBytes;
     this.#headerBytes = headerBytes;
+    this.#admission = options.admission;
   }
   protected scope(
     scope: Pick<CandidateJournal, "consumerId" | "generation" | "accountRef" | "ownerRef">,
@@ -396,6 +400,7 @@ class NativeControlHTTP {
     value?: unknown,
     deadlineMs = this.#deadlineMs,
   ): Promise<Buffer> {
+    const deadline = Date.now() + Math.min(deadlineMs, this.#deadlineMs);
     let body: Buffer | undefined;
     try {
       body = value === undefined ? undefined : Buffer.from(JSON.stringify(value));
@@ -405,8 +410,19 @@ class NativeControlHTTP {
     } catch {
       throw new NativeFailure("bounded");
     }
+    let release: (() => void) | undefined;
+    try {
+      release = await this.#admission?.acquire(deadline);
+    } catch {
+      throw new NativeFailure("unavailable");
+    }
+    if (Date.now() >= deadline) {
+      release?.();
+      throw new NativeFailure("deadline");
+    }
     return new Promise<Buffer>((resolve, reject) => {
       let finished = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const finish = (error?: NativeFailure, bytes?: Buffer): void => {
         if (finished) {
           return;
@@ -418,29 +434,46 @@ class NativeControlHTTP {
         } else {
           resolve(bytes ?? Buffer.alloc(0));
         }
+        req.destroy();
       };
       const send = this.#origin.protocol === "https:" ? httpsRequest : httpRequest;
-      const req = send(this.#origin, {
-        method,
-        path,
-        agent: false,
-        maxHeaderSize: this.#headerBytes,
-        headers: {
-          authorization: "Bearer " + this.#control,
-          accept: "application/json",
-          connection: "close",
-          ...(body
-            ? { "content-type": "application/json", "content-length": String(body.length) }
-            : {}),
-        },
+      let req: ReturnType<typeof httpRequest>;
+      try {
+        req = send(this.#origin, {
+          method,
+          path,
+          agent: false,
+          maxHeaderSize: this.#headerBytes,
+          headers: {
+            authorization: "Bearer " + this.#control,
+            accept: "application/json",
+            connection: "close",
+            ...(body
+              ? { "content-type": "application/json", "content-length": String(body.length) }
+              : {}),
+          },
+        });
+      } catch {
+        release?.();
+        reject(new NativeFailure("unavailable"));
+        return;
+      }
+      let physical = false;
+      req.once("socket", (socket) => {
+        physical = true;
+        socket.once("close", () => release?.());
+      });
+      req.once("close", () => {
+        if (!physical) {
+          release?.();
+        }
       });
       req.maxHeadersCount = 65;
-      const timer = setTimeout(
+      timer = setTimeout(
         () => {
           finish(new NativeFailure("deadline"));
-          req.destroy();
         },
-        Math.min(deadlineMs, this.#deadlineMs),
+        Math.max(1, deadline - Date.now()),
       );
       req.on("error", () => {
         finish(new NativeFailure("unavailable"));

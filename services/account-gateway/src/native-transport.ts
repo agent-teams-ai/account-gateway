@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { KernelError } from "./domain.ts";
 import { inServiceLane } from "./service-admission.ts";
+import type { NativeControlAdmission } from "./service-admission.ts";
 import type { CleanupAuthority, NativeDispatchProof, TrustedContext } from "./domain.ts";
 import type { NativeTransport } from "./facade.ts";
 import type { NativeAuthority, Association } from "./native-authority.ts";
@@ -19,13 +20,16 @@ import {
 import type { CleanupLease, Receipt } from "./native-wire.ts";
 
 const path = "/private/native/v1/transports";
+const streamChunkBytes = 65_536;
 function finalized(value: boolean | undefined): value is true {
   return Boolean(value);
 }
 export class NativeHTTPTransport implements NativeTransport {
   readonly #authority: NativeAuthority;
-  constructor(authority: NativeAuthority) {
+  readonly #controls?: NativeControlAdmission;
+  constructor(authority: NativeAuthority, controls?: NativeControlAdmission) {
     this.#authority = authority;
+    this.#controls = controls;
   }
   async #control(
     ctx: TrustedContext,
@@ -45,6 +49,9 @@ export class NativeHTTPTransport implements NativeTransport {
       c ? consumer.cleanupCredential : consumer.executionCredential,
       path + "/" + action,
       Buffer.from(JSON.stringify({ proof: p, ...(c ? { cleanup: c } : {}) })),
+      undefined,
+      cfg.timeoutMs,
+      this.#controls,
     );
     try {
       if (
@@ -65,23 +72,25 @@ export class NativeHTTPTransport implements NativeTransport {
     if (a.proof) {
       return a.proof;
     }
-    const actual = await this.#authority.kernel.requestProof(
-      a.context,
-      a.saved.admission.executionRef,
-      a.requestId,
-    );
-    if (actual) {
-      const p = proof(actual);
-      await this.#authority.persisted(a.context, p);
-      if (
-        p.native.generation !== a.saved.generation ||
-        (a.native && p.native.requestNonce !== a.native.requestNonce)
-      ) {
-        return denied();
+    return inServiceLane("control", async () => {
+      const actual = await this.#authority.kernel.requestProof(
+        a.context,
+        a.saved.admission.executionRef,
+        a.requestId,
+      );
+      if (actual) {
+        const p = proof(actual);
+        await this.#authority.persisted(a.context, p);
+        if (
+          p.native.generation !== a.saved.generation ||
+          (a.native && p.native.requestNonce !== a.native.requestNonce)
+        ) {
+          return denied();
+        }
+        a.proof = p;
       }
-      a.proof = p;
-    }
-    return a.proof;
+      return a.proof;
+    });
   }
   async #unknown(a: Association): Promise<void> {
     try {
@@ -167,12 +176,17 @@ export class NativeHTTPTransport implements NativeTransport {
     if (!first) {
       // Reading the original SQL status is harmless. A live or uncertain route
       // association never sends another inference POST, even under a new signal.
-      await authority.kernel.request(a.context, a.saved.admission.executionRef, a.requestId);
+      await inServiceLane("control", () =>
+        authority.kernel.request(a.context, a.saved.admission.executionRef, a.requestId),
+      );
       return { kind: "status" };
     }
     let envelope: Buffer;
     try {
-      await authority.prepare(a, bytes);
+      // Public grant/body checks already completed at ingress. Original native
+      // mapping/lease validation is protocol work; it holds no SQL checkout
+      // across the subsequent HTTP call and cannot consume another data permit.
+      await inServiceLane("control", () => authority.prepare(a, bytes));
       envelope = Buffer.concat([
         Buffer.from(
           JSON.stringify({
@@ -271,7 +285,7 @@ export class NativeHTTPTransport implements NativeTransport {
         if (!p) {
           // A status-only admission has no dispatch proof. Verify actual SQL
           // readback; an uncertain first claim is conservatively fenced.
-          await authority.reclaimDenied(a);
+          await inServiceLane("control", () => authority.reclaimDenied(a));
         } else {
           await inServiceLane("control", () => this.#settle(a));
         }
@@ -291,6 +305,7 @@ export class NativeHTTPTransport implements NativeTransport {
       }
       const settleStream = () => this.#settle(a);
       const active = hop;
+      const isCanceled = () => a.signal.aborted || cancellation !== undefined;
       return {
         kind: "stream",
         cancel,
@@ -299,28 +314,35 @@ export class NativeHTTPTransport implements NativeTransport {
             started = false;
           try {
             for await (const chunk of response) {
-              if (a.signal.aborted || cancellation) {
+              if (isCanceled()) {
                 return denied();
               }
-              const b = new Uint8Array(chunk as Uint8Array);
-              size += b.byteLength;
+              if (!(chunk instanceof Uint8Array)) {
+                return denied();
+              }
+              size += chunk.byteLength;
               if (size > a.saved.admission.limits.outputBytes) {
                 return denied();
               }
-              if (!started && b.byteLength) {
+              if (!started && chunk.byteLength) {
                 started = true;
-                const current = await authority.kernel.request(
-                  a.context,
-                  a.saved.admission.executionRef,
-                  a.requestId,
+                const current = await inServiceLane("control", () =>
+                  authority.kernel.request(a.context, a.saved.admission.executionRef, a.requestId),
                 );
                 if (current.effect === "dispatch_started") {
                   await a.callback.effect(a.proof!, "response_started");
                 }
               }
-              yield b; // Pull-based Node iteration preserves backpressure.
+              // IncomingMessage iteration may coalesce reads beyond its high-water
+              // mark. Deliver bounded copies only as the facade pulls each slice.
+              for (let offset = 0; offset < chunk.byteLength; offset += streamChunkBytes) {
+                if (isCanceled()) {
+                  return denied();
+                }
+                yield new Uint8Array(chunk.subarray(offset, offset + streamChunkBytes));
+              }
             }
-            if (!response.complete || a.signal.aborted || cancellation) {
+            if (!response.complete || isCanceled()) {
               return denied();
             }
             await inServiceLane("control", settleStream);

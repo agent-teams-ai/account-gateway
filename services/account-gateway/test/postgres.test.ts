@@ -6,6 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { execFileSync } from "node:child_process";
 import { Pool, type PoolClient } from "pg";
 import { PostgresKernel } from "../src/postgres.ts";
+import * as serviceComposition from "../src/service.ts";
 import { KernelError, defaults, factDefaults } from "../src/domain.ts";
 import type {
   TrustedContext,
@@ -1972,6 +1973,114 @@ void test("restart reconciles only lost claims; explicit restore rotates and qua
 
 // Red if cleanup dies with capability/owner, two workers settle the same lease,
 // a stale token settles reclaimed work, or cleanup reactivates a disabled account.
+void test("service cleanup batches durable closed executions within a bounded turn and yields to OAuth", async () => {
+  const ctx = context(),
+    account = await connected(ctx),
+    w = await worker(ctx);
+  for (let n = 0; n < 10; n++) {
+    const e = await prepared(ctx, account.accountRef!);
+    if (!n) {
+      const accepted = await a.claim(
+        ctx,
+        e.result.executionRef!,
+        "completed-before-close",
+        w,
+        e.admission,
+        reservation(),
+      );
+      assert.ok(accepted.dispatch);
+      await a.effect(ctx, e.result.executionRef!, "completed-before-close", w, "response_started");
+      await a.effect(ctx, e.result.executionRef!, "completed-before-close", w, "completed");
+      await a.acknowledgeTransportClosed(ctx, w, accepted.dispatch.closure);
+    }
+    await a.close(ctx, op(), e.result.executionRef!);
+  }
+  const done = () =>
+    count("SELECT count(*)::integer n FROM ag_kernel.cleanup WHERE consumer=$1 AND state='done'", [
+      ctx.consumerId,
+    ]);
+  const settle = async (claim: CleanupClaim) => {
+    assert.equal(claim.scope.kind, "execution");
+    assert.equal(claim.scope.transports.length, 0);
+    await a.settleCleanup(ctx, claim.cleanupRef, w, claim.token, true);
+    return true;
+  };
+  // On the old source, exercise its one-claim behavior against the same real DB.
+  const source = serviceComposition as Partial<typeof serviceComposition>;
+  const turn =
+    source.composeServiceCleanupTurn?.(a, ctx, w, settle) ??
+    (async () => {
+      const claim = await a.claimCleanup(ctx, w);
+      if (claim) {
+        await settle(claim);
+      }
+      return !!claim;
+    });
+  assert.equal(await turn(), true);
+  const first = await done();
+  assert.ok(
+    first > 1 && first <= 8,
+    "one turn must make bounded progress beyond a single closed execution",
+  );
+  assert.equal(
+    await turn(),
+    false,
+    "the next tick remains available to OAuth even with cleanup queued",
+  );
+  assert.equal(await done(), first);
+  for (let n = 0; n < 8 && (await done()) < 10; n++) {
+    await turn();
+  }
+  assert.equal(await done(), 10);
+  assert.equal(await occupancy(ctx, account.accountRef!), 0);
+});
+
+void test("service cleanup ends a batch at unresolved transport ownership and never substitutes closure proof", async () => {
+  const ctx = context(),
+    account = await connected(ctx),
+    w = await worker(ctx);
+  const e = await prepared(ctx, account.accountRef!);
+  const accepted = await a.claim(
+    ctx,
+    e.result.executionRef!,
+    "accepted-before-close",
+    w,
+    e.admission,
+    reservation(),
+  );
+  assert.ok(accepted.dispatch);
+  await a.effect(ctx, e.result.executionRef!, "accepted-before-close", w, "effect_unknown");
+  await a.close(ctx, op(), e.result.executionRef!);
+  let attempts = 0;
+  const turn = serviceComposition.composeServiceCleanupTurn(a, ctx, w, async (claim) => {
+    attempts++;
+    assert.equal(claim.scope.kind, "execution");
+    assert.equal(claim.scope.transports.length, 1);
+    await assert.rejects(
+      a.settleCleanup(ctx, claim.cleanupRef, w, claim.token, true),
+      isCode("conflict"),
+    );
+    await a.settleCleanup(ctx, claim.cleanupRef, w, claim.token, false);
+    return false;
+  });
+  assert.equal(await turn(), true);
+  assert.equal(attempts, 1, "unresolved work must not be retried repeatedly in the same batch");
+  assert.equal(await turn(), false);
+  assert.equal(attempts, 1);
+  assert.equal(await occupancy(ctx, account.accountRef!), 1);
+  assert.equal(
+    (await a.request(ctx, e.result.executionRef!, "accepted-before-close")).effect,
+    "effect_unknown",
+  );
+  assert.equal(
+    await count(
+      "SELECT count(*)::integer n FROM ag_kernel.cleanup WHERE consumer=$1 AND state='pending'",
+      [ctx.consumerId],
+    ),
+    1,
+  );
+});
+
 void test("disable and idempotent close persist bounded scoped cleanup across worker loss", async () => {
   const ctx = context(),
     account = await connected(ctx),

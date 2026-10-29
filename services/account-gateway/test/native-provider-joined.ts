@@ -30,7 +30,7 @@ import {
   composeServiceControl,
   composeServiceNative,
   composeServiceCachedLimits,
-  composeServiceCleanupClaim,
+  composeServiceCleanupTurn,
 } from "../src/service.ts";
 import { createFacade, cancelFacadeTransport } from "../src/facade.ts";
 import type { FacadeOptions } from "../src/facade.ts";
@@ -938,18 +938,7 @@ async function run(): Promise<void> {
     );
   }
   phase = "canonical-generation-and-execution-cleanup";
-  const claimCleanup = composeServiceCleanupClaim(kernel, context, worker);
-  let idleCleanupTurns = 0;
-  for (let count = 0; count < 64; count++) {
-    const claim = await claimCleanup();
-    // The production selector deliberately yields every second turn to refresh.
-    if (!claim) {
-      if (++idleCleanupTurns === 2) {
-        break;
-      }
-      continue;
-    }
-    idleCleanupTurns = 0;
+  const cleanupTurn = composeServiceCleanupTurn(kernel, context, worker, async (claim) => {
     if (claim.scope.kind === "generation") {
       assert.equal(
         await control.management.cleanupClaim(context, claim),
@@ -971,6 +960,19 @@ async function run(): Promise<void> {
       }
       await kernel.settleCleanup(context, claim.cleanupRef, worker, claim.token, true);
     }
+    return true;
+  });
+  let idleCleanupTurns = 0;
+  for (let count = 0; count < 64; count++) {
+    const acquired = await cleanupTurn();
+    // The production selector yields the next turn to refresh after each batch.
+    if (!acquired) {
+      if (++idleCleanupTurns === 2) {
+        break;
+      }
+      continue;
+    }
+    idleCleanupTurns = 0;
     if (count === 63) {
       throw new Error("cleanup did not drain");
     }

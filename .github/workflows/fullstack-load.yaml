@@ -1,0 +1,174 @@
+name: Production full-stack E2E and bounded load
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Smoke or all eight bounded load scenarios
+        required: true
+        default: all
+        type: choice
+        options: [smoke, all]
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  fullstack_runtime:
+    name: full-stack (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['26.11.1', '24.21.0']
+    env:
+      NPM_CONFIG_ENGINE_STRICT: 'true'
+      LOAD_SUITE: ${{ inputs.suite || 'all' }}
+      NATIVE_COMMIT: b813197871c3d7a2ae07fa9cabe97b9862856653
+      PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
+      GATEWAY_LOAD_IMAGE: account-gateway-fullstack:qualified
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Node 26 has no bundled Corepack. Retain Node 24's qualified Corepack
+      # entrypoint, then run it using the selected runtime and pinned pnpm.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.21.0'
+      - name: Retain bundled Corepack entrypoint
+        run: |
+          corepack_entry="$(dirname "$(dirname "$(command -v node)")")/lib/node_modules/corepack/dist/corepack.js"
+          test -f "$corepack_entry"
+          echo "GATEWAY_COREPACK=$corepack_entry" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Prepare task-owned tool, dependency and build directories
+        run: |
+          test "$(node --version)" = "v${{ matrix.node }}"
+          load_root="$RUNNER_TEMP/gateway-load"
+          mkdir -p "$load_root/shim" "$load_root/tmp"
+          # The root operator accepts only a fresh private directory owned by
+          # its own UID; never claim an existing caller-writable destination.
+          sudo mkdir -m 700 "$load_root/artifacts"
+          printf '#!/bin/sh\nexec "%s" "%s" pnpm "$@"\n' "$(command -v node)" "$GATEWAY_COREPACK" > "$load_root/shim/pnpm"
+          chmod 755 "$load_root/shim/pnpm"
+          echo "GATEWAY_LOAD_ROOT=$load_root" >> "$GITHUB_ENV"
+          echo "GATEWAY_NODE=$(command -v node)" >> "$GITHUB_ENV"
+          echo "GATEWAY_NODE_HOME=$(dirname "$(dirname "$(command -v node)")")" >> "$GITHUB_ENV"
+          echo "COREPACK_HOME=$load_root/corepack" >> "$GITHUB_ENV"
+          echo "TMPDIR=$load_root/tmp" >> "$GITHUB_ENV"
+          echo "GOCACHE=$load_root/go-cache" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=$load_root/go-modules" >> "$GITHUB_ENV"
+          echo "GOPATH=$load_root/go" >> "$GITHUB_ENV"
+          echo "$load_root/shim" >> "$GITHUB_PATH"
+      - name: Build and check the isolated runtime image
+        run: |
+          # The PostgreSQL image has neither Node 26's libatomic dependency nor
+          # a system CA bundle. Provision these before measurement and validate
+          # the selected Node in the actual image before the native build.
+          mkdir -p "$GATEWAY_LOAD_ROOT/container"
+          cat > "$GATEWAY_LOAD_ROOT/container/Dockerfile" <<'DOCKERFILE'
+          ARG PG_IMAGE
+          FROM ${PG_IMAGE}
+          RUN . /etc/os-release && test "$VERSION_CODENAME" = trixie \
+            && apt-get update \
+            && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends --no-upgrade \
+              libatomic1=14.2.0-19 ca-certificates=20250419+deb13u1 \
+            && rm -rf /var/lib/apt/lists/*
+          DOCKERFILE
+          docker build --pull --build-arg "PG_IMAGE=$PG_IMAGE" --tag "$GATEWAY_LOAD_IMAGE" "$GATEWAY_LOAD_ROOT/container"
+          docker run --rm --network none --user 0:0 \
+            --mount "type=bind,source=$GATEWAY_NODE_HOME,target=$GATEWAY_NODE_HOME,readonly" \
+            --entrypoint /bin/sh "$GATEWAY_LOAD_IMAGE" -ec '
+              test "$("$1" --version)" = "$2"
+              /usr/bin/openssl version
+              /usr/lib/postgresql/17/bin/postgres --version
+              test -s /etc/ssl/certs/ca-certificates.crt
+              dpkg-query -W libatomic1 ca-certificates
+            ' -- "$GATEWAY_NODE" "v${{ matrix.node }}"
+      - name: Install frozen dependencies and build the public SDK
+        run: |
+          test "$(pnpm --version)" = 11.28.2
+          test "$(pnpm --config.engine-strict=true config get engine-strict)" = true
+          pnpm --config.engine-strict=true install --frozen-lockfile --store-dir "$GATEWAY_LOAD_ROOT/store" --virtual-store-dir "$GATEWAY_LOAD_ROOT/virtual"
+          node node_modules/typescript/bin/tsc --project tsconfig.build.json --outDir "$GATEWAY_LOAD_ROOT/sdk-dist"
+          test -f "$GATEWAY_LOAD_ROOT/sdk-dist/index.js"
+          test -f "$GATEWAY_LOAD_ROOT/sdk-dist/index.d.ts"
+          ln -s "$GITHUB_WORKSPACE/packages/account-gateway/node_modules" "$GATEWAY_LOAD_ROOT/sdk-dist/node_modules"
+          ln -s "$GATEWAY_LOAD_ROOT/sdk-dist" packages/account-gateway/dist
+          pnpm --dir services/account-gateway run typecheck
+          pnpm --dir services/account-gateway run test:load:unit
+          git diff --exit-code -- pnpm-lock.yaml
+      - name: Check SDK and service imports inside the isolated image
+        run: |
+          docker run --rm --network none --user 0:0 \
+            --mount "type=bind,source=$GATEWAY_NODE_HOME,target=$GATEWAY_NODE_HOME,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=$GITHUB_WORKSPACE,readonly" \
+            --mount "type=bind,source=$GATEWAY_LOAD_ROOT,target=$GATEWAY_LOAD_ROOT,readonly" \
+            --workdir "$GITHUB_WORKSPACE/services/account-gateway" \
+            --entrypoint "$GATEWAY_NODE" "$GATEWAY_LOAD_IMAGE" --input-type=module -e '
+              const sdk = await import("@agent-teams/account-gateway/http");
+              const contracts = await import("@agent-teams/account-gateway/contracts");
+              const service = await import("./src/service.ts");
+              if (typeof sdk.createExecutionClient !== "function" || !contracts.close || typeof service.startService !== "function") process.exit(1);
+              process.stdout.write("Actual container SDK and service imports passed\n");
+            '
+      - name: Build the exact production native CLI and production migration adapter
+        run: |
+          git clone --no-checkout https://github.com/agent-teams-ai/sub2api.git "$GATEWAY_LOAD_ROOT/native-source"
+          git -C "$GATEWAY_LOAD_ROOT/native-source" checkout --detach "$NATIVE_COMMIT"
+          node services/account-gateway/test/load/build-native-fixture.ts --native-source "$GATEWAY_LOAD_ROOT/native-source" --output "$GATEWAY_LOAD_ROOT/native-build"
+      - name: Run real E2E in a disposable container with no external network
+        run: |
+          # No --privileged, no host network, no host CA edits. Only this fresh
+          # artifact directory is a writable host mount during measurement.
+          docker run --rm --network none --user 0:0 --cpus 2 --memory 4g --pids-limit 256 --ulimit nofile=4096:4096 \
+            --sysctl 'net.ipv4.tcp_rmem=4096 16384 65536' \
+            --sysctl 'net.ipv4.tcp_wmem=4096 16384 65536' \
+            --sysctl net.ipv4.tcp_moderate_rcvbuf=0 \
+            --mount "type=bind,source=$GATEWAY_NODE_HOME,target=$GATEWAY_NODE_HOME,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=$GITHUB_WORKSPACE,readonly" \
+            --mount "type=bind,source=$GATEWAY_LOAD_ROOT,target=$GATEWAY_LOAD_ROOT,readonly" \
+            --mount "type=bind,source=$GATEWAY_LOAD_ROOT/artifacts,target=$GATEWAY_LOAD_ROOT/artifacts" \
+            --entrypoint "$GATEWAY_NODE" "$GATEWAY_LOAD_IMAGE" \
+            "$GITHUB_WORKSPACE/services/account-gateway/test/load/provision.ts" \
+            --repo "$GITHUB_WORKSPACE" --build-receipt "$GATEWAY_LOAD_ROOT/native-build/build-receipt.json" \
+            --pg-bin /usr/lib/postgresql/17/bin --artifacts "$GATEWAY_LOAD_ROOT/artifacts" \
+            --trust-mode container --gateway-commit "$(git rev-parse HEAD)" --suite "$LOAD_SUITE"
+      - name: Make safe evidence readable by the artifact uploader
+        if: ${{ always() && env.GATEWAY_LOAD_ROOT != '' }}
+        run: sudo chown -R "$(id -u):$(id -g)" "$GATEWAY_LOAD_ROOT/artifacts"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() && env.GATEWAY_LOAD_ROOT != '' }}
+        with:
+          name: fullstack-${{ matrix.node }}-${{ inputs.suite || 'all' }}
+          path: |
+            ${{ env.GATEWAY_LOAD_ROOT }}/artifacts/operator-result.json
+            ${{ env.GATEWAY_LOAD_ROOT }}/artifacts/summary.json
+            ${{ env.GATEWAY_LOAD_ROOT }}/artifacts/source-manifest.json
+            ${{ env.GATEWAY_LOAD_ROOT }}/artifacts/native-migrations.json
+            ${{ env.GATEWAY_LOAD_ROOT }}/artifacts/attempts.json
+            ${{ env.GATEWAY_LOAD_ROOT }}/artifacts/scenarios.json
+            ${{ env.GATEWAY_LOAD_ROOT }}/artifacts/provider-ledger.ndjson
+            ${{ env.GATEWAY_LOAD_ROOT }}/artifacts/resources.json
+            ${{ env.GATEWAY_LOAD_ROOT }}/artifacts/cleanup.json
+            ${{ env.GATEWAY_LOAD_ROOT }}/artifacts/preparations.json
+          if-no-files-found: warn
+          retention-days: 14
+  fullstack:
+    needs: fullstack_runtime
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both actual production runtime lanes
+        env:
+          LANE_RESULT: ${{ needs.fullstack_runtime.result }}
+        run: test "$LANE_RESULT" = success
