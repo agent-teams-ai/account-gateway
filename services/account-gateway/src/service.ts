@@ -4,15 +4,22 @@ import { randomUUID } from "node:crypto";
 import { writeSync } from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
-import pg from "pg";
+import { Pool } from "pg";
 import {
   ServiceAdmission,
   facadeControlRoute,
   facadeBoundedReadRoute,
   inServiceLane,
 } from "./service-admission.ts";
-import { KernelError, defaults, uuid } from "./domain.ts";
-import type { Bounds } from "./domain.ts";
+import {
+  KernelError,
+  defaults,
+  uuid,
+  type Bounds,
+  type DurableKernel,
+  type ExecutionRead,
+  type TrustedContext,
+} from "./domain.ts";
 import { PostgresKernel } from "./postgres.ts";
 import { IntentSecrets, PostgresManagementStore } from "./management-store.ts";
 import { AccountManagement, exactCandidate, sameCandidate } from "./management.ts";
@@ -27,7 +34,6 @@ import type {
   OAuthCleanupAction,
   OAuthMethod,
 } from "./management.ts";
-import type { DurableKernel, ExecutionRead, TrustedContext } from "./domain.ts";
 import { oauthProfileDefinition } from "./oauth-profiles.ts";
 import { providerConnectionDefinition } from "./provider-connections.ts";
 import {
@@ -82,7 +88,7 @@ export function composeServiceCleanupClaim(
   return async () => {
     if (refreshTurn) {
       refreshTurn = false;
-      return undefined;
+      return;
     }
     const claim = await kernel.claimCleanup(ctx, worker);
     refreshTurn = claim !== undefined;
@@ -95,7 +101,9 @@ export function composeServiceCleanupClaim(
 export function protectedReadSockets(): (req: IncomingMessage, res: ServerResponse) => boolean {
   let occupied = 0;
   return (req, res) => {
-    if (!facadeBoundedReadRoute(req.method, req.url)) return true;
+    if (!facadeBoundedReadRoute(req.method, req.url)) {
+      return true;
+    }
     if (occupied >= 6) {
       res.writeHead(503, { connection: "close" });
       res.end();
@@ -140,7 +148,7 @@ export function composeServiceControl(
   };
   const client = new NativeManagementClient(control);
   const checkProfile = (j: CandidateJournal) => {
-    const p = profiles.find((p) => p.profile === j.profile.profile);
+    const p = profiles.find((profile) => profile.profile === j.profile.profile);
     if (
       !p ||
       oauthProfileDefinition(p.profile) ||
@@ -148,8 +156,9 @@ export function composeServiceControl(
       j.profile.model !== p.model ||
       j.profile.baseURL !== p.baseURL ||
       j.profile.qualificationRef !== p.qualificationRef
-    )
+    ) {
       throw new KernelError("denied");
+    }
   };
   const native: CandidateNative = {
     create(j, name, key) {
@@ -223,7 +232,7 @@ export function composeServiceControl(
     retainedCustody: new NativeRetainedCustodyClient(control),
     proof: {
       async verify(j, d) {
-        const p = profiles.find((p) => p.profile === j.profile.profile);
+        const p = profiles.find((profile) => profile.profile === j.profile.profile);
         const rows = await native.read(j);
         return (
           !!p &&
@@ -264,9 +273,16 @@ export function composeServiceControl(
 }
 /** Both facades and joined callers use the production cached-read wiring. */
 export function composeServiceCachedLimits(
-  control: Pick<ReturnType<typeof composeServiceControl>, "accountModels" | "accountLimits" | "accountLimitsV2">,
+  control: Pick<
+    ReturnType<typeof composeServiceControl>,
+    "accountModels" | "accountLimits" | "accountLimitsV2"
+  >,
 ): Pick<FacadeOptions, "accountModels" | "accountLimits" | "accountLimitsV2"> {
-  return { accountModels: control.accountModels, accountLimits: control.accountLimits, accountLimitsV2: control.accountLimitsV2 };
+  return {
+    accountModels: control.accountModels,
+    accountLimits: control.accountLimits,
+    accountLimitsV2: control.accountLimitsV2,
+  };
 }
 export function composeServiceNative(
   cfg: Pick<
@@ -338,7 +354,9 @@ function captured(value: unknown, originRef: string): ProcessBinding {
     "lockDevice",
     "lockInode",
   ]);
-  if (r.originRef !== originRef) throw new ServiceError("runtime_denied");
+  if (r.originRef !== originRef) {
+    throw new ServiceError("runtime_denied");
+  }
   uuid(r.bootId);
   uuid(r.incarnation);
   for (const k of ["pid", "birthTicks", "lockDevice", "lockInode"]) {
@@ -347,10 +365,13 @@ function captured(value: unknown, originRef: string): ProcessBinding {
       typeof v !== "string" ||
       !/^[1-9][0-9]{0,19}$/.test(v) ||
       BigInt(v) > 18_446_744_073_709_551_615n
-    )
+    ) {
       throw new ServiceError("runtime_denied");
+    }
   }
-  if (BigInt(r.pid as string) > 2_147_483_647n) throw new ServiceError("runtime_denied");
+  if (BigInt(r.pid as string) > 2_147_483_647n) {
+    throw new ServiceError("runtime_denied");
+  }
   return Object.freeze({ ...r }) as unknown as ProcessBinding;
 }
 const same = (a: ProcessBinding, b: ProcessBinding) =>
@@ -377,14 +398,17 @@ export function composeServiceRetirementReadback(
       current = captured(current, originRef);
       uuid(selected.engineIncarnation);
       if (
-        active ||
+        Boolean(active) ||
         signal.aborted ||
         selected.originRef !== originRef ||
         selected.engineIncarnation === current.incarnation
-      )
+      ) {
         return;
+      }
       input = Buffer.from(JSON.stringify({ current, selectors: [selected] }));
-      if (input.length > 4096) return;
+      if (input.length > 4096) {
+        return;
+      }
     } catch {
       return;
     }
@@ -401,7 +425,7 @@ export function composeServiceRetirementReadback(
         active = query;
       } catch {
         active = undefined;
-        resolve(undefined);
+        resolve(void 0);
         return;
       }
       let failed = false,
@@ -413,14 +437,18 @@ export function composeServiceRetirementReadback(
       const chunks: Buffer[] = [];
       let timer: ReturnType<typeof setTimeout>;
       const finish = (receipt?: Retirement) => {
-        if (done) return;
+        if (done) {
+          return;
+        }
         done = true;
         clearTimeout(timer);
         signal.removeEventListener("abort", terminate);
         resolve(receipt);
       };
       const terminate = () => {
-        if (done || failed) return;
+        if (done || failed) {
+          return;
+        }
         failed = true;
         chunks.length = 0;
         clearTimeout(timer);
@@ -434,7 +462,12 @@ export function composeServiceRetirementReadback(
         query.stdin?.destroy();
         query.stdout?.destroy();
         query.stderr?.destroy();
-        timer = setTimeout(() => finish(), Math.max(1, Math.min(500, deadline - Date.now())));
+        timer = setTimeout(
+          () => {
+            finish();
+          },
+          Math.max(1, Math.min(500, deadline - Date.now())),
+        );
       };
       timer = setTimeout(terminate, Math.max(1, deadline - Date.now() - 500));
       query.once("error", terminate);
@@ -448,20 +481,31 @@ export function composeServiceRetirementReadback(
         eof = true;
       });
       query.stdout!.on("data", (b: Buffer) => {
-        if (failed || done) return;
+        if (failed || done) {
+          return;
+        }
         bytes += b.length;
-        if (bytes > 4096) terminate();
-        else chunks.push(b);
+        if (bytes > 4096) {
+          terminate();
+        } else {
+          chunks.push(b);
+        }
       });
       query.stderr!.on("data", (b: Buffer) => {
         diagnostics += b.length;
-        if (diagnostics > 4096) terminate();
+        if (diagnostics > 4096) {
+          terminate();
+        }
       });
       query.once("close", (code, exitSignal) => {
         // Logical timeout cannot release physical custody. Only this exact
         // handle's close permits another query, even after finish() resolved.
-        if (active === query) active = undefined;
-        if (done) return;
+        if (active === query) {
+          active = undefined;
+        }
+        if (done) {
+          return;
+        }
         if (
           failed ||
           signal.aborted ||
@@ -476,8 +520,9 @@ export function composeServiceRetirementReadback(
         }
         try {
           const reply = object(strictJSON(Buffer.concat(chunks)), ["receipts"]);
-          if (!Array.isArray(reply.receipts) || reply.receipts.length !== 1)
+          if (!Array.isArray(reply.receipts) || reply.receipts.length !== 1) {
             throw new ServiceError("runtime_denied");
+          }
           const r = object(reply.receipts[0], ["binding", "scope", "method"]),
             old = captured(r.binding, originRef);
           if (
@@ -490,16 +535,20 @@ export function composeServiceRetirementReadback(
             !["observed-child-exit", "reacquired-after-supervisor-loss"].includes(
               r.method as string,
             )
-          )
+          ) {
             throw new ServiceError("runtime_denied");
+          }
           finish(Object.freeze({ binding: old, scope: r.scope, method: r.method as string }));
         } catch {
           finish();
         }
       });
       signal.addEventListener("abort", terminate, { once: true });
-      if (signal.aborted) terminate();
-      else query.stdin!.end(input);
+      if (signal.aborted) {
+        terminate();
+      } else {
+        query.stdin!.end(input);
+      }
     });
   };
 }
@@ -508,8 +557,10 @@ async function bounded<T>(work: Promise<T>, ms: number): Promise<T> {
   try {
     return await Promise.race([
       work,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new ServiceError("runtime_denied")), ms);
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new ServiceError("runtime_denied"));
+        }, ms);
       }),
     ]);
   } finally {
@@ -530,10 +581,16 @@ async function listen(s: Server, origin: string): Promise<void> {
   );
 }
 async function close(s: Server | undefined): Promise<void> {
-  if (!s) return;
-  const closed = new Promise<void>((resolve) => s.close(() => resolve()));
+  if (!s) {
+    return;
+  }
+  const closed = new Promise<void>((resolve) => {
+    s.close(() => {
+      resolve();
+    });
+  });
   s.closeAllConnections();
-  await bounded(closed, 1000).catch(() => undefined);
+  await bounded(closed, 1000).catch(() => {});
 }
 
 // Each call is one foreground deployable unit, one configured consumer and one
@@ -566,7 +623,8 @@ export function runtimeFailureDiagnostic(
   error?: unknown,
   maintenancePhase?: MaintenancePhase,
 ) {
-  const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+  const code =
+    error !== null && typeof error === "object" && "code" in error ? error.code : undefined;
   const phase =
     cause === "maintenance_failed" &&
     [
@@ -615,10 +673,14 @@ export function writeRuntimeFailureDiagnostic(
   }
 }
 
+function nonempty(value: string | undefined): value is string {
+  return Boolean(value);
+}
+
 export async function startService(configFile: string, signal?: AbortSignal): Promise<Service> {
   const admission = new ServiceAdmission();
   const cfg = loadServiceConfig(configFile); // Fully frozen before any await.
-  const pool = new pg.Pool({
+  const pool = new Pool({
     connectionString: cfg.kernelDSN,
     max: 8,
     connectionTimeoutMillis: 5000,
@@ -626,7 +688,9 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     statement_timeout: 5000,
     idle_in_transaction_session_timeout: 5000,
   });
-  pool.on("error", (error) => fail(error, "pool_error"));
+  pool.on("error", (error) => {
+    fail(error, "pool_error");
+  });
   const kernel = new PostgresKernel(pool, composeKernelBounds(cfg.bearers), cfg.durableFacts),
     worker = randomUUID(),
     ctx = Object.freeze({ consumerId: cfg.consumer.consumerId });
@@ -641,14 +705,16 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     ready = false,
     invalid = false,
     stopping = false;
+  const isStopping = (): boolean => stopping;
   let terminal: "retired" | "pending" | undefined, retirement: Retirement | undefined;
   let child: ReturnType<typeof spawn> | undefined, options: FacadeOptions | undefined;
   type StartupStage = "starting" | "ready" | "heartbeat" | "facade-listen";
   let startupStage: StartupStage | undefined = "starting";
   let startupFailure: { cause: unknown; stage: StartupStage } | undefined;
   function retainStartupFailure(cause: unknown) {
-    if (startupStage !== undefined && !startupFailure)
+    if (startupStage !== undefined && !startupFailure) {
       startupFailure = { cause, stage: startupStage };
+    }
   }
   let notify: (() => void) | undefined;
   const pulse = () => {
@@ -656,7 +722,9 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     notify = undefined;
   };
   function startupActive() {
-    if (stopping || invalid || exited || signal?.aborted) throw new ServiceError("startup_denied");
+    if (stopping || invalid || exited || (signal?.aborted ?? false)) {
+      throw new ServiceError("startup_denied");
+    }
   }
   const waitFor = async (predicate: () => boolean, ms: number) => {
     const deadline = Date.now() + ms;
@@ -696,17 +764,20 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   }
   function fail(error?: unknown, cause: RuntimeFailureCause = "runtime_invalidated") {
     const report = !stopping && startupStage === undefined;
-    if (!stopping && error !== undefined) retainStartupFailure(error);
+    if (!stopping && error !== undefined) {
+      retainStartupFailure(error);
+    }
     invalid = true;
     denyAdmission();
     pulse();
     void stop();
-    if (report)
+    if (report) {
       writeRuntimeFailureDiagnostic(
         cause,
         error,
         cause === "maintenance_failed" ? maintenancePhase : undefined,
       );
+    }
   }
   const reserveReadSocket = protectedReadSockets();
   const callback = createServer(
@@ -722,14 +793,18 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
         res.destroy();
         req.destroy();
       }, 5000);
-      res.once("close", () => clearTimeout(timer));
+      res.once("close", () => {
+        clearTimeout(timer);
+      });
       if (facadeControlRoute(req.method, req.url)) {
         if (!controlFacade || stopping || invalid) {
           res.writeHead(503);
           res.end();
           return;
         }
-        if (!reserveReadSocket(req, res)) return;
+        if (!reserveReadSocket(req, res)) {
+          return;
+        }
         controlFacade.emit("request", req, res);
         return;
       }
@@ -746,7 +821,9 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
       // Go's first enrollment can arrive before stdout's actual starting binding.
       // Hold only this bounded listener; never ACK a synthetic authority.
       const dispatch = () => {
-        if (res.destroyed || res.writableEnded) return;
+        if (res.destroyed || res.writableEnded) {
+          return;
+        }
         if (!handler || stopping || invalid) {
           res.writeHead(503);
           res.end();
@@ -780,10 +857,16 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   callback.maxConnections = 8;
   callback.maxRequestsPerSocket = 1;
   callback.on("clientError", (_e, socket) => socket.destroy());
-  callback.on("error", (error) => fail(error, "callback_error"));
+  callback.on("error", (error) => {
+    fail(error, "callback_error");
+  });
   function stop(): Promise<"retired" | "pending"> {
-    if (stopWork) return stopWork;
-    if (stopping) return stopped;
+    if (stopWork) {
+      return stopWork;
+    }
+    if (stopping) {
+      return stopped;
+    }
     stopping = true;
     const handlersSettled = admission.stop();
     readbackAbort.abort();
@@ -795,7 +878,9 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     // alone decides exact-engine retirement and retains launcher disk evidence.
     if (child && !exited) {
       try {
-        if (!child.kill("SIGTERM")) invalid = true;
+        if (!child.kill("SIGTERM")) {
+          invalid = true;
+        }
       } catch {
         invalid = true;
       }
@@ -805,10 +890,11 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
       await bounded(Promise.all([maintenance, inFlightTick, handlersSettled]), 6500).catch(() => {
         invalid = true;
       });
-      if (child)
+      if (child) {
         await bounded(exit, 12_000).catch(() => {
           invalid = true;
         });
+      }
       await bounded(pool.end(), 6000).catch(() => {
         invalid = true;
       });
@@ -864,7 +950,9 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
       exited = true;
       denyAdmission();
       pulse();
-      if (!stopping) fail(undefined, "child_exit");
+      if (!stopping) {
+        fail(undefined, "child_exit");
+      }
     });
     child.once("close", (code) => {
       exitCode = code;
@@ -895,10 +983,14 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     child.stdout!.on("data", (b: Buffer) => {
       try {
         metadata += b.length;
-        if (metadata > 16_384) throw new ServiceError("runtime_denied");
+        if (metadata > 16_384) {
+          throw new ServiceError("runtime_denied");
+        }
         buffer = Buffer.concat([buffer, b]);
         for (let newline = buffer.indexOf(10); newline >= 0; newline = buffer.indexOf(10)) {
-          if (newline > 4096) throw new ServiceError("runtime_denied");
+          if (newline > 4096) {
+            throw new ServiceError("runtime_denied");
+          }
           const r = object(
             strictJSON(buffer.subarray(0, newline)),
             ["state", "binding"],
@@ -906,7 +998,9 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
           );
           buffer = buffer.subarray(newline + 1);
           const actual = captured(r.binding, cfg.native.originRef);
-          if (original && !same(actual, original)) throw new ServiceError("runtime_denied");
+          if (original && !same(actual, original)) {
+            throw new ServiceError("runtime_denied");
+          }
           if (
             r.state === "starting" &&
             sequence === 0 &&
@@ -937,8 +1031,9 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
               !same(captured(receipt.binding, cfg.native.originRef), original) ||
               receipt.scope !== "exact-local-process-transport-teardown-v1" ||
               receipt.method !== "observed-child-exit"
-            )
+            ) {
               throw new ServiceError("runtime_denied");
+            }
             retirement = Object.freeze({
               binding: original,
               scope: receipt.scope,
@@ -958,19 +1053,29 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
           ) {
             terminal = "pending";
             fail(undefined, "child_pending");
-          } else throw new ServiceError("runtime_denied");
+          } else {
+            throw new ServiceError("runtime_denied");
+          }
           pulse();
         }
-        if (buffer.length > 4096) throw new ServiceError("runtime_denied");
+        if (buffer.length > 4096) {
+          throw new ServiceError("runtime_denied");
+        }
       } catch (error) {
         fail(error, "metadata_invalid");
       }
     });
     child.stdout!.once("end", () => {
-      if (buffer.length || !terminal) fail(undefined, "stdout_incomplete");
+      if (buffer.length || !terminal) {
+        fail(undefined, "stdout_incomplete");
+      }
     });
-    child.stdout!.on("error", (error) => fail(error, "stdout_error"));
-    child.stderr!.on("error", (error) => fail(error, "stderr_error"));
+    child.stdout!.on("error", (error) => {
+      fail(error, "stdout_error");
+    });
+    child.stderr!.on("error", (error) => {
+      fail(error, "stderr_error");
+    });
     await waitFor(() => original !== undefined, 10_000);
     startupActive();
     const binding = original!;
@@ -1018,49 +1123,61 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     };
     startupStage = "facade-listen";
     facade = createFacade(options);
-    facade.on("error", (error) => fail(error, "facade_error"));
+    facade.on("error", (error) => {
+      fail(error, "facade_error");
+    });
     controlFacade = createFacade({ ...options, controlOnly: true });
-    controlFacade.on("error", (error) => fail(error, "control_error"));
+    controlFacade.on("error", (error) => {
+      fail(error, "control_error");
+    });
     await listen(facade, cfg.facadeOrigin);
     startupActive();
     const claimCleanup = composeServiceCleanupClaim(kernel, ctx, worker);
     async function tick(): Promise<void> {
       maintenancePhase = "heartbeat";
       await kernel.heartbeat(ctx, worker);
-      if (stopping) return;
+      if (isStopping()) {
+        return;
+      }
       maintenancePhase = "reconcile";
       await management.reconcile(ctx);
-      if (stopping) return;
+      if (isStopping()) {
+        return;
+      }
       maintenancePhase = "cleanup_claim";
       const claim = await claimCleanup();
-      if (stopping) return; // An acquired lease remains outstanding until expiry.
+      if (isStopping()) {
+        return;
+      } // An acquired lease remains outstanding until expiry.
       if (claim?.scope.kind === "generation") {
         maintenancePhase = "cleanup_generation";
         await management.cleanupClaim(ctx, claim);
       } else if (claim) {
         maintenancePhase = "cleanup_transport";
         let closed = true;
-        if (claim.scope.transports.length > 2) closed = false;
+        if (claim.scope.transports.length > 2) {
+          closed = false;
+        }
         for (const t of claim.scope.transports.slice(0, 2)) {
-          if (stopping) {
+          if (isStopping()) {
             closed = false;
             break;
           }
-          if (!t.native || !t.token || t.native.originRef !== binding.originRef) {
+          if (!t.native || !nonempty(t.token) || t.native.originRef !== binding.originRef) {
             closed = false;
             continue;
           }
           try {
-            if (t.native.engineIncarnation === binding.incarnation)
+            if (t.native.engineIncarnation === binding.incarnation) {
               await cancelFacadeTransport(
                 options!,
                 ctx,
                 { ...t, native: t.native, token: t.token },
                 claim,
               );
-            else {
+            } else {
               const receipt = await readRetirement(binding, t.native, readbackAbort.signal);
-              if (!receipt || stopping) {
+              if (!receipt || isStopping()) {
                 closed = false;
                 continue;
               }
@@ -1073,19 +1190,23 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
             closed = false;
           }
         }
-        if (stopping) return;
+        if (isStopping()) {
+          return;
+        }
         maintenancePhase = "cleanup_settlement";
         await kernel.settleCleanup(ctx, claim.cleanupRef, worker, claim.token, closed);
       }
-      if (stopping) return;
+      if (isStopping()) {
+        return;
+      }
       maintenancePhase = "oauth_refresh";
       await management.refreshOAuth(ctx, claim !== undefined, readbackAbort.signal);
     }
     maintenance = (async () => {
-      while (!stopping) {
+      while (!isStopping()) {
         inFlightTick = inServiceLane("control", tick);
         await bounded(inFlightTick, 15_000);
-        if (!stopping)
+        if (!isStopping()) {
           await new Promise<void>((resolve) => {
             const timer = setTimeout(() => {
               wakeSleep = undefined;
@@ -1097,8 +1218,11 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
               resolve();
             };
           });
+        }
       }
-    })().catch((error) => fail(error, "maintenance_failed"));
+    })().catch((error: unknown) => {
+      fail(error, "maintenance_failed");
+    });
     startupStage = undefined;
     return Object.freeze({ binding, stopped, stop });
   } catch (error) {
@@ -1112,8 +1236,9 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
       await stop();
       // A listen already in flight at cancellation can finish after stop's snapshot.
       await Promise.all([close(facade), close(callback), close(handler), close(controlFacade)]);
-    } finally {
-      throw denied;
+    } catch {
+      // Cleanup cannot replace the retained redacted startup denial.
     }
+    throw denied;
   }
 }

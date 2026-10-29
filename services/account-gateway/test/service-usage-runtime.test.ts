@@ -7,7 +7,7 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createServer as createTLSServer } from "node:https";
 import { setTimeout as delay } from "node:timers/promises";
-import pg from "pg";
+import { Pool, type PoolClient } from "pg";
 import { createManagementClient, createExecutionClient } from "@agent-teams/account-gateway/http";
 import { startService } from "../src/service.ts";
 import type { Service } from "../src/service.ts";
@@ -22,23 +22,31 @@ const installation = "/opt/account-gateway-service-usage";
 const token = () => randomBytes(32).toString("base64url");
 async function freeOrigin(): Promise<string> {
   const server = createServer();
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  assert.ok(address !== null && typeof address === "object");
+  await new Promise<void>((resolve) => {
+    server.close(() => {
+      resolve();
+    });
+  });
   return "http://127.0.0.1:" + address.port;
 }
 function database(name: string, prefix: string): string {
   const input = process.env[name];
-  if (!input) throw new Error("NOT_RUN: explicit disposable DB required");
+  if (input === undefined || input === "") {
+    throw new Error("NOT_RUN: explicit disposable DB required");
+  }
   const url = new URL(input);
   assert.ok(
     url.protocol === "postgres:" &&
       url.host === "127.0.0.1:5432" &&
       url.username === "postgres" &&
-      !url.password &&
-      !url.search &&
-      !url.hash &&
+      url.password === "" &&
+      url.search === "" &&
+      url.hash === "" &&
       url.pathname === "/" + prefix + "_20261022",
     "only owned loopback DB",
   );
@@ -49,8 +57,10 @@ async function bounded<T>(work: Promise<T>, ms = 1500): Promise<T> {
   try {
     return await Promise.race([
       work,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("control capacity deadline")), ms);
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error("control capacity deadline"));
+        }, ms);
       }),
     ]);
   } finally {
@@ -58,7 +68,7 @@ async function bounded<T>(work: Promise<T>, ms = 1500): Promise<T> {
   }
 }
 
-test(
+void test(
   "production protected usage listener preserves role proofs, physical sockets and real SQL control capacity",
   { timeout: 45_000 },
   async () => {
@@ -66,8 +76,9 @@ test(
       process.env.AG_SERVICE_USAGE_ALLOW !== "new_disposable_root_pg17_10" ||
       process.platform !== "linux" ||
       process.geteuid?.() !== 0
-    )
+    ) {
       throw new Error("NOT_RUN: explicit isolated root/Linux fixture required");
+    }
     const kernelDSN = database("AG_SERVICE_USAGE_KERNEL_DSN", "ag_usage_service"),
       nativeDSN = database("AG_SERVICE_USAGE_NATIVE_DSN", "native_bootstrap_usage");
     const expected = process.env.AG_SERVICE_USAGE_NATIVE_SHA256;
@@ -79,8 +90,8 @@ test(
         .digest("hex"),
       expected,
     );
-    const admin = new pg.Pool({ connectionString: kernelDSN, max: 2, statement_timeout: 8000 });
-    admin.on("error", () => undefined);
+    const admin = new Pool({ connectionString: kernelDSN, max: 2, statement_timeout: 8000 });
+    admin.on("error", () => {});
     const root = "/root/account_gateway_usage_" + randomUUID().replaceAll("-", "");
     await mkdir(root, { mode: 0o700 });
     await mkdir(root + "/authority", { mode: 0o700 });
@@ -119,7 +130,9 @@ test(
           assert.equal(req.headers.authorization, "Bearer " + dummyKey);
           let bytes = 0;
           for await (const chunk of req) {
-            bytes += Buffer.byteLength(chunk);
+            const value: unknown = chunk;
+            assert.ok(typeof value === "string" || value instanceof Uint8Array);
+            bytes += Buffer.byteLength(value);
             assert.ok(bytes <= 4096);
           }
           upstreamCalls++;
@@ -213,22 +226,27 @@ test(
         });
       },
     );
-    let service: Service | undefined, blocker: pg.PoolClient | undefined;
+    let service: Service | undefined, blocker: PoolClient | undefined;
     const requests: Promise<Response>[] = [];
     try {
       const state = (
-        await admin.query(
+        await admin.query<{ version: string; empty: boolean }>(
           "SELECT current_setting('server_version') AS version, NOT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname IN ('ag_kernel','ag_management')) AS empty",
         )
       ).rows[0];
       assert.match(state.version, /^17\.10(?:$| )/);
       assert.equal(state.empty, true);
       const directory = new URL("../migrations/", import.meta.url);
-      for (const file of (await readdir(directory)).filter((f) => /^\d{3}_.*\.sql$/.test(f)).sort())
+      for (const file of (await readdir(directory))
+        .filter((f) => /^\d{3}_.*\.sql$/.test(f))
+        .toSorted()) {
         await admin.query(await readFile(new URL(file, directory), "utf8"));
-      await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+      }
+      await new Promise<void>((resolve) => {
+        upstream.listen(0, "127.0.0.1", resolve);
+      });
       const address = upstream.address();
-      assert.ok(address && typeof address === "object");
+      assert.ok(address !== null && typeof address === "object");
       const baseURL = "https://127.0.0.1:" + address.port + "/v1";
       const facadeOrigin = await freeOrigin(),
         callbackOrigin = await freeOrigin(),
@@ -347,9 +365,12 @@ test(
         displayName: "Synthetic usage fixture",
         credential: { kind: "api_key", value: dummyKey },
       });
-      assert.ok(created.state === "applied" && created.result?.kind === "account");
-      if (created.state !== "applied" || created.result?.kind !== "account")
+      const observedAccount: boolean =
+        created.state === "applied" && created.result?.kind === "account";
+      assert.ok(observedAccount);
+      if (created.state !== "applied" || created.result?.kind !== "account") {
         throw new Error("fixture account not created");
+      }
       const accountRef = created.result.accountRef;
       const get = (path: string, credential = controlToken) =>
         fetch(callbackOrigin + path, {
@@ -377,17 +398,21 @@ test(
       blocker = await admin.connect();
       await blocker.query("BEGIN");
       await blocker.query("LOCK ag_kernel.usage_observations IN ACCESS EXCLUSIVE MODE");
-      for (let i = 0; i < 6; i++) requests.push(get("/v1/usage?limit=1"));
+      for (let i = 0; i < 6; i++) {
+        requests.push(get("/v1/usage?limit=1"));
+      }
       let count = 0;
       for (let i = 0; i < 75; i++) {
         count = Number(
           (
-            await admin.query(
+            await admin.query<{ n: string }>(
               "SELECT count(*) AS n FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT position,fact%'",
             )
           ).rows[0].n,
         );
-        if (count === 6) break;
+        if (count === 6) {
+          break;
+        }
         await delay(20);
       }
       assert.equal(count, 6, "six real usage sockets and SQL clients must remain held");
@@ -453,25 +478,35 @@ test(
               }),
             ),
           });
-        assert.equal(result.kind, "stream");
-        if (result.kind !== "stream") throw new Error("no controlled stream");
-        for await (const _chunk of result.body) {
+        const observedKind: string = result.kind;
+        assert.equal(observedKind, "stream");
+        if (result.kind !== "stream") {
+          throw new Error("no controlled stream");
+        }
+        for await (const chunk of result.body) {
+          void chunk;
           /* bounded SDK stream consumed */
         }
         assert.equal((await execution.status(executionRef, requestId)).effect, "completed");
         let closed = false;
         for (let n = 0; n < 80; n++) {
           const row = (
-            await admin.query(
+            await admin.query<{
+              transport_occupied: boolean;
+              native_origin_ref: string | null;
+              engine_incarnation: string | null;
+            }>(
               "SELECT transport_occupied,native_origin_ref,engine_incarnation FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
               [consumerId, executionRef, requestId],
             )
-          ).rows[0];
+          ).rows.at(0);
           closed =
             row?.transport_occupied === false &&
             row.native_origin_ref === binding.originRef &&
             row.engine_incarnation === binding.incarnation;
-          if (closed) break;
+          if (closed) {
+            break;
+          }
           await delay(20);
         }
         assert.equal(
@@ -525,13 +560,19 @@ test(
       );
     } finally {
       if (blocker) {
-        await blocker.query("ROLLBACK").catch(() => undefined);
+        await blocker.query("ROLLBACK").catch(() => {});
         blocker.release();
       }
       await Promise.allSettled(requests);
-      if (service) await service.stop();
+      if (service) {
+        await service.stop();
+      }
       upstream.closeAllConnections();
-      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      await new Promise<void>((resolve) => {
+        upstream.close(() => {
+          resolve();
+        });
+      });
       await admin.end();
     }
   },

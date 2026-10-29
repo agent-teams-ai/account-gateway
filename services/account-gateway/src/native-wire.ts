@@ -19,13 +19,16 @@ export function object(
   keys: readonly string[],
   optional: readonly string[] = [],
 ): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return denied();
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return denied();
+  }
   const row = value as Record<string, unknown>;
   if (
     Object.keys(row).some((k) => !keys.includes(k) && !optional.includes(k)) ||
     keys.some((k) => !Object.hasOwn(row, k))
-  )
+  ) {
     return denied();
+  }
   return row;
 }
 export const now = () => BigInt(Date.now()) * 1_000_000n;
@@ -47,9 +50,14 @@ export function admission(value: unknown): PrivateAdmission {
   uuid(r.executionRef);
   uuid(r.issuerEpoch);
   uuid(r.accountRef);
-  for (const key of ["invocationRef", "attemptRef", "subjectRef", "profileId"]) identifier(r[key]);
-  for (const key of ["authorizationEpoch", "policyRevision", "bindingRevision"])
-    if (!Number.isSafeInteger(r[key]) || (r[key] as number) < 0) return denied();
+  for (const key of ["invocationRef", "attemptRef", "subjectRef", "profileId"]) {
+    identifier(r[key]);
+  }
+  for (const key of ["authorizationEpoch", "policyRevision", "bindingRevision"]) {
+    if (!Number.isSafeInteger(r[key]) || (r[key] as number) < 0) {
+      return denied();
+    }
+  }
   instant(r.expiresAt);
   const limits = Object.freeze(
     approvedLimits(r.limits as PrivateAdmission["limits"], {
@@ -68,8 +76,9 @@ export function saved(value: SavedExecution): SavedExecution {
   if (
     !["open", "closed", "fenced"].includes(value.state) ||
     typeof value.dispatchAllowed !== "boolean"
-  )
+  ) {
     return denied();
+  }
   return Object.freeze({
     admission: admission(value.admission),
     generation: value.generation,
@@ -184,6 +193,9 @@ export interface Receipt {
     sealed: boolean;
   };
 }
+function truthy(value: unknown): boolean {
+  return Boolean(value);
+}
 export function receipt(value: unknown, consumer: string, p: NativeDispatchProof): Receipt {
   const r = object(
     value,
@@ -204,15 +216,16 @@ export function receipt(value: unknown, consumer: string, p: NativeDispatchProof
     r.consumerId !== consumer ||
     r.executionRef !== p.executionRef ||
     r.requestRef !== p.requestRef ||
-    !r.proof ||
+    !truthy(r.proof) ||
     !sameProof(proof(r.proof), p) ||
     !sameProof({ ...p, native: binding(r.native) }, p) ||
     !["reserved", "admitted", "entered", "closed"].includes(r.phase as string) ||
     !["effect_unknown", "completed"].includes(r.effect as string) ||
     typeof r.sealed !== "boolean" ||
     typeof r.acknowledged !== "boolean"
-  )
+  ) {
     return denied();
+  }
   const lifetime = object(
     r.lifetime,
     [
@@ -236,18 +249,23 @@ export function receipt(value: unknown, consumer: string, p: NativeDispatchProof
     "closeFailed",
     "completed",
     "sealed",
-  ])
-    if (typeof lifetime[k] !== "boolean") return denied();
+  ]) {
+    if (typeof lifetime[k] !== "boolean") {
+      return denied();
+    }
+  }
   if (
     lifetime.outputBytes !== undefined &&
     (!Number.isSafeInteger(lifetime.outputBytes) || (lifetime.outputBytes as number) < 0)
-  )
+  ) {
     return denied();
+  }
   if (
-    (lifetime.completed && !lifetime.entered) ||
+    (truthy(lifetime.completed) && !truthy(lifetime.entered)) ||
     (r.effect === "completed") !== lifetime.completed
-  )
+  ) {
     return denied();
+  }
   if (r.status !== undefined) {
     const status = object(r.status, ["requestRef", "effect"], ["code"]);
     if (
@@ -260,9 +278,12 @@ export function receipt(value: unknown, consumer: string, p: NativeDispatchProof
         "effect_unknown",
         "rejected_before_dispatch",
       ].includes(status.effect as string)
-    )
+    ) {
       return denied();
-    if (status.code !== undefined) identifier(status.code);
+    }
+    if (status.code !== undefined) {
+      identifier(status.code);
+    }
   }
   return {
     ...r,
@@ -332,8 +353,9 @@ export function config(input: BridgeConfig) {
       origin.protocol === "https:" ||
       (origin.protocol === "http:" && ["127.0.0.1", "[::1]"].includes(origin.hostname))
     )
-  )
+  ) {
     return denied();
+  }
   const enrollment = Object.freeze({ ...input.enrollment });
   identifier(enrollment.originRef);
   identifier(enrollment.engineIncarnation);
@@ -344,8 +366,9 @@ export function config(input: BridgeConfig) {
     input.consumers.length > 128 ||
     !input.profiles.length ||
     input.profiles.length > 16
-  )
+  ) {
     return denied();
+  }
   const tokens = new Set<string>(),
     consumers = input.consumers.map((c) => {
       identifier(c.consumerId);
@@ -355,13 +378,16 @@ export function config(input: BridgeConfig) {
           t.length > 1024 ||
           !/^[A-Za-z0-9._~+/-]{16,1024}=*$/.test(t) ||
           tokens.has(t)
-        )
+        ) {
           return denied();
+        }
         tokens.add(t);
       }
       return Object.freeze({ ...c });
     });
-  if (new Set(consumers.map((c) => c.consumerId)).size !== consumers.length) return denied();
+  if (new Set(consumers.map((c) => c.consumerId)).size !== consumers.length) {
+    return denied();
+  }
   const profiles = input.profiles.map((p) => {
     identifier(p.profile);
     identifier(p.qualificationRef);
@@ -375,19 +401,27 @@ export function config(input: BridgeConfig) {
       p.baseURL.length > 2048 ||
       !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(p.model) ||
       p.qualificationRef !== enrollment.qualificationRef
-    )
+    ) {
       return denied();
+    }
     for (const [v, cap] of [
       [p.requestBytes, 4_194_304],
       [p.outputBytes, 8_388_608],
       [p.tokens, 10_000_000],
       [p.providerTokenUpperBound, 10_000_000],
-    ])
-      if (!Number.isSafeInteger(v) || v < 1 || v > cap) return denied();
-    if (p.tokens > p.providerTokenUpperBound) return denied();
+    ]) {
+      if (!Number.isSafeInteger(v) || v < 1 || v > cap) {
+        return denied();
+      }
+    }
+    if (p.tokens > p.providerTokenUpperBound) {
+      return denied();
+    }
     return Object.freeze({ ...p });
   });
-  if (new Set(profiles.map((p) => p.profile)).size !== profiles.length) return denied();
+  if (new Set(profiles.map((p) => p.profile)).size !== profiles.length) {
+    return denied();
+  }
   const caps = {
     timeoutMs: input.timeoutMs ?? 5000,
     closureWaitMs: input.closureWaitMs ?? 1000,
@@ -401,13 +435,15 @@ export function config(input: BridgeConfig) {
     maxStreamMs: 86_400_000,
     maxPending: 10_000,
     controlBytes: 262_144,
-  }))
+  })) {
     if (
       !Number.isSafeInteger(caps[k as keyof typeof caps]) ||
       caps[k as keyof typeof caps] < 1 ||
       caps[k as keyof typeof caps] > max
-    )
+    ) {
       return denied();
+    }
+  }
   return Object.freeze({
     origin: origin.origin,
     enrollment,
@@ -448,7 +484,7 @@ export async function post(
       reject(new KernelError("unavailable"));
     });
     req.once("response", (response) => {
-      response.on("error", () => undefined);
+      response.on("error", () => {});
       resolve({
         response,
         abort: () => {
@@ -456,7 +492,9 @@ export async function post(
           req.destroy();
           clearTimeout(timer);
         },
-        dispose: () => clearTimeout(timer),
+        dispose: () => {
+          clearTimeout(timer);
+        },
       });
     });
     req.end(body);
@@ -464,8 +502,11 @@ export async function post(
 }
 export function singleton(message: IncomingMessage, name: string): string | undefined {
   const values: string[] = [];
-  for (let i = 0; i < message.rawHeaders.length; i += 2)
-    if (message.rawHeaders[i].toLowerCase() === name) values.push(message.rawHeaders[i + 1]);
+  for (let i = 0; i < message.rawHeaders.length; i += 2) {
+    if (message.rawHeaders[i].toLowerCase() === name) {
+      values.push(message.rawHeaders[i + 1]);
+    }
+  }
   return values.length === 1 ? values[0] : undefined;
 }
 export async function jsonBody(message: IncomingMessage, cap: number): Promise<unknown> {

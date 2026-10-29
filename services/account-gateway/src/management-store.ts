@@ -3,7 +3,7 @@ import type { Pool, PoolClient } from "pg";
 import { sharedCheckout } from "./service-admission.ts";
 import type { Checkout } from "./service-admission.ts";
 import { KernelError, identifier, uuid } from "./domain.ts";
-import type { TrustedContext } from "./domain.ts";
+import type { TrustedContext, AccountStatus } from "./domain.ts";
 import { captureContext, exactCandidate, physicalCandidate } from "./management.ts";
 import { oauthProfileDefinition } from "./oauth-profiles.ts";
 import type {
@@ -37,7 +37,9 @@ function scopeCopy(s: CandidateScope): CandidateScope {
   identifier(copy.operationId);
   uuid(copy.accountRef);
   identifier(copy.ownerRef);
-  if (!["create", "reconnect"].includes(copy.purpose)) throw new KernelError("invalid");
+  if (!["create", "reconnect"].includes(copy.purpose)) {
+    throw new KernelError("invalid");
+  }
   return copy;
 }
 function aad(s: CandidateScope): Buffer {
@@ -62,8 +64,9 @@ export class IntentSecrets implements IntentCustody {
       aeadKey.byteLength !== 32 ||
       hmacKey.byteLength !== 32 ||
       Buffer.from(aeadKey).equals(Buffer.from(hmacKey))
-    )
+    ) {
       throw new KernelError("invalid");
+    }
     this.#aead = Buffer.from(aeadKey);
     this.#hmac = Buffer.from(hmacKey);
   }
@@ -90,10 +93,14 @@ export class IntentSecrets implements IntentCustody {
   }
   seal(scope: CandidateScope, apiKey: string): IntentEnvelope {
     const s = scopeCopy(scope);
-    if (typeof apiKey !== "string" || !apiKey.isWellFormed()) throw new KernelError("invalid");
+    if (typeof apiKey !== "string" || !apiKey.isWellFormed()) {
+      throw new KernelError("invalid");
+    }
     const plaintext = Buffer.from(apiKey, "utf8");
     try {
-      if (plaintext.length < 1 || plaintext.length > 4096) throw new KernelError("invalid");
+      if (plaintext.length < 1 || plaintext.length > 4096) {
+        throw new KernelError("invalid");
+      }
       const nonce = randomBytes(12),
         cipher = createCipheriv("aes-256-gcm", this.#aead, nonce);
       cipher.setAAD(aad(s));
@@ -115,8 +122,9 @@ export class IntentSecrets implements IntentCustody {
         envelope.tag.length !== 16 ||
         envelope.ciphertext.length < 1 ||
         envelope.ciphertext.length > 4096
-      )
+      ) {
         throw new KernelError("unavailable");
+      }
       const decipher = createDecipheriv("aes-256-gcm", this.#aead, envelope.nonce);
       decipher.setAAD(aad(s));
       decipher.setAuthTag(envelope.tag);
@@ -180,6 +188,11 @@ type MappingRow = JournalRow & {
   native_id: string;
   native_created_at: string;
 };
+// SQL004's non-null mapping columns move together through this LEFT JOIN.
+// An absent mapping is SQL NULL, not a Partial row with undefined fields.
+type JoinedMapping =
+  | Pick<MappingRow, "native_physical_identity" | "native_id" | "native_created_at">
+  | { native_physical_identity: null; native_id: null; native_created_at: null };
 function mappingRow(r: MappingRow): CandidateMapping {
   const j = journalRow(r);
   const descriptor = physicalCandidate({
@@ -191,7 +204,9 @@ function mappingRow(r: MappingRow): CandidateMapping {
     baseURL: j.profile.baseURL,
     model: j.profile.model,
   });
-  if (!exactCandidate(j, descriptor)) throw new KernelError("conflict");
+  if (!exactCandidate(j, descriptor)) {
+    throw new KernelError("conflict");
+  }
   return Object.freeze({ ...j, descriptor });
 }
 // Both selection and the protected callback use the same active physical scope.
@@ -243,8 +258,9 @@ function refreshProfile(source: ManagedProfile): ManagedProfile {
     qualificationRef: source.qualificationRef,
   });
   const definition = oauthProfileDefinition(p.profile);
-  if (!definition || p.baseURL !== definition.baseURL || p.model !== definition.model)
+  if (!definition || p.baseURL !== definition.baseURL || p.model !== definition.model) {
     throw new KernelError("invalid");
+  }
   identifier(p.qualificationRef);
   return p;
 }
@@ -273,8 +289,9 @@ export class PostgresManagementStore implements ManagementStore {
       !Number.isInteger(batch) ||
       batch < 1 ||
       batch > 1000
-    )
+    ) {
       throw new KernelError("invalid");
+    }
     this.checkout = sharedCheckout(pool);
     this.secrets = secrets;
     this.ttlMs = ttlMs;
@@ -292,13 +309,19 @@ export class PostgresManagementStore implements ManagementStore {
         "SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE",
         [consumer],
       );
-      if (!existing.rowCount) throw new KernelError("unknown");
+      if (existing.rowCount === null || existing.rowCount === 0) {
+        throw new KernelError("unknown");
+      }
       const result = await action(db);
       await db.query("COMMIT");
       return result;
     } catch (error) {
-      if (db) await db.query("ROLLBACK").catch(() => undefined);
-      if (error instanceof KernelError) throw error;
+      if (db) {
+        await db.query("ROLLBACK").catch(() => {});
+      }
+      if (error instanceof KernelError) {
+        throw error;
+      }
       // SQL errors can contain plaintext query parameters. Never reflect them.
       throw new KernelError("unavailable");
     } finally {
@@ -310,28 +333,39 @@ export class PostgresManagementStore implements ManagementStore {
       envelope = this.secrets.seal(s, apiKey);
     return this.tx(s.consumerId, async (db) => {
       const old = (
-        await db.query(
+        await db.query<{
+          account_ref: string;
+          owner_ref: string;
+          purpose: CandidateScope["purpose"];
+          live: boolean;
+        }>(
           `SELECT account_ref,owner_ref,purpose,ciphertext IS NOT NULL AND
         expires_at>clock_timestamp() AS live FROM ag_management.transient_intents WHERE consumer=$1 AND operation_id=$2`,
           [s.consumerId, s.operationId],
         )
-      ).rows[0];
+      ).rows.at(0);
       if (old) {
         if (
           old.account_ref !== s.accountRef ||
           old.owner_ref !== s.ownerRef ||
           old.purpose !== s.purpose
-        )
+        ) {
           throw new KernelError("conflict");
-        return old.live as boolean;
+        }
+        return old.live;
       }
       const count = (
-        await db.query(
+        await db.query<{ n: number }>(
           "SELECT count(*)::integer AS n FROM ag_management.transient_intents WHERE consumer=$1",
           [s.consumerId],
         )
-      ).rows[0].n;
-      if (count >= this.maxIntents) throw new KernelError("unavailable");
+      ).rows.at(0);
+      if (count === undefined) {
+        throw new KernelError("unavailable");
+      }
+      if (count.n >= this.maxIntents) {
+        throw new KernelError("unavailable");
+      }
       const valid = await db.query(
         `SELECT 1 FROM ag_kernel.operations o JOIN ag_kernel.accounts a
         ON a.consumer=o.consumer AND a.ref=o.account_ref JOIN ag_kernel.candidates c
@@ -339,7 +373,9 @@ export class PostgresManagementStore implements ManagementStore {
         AND a.ref=$3 AND a.owner_ref=$4 AND o.intent->>'kind'=$5 AND o.state='pending' AND c.state='staged'`,
         [s.consumerId, s.operationId, s.accountRef, s.ownerRef, s.purpose],
       );
-      if (!valid.rowCount) return false;
+      if (valid.rowCount === null || valid.rowCount === 0) {
+        return false;
+      }
       await db.query(
         `INSERT INTO ag_management.transient_intents
         (consumer,operation_id,account_ref,owner_ref,purpose,nonce,ciphertext,tag,created_at,expires_at)
@@ -392,7 +428,9 @@ export class PostgresManagementStore implements ManagementStore {
           profile.profile,
         ],
       );
-      if (!owned.rowCount) throw new KernelError("denied");
+      if (owned.rowCount === null || owned.rowCount === 0) {
+        throw new KernelError("denied");
+      }
       await db.query(
         `INSERT INTO ag_management.candidate_journal
         (consumer,operation_id,account_ref,owner_ref,purpose,generation,worker,profile,base_url,model,qualification_ref)
@@ -404,8 +442,10 @@ export class PostgresManagementStore implements ManagementStore {
           "SELECT * FROM ag_management.candidate_journal WHERE consumer=$1 AND operation_id=$2",
           [s.consumerId, s.operationId],
         )
-      ).rows[0];
-      if (!stored || !sameJournal(journal, journalRow(stored))) throw new KernelError("conflict");
+      ).rows.at(0);
+      if (!stored || !sameJournal(journal, journalRow(stored))) {
+        throw new KernelError("conflict");
+      }
       return journalRow(stored);
     });
   }
@@ -421,7 +461,7 @@ export class PostgresManagementStore implements ManagementStore {
           "SELECT * FROM ag_management.candidate_journal WHERE consumer=$1 AND operation_id=$2",
           [ctx.consumerId, operationId],
         )
-      ).rows[0];
+      ).rows.at(0);
       return r ? journalRow(r) : undefined;
     });
   }
@@ -429,14 +469,14 @@ export class PostgresManagementStore implements ManagementStore {
     const s = scopeCopy(scope);
     return this.tx(s.consumerId, async (db) => {
       const r = (
-        await db.query(
+        await db.query<IntentEnvelope>(
           `SELECT nonce,ciphertext,tag FROM ag_management.transient_intents
         WHERE consumer=$1 AND operation_id=$2 AND account_ref=$3 AND owner_ref=$4 AND purpose=$5
         AND expires_at>clock_timestamp() AND ciphertext IS NOT NULL`,
           [s.consumerId, s.operationId, s.accountRef, s.ownerRef, s.purpose],
         )
-      ).rows[0];
-      return r ? this.secrets.open(s, r as IntentEnvelope) : undefined;
+      ).rows.at(0);
+      return r ? this.secrets.open(s, r) : undefined;
     });
   }
   async eraseIntent(scope: CandidateScope): Promise<void> {
@@ -463,15 +503,19 @@ export class PostgresManagementStore implements ManagementStore {
         qualificationRef: input.profile.qualificationRef,
       }),
     };
-    if (!exactCandidate(j, d)) throw new KernelError("conflict");
+    if (!exactCandidate(j, d)) {
+      throw new KernelError("conflict");
+    }
     return this.tx(s.consumerId, async (db) => {
       const stored = (
         await db.query<JournalRow>(
           "SELECT * FROM ag_management.candidate_journal WHERE consumer=$1 AND generation=$2",
           [s.consumerId, j.generation],
         )
-      ).rows[0];
-      if (!stored || !sameJournal(j, journalRow(stored))) throw new KernelError("conflict");
+      ).rows.at(0);
+      if (!stored || !sameJournal(j, journalRow(stored))) {
+        throw new KernelError("conflict");
+      }
       await db.query(
         `INSERT INTO ag_management.physical_mappings
         (consumer,generation,native_physical_identity,native_id,native_created_at) VALUES ($1,$2,$3,$4,$5)
@@ -479,18 +523,21 @@ export class PostgresManagementStore implements ManagementStore {
         [s.consumerId, j.generation, d.nativePhysicalIdentity, d.nativeId, d.createdAt],
       );
       const row = (
-        await db.query(
-          "SELECT * FROM ag_management.physical_mappings WHERE consumer=$1 AND generation=$2",
-          [s.consumerId, j.generation],
-        )
-      ).rows[0];
+        await db.query<
+          Pick<MappingRow, "native_physical_identity" | "native_id" | "native_created_at">
+        >("SELECT * FROM ag_management.physical_mappings WHERE consumer=$1 AND generation=$2", [
+          s.consumerId,
+          j.generation,
+        ])
+      ).rows.at(0);
       if (
         !row ||
         row.native_physical_identity !== d.nativePhysicalIdentity ||
         Number(row.native_id) !== d.nativeId ||
         row.native_created_at !== d.createdAt
-      )
+      ) {
         throw new KernelError("conflict");
+      }
     });
   }
   async mapping(
@@ -513,8 +560,10 @@ export class PostgresManagementStore implements ManagementStore {
         ON m.consumer=j.consumer AND m.generation=j.generation WHERE j.consumer=$1 AND j.generation=$2`,
           [ctx.consumerId, generation],
         )
-      ).rows[0];
-      if (!r) return undefined;
+      ).rows.at(0);
+      if (!r) {
+        return;
+      }
       const j = journalRow(r);
       const descriptor = physicalCandidate({
         generation: j.generation,
@@ -525,7 +574,9 @@ export class PostgresManagementStore implements ManagementStore {
         baseURL: j.profile.baseURL,
         model: j.profile.model,
       });
-      if (!exactCandidate(j, descriptor)) throw new KernelError("conflict");
+      if (!exactCandidate(j, descriptor)) {
+        throw new KernelError("conflict");
+      }
       return Object.freeze({ ...j, descriptor });
     });
   }
@@ -539,20 +590,21 @@ export class PostgresManagementStore implements ManagementStore {
       p = refreshProfile(source),
       cursor = after;
     uuid(worker);
-    if (cursor !== undefined) uuid(cursor);
+    if (cursor !== undefined) {
+      uuid(cursor);
+    }
     return this.tx(ctx.consumerId, async (db) => {
       const values = [ctx.consumerId, worker, p.profile, p.baseURL, p.model, p.qualificationRef];
-      const select = async (after: string | undefined): Promise<MappingRow | undefined> =>
+      const select = async (cursorValue?: string): Promise<MappingRow | undefined> =>
         (
           await db.query<MappingRow>(
             activeOAuthMapping +
               " AND ($7::uuid IS NULL OR j.generation>$7::uuid) ORDER BY j.generation LIMIT 1",
-            [...values, after ?? null],
+            [...values, cursorValue ?? null],
           )
-        ).rows[0];
+        ).rows.at(0);
       // At most two finite LIMIT 1 reads; no OFFSET or materialized account list.
-      const row =
-        (await select(cursor)) ?? (cursor === undefined ? undefined : await select(undefined));
+      const row = (await select(cursor)) ?? (cursor === undefined ? undefined : await select());
       return row ? mappingRow(row) : undefined;
     }); // tx COMMIT and release precede native HTTP, never span callback awaits.
   }
@@ -574,7 +626,9 @@ export class PostgresManagementStore implements ManagementStore {
     identifier(s.operationId);
     uuid(s.accountRef);
     uuid(s.generation);
-    if (s.consumerId !== ctx.consumerId) throw new KernelError("denied");
+    if (s.consumerId !== ctx.consumerId) {
+      throw new KernelError("denied");
+    }
     return this.tx(ctx.consumerId, async (db) => {
       const row = (
         await db.query<MappingRow>(
@@ -592,7 +646,7 @@ export class PostgresManagementStore implements ManagementStore {
             s.generation,
           ],
         )
-      ).rows[0];
+      ).rows.at(0);
       return row ? mappingRow(row) : undefined;
     });
   }
@@ -614,7 +668,9 @@ export class PostgresManagementStore implements ManagementStore {
     identifier(s.operationId);
     uuid(s.accountRef);
     uuid(s.generation);
-    if (s.consumerId !== ctx.consumerId) throw new KernelError("denied");
+    if (s.consumerId !== ctx.consumerId) {
+      throw new KernelError("denied");
+    }
     return this.tx(ctx.consumerId, async (db) => {
       const row = (
         await db.query<JournalRow>(
@@ -632,7 +688,7 @@ export class PostgresManagementStore implements ManagementStore {
             s.generation,
           ],
         )
-      ).rows[0];
+      ).rows.at(0);
       return row ? journalRow(row) : undefined;
     }); // Release consumer lock before native refresh and its authority callback.
   }
@@ -686,16 +742,18 @@ export class PostgresManagementStore implements ManagementStore {
           intent->>'target' AS intent_target FROM ag_kernel.operations WHERE consumer=$1 AND id=$2`,
           [ctx.consumerId, operationId],
         )
-      ).rows[0];
+      ).rows.at(0);
       // Missing is unknown through AccountManagement, never positive absence.
-      if (!operation) return undefined;
+      if (!operation) {
+        return;
+      }
       const account = (
         await db.query<{
           ref: string;
           owner_ref: string;
           profile: string;
           display_name: string;
-          state: "staging" | "active" | "disabled" | "quarantined";
+          state: AccountStatus["state"];
           revision: number;
           epoch: number;
         }>(
@@ -703,8 +761,10 @@ export class PostgresManagementStore implements ManagementStore {
           WHERE consumer=$1 AND ref=$2 FOR UPDATE`,
           [ctx.consumerId, accountRef],
         )
-      ).rows[0];
-      if (!account) throw new KernelError("conflict");
+      ).rows.at(0);
+      if (!account) {
+        throw new KernelError("conflict");
+      }
       const original =
         operation.state === "applied" &&
         operation.intent_kind === "disable" &&
@@ -718,8 +778,9 @@ export class PostgresManagementStore implements ManagementStore {
         !original ||
         typeof metadataRevision !== "number" ||
         typeof authorizationEpoch !== "number"
-      )
+      ) {
         throw new KernelError("conflict");
+      }
       const row = (
         await db.query<{
           retained_generations: number;
@@ -767,7 +828,10 @@ export class PostgresManagementStore implements ManagementStore {
             AND i.account_ref=$2 AND i.ciphertext IS NOT NULL) AS outstanding_intents`,
           [ctx.consumerId, accountRef],
         )
-      ).rows[0];
+      ).rows.at(0);
+      if (row === undefined) {
+        throw new KernelError("unavailable");
+      }
       const counts = Object.freeze({
         retainedGenerations: row.retained_generations,
         settledNativeErasureGenerations: row.settled_native_erasure_generations,
@@ -822,20 +886,29 @@ export class PostgresManagementStore implements ManagementStore {
     identifier(operationId);
     return this.tx(ctx.consumerId, async (db) => {
       const op = (
-        await db.query<{ state: string; kind: string; subject: string; revision: number }>(
+        await db.query<{
+          state: string;
+          kind: string | null;
+          subject: string | null;
+          revision: unknown;
+        }>(
           `SELECT state,intent->>'kind' AS kind,intent->>'subject' AS subject,intent->'revision' AS revision
           FROM ag_kernel.operations WHERE consumer=$1 AND id=$2`,
           [ctx.consumerId, operationId],
         )
-      ).rows[0];
-      if (!op) return undefined;
+      ).rows.at(0);
+      if (!op) {
+        return;
+      }
       if (
         op.state !== "applied" ||
         op.kind !== "fence" ||
+        typeof op.revision !== "number" ||
         !Number.isSafeInteger(op.revision) ||
         op.revision < 0
-      )
+      ) {
         throw new KernelError("conflict");
+      }
       identifier(op.subject);
       const current = (
         await db.query<{ revision: string }>(
@@ -843,8 +916,10 @@ export class PostgresManagementStore implements ManagementStore {
         WHERE consumer=$1 AND subject=$2`,
           [ctx.consumerId, op.subject],
         )
-      ).rows[0];
-      if (!current || Number(current.revision) < op.revision) throw new KernelError("conflict");
+      ).rows.at(0);
+      if (!current || Number(current.revision) < op.revision) {
+        throw new KernelError("conflict");
+      }
       // The original immutable fence chooses the whole cohort. No account,
       // owner, execution list or caller-supplied policy selector can truncate it.
       const counts = (
@@ -874,7 +949,10 @@ export class PostgresManagementStore implements ManagementStore {
           (SELECT count(*)::integer FROM chosen_requests WHERE effect='effect_unknown') AS "unknownEffects"`,
           [ctx.consumerId, op.subject, op.revision],
         )
-      ).rows[0];
+      ).rows.at(0);
+      if (counts === undefined) {
+        throw new KernelError("unavailable");
+      }
       const closed =
         counts.openExecutions === 0 &&
         counts.occupiedTransports === 0 &&
@@ -917,18 +995,21 @@ export class PostgresManagementStore implements ManagementStore {
     uuid(worker);
     uuid(authority.cleanupRef);
     uuid(authority.cleanupToken);
-    if (!["read", "erase"].includes(action)) throw new KernelError("invalid");
+    if (!["read", "erase"].includes(action)) {
+      throw new KernelError("invalid");
+    }
     if (s) {
       identifier(s.operationId);
       uuid(s.accountRef);
       uuid(s.generation);
-      if (s.consumerId !== ctx.consumerId) throw new KernelError("denied");
+      if (s.consumerId !== ctx.consumerId) {
+        throw new KernelError("denied");
+      }
     }
     return this.tx(ctx.consumerId, async (db) => {
       const r = (
         await db.query<
-          JournalRow &
-            Partial<MappingRow> & { native_identity: string | null; lease_expires_at: string }
+          JournalRow & JoinedMapping & { native_identity: string | null; lease_expires_at: string }
         >(
           `
         SELECT j.*,m.native_physical_identity,m.native_id,m.native_created_at,c.native_identity,
@@ -966,37 +1047,46 @@ export class PostgresManagementStore implements ManagementStore {
             action === "erase",
           ],
         )
-      ).rows[0];
-      if (!r) return undefined;
+      ).rows.at(0);
+      if (!r) {
+        return;
+      }
       const journal = journalRow(r);
       // A saved mapping is not erasure authority until the kernel bound the
       // exact proof. Read can recover that gap without deleting a discovered row.
       if (
-        r.native_identity &&
-        (r.native_identity !== journal.generation || !r.native_physical_identity)
-      )
+        r.native_identity !== null &&
+        r.native_identity !== "" &&
+        (r.native_identity !== journal.generation ||
+          r.native_physical_identity === null ||
+          r.native_physical_identity === "")
+      ) {
         throw new KernelError("conflict");
-      const native = r.native_physical_identity
-        ? mappingRow(r as MappingRow).descriptor
-        : undefined;
+      }
+      const native =
+        r.native_physical_identity !== null && r.native_physical_identity !== ""
+          ? mappingRow(r).descriptor
+          : undefined;
       return Object.freeze({
         journal,
         leaseExpiresAt: r.lease_expires_at,
-        ...(native && r.native_identity ? { native } : {}),
+        ...(native !== undefined && r.native_identity !== null && r.native_identity !== ""
+          ? { native }
+          : {}),
       });
     });
   }
   async expire(context: TrustedContext): Promise<readonly CandidateJournal[]> {
     const ctx = captureContext(context);
     return this.tx(ctx.consumerId, async (db) => {
-      const expired = await db.query(
+      const expired = await db.query<{ operation_id: string }>(
         `UPDATE ag_management.transient_intents i SET nonce=NULL,ciphertext=NULL,tag=NULL
         WHERE (consumer,operation_id) IN (SELECT consumer,operation_id FROM ag_management.transient_intents
           WHERE consumer=$1 AND expires_at<=clock_timestamp() AND ciphertext IS NOT NULL ORDER BY expires_at LIMIT $2)
         RETURNING operation_id`,
         [ctx.consumerId, this.batch],
       );
-      const ids = expired.rows.map((r: { operation_id: string }) => r.operation_id);
+      const ids = expired.rows.map((row) => row.operation_id);
       const journals = (
         await db.query<JournalRow>(
           `SELECT j.* FROM ag_management.candidate_journal j

@@ -10,5 +10,5 @@
     "skipLibCheck": false,
     "types": ["node"]
   },
-  "include": ["tests/**/*.mts"]
+  "include": ["tests/**/*.mts", "tests/whole-consumer.test.ts"]
 }

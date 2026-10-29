@@ -3,14 +3,14 @@
 // Regression: treating F3 prepared as invalid/staged quarantines ordinary waiting;
 // replay after a lost ACK duplicates Begin; custody-only promotion exposes an
 // unqualified account; lossy or substituted birth descriptors activate the wrong row.
-import test, { before, after } from "node:test";
+import test, { before as beforeTests, after as afterTests } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
 import { readFile, readdir } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
-import pg from "pg";
+import { Pool, type PoolConfig } from "pg";
 import * as c from "@agent-teams/account-gateway/contracts";
 import { createManagementClient, GatewayError } from "@agent-teams/account-gateway/http";
 import { KernelError } from "../src/domain.ts";
@@ -41,15 +41,24 @@ import { captureOAuthEnrollmentConfig, ServiceError } from "../src/service-confi
 import { NativeAuthority } from "../src/native-authority.ts";
 import * as serviceComposition from "../src/service.ts";
 
+function redactFixtureFailure(error: unknown, message: string): Error {
+  if (error instanceof assert.AssertionError) {
+    return error;
+  }
+  return new Error(message);
+}
+
 // Reuse management-postgres's disposable guard and migration procedure. Its
 // helper is private to that suite; exporting it would widen the ten owned paths.
-let pool: pg.Pool;
+let pool: Pool;
 function disposable(): { dsn: string; database: string } {
   const dsn = process.env.AG_MANAGEMENT_TEST_DSN ?? process.env.AG_KERNEL_TEST_DSN,
     database = process.env.AG_MANAGEMENT_DISPOSABLE_DB ?? process.env.AG_KERNEL_DISPOSABLE_DB;
   if (
-    !dsn ||
-    !database ||
+    dsn === undefined ||
+    dsn === "" ||
+    database === undefined ||
+    database === "" ||
     !/^ag_kernel_test_[a-z0-9_]+$/.test(database) ||
     process.env.AG_KERNEL_TEST_ALLOW !== "disposable_pg17_10"
   ) {
@@ -65,14 +74,14 @@ function disposable(): { dsn: string; database: string } {
     !["postgres:", "postgresql:"].includes(url.protocol) ||
     !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) ||
     url.pathname !== "/" + database ||
-    url.search ||
-    url.hash
+    url.search !== "" ||
+    url.hash !== ""
   ) {
     throw new Error("NOT_RUN: refusing remote or unspecified DB");
   }
   return { dsn, database };
 }
-before(async () => {
+beforeTests(async () => {
   const selected = disposable();
   // Session defaults also bound selector SQL and BEGIN/COMMIT/ROLLBACK, not just the blocker.
   const config = {
@@ -81,12 +90,12 @@ before(async () => {
     connectionTimeoutMillis: 5000,
     statement_timeout: 10_000,
     query_timeout: 12_000,
-  } satisfies pg.PoolConfig;
-  pool = new pg.Pool(config);
-  pool.on("error", () => undefined);
+  } satisfies PoolConfig;
+  pool = new Pool(config);
+  pool.on("error", () => {});
   try {
     const version = (
-      await pool.query(
+      await pool.query<{ db: string; version: string }>(
         "SELECT current_database() AS db,current_setting('server_version') AS version",
       )
     ).rows[0];
@@ -99,7 +108,7 @@ before(async () => {
       const directory = new URL("../migrations/", import.meta.url);
       for (const file of (await readdir(directory))
         .filter((f) => /^\d{3}_.*\.sql$/.test(f))
-        .sort()) {
+        .toSorted()) {
         await pool.query(await readFile(new URL(file, directory), "utf8"));
       }
     } else {
@@ -111,7 +120,7 @@ before(async () => {
         ag_management.physical_mappings m,ag_kernel.workers w LIMIT 0`);
     }
     const maximum = (
-      await pool.query(
+      await pool.query<{ maximum: string }>(
         "SELECT coalesce(max(native_id),4000)::text AS maximum FROM ag_management.physical_mappings",
       )
     ).rows[0].maximum;
@@ -121,12 +130,14 @@ before(async () => {
       "finite fresh synthetic identity space",
     );
   } catch (error) {
-    if (error instanceof assert.AssertionError) throw error;
-    throw new Error("NOT_RUN: disposable PostgreSQL setup unavailable; vendor details withheld");
+    throw redactFixtureFailure(
+      error,
+      "NOT_RUN: disposable PostgreSQL setup unavailable; vendor details withheld",
+    );
   }
 });
-after(async () => {
-  await pool?.end();
+afterTests(async () => {
+  await Promise.all([pool].filter(Boolean).map((createdPool) => createdPool.end()));
 });
 
 const apiProfile = Object.freeze({
@@ -184,12 +195,12 @@ interface ConnectWire {
   account_ref: string;
   generation: string;
 }
-function wire(scope: OAuthScope): ConnectWire {
+function wire(selectedScope: OAuthScope): ConnectWire {
   return {
-    operation: scope.operationId,
-    owner_ref: scope.ownerRef,
-    account_ref: scope.accountRef,
-    generation: scope.generation,
+    operation: selectedScope.operationId,
+    owner_ref: selectedScope.ownerRef,
+    account_ref: selectedScope.accountRef,
+    generation: selectedScope.generation,
   };
 }
 function scope(j: CandidateJournal): OAuthScope {
@@ -207,12 +218,16 @@ async function listen(server: Server): Promise<string> {
     server.listen(0, "127.0.0.1", resolve);
   });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   return "http://127.0.0.1:" + address.port;
 }
 async function stop(server: Server): Promise<void> {
   server.closeAllConnections();
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  await new Promise<void>((resolve) => {
+    server.close(() => {
+      resolve();
+    });
+  });
 }
 let nextNativeId = 4000;
 type DescriptorMode = "absent" | "unavailable" | "pending" | "qualified";
@@ -292,9 +307,11 @@ async function fixture(options: FixtureOptions = {}) {
       );
       if (req.method === "POST" && req.url === "/private/native/v1/oauth/refresh") {
         const chunks: Buffer[] = [];
-        for await (const chunk of req) chunks.push(chunk as Buffer);
+        for await (const chunk of req) {
+          chunks.push(chunk as Buffer);
+        }
         const submitted = JSON.parse(Buffer.concat(chunks).toString()) as ConnectWire;
-        assert.deepEqual(Object.keys(submitted).sort(), [
+        assert.deepEqual(Object.keys(submitted).toSorted(), [
           "account_ref",
           "generation",
           "operation",
@@ -349,11 +366,13 @@ async function fixture(options: FixtureOptions = {}) {
           req.url === "/private/native/v1/oauth/connect/poll")
       ) {
         const chunks: Buffer[] = [];
-        for await (const chunk of req) chunks.push(chunk as Buffer);
+        for await (const chunk of req) {
+          chunks.push(chunk as Buffer);
+        }
         const { method, ...submitted } = JSON.parse(
           Buffer.concat(chunks).toString(),
         ) as ConnectWire & { method?: string };
-        assert.deepEqual(Object.keys(submitted).sort(), [
+        assert.deepEqual(Object.keys(submitted).toSorted(), [
           "account_ref",
           "generation",
           "operation",
@@ -362,7 +381,9 @@ async function fixture(options: FixtureOptions = {}) {
         assert.equal(submitted.owner_ref, owner);
         const isBegin = req.url === "/private/native/v1/oauth/connect";
         const isPoll = req.url === "/private/native/v1/oauth/connect/poll";
-        if (!isBegin) assert.equal(method, undefined, "method cannot change on read/poll");
+        if (!isBegin) {
+          assert.equal(method, undefined, "method cannot change on read/poll");
+        }
         requests.push({ path: req.url, input: submitted });
         if (isBegin) {
           begins++;
@@ -381,7 +402,9 @@ async function fixture(options: FixtureOptions = {}) {
             "one native Begin per operation",
           );
           nativeIntents.set(submitted.operation, submitted);
-          if (method === "device_code") deviceOperations.add(submitted.operation);
+          if (method === "device_code") {
+            deviceOperations.add(submitted.operation);
+          }
           rows.set(submitted.generation, {
             generation: submitted.generation,
             nativePhysicalIdentity: submitted.generation,
@@ -390,7 +413,7 @@ async function fixture(options: FixtureOptions = {}) {
             state: "inactive",
             ...codexOAuthProfile,
           });
-          if (options.lostACK) {
+          if (options.lostACK === true) {
             req.socket.destroy();
             return;
           }
@@ -439,7 +462,9 @@ async function fixture(options: FixtureOptions = {}) {
       }
       if (req.method === "POST" && req.url === "/private/native/v1/oauth/connect/descriptor") {
         const chunks: Buffer[] = [];
-        for await (const chunk of req) chunks.push(chunk as Buffer);
+        for await (const chunk of req) {
+          chunks.push(chunk as Buffer);
+        }
         const submitted = JSON.parse(Buffer.concat(chunks).toString()) as ConnectWire;
         assert.deepEqual(submitted, nativeIntents.get(submitted.operation));
         const row = rows.get(submitted.generation);
@@ -467,7 +492,9 @@ async function fixture(options: FixtureOptions = {}) {
       }
       if (req.method === "POST" && req.url === "/private/native/v1/oauth/connect/cleanup") {
         const chunks: Buffer[] = [];
-        for await (const chunk of req) chunks.push(chunk as Buffer);
+        for await (const chunk of req) {
+          chunks.push(chunk as Buffer);
+        }
         const submitted = JSON.parse(Buffer.concat(chunks).toString()) as ConnectWire & {
           action: "read" | "erase";
           cleanup_ref: string;
@@ -529,10 +556,14 @@ async function fixture(options: FixtureOptions = {}) {
         );
         return;
       }
-      if (req.url?.startsWith("/private/native/v1/candidates")) {
-        if (req.method === "GET") candidateReads++;
-        else if (req.method === "PUT") activations++;
-        else candidateCreates++;
+      if (req.url?.startsWith("/private/native/v1/candidates") === true) {
+        if (req.method === "GET") {
+          candidateReads++;
+        } else if (req.method === "PUT") {
+          activations++;
+        } else {
+          candidateCreates++;
+        }
         res.statusCode = 403;
         res.end();
         return;
@@ -540,7 +571,7 @@ async function fixture(options: FixtureOptions = {}) {
       unexpected++;
       res.statusCode = 404;
       res.end();
-    })().catch((error) => {
+    })().catch((error: unknown) => {
       fixtureFailure = error;
       res.destroy();
     });
@@ -569,7 +600,9 @@ async function fixture(options: FixtureOptions = {}) {
         descriptorBarrier.entered.resolve();
         await descriptorBarrier.released.promise;
       }
-      if (descriptorMode === "unavailable") throw new NativeFailure("unavailable");
+      if (descriptorMode === "unavailable") {
+        throw new NativeFailure("unavailable");
+      }
       const identity = {
         operationId: s.operationId,
         accountRef: s.accountRef,
@@ -750,8 +783,11 @@ async function fixture(options: FixtureOptions = {}) {
       descriptorWirePatch = patch;
     },
     replies(patch: Record<string, unknown>, begin = false) {
-      if (begin) beginPatch = patch;
-      else replyPatch = patch;
+      if (begin) {
+        beginPatch = patch;
+      } else {
+        replyPatch = patch;
+      }
     },
     url(value: string) {
       responseURL = value;
@@ -786,19 +822,29 @@ async function fixture(options: FixtureOptions = {}) {
     },
     stats: () => ({ begins, candidateCreates, candidateReads, activations, unexpected }),
     async assertHealthy() {
-      if (fixtureFailure) throw fixtureFailure;
+      const hasFixtureFailure = Boolean(fixtureFailure);
+      if (hasFixtureFailure) {
+        throw redactFixtureFailure(
+          fixtureFailure,
+          "synthetic native fixture failed; vendor details withheld",
+        );
+      }
       assert.equal(unexpected, 0);
       assert.equal(candidateCreates, 0);
     },
     async restart(targetWorker = worker, withDescriptor = descriptorMode !== "absent") {
-      if (facade) await stop(facade);
+      if (facade) {
+        await stop(facade);
+      }
       management = manager(targetWorker, withDescriptor);
       origin = await startFacade();
     },
     async close() {
       descriptorBarrier?.released.resolve();
       refreshBarrier?.released.resolve();
-      if (facade) await stop(facade);
+      if (facade) {
+        await stop(facade);
+      }
       await stop(callbackServer);
       await stop(nativeServer);
     },
@@ -812,8 +858,12 @@ async function journal(f: Fixture, command: OAuthBeginInput): Promise<CandidateJ
 }
 async function assertPinned(f: Fixture, j: CandidateJournal): Promise<void> {
   assert.deepEqual(await f.store.readJournal(f.context, j.operationId), j);
-  for (const request of f.requests) assert.deepEqual(request.input, wire(scope(j)));
-  for (const s of f.descriptorScopes) assert.deepEqual(s, scope(j));
+  for (const request of f.requests) {
+    assert.deepEqual(request.input, wire(scope(j)));
+  }
+  for (const s of f.descriptorScopes) {
+    assert.deepEqual(s, scope(j));
+  }
   assert.equal(f.stats().begins, 1);
   await f.assertHealthy();
 }
@@ -832,11 +882,13 @@ async function assertInert(
   if (original) {
     assert.ok(mapping);
     assert.deepEqual(mapping.descriptor, original);
-  } else assert.equal(mapping, undefined);
+  } else {
+    assert.equal(mapping, undefined);
+  }
   assert.equal(f.rows.get(j.generation)?.state, "inactive");
   assert.equal(f.stats().activations, 0);
   const saved = (
-    await pool.query(
+    await pool.query<{ state: string; generation: string; active_generation: string | null }>(
       `SELECT c.state,c.generation,a.active_generation FROM ag_kernel.candidates c
     JOIN ag_kernel.accounts a ON a.consumer=c.consumer AND a.ref=c.account_ref
     WHERE c.consumer=$1 AND c.operation_id=$2`,
@@ -848,7 +900,7 @@ async function assertInert(
   assert.equal(saved.state, expected === "pending" ? "creating" : "quarantined");
   assert.equal(
     (
-      await pool.query(
+      await pool.query<{ n: number }>(
         "SELECT count(*)::int AS n FROM ag_management.transient_intents WHERE consumer=$1",
         [f.context.consumerId],
       )
@@ -858,9 +910,10 @@ async function assertInert(
   );
   assert.equal(
     (
-      await pool.query("SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1", [
-        f.context.consumerId,
-      ])
+      await pool.query<{ n: number }>(
+        "SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1",
+        [f.context.consumerId],
+      )
     ).rows[0].n,
     0,
     "management never obtains inference permission",
@@ -893,7 +946,7 @@ function selectors(j: CandidateJournal): OAuthSelectors {
 
 // Regression: implicit read polling, owner substitution, method switching or a
 // replayed handoff could consume another owner's intent or re-exchange tokens.
-test("device enrollment binds method/owner and promotes through the original qualification path", async () => {
+void test("device enrollment binds method/owner and promotes through the original qualification path", async () => {
   const f = await fixture({ descriptor: "qualified" });
   const command = { ...input(), method: "device_code" as const };
   try {
@@ -963,12 +1016,12 @@ test("device enrollment binds method/owner and promotes through the original qua
   }
 });
 
-test("browser compatibility and device reconnect preserve one method and original account", async () => {
+void test("browser compatibility and device reconnect preserve one method and original account", async () => {
   const f = await fixture({ descriptor: "qualified" }),
     command = input();
   try {
     const begun = await f.client().beginOAuth(sdkInput(command));
-    assert.ok(begun.authorizationURL);
+    assert.ok(typeof begun.authorizationURL === "string" && begun.authorizationURL !== "");
     assert.equal(begun.operation.oauthMethod, undefined);
     assert.deepEqual(await f.client().beginOAuth({ ...sdkInput(command), method: "browser" }), {
       operation: begun.operation,
@@ -1021,7 +1074,7 @@ test("browser compatibility and device reconnect preserve one method and origina
   }
 });
 
-test("lost device poll acknowledgement spends authority and cannot be replayed", async () => {
+void test("lost device poll acknowledgement spends authority and cannot be replayed", async () => {
   const f = await fixture(),
     command = { ...input(), method: "device_code" as const };
   try {
@@ -1045,8 +1098,8 @@ test("lost device poll acknowledgement spends authority and cannot be replayed",
 
 // RED if cleanup needs a revoked management grant or guesses an unmapped birth,
 // promotes a disabled candidate, retries erase after a lost ACK, or closes unknown.
-test("F cleanup: current claim recovers unmapped custody and retains closure uncertainty", async (t) => {
-  for (const mode of ["closed", "lost_ack", "unknown"] as const)
+void test("F cleanup: current claim recovers unmapped custody and retains closure uncertainty", async (t) => {
+  for (const mode of ["closed", "lost_ack", "unknown"] as const) {
     await t.test(mode, async () => {
       const f = await fixture({ descriptor: "qualified" }),
         command = input();
@@ -1104,7 +1157,11 @@ test("F cleanup: current claim recovers unmapped custody and retains closure unc
         assert.equal((await f.kernel.account(f.context, j.accountRef)).state, "disabled");
         assert.equal((await f.kernel.operation(f.context, j.operationId)).state, "unknown");
         const saved = (
-          await pool.query(
+          await pool.query<{
+            native_identity: string | null;
+            state: string;
+            cleanup_state: string;
+          }>(
             `SELECT c.native_identity,c.state,l.state AS cleanup_state FROM ag_kernel.candidates c
         JOIN ag_kernel.cleanup l ON l.consumer=c.consumer AND l.generation=c.generation WHERE c.consumer=$1 AND c.generation=$2`,
             [f.context.consumerId, j.generation],
@@ -1146,11 +1203,12 @@ test("F cleanup: current claim recovers unmapped custody and retains closure unc
         await f.close();
       }
     });
+  }
 });
 
 // RED if immediate pending after unknown closure reclaims the smallest UUID
 // forever. Existing last-claim lease orders progress without delaying recovery.
-test("F cleanup fairness: unresolved low-ref birth yields to an independent job", async () => {
+void test("F cleanup fairness: unresolved low-ref birth yields to an independent job", async () => {
   const f = await fixture({ descriptor: "qualified" });
   try {
     const journals: CandidateJournal[] = [];
@@ -1198,7 +1256,7 @@ test("F cleanup fairness: unresolved low-ref birth yields to an independent job"
     assert.equal((await f.kernel.operation(f.context, a.operationId)).state, "unknown");
     assert.equal((await f.kernel.account(f.context, a.accountRef)).state, "disabled");
     const saved = (
-      await pool.query(
+      await pool.query<{ state: string; cleanup_state: string }>(
         `SELECT c.state,l.state AS cleanup_state FROM ag_kernel.candidates c
       JOIN ag_kernel.cleanup l ON l.consumer=c.consumer AND l.generation=c.generation WHERE c.consumer=$1 AND c.generation=$2`,
         [f.context.consumerId, a.generation],
@@ -1217,7 +1275,7 @@ test("F cleanup fairness: unresolved low-ref birth yields to an independent job"
 });
 
 // RED if a callback authorizes from an earlier lease read after waiting for SQL.
-test("F cleanup authority rereads an expired claim after the consumer lock wait", async () => {
+void test("F cleanup authority rereads an expired claim after the consumer lock wait", async () => {
   const f = await fixture(),
     command = input(),
     gate = await pool.connect();
@@ -1254,13 +1312,13 @@ test("F cleanup authority rereads an expired claim after the consumer lock wait"
   } finally {
     await gate.query("ROLLBACK");
     gate.release();
-    await pending?.catch(() => undefined);
+    await pending?.catch(() => {});
     await f.close();
   }
 });
 
 // A retained prior-model birth remains cleanup-only; an unknown model cannot authorize erase.
-test("F cleanup authority erases exact historical model and denies foreign model", async () => {
+void test("F cleanup authority erases exact historical model and denies foreign model", async () => {
   for (const model of ["gpt-6.1-sol", "unapproved-model"]) {
     const f = await fixture({ descriptor: "qualified" });
     try {
@@ -1270,7 +1328,7 @@ test("F cleanup authority erases exact historical model and denies foreign model
         ...command,
         intentDigest: randomUUID(),
       });
-      assert.ok(operation.accountRef);
+      assert.ok(typeof operation.accountRef === "string" && operation.accountRef !== "");
       const permit = await f.kernel.startCandidate(f.context, command.operationId, f.worker);
       assert.ok(permit);
       // Seed the retained prior-version fixture through the canonical immutable journal/mapping APIs.
@@ -1324,7 +1382,7 @@ test("F cleanup authority erases exact historical model and denies foreign model
 
 // RED if current generation claim alone authorizes OAuth erasure while its exact
 // execution is occupied, or pending generation prevents that execution cleanup.
-test("F cleanup authority waits for exact occupied execution closure before erasure", async () => {
+void test("F cleanup authority waits for exact occupied execution closure before erasure", async () => {
   const f = await fixture({ descriptor: "qualified" });
   try {
     const j = await activeOAuth(f);
@@ -1342,7 +1400,7 @@ test("F cleanup authority waits for exact occupied execution closure before eras
       deadline: new Date(Date.now() + 45_000),
       limits: bounds,
     });
-    assert.ok(prepared.executionRef);
+    assert.ok(typeof prepared.executionRef === "string" && prepared.executionRef !== "");
     const saved = await f.kernel.savedExecution(f.context, prepared.executionRef);
     const claimed = await f.kernel.claim(
       f.context,
@@ -1386,7 +1444,7 @@ test("F cleanup authority waits for exact occupied execution closure before eras
       "current claimed scope permits read, zero native erase",
     );
     const held = (
-      await pool.query(
+      await pool.query<{ transport_occupied: boolean; effect: string; cleanup_state: string }>(
         `SELECT r.transport_occupied,r.effect,l.state AS cleanup_state FROM ag_kernel.requests r
       JOIN ag_kernel.executions e ON e.consumer=r.consumer AND e.ref=r.execution_ref
       JOIN ag_kernel.cleanup l ON l.consumer=e.consumer AND l.generation=e.generation
@@ -1423,7 +1481,7 @@ test("F cleanup authority waits for exact occupied execution closure before eras
 });
 
 // RED if missing native fields on a retained legacy request imply no transport.
-test("F cleanup authority preserves legacy unknown occupancy with no native proof", async () => {
+void test("F cleanup authority preserves legacy unknown occupancy with no native proof", async () => {
   const f = await fixture({ descriptor: "qualified" });
   try {
     const j = await activeOAuth(f);
@@ -1441,7 +1499,7 @@ test("F cleanup authority preserves legacy unknown occupancy with no native proo
       deadline: new Date(Date.now() + 45_000),
       limits: bounds,
     });
-    assert.ok(prepared.executionRef);
+    assert.ok(typeof prepared.executionRef === "string" && prepared.executionRef !== "");
     await pool.query(
       `INSERT INTO ag_kernel.requests(consumer,execution_ref,id,effect,worker)
       VALUES ($1,$2,'legacy-unknown','effect_unknown',$3)`,
@@ -1473,7 +1531,11 @@ test("F cleanup authority preserves legacy unknown occupancy with no native proo
     assert.equal(execution.scope.transports[0].token, undefined);
     assert.equal(execution.scope.transports[0].native, undefined);
     const held = (
-      await pool.query(
+      await pool.query<{
+        transport_occupied: boolean;
+        native_origin_ref: string | null;
+        descriptor_generation: string | null;
+      }>(
         `SELECT transport_occupied,native_origin_ref,descriptor_generation FROM ag_kernel.requests
       WHERE consumer=$1 AND execution_ref=$2 AND id='legacy-unknown'`,
         [f.context.consumerId, prepared.executionRef],
@@ -1496,7 +1558,7 @@ test("F cleanup authority preserves legacy unknown occupancy with no native proo
 // RED if selection spans HTTP/callback with the consumer lock, if failed A is
 // retried in the same tick, or if cursor advancement waits for a successful ACK.
 // Native F2's durable no-second-entry proof belongs to its existing real PG case.
-test("F maintenance: retained pending cleanup cannot starve another active OAuth account", async () => {
+void test("F maintenance: retained pending cleanup cannot starve another active OAuth account", async () => {
   const f = await fixture({ descriptor: "qualified" });
   try {
     const retired = await activeOAuth(f),
@@ -1526,12 +1588,13 @@ test("F maintenance: retained pending cleanup cannot starve another active OAuth
         cleanupTicks++;
       }
       const result = await manager.refreshOAuth(f.context, claim !== undefined);
-      if (claim)
+      if (claim) {
         assert.equal(
           result,
           "idle",
           "cleanup claim retains priority and suppresses same-tick refresh",
         );
+      }
     }
     assert.equal(cleanupTicks, 2, "cleanup remains serviced while uncertainty is retained");
     assert.deepEqual(
@@ -1541,7 +1604,7 @@ test("F maintenance: retained pending cleanup cannot starve another active OAuth
     );
     assert.equal(
       (
-        await pool.query(
+        await pool.query<{ state: string }>(
           "SELECT state FROM ag_kernel.cleanup WHERE consumer=$1 AND generation=$2",
           [f.context.consumerId, retired.generation],
         )
@@ -1560,10 +1623,10 @@ test("F maintenance: retained pending cleanup cannot starve another active OAuth
   }
 });
 
-test("F refresh: committed real journal/HTTP selection advances past dropped ACK and unknown A to B", async () => {
+void test("F refresh: committed real journal/HTTP selection advances past dropped ACK and unknown A to B", async () => {
   const f = await fixture({ descriptor: "qualified" });
   try {
-    const journals = [await activeOAuth(f), await activeOAuth(f)].sort((a, b) =>
+    const journals = [await activeOAuth(f), await activeOAuth(f)].toSorted((a, b) =>
       a.generation.localeCompare(b.generation),
     );
     const [a, b] = journals;
@@ -1585,12 +1648,13 @@ test("F refresh: committed real journal/HTTP selection advances past dropped ACK
       deadline: new Date(Date.now() + 45_000),
       limits: bounds,
     });
-    assert.ok(execution.executionRef);
+    assert.ok(typeof execution.executionRef === "string" && execution.executionRef !== "");
     const savedBefore = await f.kernel.savedExecution(f.context, execution.executionRef);
     const operationsBefore = (
-      await pool.query("SELECT count(*)::int AS n FROM ag_kernel.operations WHERE consumer=$1", [
-        f.context.consumerId,
-      ])
+      await pool.query<{ n: number }>(
+        "SELECT count(*)::int AS n FROM ag_kernel.operations WHERE consumer=$1",
+        [f.context.consumerId],
+      )
     ).rows[0].n;
     assert.equal(await manager.refreshOAuth(f.context, true), "idle");
     assert.deepEqual(
@@ -1648,16 +1712,16 @@ test("F refresh: committed real journal/HTTP selection advances past dropped ACK
       await gate.query("SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE", [
         f.context.consumerId,
       ]);
-      const pid = (await gate.query("SELECT pg_backend_pid() AS pid")).rows[0].pid as number;
+      const pid = (await gate.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
       rawRefresh = manager.refreshOAuth(f.context, false, shutdown.signal);
-      void rawRefresh.catch(() => undefined);
+      void rawRefresh.catch(() => {});
       const selecting = Promise.race([
         rawRefresh,
         delay(6500, undefined, { signal: wait.signal }).then(() => {
           throw new Error("shutdown refresh did not settle");
         }),
       ]);
-      void selecting.catch(() => undefined);
+      void selecting.catch(() => {});
       const deadline = process.hrtime.bigint() + 2_500_000_000n;
       let blocked = false;
       while (!blocked && process.hrtime.bigint() < deadline) {
@@ -1670,7 +1734,9 @@ test("F refresh: committed real journal/HTTP selection advances past dropped ACK
               [pid],
             )
           ).rowCount ?? 0) > 0;
-        if (!blocked) await delay(10);
+        if (!blocked) {
+          await delay(10);
+        }
       }
       assert.equal(blocked, true, "refresh selector reached the actual consumer SQL lock");
       assert.equal(
@@ -1696,21 +1762,27 @@ test("F refresh: committed real journal/HTTP selection advances past dropped ACK
     } finally {
       shutdown.abort();
       wait.abort();
-      const rollback = { text: "ROLLBACK", query_timeout: 3500 };
-      let discard = false;
-      try {
-        await gate.query(rollback);
-      } catch (error) {
-        discard = true;
-        throw error;
-      } finally {
-        // An uncertain transaction must never return to the pool; release before joining.
+      async function cleanupRefreshSelection(): Promise<void> {
+        const rollback = { text: "ROLLBACK", query_timeout: 3500 };
+        let discard = false;
         try {
-          gate.release(discard);
+          await gate.query(rollback);
+        } catch (error) {
+          discard = true;
+          throw redactFixtureFailure(
+            error,
+            "disposable PostgreSQL rollback failed; vendor details withheld",
+          );
         } finally {
-          await rawRefresh?.catch(() => undefined);
+          // An uncertain transaction must never return to the pool; release before joining.
+          try {
+            gate.release(discard);
+          } finally {
+            await rawRefresh?.catch(() => {});
+          }
         }
       }
+      await cleanupRefreshSelection();
     }
     assert.deepEqual(await f.kernel.account(f.context, a.accountRef), accountBefore);
     assert.deepEqual(await f.kernel.savedExecution(f.context, execution.executionRef), savedBefore);
@@ -1718,9 +1790,10 @@ test("F refresh: committed real journal/HTTP selection advances past dropped ACK
     assert.deepEqual(await f.store.mapping(f.context, a.generation), mappingBefore);
     assert.equal(
       (
-        await pool.query("SELECT count(*)::int AS n FROM ag_kernel.operations WHERE consumer=$1", [
-          f.context.consumerId,
-        ])
+        await pool.query<{ n: number }>(
+          "SELECT count(*)::int AS n FROM ag_kernel.operations WHERE consumer=$1",
+          [f.context.consumerId],
+        )
       ).rows[0].n,
       operationsBefore,
       "refresh creates no kernel operation",
@@ -1733,7 +1806,7 @@ test("F refresh: committed real journal/HTTP selection advances past dropped ACK
 
 // RED if refresh derives owner from the body, accepts a replacement staging
 // worker, or accepts the original physical mapping after reconnect promotion.
-test("F refresh authority: exact active or original creating selectors retain ownership fences", async () => {
+void test("F refresh authority: exact active or original creating selectors retain ownership fences", async () => {
   const f = await fixture({ descriptor: "qualified" });
   try {
     const command = input();
@@ -1827,7 +1900,7 @@ test("F refresh authority: exact active or original creating selectors retain ow
 // The existing protected HTTP refresh peer calls the real authority callback.
 // Native owns due time and its one-use entry ledger; management never creates
 // a replacement candidate while recovering completed, unqualified custody.
-test("F pending refresh: completed original custody runs F2 before Descriptor and normal ACK", async () => {
+void test("F pending refresh: completed original custody runs F2 before Descriptor and normal ACK", async () => {
   const f = await fixture({ descriptor: "pending" }),
     command = input();
   try {
@@ -1857,7 +1930,7 @@ test("F pending refresh: completed original custody runs F2 before Descriptor an
   }
 });
 
-test("F pending refresh: lost ACK defers, UNKNOWN is spent, original lease and owner remain required", async () => {
+void test("F pending refresh: lost ACK defers, UNKNOWN is spent, original lease and owner remain required", async () => {
   const f = await fixture({ descriptor: "qualified" }),
     command = input();
   try {
@@ -1886,9 +1959,9 @@ test("F pending refresh: lost ACK defers, UNKNOWN is spent, original lease and o
     // attempting to revive the original worker used by the UNKNOWN assertions.
     const expired = await fixture({ descriptor: "pending" });
     try {
-      const command = input();
-      await expired.client().beginOAuth(sdkInput(command));
-      const pending = await journal(expired, command);
+      const expiredCommand = input();
+      await expired.client().beginOAuth(sdkInput(expiredCommand));
+      const pending = await journal(expired, expiredCommand);
       assert.equal(
         (await expired.callback("oauth-refresh-authority", selectors(pending))).status,
         200,
@@ -1931,7 +2004,7 @@ test("F pending refresh: lost ACK defers, UNKNOWN is spent, original lease and o
 
 // A real reconnect route preserves the logical account and uses a fresh inert
 // birth. Existing kernel ACK owns epoch rotation, old-use fencing and cleanup.
-test("F OAuth reconnect: new verified birth promotes stable account and fences the old epoch once", async () => {
+void test("F OAuth reconnect: new verified birth promotes stable account and fences the old epoch once", async () => {
   const f = await fixture({ descriptor: "qualified" });
   try {
     const old = await activeOAuth(f),
@@ -1950,12 +2023,12 @@ test("F OAuth reconnect: new verified birth promotes stable account and fences t
       deadline: new Date(Date.now() + 45_000),
       limits: bounds,
     });
-    assert.ok(execution.executionRef);
+    assert.ok(typeof execution.executionRef === "string" && execution.executionRef !== "");
     f.state("prepared");
     const command = { operationId: randomUUID(), expectedMetadataRevision: before.revision };
     const begun = await f.client().beginOAuthReconnect(old.accountRef, command);
     assert.equal(begun.operation.state, "pending");
-    assert.ok(begun.authorizationURL);
+    assert.ok(typeof begun.authorizationURL === "string" && begun.authorizationURL !== "");
     const j = await f.store.readJournal(f.context, command.operationId);
     assert.ok(j);
     assert.equal(j.purpose, "reconnect");
@@ -2007,7 +2080,7 @@ test("F OAuth reconnect: new verified birth promotes stable account and fences t
   }
 });
 
-test("F OAuth disabled reauthorization: completed erasure permits only a fresh proof and preserves the disable fence", async () => {
+void test("F OAuth disabled reauthorization: completed erasure permits only a fresh proof and preserves the disable fence", async () => {
   const f = await fixture({ descriptor: "qualified" });
   try {
     const old = await activeOAuth(f),
@@ -2065,7 +2138,7 @@ test("F OAuth disabled reauthorization: completed erasure permits only a fresh p
     const command = { operationId: randomUUID(), expectedMetadataRevision: before.revision };
     const begun = await f.client().beginOAuthReconnect(old.accountRef, command);
     assert.equal(begun.operation.state, "pending");
-    assert.ok(begun.authorizationURL);
+    assert.ok(typeof begun.authorizationURL === "string" && begun.authorizationURL !== "");
     const fresh = await f.store.readJournal(f.context, command.operationId);
     assert.ok(fresh);
     assert.equal(fresh.accountRef, old.accountRef);
@@ -2126,7 +2199,7 @@ test("F OAuth disabled reauthorization: completed erasure permits only a fresh p
     assert.deepEqual(await f.kernel.operation(f.context, disabled.operationRef), disableReadback);
     assert.equal(
       (
-        await pool.query(
+        await pool.query<{ state: string }>(
           "SELECT state FROM ag_kernel.candidates WHERE consumer=$1 AND generation=$2",
           [f.context.consumerId, old.generation],
         )
@@ -2145,7 +2218,7 @@ test("F OAuth disabled reauthorization: completed erasure permits only a fresh p
   }
 });
 
-test("F OAuth disabled reauthorization: unresolved old intent remains spent and blocks a new birth", async () => {
+void test("F OAuth disabled reauthorization: unresolved old intent remains spent and blocks a new birth", async () => {
   const f = await fixture({ descriptor: "qualified" });
   try {
     const old = await activeOAuth(f),
@@ -2193,7 +2266,7 @@ test("F OAuth disabled reauthorization: unresolved old intent remains spent and 
   }
 });
 
-test("F OAuth disabled reauthorization: another disable fences its new callback and final proof", async () => {
+void test("F OAuth disabled reauthorization: another disable fences its new callback and final proof", async () => {
   const f = await fixture({ descriptor: "qualified" });
   try {
     const old = await activeOAuth(f),
@@ -2236,7 +2309,7 @@ test("F OAuth disabled reauthorization: another disable fences its new callback 
   }
 });
 
-test("F OAuth reconnect: stored owner, metadata CAS and original creator fence native entry", async () => {
+void test("F OAuth reconnect: stored owner, metadata CAS and original creator fence native entry", async () => {
   const f = await fixture({ descriptor: "qualified" });
   try {
     const old = await activeOAuth(f),
@@ -2294,7 +2367,7 @@ test("F OAuth reconnect: stored owner, metadata CAS and original creator fence n
 
 // RED if the management grant is captured before SQL: replace it while a real
 // callback waits on the consumer lock, then observe denial over authenticated HTTP.
-test("F refresh authority: grant replacement during real SQL wait denies the callback", async () => {
+void test("F refresh authority: grant replacement during real SQL wait denies the callback", async () => {
   const f = await fixture({ descriptor: "qualified" }),
     gate = await pool.connect();
   let pending: Promise<Response> | undefined;
@@ -2304,9 +2377,9 @@ test("F refresh authority: grant replacement during real SQL wait denies the cal
     await gate.query("SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE", [
       f.context.consumerId,
     ]);
-    const pid = (await gate.query("SELECT pg_backend_pid() AS pid")).rows[0].pid as number;
+    const pid = (await gate.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
     pending = f.callback("oauth-refresh-authority", selectors(j));
-    void pending.catch(() => undefined);
+    void pending.catch(() => {});
     const deadline = Date.now() + 2500;
     let blocked = false;
     while (!blocked && Date.now() < deadline) {
@@ -2317,7 +2390,9 @@ test("F refresh authority: grant replacement during real SQL wait denies the cal
             pid,
           ])
         ).rowCount ?? 0) > 0;
-      if (!blocked) await delay(10);
+      if (!blocked) {
+        await delay(10);
+      }
     }
     assert.equal(blocked, true, "callback reached actual SQL lock");
     f.bearers.replace([]);
@@ -2326,14 +2401,14 @@ test("F refresh authority: grant replacement during real SQL wait denies the cal
   } finally {
     await gate.query("ROLLBACK");
     gate.release();
-    await pending?.catch(() => undefined);
+    await pending?.catch(() => {});
     await f.close();
   }
 });
 
 // Regression: invented staged DTO/URL restriction changes a real prepared Begin
 // into unknown; ordinary waiting/completed custody must stay inert through GET.
-test("F source: prepared Begin journals first; prepared/entered/completed without descriptor remain pending", async () => {
+void test("F source: prepared Begin journals first; prepared/entered/completed without descriptor remain pending", async () => {
   const f = await fixture(),
     command = input();
   try {
@@ -2354,7 +2429,7 @@ test("F source: prepared Begin journals first; prepared/entered/completed withou
       });
       const account = await f.client().get(j.accountRef);
       assert.equal(account.state, "staging");
-      assert.deepEqual(Object.keys(account).sort(), [
+      assert.deepEqual(Object.keys(account).toSorted(), [
         "accountRef",
         "authorizationEpoch",
         "displayName",
@@ -2376,13 +2451,15 @@ test("F source: prepared Begin journals first; prepared/entered/completed withou
 
 // Regression: a lost native response re-enters Begin or reconstructs its URL on
 // duplicate POST/restart; an invalid ACK is equally ambiguous and Read-only.
-test("F source: lost and invalid Begin ACK use Read on the original journal through restart", async (t) => {
-  for (const mode of ["lost", "invalid"] as const)
+void test("F source: lost and invalid Begin ACK use Read on the original journal through restart", async (t) => {
+  for (const mode of ["lost", "invalid"] as const) {
     await t.test(mode, async () => {
       const f = await fixture({ lostACK: mode === "lost" }),
         command = input();
       try {
-        if (mode === "invalid") f.replies({ operation: "foreign-operation" }, true);
+        if (mode === "invalid") {
+          f.replies({ operation: "foreign-operation" }, true);
+        }
         const begun = await f.client().beginOAuth(sdkInput(command));
         assert.deepEqual(begun, {
           operation: { operationRef: command.operationId, state: "pending" },
@@ -2399,19 +2476,21 @@ test("F source: lost and invalid Begin ACK use Read on the original journal thro
         await f.close();
       }
     });
+  }
 });
 
 // Regression: racing same-intent callers each spend a native Begin or each
 // receive a persisted capability, rather than sharing the one durable candidate.
-test("F source: concurrent stable Begin callers share one journal and one capability", async () => {
+void test("F source: concurrent stable Begin callers share one journal and one capability", async () => {
   const f = await fixture(),
     command = input();
   try {
     const results = await Promise.all(
       Array.from({ length: 4 }, () => f.client().beginOAuth(sdkInput(command))),
     );
-    for (const result of results)
+    for (const result of results) {
       assert.deepEqual(result.operation, { operationRef: command.operationId, state: "pending" });
+    }
     assert.equal(results.filter((result) => result.authorizationURL !== undefined).length, 1);
     const j = await journal(f, command);
     assert.deepEqual(f.observedJournals, [j]);
@@ -2419,9 +2498,10 @@ test("F source: concurrent stable Begin callers share one journal and one capabi
     await assertPinned(f, j);
     assert.equal(
       (
-        await pool.query("SELECT count(*)::int AS n FROM ag_kernel.candidates WHERE consumer=$1", [
-          f.context.consumerId,
-        ])
+        await pool.query<{ n: number }>(
+          "SELECT count(*)::int AS n FROM ag_kernel.candidates WHERE consumer=$1",
+          [f.context.consumerId],
+        )
       ).rows[0].n,
       1,
     );
@@ -2432,8 +2512,8 @@ test("F source: concurrent stable Begin callers share one journal and one capabi
 
 // Regression: calling accounts/check during user interaction, or promoting a
 // custody-only completed row, bypasses the future protected descriptor gate.
-test("F source: waiting ignores even a qualified injection; pending/missing descriptor cannot promote completed custody", async (t) => {
-  for (const mode of ["pending", "unavailable", "qualified"] as const)
+void test("F source: waiting ignores even a qualified injection; pending/missing descriptor cannot promote completed custody", async (t) => {
+  for (const mode of ["pending", "unavailable", "qualified"] as const) {
     await t.test(mode, async () => {
       const f = await fixture({ descriptor: mode }),
         command = input();
@@ -2458,11 +2538,12 @@ test("F source: waiting ignores even a qualified injection; pending/missing desc
         await f.close();
       }
     });
+  }
 });
 
 // Red if metadata rename rejects an already-effected initial birth, overwrites
 // the latest name, rotates authority, or bypasses exact qualified inactive proof.
-test("F source: staging rename preserves original qualified birth and epoch while retaining latest metadata", async () => {
+void test("F source: staging rename preserves original qualified birth and epoch while retaining latest metadata", async () => {
   const f = await fixture({ descriptor: "pending" }),
     command = input();
   try {
@@ -2498,7 +2579,7 @@ test("F source: staging rename preserves original qualified birth and epoch whil
       "logical ACK never activates physical OAuth",
     );
     const saved = (
-      await pool.query(
+      await pool.query<{ active_generation: string | null }>(
         "SELECT active_generation FROM ag_kernel.accounts WHERE consumer=$1 AND ref=$2",
         [f.context.consumerId, j.accountRef],
       )
@@ -2510,9 +2591,10 @@ test("F source: staging rename preserves original qualified birth and epoch whil
     assert.equal(account.authorizationEpoch, original.epoch);
     assert.equal(
       (
-        await pool.query("SELECT count(*)::int AS n FROM ag_kernel.cleanup WHERE consumer=$1", [
-          f.context.consumerId,
-        ])
+        await pool.query<{ n: number }>(
+          "SELECT count(*)::int AS n FROM ag_kernel.cleanup WHERE consumer=$1",
+          [f.context.consumerId],
+        )
       ).rows[0].n,
       0,
       "harmless staging rename must not schedule birth cleanup",
@@ -2530,7 +2612,7 @@ test("F source: staging rename preserves original qualified birth and epoch whil
 
 // Red if final ACK overwrites a committed disable's unknown with rejected,
 // promotes through its epoch/state fence, or loses exact physical cleanup proof.
-test("F source: disable wins final native ACK atomically without erasing effected classification", async () => {
+void test("F source: disable wins final native ACK atomically without erasing effected classification", async () => {
   const f = await fixture({ descriptor: "qualified" }),
     command = input(),
     pending: Promise<unknown>[] = [];
@@ -2542,7 +2624,6 @@ test("F source: disable wins final native ACK atomically without erasing effecte
     assert.equal((await f.oauth.read(scope(j))).state, "completed");
     const qualified = await f.descriptorBoundary.describe(scope(j));
     assert.equal(qualified.state, "qualified");
-    assert.ok(qualified.state === "qualified");
     const inactive = f.rows.get(j.generation);
     assert.ok(inactive);
     assert.equal(inactive.state, "inactive");
@@ -2555,19 +2636,22 @@ test("F source: disable wins final native ACK atomically without erasing effecte
     await gate.query("SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE", [
       f.context.consumerId,
     ]);
-    const gatePid = (await gate.query("SELECT pg_backend_pid() AS pid")).rows[0].pid as number;
+    const gatePid = (await gate.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]
+      .pid;
     async function blockedBy(pid: number): Promise<number> {
       const until = process.hrtime.bigint() + 5_000_000_000n;
       while (process.hrtime.bigint() < until) {
         await gate.query("SELECT pg_stat_clear_snapshot()");
         const blocked = (
-          await gate.query(
+          await gate.query<{ pid: number }>(
             `SELECT pid FROM pg_stat_activity WHERE datname=current_database()
           AND $1=ANY(pg_blocking_pids(pid)) AND wait_event_type='Lock'`,
             [pid],
           )
-        ).rows[0];
-        if (blocked) return blocked.pid as number;
+        ).rows.at(0);
+        if (blocked !== undefined) {
+          return blocked.pid;
+        }
         await delay(10);
       }
       throw new Error("final ACK fixture did not reach the real SQL lock boundary");
@@ -2578,7 +2662,7 @@ test("F source: disable wins final native ACK atomically without erasing effecte
       expectedRevision: original.revision,
     });
     pending.push(disable);
-    void disable.catch(() => undefined);
+    void disable.catch(() => {});
     const disablePid = await blockedBy(gatePid);
     const proof = {
       generation: inactive.generation,
@@ -2587,7 +2671,7 @@ test("F source: disable wins final native ACK atomically without erasing effecte
     };
     const ack = f.kernel.acknowledgeCandidate(f.context, command.operationId, f.worker, proof);
     pending.push(ack);
-    void ack.catch(() => undefined);
+    void ack.catch(() => {});
     assert.notEqual(
       await blockedBy(disablePid),
       disablePid,
@@ -2604,7 +2688,11 @@ test("F source: disable wins final native ACK atomically without erasing effecte
     assert.equal(account.state, "disabled");
     assert.equal(account.epoch, original.epoch + 1);
     const saved = (
-      await pool.query(
+      await pool.query<{
+        active_generation: string | null;
+        state: string;
+        native_identity: string | null;
+      }>(
         `SELECT a.active_generation,c.state,c.native_identity FROM ag_kernel.accounts a
       JOIN ag_kernel.candidates c ON c.consumer=a.consumer AND c.account_ref=a.ref
       WHERE a.consumer=$1 AND a.ref=$2 AND c.generation=$3`,
@@ -2647,7 +2735,7 @@ test("F source: disable wins final native ACK atomically without erasing effecte
 // Regression: a profile/model/origin/birth/account substitution still saves a
 // mapping or admits a different birth. Well-formed ID/birth changes must compare
 // against the original durable mapping, including every timestamp digit.
-test("F source: descriptor substitution cannot change scope or replace a pinned birth", async (t) => {
+void test("F source: descriptor substitution cannot change scope or replace a pinned birth", async (t) => {
   const variants: {
     name: string;
     physical?: Partial<PhysicalCandidate>;
@@ -2665,7 +2753,7 @@ test("F source: descriptor substitution cannot change scope or replace a pinned 
     { name: "operation", identity: { operationId: randomUUID() } },
     { name: "account", identity: { accountRef: randomUUID() } },
   ];
-  for (const variant of variants)
+  for (const variant of variants) {
     await t.test(variant.name, async () => {
       const f = await fixture({ descriptor: "qualified" }),
         command = input();
@@ -2688,13 +2776,13 @@ test("F source: descriptor substitution cannot change scope or replace a pinned 
         f.descriptor("qualified", variant.physical, variant.identity);
         const result = await f.client().readOAuth(command.operationId);
         assert.equal(result.state, "unknown");
-        assert.ok(result.state === "unknown" && result.error?.effect === "effect_unknown");
+        assert.equal(result.error?.effect, "effect_unknown");
         await assertInert(f, j, "unknown", original);
         assert.equal((await f.client().beginOAuth(sdkInput(command))).operation.state, "unknown");
         await assertPinned(f, j);
         assert.equal(
           (
-            await pool.query(
+            await pool.query<{ n: number }>(
               "SELECT count(*)::int AS n FROM ag_kernel.cleanup WHERE consumer=$1 AND generation=$2",
               [f.context.consumerId, j.generation],
             )
@@ -2706,12 +2794,13 @@ test("F source: descriptor substitution cannot change scope or replace a pinned 
         await f.close();
       }
     });
+  }
 });
 
 // Regression: expiry/unknown or unexpected failed/rejected wire is treated as
 // not_dispatched and re-arms the same operation. No status is a no-effect proof.
-test("F source: ambiguous or expired connect readback quarantines without recreating or erasing effects", async (t) => {
-  for (const state of ["expired", "unknown", "staged", "failed", "rejected"])
+void test("F source: ambiguous or expired connect readback quarantines without recreating or erasing effects", async (t) => {
+  for (const state of ["expired", "unknown", "staged", "failed", "rejected"]) {
     await t.test(state, async () => {
       const f = await fixture(),
         command = input();
@@ -2730,11 +2819,12 @@ test("F source: ambiguous or expired connect readback quarantines without recrea
         await f.close();
       }
     });
+  }
 });
 
 // Regression: readback allows URL/state export, accepts a foreign operation or
 // account, or conflates custody outcome staged with actual connect state.
-test("F source: native read rejects URL and correlation changes; completed discards custody outcome", async (t) => {
+void test("F source: native read rejects URL and correlation changes; completed discards custody outcome", async (t) => {
   for (const variant of [
     { authorize_url: authorizationURL() },
     { operation: randomUUID() },
@@ -2782,7 +2872,7 @@ test("F source: native read rejects URL and correlation changes; completed disca
 
 // Regression: caller chooses a native owner/consumer or mutates the stable
 // intent; owner authorization must deny before native contact or new SQL rows.
-test("F source: cross-owner/consumer and changed stable intent reject without native Begin", async () => {
+void test("F source: cross-owner/consumer and changed stable intent reject without native Begin", async () => {
   const f = await fixture(),
     command = input();
   try {
@@ -2814,9 +2904,10 @@ test("F source: cross-owner/consumer and changed stable intent reject without na
     await assertPinned(f, j);
     assert.equal(
       (
-        await pool.query("SELECT count(*)::int AS n FROM ag_kernel.accounts WHERE consumer=$1", [
-          f.context.consumerId,
-        ])
+        await pool.query<{ n: number }>(
+          "SELECT count(*)::int AS n FROM ag_kernel.accounts WHERE consumer=$1",
+          [f.context.consumerId],
+        )
       ).rows[0].n,
       1,
     );
@@ -2827,7 +2918,7 @@ test("F source: cross-owner/consumer and changed stable intent reject without na
 
 // Regression: replacement workers reacquire a spent permit, revive a candidate
 // after lease loss, or silently activate while SQL has quarantined authority.
-test("F source: live owner restart waits; lease loss retains unknown and exact cleanup without promotion", async () => {
+void test("F source: live owner restart waits; lease loss retains unknown and exact cleanup without promotion", async () => {
   const f = await fixture({ descriptor: "qualified" }),
     command = input();
   try {
@@ -2868,7 +2959,7 @@ test("F source: live owner restart waits; lease loss retains unknown and exact c
 
 // Regression: delayed protected qualification resumes promotion using the
 // pre-await pending snapshot after its worker lease has already expired.
-test("F source: owner loss while descriptor is held preserves unknown with zero physical activation", async () => {
+void test("F source: owner loss while descriptor is held preserves unknown with zero physical activation", async () => {
   const f = await fixture({ descriptor: "qualified" }),
     command = input();
   let read: Promise<c.Operation> | undefined;
@@ -2878,7 +2969,7 @@ test("F source: owner loss while descriptor is held preserves unknown with zero 
     const j = await journal(f, command);
     f.state("completed");
     read = f.client().readOAuth(command.operationId);
-    void read.catch(() => undefined);
+    void read.catch(() => {});
     await barrier.entered;
     await pool.query(
       "UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND worker=$2",
@@ -2899,14 +2990,14 @@ test("F source: owner loss while descriptor is held preserves unknown with zero 
     assert.equal(f.stats().candidateReads, 0, "OAuth does not use generic candidate routes");
   } finally {
     barrier.release();
-    await read?.catch(() => undefined);
+    await read?.catch(() => {});
     await f.close();
   }
 });
 
 // Regression: PKCE callback/origin aliases or inherited object names become
 // capabilities; invalid ACK must Read, never follow redirects/recreate Begin.
-test("F source: invalid authorization authorities and query fields lose URL and preserve one pending Begin", async (t) => {
+void test("F source: invalid authorization authorities and query fields lose URL and preserve one pending Begin", async (t) => {
   const valid = authorizationURL();
   const variants = [
     valid.replace("auth.openai.com", "auth.openai.com.evil.invalid"),
@@ -2922,7 +3013,7 @@ test("F source: invalid authorization authorities and query fields lose URL and 
     valid.replace("https://", "https://userinfo@"),
     valid + "&state=" + "b".repeat(32),
   ];
-  for (const [n, value] of variants.entries())
+  for (const [n, value] of variants.entries()) {
     await t.test(String(n), async () => {
       const f = await fixture(),
         command = input();
@@ -2940,11 +3031,12 @@ test("F source: invalid authorization authorities and query fields lose URL and 
         await f.close();
       }
     });
+  }
 });
 
 // Regression: a config alias or caller endpoint silently enables product OAuth;
 // SDK input stays additive and existing raw OAuth ingress remains unsupported.
-test("F source: fixed opt-in catalog and strict PKCE ingress cannot enable raw OAuth or dispatch", async () => {
+void test("F source: fixed opt-in catalog and strict PKCE ingress cannot enable raw OAuth or dispatch", async () => {
   const f = await fixture(),
     command = input();
   try {

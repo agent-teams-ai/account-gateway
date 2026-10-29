@@ -10,7 +10,6 @@ import type {
   AccountLimitsV2Capabilities,
 } from "@agent-teams/account-gateway/contracts";
 import type { RetainedCustodyProof } from "./domain.ts";
-import type { RetainedCustodyVerifier } from "./management.ts";
 import { KernelError, identifier, uuid } from "./domain.ts";
 import { secretSubmission } from "@agent-teams/account-gateway/http";
 import {
@@ -26,31 +25,32 @@ import {
   grokOAuthAuthorizationURL,
   oauthDeviceAuthorization,
 } from "@agent-teams/account-gateway/contracts";
-import { codexOAuthProfile, exactCandidate, physicalCandidate } from "./management.ts";
+import {
+  type RetainedCustodyVerifier,
+  codexOAuthProfile,
+  exactCandidate,
+  physicalCandidate,
+  type CandidateJournal,
+  type CandidateMapping,
+  type CandidateNative,
+  type NativeReadback,
+  type PhysicalCandidate,
+  type OAuthScope,
+  type OAuthEnrollmentNative,
+  type OAuthReadback,
+  type OAuthBeginReadback,
+  type OAuthCallback,
+  type OAuthMethod,
+  type OAuthDescriptor,
+  type OAuthDescriptorBoundary,
+  type OAuthRefreshNative,
+  type OAuthRefreshReadback,
+  type OAuthLifecycleNative,
+  type OAuthCleanupAuthority,
+  type OAuthCleanupAction,
+  type OAuthCleanupReadback,
+} from "./management.ts";
 import { oauthProfileDefinition, type OAuthProfileDefinition } from "./oauth-profiles.ts";
-import type {
-  CandidateJournal,
-  CandidateMapping,
-  CandidateNative,
-  NativeReadback,
-  PhysicalCandidate,
-} from "./management.ts";
-import type {
-  OAuthScope,
-  OAuthEnrollmentNative,
-  OAuthReadback,
-  OAuthBeginReadback,
-  OAuthCallback,
-  OAuthMethod,
-} from "./management.ts";
-import type { OAuthDescriptor, OAuthDescriptorBoundary } from "./management.ts";
-import type { OAuthRefreshNative, OAuthRefreshReadback } from "./management.ts";
-import type {
-  OAuthLifecycleNative,
-  OAuthCleanupAuthority,
-  OAuthCleanupAction,
-  OAuthCleanupReadback,
-} from "./management.ts";
 
 export type NativeFailureCode =
   | "unavailable"
@@ -70,19 +70,23 @@ export class NativeFailure extends Error {
 }
 // Existing private Go wire, supplied at native source 16d621c2. This is not SDK v1.
 const candidatesPath = "/private/native/v1/candidates";
+function oauthMethodDenied(method: unknown): boolean {
+  return method !== undefined && method !== "device_code" && method !== "browser";
+}
 function object(
   value: unknown,
   keys: readonly string[],
   optional: readonly string[] = [],
 ): Record<string, unknown> {
   if (
-    !value ||
+    value === null ||
     typeof value !== "object" ||
     Array.isArray(value) ||
     Object.keys(value).some((k) => !keys.includes(k) && !optional.includes(k)) ||
     keys.some((k) => !Object.hasOwn(value, k))
-  )
+  ) {
     throw new NativeFailure("invalid_readback");
+  }
   return value as Record<string, unknown>;
 }
 function decode(bytes: Buffer, maximumDepth = 4): unknown {
@@ -91,22 +95,31 @@ function decode(bytes: Buffer, maximumDepth = 4): unknown {
   // (including escaped aliases) before accepting any physical identity or ACK.
   let position = 0;
   const space = (): void => {
-    while (/\s/.test(text[position] ?? "") && position < text.length) position++;
+    while (/\s/.test(text[position] ?? "") && position < text.length) {
+      position++;
+    }
   };
   const string = (): string => {
     const start = position++;
     while (position < text.length) {
       const c = text[position++];
-      if (c === "\\") position++;
-      else if (c === '"') return JSON.parse(text.slice(start, position)) as string;
+      if (c === "\\") {
+        position++;
+      } else if (c === '"') {
+        return JSON.parse(text.slice(start, position)) as string;
+      }
     }
     throw new NativeFailure("invalid_readback");
   };
   const value = (depth: number): void => {
     space();
-    if (depth > maximumDepth) throw new NativeFailure("invalid_readback");
+    if (depth > maximumDepth) {
+      throw new NativeFailure("invalid_readback");
+    }
     if (text[position] === "{") {
-      if (depth > maximumDepth) throw new NativeFailure("invalid_readback");
+      if (depth > maximumDepth) {
+        throw new NativeFailure("invalid_readback");
+      }
       position++;
       space();
       const keys = new Set<string>();
@@ -115,12 +128,18 @@ function decode(bytes: Buffer, maximumDepth = 4): unknown {
         return;
       }
       while (position < text.length) {
-        if (text[position] !== '"') throw new NativeFailure("invalid_readback");
+        if (text[position] !== '"') {
+          throw new NativeFailure("invalid_readback");
+        }
         const key = string();
-        if (keys.has(key)) throw new NativeFailure("invalid_readback");
+        if (keys.has(key)) {
+          throw new NativeFailure("invalid_readback");
+        }
         keys.add(key);
         space();
-        if (text[position++] !== ":") throw new NativeFailure("invalid_readback");
+        if (text[position++] !== ":") {
+          throw new NativeFailure("invalid_readback");
+        }
         const start = position;
         value(depth + 1);
         if (key === "account_id") {
@@ -132,8 +151,12 @@ function decode(bytes: Buffer, maximumDepth = 4): unknown {
         }
         space();
         const next = text[position++];
-        if (next === "}") return;
-        if (next !== ",") throw new NativeFailure("invalid_readback");
+        if (next === "}") {
+          return;
+        }
+        if (next !== ",") {
+          throw new NativeFailure("invalid_readback");
+        }
         space();
       }
       throw new NativeFailure("invalid_readback");
@@ -149,8 +172,12 @@ function decode(bytes: Buffer, maximumDepth = 4): unknown {
         value(depth + 1);
         space();
         const next = text[position++];
-        if (next === "]") return;
-        if (next !== ",") throw new NativeFailure("invalid_readback");
+        if (next === "]") {
+          return;
+        }
+        if (next !== ",") {
+          throw new NativeFailure("invalid_readback");
+        }
       }
     }
     if (text[position] === '"') {
@@ -158,12 +185,18 @@ function decode(bytes: Buffer, maximumDepth = 4): unknown {
       return;
     }
     const start = position;
-    while (position < text.length && !/[\s,}]/.test(text[position])) position++;
-    if (position === start) throw new NativeFailure("invalid_readback");
+    while (position < text.length && !/[\s,}]/.test(text[position])) {
+      position++;
+    }
+    if (position === start) {
+      throw new NativeFailure("invalid_readback");
+    }
   };
   value(0);
   space();
-  if (position !== text.length) throw new NativeFailure("invalid_readback");
+  if (position !== text.length) {
+    throw new NativeFailure("invalid_readback");
+  }
   return JSON.parse(text) as unknown;
 }
 function readback(bytes: Buffer): NativeReadback {
@@ -192,8 +225,9 @@ function readback(bytes: Buffer): NativeReadback {
       r.group_free !== true ||
       r.schedulable !== false ||
       r.probes_enabled !== false
-    )
+    ) {
       throw new NativeFailure("invalid_readback");
+    }
     const descriptor = physicalCandidate({
       generation: d.generation as string,
       nativePhysicalIdentity: d.generation as string,
@@ -248,15 +282,18 @@ function oauthPhysical(
     (cleanupOnly
       ? !definition.cleanupModels.includes(native.model)
       : native.model !== definition.model)
-  )
+  ) {
     throw new NativeFailure("invalid_readback");
+  }
   return native;
 }
 function oauthEndpoint(
   definition: OAuthProfileDefinition,
   action: "begin" | "read" | "complete" | "poll" | "descriptor" | "custody" | "cleanup" | "refresh",
 ): string {
-  if (action === "refresh") return definition.refreshPath;
+  if (action === "refresh") {
+    return definition.refreshPath;
+  }
   return (
     definition.nativePath +
     (action === "begin"
@@ -308,16 +345,18 @@ class NativeControlHTTP {
       origin.password ||
       origin.search ||
       origin.hash
-    )
+    ) {
       throw new KernelError("invalid");
+    }
     identifier(options.consumerId);
     if (
       typeof options.controlCredential !== "string" ||
       options.controlCredential.length < 1 ||
       options.controlCredential.length > 2048 ||
       !/^[A-Za-z0-9._~+/-]+=*$/.test(options.controlCredential)
-    )
+    ) {
       throw new KernelError("invalid");
+    }
     const deadlineMs = options.deadlineMs ?? 5000,
       bodyBytes = options.bodyBytes ?? 65_536,
       headerBytes = options.headerBytes ?? 16_384;
@@ -331,8 +370,9 @@ class NativeControlHTTP {
       !Number.isInteger(headerBytes) ||
       headerBytes < 1024 ||
       headerBytes > 16_384
-    )
+    ) {
       throw new KernelError("invalid");
+    }
     this.#origin = origin;
     this.#consumer = options.consumerId;
     this.#control = options.controlCredential;
@@ -343,7 +383,9 @@ class NativeControlHTTP {
   protected scope(
     scope: Pick<CandidateJournal, "consumerId" | "generation" | "accountRef" | "ownerRef">,
   ): void {
-    if (scope.consumerId !== this.#consumer) throw new NativeFailure("denied");
+    if (scope.consumerId !== this.#consumer) {
+      throw new NativeFailure("denied");
+    }
     uuid(scope.generation);
     uuid(scope.accountRef);
     identifier(scope.ownerRef);
@@ -357,19 +399,25 @@ class NativeControlHTTP {
     let body: Buffer | undefined;
     try {
       body = value === undefined ? undefined : Buffer.from(JSON.stringify(value));
-      if (body && body.length > (path.endsWith("/oauth/connect/complete") ? 32_768 : 16_384))
+      if (body && body.length > (path.endsWith("/oauth/connect/complete") ? 32_768 : 16_384)) {
         throw new NativeFailure("bounded");
+      }
     } catch {
       throw new NativeFailure("bounded");
     }
     return new Promise<Buffer>((resolve, reject) => {
       let finished = false;
       const finish = (error?: NativeFailure, bytes?: Buffer): void => {
-        if (finished) return;
+        if (finished) {
+          return;
+        }
         finished = true;
         clearTimeout(timer);
-        if (error) reject(error);
-        else resolve(bytes ?? Buffer.alloc(0));
+        if (error) {
+          reject(error);
+        } else {
+          resolve(bytes ?? Buffer.alloc(0));
+        }
       };
       const send = this.#origin.protocol === "https:" ? httpsRequest : httpRequest;
       const req = send(this.#origin, {
@@ -394,7 +442,9 @@ class NativeControlHTTP {
         },
         Math.min(deadlineMs, this.#deadlineMs),
       );
-      req.on("error", () => finish(new NativeFailure("unavailable")));
+      req.on("error", () => {
+        finish(new NativeFailure("unavailable"));
+      });
       req.on("response", (res) => {
         // Retain one overflow sentinel beyond 64 pairs; Node truncates the rest.
         if (res.rawHeaders.length > 128) {
@@ -418,15 +468,26 @@ class NativeControlHTTP {
             finish(new NativeFailure("bounded"));
             res.destroy();
             req.destroy();
-          } else chunks.push(chunk);
+          } else {
+            chunks.push(chunk);
+          }
         });
-        res.on("aborted", () => finish(new NativeFailure("unavailable")));
-        res.on("error", () => finish(new NativeFailure("unavailable")));
-        res.on("end", () => finish(undefined, Buffer.concat(chunks)));
+        res.on("aborted", () => {
+          finish(new NativeFailure("unavailable"));
+        });
+        res.on("error", () => {
+          finish(new NativeFailure("unavailable"));
+        });
+        res.on("end", () => {
+          finish(undefined, Buffer.concat(chunks));
+        });
       });
       // No redirect handler, reuse agent, retry, provider route or consumer bearer.
-      if (body) req.end(body);
-      else req.end();
+      if (body) {
+        req.end(body);
+      } else {
+        req.end();
+      }
     });
   }
 }
@@ -438,11 +499,14 @@ export class NativeRetainedCustodyClient
   async verify(input: CandidateMapping): Promise<RetainedCustodyProof> {
     this.scope(input);
     const d = physicalCandidate(input.descriptor);
-    if (!exactCandidate(input, d) || d.nativePhysicalIdentity !== d.generation)
+    if (!exactCandidate(input, d) || d.nativePhysicalIdentity !== d.generation) {
       throw new NativeFailure("denied");
+    }
     const definition = oauthProfileDefinition(d.profile);
     const oauth = !!definition;
-    if (oauth) identifier(input.operationId);
+    if (oauth) {
+      identifier(input.operationId);
+    }
     const request = {
       contract: "native-retained-custody/v1",
       owner_ref: input.ownerRef,
@@ -477,8 +541,9 @@ export class NativeRetainedCustodyClient
         retention.state !== (oauth ? "inactive" : "active") ||
         retention.credential !== "retained" ||
         proof.authenticated !== true
-      )
+      ) {
         throw new NativeFailure("invalid_readback");
+      }
       if (oauth) {
         const policy = object(r.oauth_policy, ["provider_validity", "expired_but_refreshable"]);
         if (
@@ -489,8 +554,9 @@ export class NativeRetainedCustodyClient
             "not-due-by-existing-policy",
             "eligible-by-existing-policy",
           ].includes(policy.expired_but_refreshable as string)
-        )
+        ) {
           throw new NativeFailure("invalid_readback");
+        }
       }
       return Object.freeze({
         contract: "native-retained-custody/v1",
@@ -559,8 +625,9 @@ export class NativeManagementClient extends NativeControlHTTP implements Candida
       Buffer.byteLength(apiKey) < 1 ||
       Buffer.byteLength(apiKey) > 4096 ||
       apiKey.trim() !== apiKey
-    )
+    ) {
       throw new NativeFailure("bounded");
+    }
     await this.call("POST", candidatesPath, {
       generation: scope.generation,
       profile: scope.profile,
@@ -574,7 +641,9 @@ export class NativeManagementClient extends NativeControlHTTP implements Candida
     this.scope(input);
     const generation = input.generation;
     const result = readback(await this.call("GET", candidatesPath + "/" + generation));
-    if (!exactCandidate(input, result)) throw new NativeFailure("invalid_readback");
+    if (!exactCandidate(input, result)) {
+      throw new NativeFailure("invalid_readback");
+    }
     return Object.freeze([result]);
   }
   private descriptor(input: CandidateMapping): PhysicalCandidate {
@@ -586,13 +655,16 @@ export class NativeManagementClient extends NativeControlHTTP implements Candida
       d.profile !== input.profile.profile ||
       d.baseURL !== input.profile.baseURL ||
       d.model !== input.profile.model
-    )
+    ) {
       throw new NativeFailure("denied");
+    }
     return d;
   }
   async setState(input: CandidateMapping, state: "active" | "inactive"): Promise<void> {
     const d = this.descriptor(input);
-    if (!["active", "inactive"].includes(state)) throw new NativeFailure("denied");
+    if (!["active", "inactive"].includes(state)) {
+      throw new NativeFailure("denied");
+    }
     // The PUT ACK itself does not authorize promotion; orchestration uses an exact GET.
     const response = readback(
       await this.call("PUT", candidatesPath + "/" + d.generation, {
@@ -608,8 +680,9 @@ export class NativeManagementClient extends NativeControlHTTP implements Candida
       response.profile !== d.profile ||
       response.baseURL !== d.baseURL ||
       response.model !== d.model
-    )
+    ) {
       throw new NativeFailure("invalid_readback");
+    }
   }
   async erase(input: CandidateMapping): Promise<void> {
     const d = this.descriptor(input);
@@ -618,8 +691,9 @@ export class NativeManagementClient extends NativeControlHTTP implements Candida
     });
     try {
       const ack = object(decode(bytes), ["state", "credentials_erased"]);
-      if (ack.state !== "tombstoned" || ack.credentials_erased !== true)
+      if (ack.state !== "tombstoned" || ack.credentials_erased !== true) {
         throw new NativeFailure("invalid_readback");
+      }
     } catch {
       throw new NativeFailure("invalid_readback");
     }
@@ -646,10 +720,14 @@ export class NativeOAuthEnrollmentClient
     identifier(options.ownerRef);
     this.#owner = options.ownerRef;
     const definition = oauthProfileDefinition(options.profileId ?? codexOAuthProfile.profile);
-    if (!definition) throw new KernelError("invalid");
+    if (!definition) {
+      throw new KernelError("invalid");
+    }
     this.#definition = definition;
     if (definition.family === "grok") {
-      if (!options.grokBrowserPolicy) throw new KernelError("invalid");
+      if (!options.grokBrowserPolicy) {
+        throw new KernelError("invalid");
+      }
       this.#grokBrowserPolicy = Object.freeze({ ...options.grokBrowserPolicy });
     }
   }
@@ -663,7 +741,9 @@ export class NativeOAuthEnrollmentClient
     });
     this.scope(scope);
     identifier(scope.operationId);
-    if (scope.ownerRef !== this.#owner) throw new NativeFailure("denied");
+    if (scope.ownerRef !== this.#owner) {
+      throw new NativeFailure("denied");
+    }
     return scope;
   }
   private wire(scope: OAuthScope): object {
@@ -690,24 +770,28 @@ export class NativeOAuthEnrollmentClient
         r.operation !== scope.operationId ||
         r.account_ref !== scope.accountRef ||
         !["prepared", "entered", "completed", "expired", "unknown"].includes(r.state as string)
-      )
+      ) {
         throw new NativeFailure("invalid_readback");
+      }
       if (
         (Object.hasOwn(r, "method") && r.method !== "device_code" && r.method !== "browser") ||
         (!this.#definition.deviceCode && r.method === "device_code")
-      )
+      ) {
         throw new NativeFailure("invalid_readback");
+      }
       // Native outcome is not a safe DTO or a no-effect receipt. Validate its
       // bounded primitive shape then discard; never reflect vendor diagnostics.
       if (
         Object.hasOwn(r, "outcome") &&
         (typeof r.outcome !== "string" || !/^[a-z][a-z0-9_]{0,63}$/.test(r.outcome))
-      )
+      ) {
         throw new NativeFailure("invalid_readback");
+      }
       let authorizationURL: string | undefined;
       if (Object.hasOwn(r, "authorize_url")) {
-        if (!begin || r.state !== "prepared" || r.method === "device_code")
+        if (!begin || r.state !== "prepared" || r.method === "device_code") {
           throw new NativeFailure("invalid_readback");
+        }
         const schema =
           this.#definition.family === "claude"
             ? claudeOAuthAuthorizationURL
@@ -715,14 +799,17 @@ export class NativeOAuthEnrollmentClient
               ? grokOAuthAuthorizationURL
               : codexOAuthAuthorizationURL;
         const parsed = schema.safeParse(r.authorize_url);
-        if (!parsed.success) throw new NativeFailure("invalid_readback");
+        if (!parsed.success) {
+          throw new NativeFailure("invalid_readback");
+        }
         if (this.#grokBrowserPolicy) {
           const url = new URL(parsed.data);
           if (
             url.searchParams.get("client_id") !== this.#grokBrowserPolicy.clientId ||
             url.searchParams.get("redirect_uri") !== this.#grokBrowserPolicy.redirectURI
-          )
+          ) {
             throw new NativeFailure("invalid_readback");
+          }
         }
         authorizationURL = parsed.data;
       }
@@ -734,8 +821,9 @@ export class NativeOAuthEnrollmentClient
           r.state !== "prepared" ||
           r.method !== "device_code" ||
           authorizationURL !== undefined
-        )
+        ) {
           throw new NativeFailure("invalid_readback");
+        }
         const d = object(r.device_authorization, [
           "user_code",
           "verification_url",
@@ -748,7 +836,9 @@ export class NativeOAuthEnrollmentClient
           expiresAt: d.expires_at,
           intervalSeconds: d.interval_seconds,
         });
-        if (!parsed.success) throw new NativeFailure("invalid_readback");
+        if (!parsed.success) {
+          throw new NativeFailure("invalid_readback");
+        }
         deviceAuthorization = Object.freeze(parsed.data);
       }
       return Object.freeze({
@@ -764,11 +854,9 @@ export class NativeOAuthEnrollmentClient
   }
   async begin(input: OAuthScope, method?: OAuthMethod): Promise<OAuthBeginReadback> {
     const scope = this.capture(input);
-    if (
-      (method !== undefined && method !== "device_code" && method !== "browser") ||
-      (method === "device_code" && !this.#definition.deviceCode)
-    )
+    if (oauthMethodDenied(method) || (method === "device_code" && !this.#definition.deviceCode)) {
       throw new NativeFailure("denied");
+    }
     const result = this.ack(
       await this.call("POST", oauthEndpoint(this.#definition, "begin"), {
         ...this.wire(scope),
@@ -781,12 +869,15 @@ export class NativeOAuthEnrollmentClient
       method === "device_code"
         ? result.authorizationURL !== undefined
         : result.deviceAuthorization !== undefined
-    )
+    ) {
       throw new NativeFailure("invalid_readback");
+    }
     return result;
   }
   async poll(input: OAuthScope): Promise<OAuthReadback> {
-    if (!this.#definition.deviceCode) throw new NativeFailure("denied");
+    if (!this.#definition.deviceCode) {
+      throw new NativeFailure("denied");
+    }
     const scope = this.capture(input);
     const result = this.ack(
       await this.call("POST", oauthEndpoint(this.#definition, "poll"), this.wire(scope)),
@@ -807,8 +898,9 @@ export class NativeOAuthEnrollmentClient
       if (
         this.#definition.family !== "grok" ||
         !secretSubmission.grokOAuthAuthorizationCode.safeParse(authorizationCode).success
-      )
+      ) {
         throw new NativeFailure("bounded");
+      }
       completion = { authorizationCode };
     } else {
       const state = callback.state,
@@ -822,8 +914,9 @@ export class NativeOAuthEnrollmentClient
       if (
         !secretSubmission.oauthCallbackState.safeParse(state).success ||
         !codeSchema.safeParse(code).success
-      )
+      ) {
         throw new NativeFailure("bounded");
+      }
       completion = { state, code };
     }
     const result = this.ack(
@@ -867,9 +960,12 @@ export class NativeOAuthEnrollmentClient
         r.operation !== scope.operationId ||
         r.account_ref !== scope.accountRef ||
         !["idle", "prepared", "entered", "completed", "unknown"].includes(r.state as string)
-      )
+      ) {
         throw new NativeFailure("invalid_readback");
-      if (Object.hasOwn(r, "refresh_ref")) identifier(r.refresh_ref);
+      }
+      if (Object.hasOwn(r, "refresh_ref")) {
+        identifier(r.refresh_ref);
+      }
       return Object.freeze({
         operationId: scope.operationId,
         accountRef: scope.accountRef,
@@ -893,14 +989,16 @@ export class NativeOAuthEnrollmentClient
         ["operation", "account_ref", "state", "qualification"],
         ["native"],
       );
-      if (r.operation !== scope.operationId || r.account_ref !== scope.accountRef)
+      if (r.operation !== scope.operationId || r.account_ref !== scope.accountRef) {
         throw new NativeFailure("invalid_readback");
+      }
       const logical = { operationId: scope.operationId, accountRef: scope.accountRef };
       if (r.state === "staged" && r.qualification === "pending" && !Object.hasOwn(r, "native")) {
         return Object.freeze({ ...logical, state: "staged", qualification: "pending" });
       }
-      if (r.state !== "staged" || r.qualification !== "controlled-source-v1")
+      if (r.state !== "staged" || r.qualification !== "controlled-source-v1") {
         throw new NativeFailure("invalid_readback");
+      }
       const native = oauthPhysical(r.native, scope.generation, this.#definition);
       return Object.freeze({
         ...logical,
@@ -918,7 +1016,6 @@ export class NativeOAuthEnrollmentClient
 export class NativeOAuthLifecycleClient extends NativeControlHTTP implements OAuthLifecycleNative {
   readonly #owner: string;
   readonly #definition: OAuthProfileDefinition;
-  readonly #grokBrowserPolicy?: { readonly clientId: string; readonly redirectURI: string };
   constructor(
     options: NativeManagementOptions & {
       readonly ownerRef: string;
@@ -930,7 +1027,9 @@ export class NativeOAuthLifecycleClient extends NativeControlHTTP implements OAu
     identifier(options.ownerRef);
     this.#owner = options.ownerRef;
     const definition = oauthProfileDefinition(options.profileId ?? codexOAuthProfile.profile);
-    if (!definition) throw new KernelError("invalid");
+    if (!definition) {
+      throw new KernelError("invalid");
+    }
     this.#definition = definition;
   }
   async cleanup(
@@ -951,8 +1050,9 @@ export class NativeOAuthLifecycleClient extends NativeControlHTTP implements OAu
     identifier(scope.operationId);
     uuid(cleanupRef);
     uuid(cleanupToken);
-    if (scope.ownerRef !== this.#owner || !["read", "erase"].includes(action))
+    if (scope.ownerRef !== this.#owner || !["read", "erase"].includes(action)) {
       throw new NativeFailure("denied");
+    }
     const bytes = await this.call("POST", oauthEndpoint(this.#definition, "cleanup"), {
       operation: scope.operationId,
       owner_ref: scope.ownerRef,
@@ -974,8 +1074,9 @@ export class NativeOAuthLifecycleClient extends NativeControlHTTP implements OAu
         typeof r.credentials_erased !== "boolean" ||
         !["pending", "closed", "unknown"].includes(r.closure as string) ||
         (r.closure === "closed" && !r.credentials_erased)
-      )
+      ) {
         throw new NativeFailure("invalid_readback");
+      }
       const native = Object.hasOwn(r, "native")
         ? oauthPhysical(r.native, scope.generation, this.#definition, true)
         : undefined;
@@ -1061,9 +1162,16 @@ export class NativeAccountModelsClient extends NativeControlHTTP {
   }
   async readAccountModels(input: AccountModelsRequest): Promise<AccountModels> {
     try {
-      return accountModels.parse(decode(await this.call(
-        "POST", "/private/native/v1/account-models/read", accountModelsRequest.parse(input),
-      ), 6));
+      return accountModels.parse(
+        decode(
+          await this.call(
+            "POST",
+            "/private/native/v1/account-models/read",
+            accountModelsRequest.parse(input),
+          ),
+          6,
+        ),
+      );
     } catch {
       throw new NativeFailure("invalid_readback");
     }

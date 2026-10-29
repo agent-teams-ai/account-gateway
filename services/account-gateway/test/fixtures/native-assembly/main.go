@@ -101,7 +101,7 @@ func endpoint(raw, scheme, path string) bool {
 
 func fixtureConfig(root string) (*os.File, gatewaybootstrap.Config, error) {
 	var c gatewaybootstrap.Config
-	if os.Geteuid() != 0 || runtime.Version() != "go1.27.1" || !rootName.MatchString(root) || protected(root, true) != nil ||
+	if os.Geteuid() != 0 || runtime.Version() != "go1.27.3" || !rootName.MatchString(root) || protected(root, true) != nil ||
 		protected(image, false) != nil || protected(trust, false) != nil { return nil, c, denied }
 	path := filepath.Join(root, "bootstrap.json")
 	if protected(path, false) != nil { return nil, c, denied }

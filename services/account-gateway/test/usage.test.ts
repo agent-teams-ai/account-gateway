@@ -3,12 +3,14 @@ import test from "node:test";
 import { ResponsesUsageCapture, PostgresUsageJournal } from "../src/usage.ts";
 import { usageObservation, usageQuery } from "@agent-teams/account-gateway/contracts";
 
-test("terminal SSE usage survives chunk boundaries and keeps inclusive cache/reasoning subdivisions", () => {
+void test("terminal SSE usage survives chunk boundaries and keeps inclusive cache/reasoning subdivisions", () => {
   const capture = new ResponsesUsageCapture();
   const event = Buffer.from(
     'data: {"type":"response.completed","response":{"usage":{"input_tokens":13,"output_tokens":7,"input_tokens_details":{"cached_tokens":5},"output_tokens_details":{"reasoning_tokens":3}}}}\r\n\r\n',
   );
-  for (const byte of event) capture.push(Uint8Array.of(byte));
+  for (const byte of event) {
+    capture.push(Uint8Array.of(byte));
+  }
   assert.deepEqual(capture.snapshot(), {
     inputTokens: 13,
     outputTokens: 7,
@@ -17,7 +19,7 @@ test("terminal SSE usage survives chunk boundaries and keeps inclusive cache/rea
     completeness: "partial",
   });
 });
-test("aborted stream and malformed metadata remain unknown instead of zeros", () => {
+void test("aborted stream and malformed metadata remain unknown instead of zeros", () => {
   const capture = new ResponsesUsageCapture();
   capture.push(
     Buffer.from('data: {"type":"response.output_text.delta","delta":"private response"}\n\n'),
@@ -35,7 +37,7 @@ test("aborted stream and malformed metadata remain unknown instead of zeros", ()
     completeness: "partial",
   });
 });
-test("oversized source frames stop parsing and never make telemetry complete", () => {
+void test("oversized source frames stop parsing and never make telemetry complete", () => {
   const capture = new ResponsesUsageCapture();
   capture.push(Buffer.alloc(1_048_577, 65));
   capture.push(
@@ -45,12 +47,12 @@ test("oversized source frames stop parsing and never make telemetry complete", (
   );
   assert.equal(capture.snapshot().inputTokens, null);
 });
-test("wire authority rejects arbitrary fields, invalid counters and unbounded queries", () => {
+void test("wire authority rejects arbitrary fields, invalid counters and unbounded queries", () => {
   assert.equal(usageQuery.safeParse({ limit: 101 }).success, false);
   assert.equal(usageQuery.safeParse({ consumerId: "other" }).success, false);
   assert.equal(usageObservation.safeParse({ prompt: "secret" }).success, false);
 });
-test("cursor signature and tenant binding fail before a database query", async () => {
+void test("cursor signature and tenant binding fail before a database query", async () => {
   const pool = {
     query() {
       throw new Error("must not query");
@@ -63,7 +65,7 @@ test("cursor signature and tenant binding fail before a database query", async (
   await assert.rejects(journal.list({ consumerId: "one" }, { limit: 101 }), { message: "invalid" });
 });
 
-test("native enrichment accepts known inclusive counters without inventing cost and rejects arbitrary or contradictory fields", async () => {
+void test("native enrichment accepts known inclusive counters without inventing cost and rejects arbitrary or contradictory fields", async () => {
   const { nativeUsage } = await import("../src/usage.ts");
   const observed = {
     source: "native_provider_response",
@@ -86,7 +88,88 @@ test("native enrichment accepts known inclusive counters without inventing cost 
   assert.throws(() => nativeUsage({ ...observed, inputTokens: undefined }), { message: "invalid" });
 });
 
-test("native authority snapshots the optional usage capability before caller mutation", async () => {
+const partialNativeUsage = Object.freeze({
+  source: "native_provider_response",
+  state: "partial",
+  costState: "unknown",
+  finalized: false,
+});
+
+void test("native enrichment snapshot captures changing counters once and rejects invalid-first", async () => {
+  const { nativeUsage } = await import("../src/usage.ts");
+  let reads = 0;
+  const values = [1, -1, 2, 3];
+  const result = nativeUsage({
+    ...partialNativeUsage,
+    get inputTokens() {
+      return values[Math.min(reads++, values.length - 1)];
+    },
+  });
+  // Deliberate hardening: the old multi-read baseline returned valid3, not captured1.
+  assert.equal(reads, 1);
+  assert.deepEqual(result, { ...partialNativeUsage, inputTokens: 1 });
+  assert.equal(Object.isFrozen(result), true);
+  let invalidReads = 0;
+  assert.throws(
+    () =>
+      nativeUsage({
+        ...partialNativeUsage,
+        get inputTokens() {
+          return ++invalidReads === 1 ? -1 : 1;
+        },
+      }),
+    { message: "invalid" },
+  );
+  assert.equal(invalidReads, 1);
+});
+
+void test("native enrichment snapshot redacts throwing known and unknown getters", async () => {
+  const { nativeUsage } = await import("../src/usage.ts");
+  const { KernelError } = await import("../src/domain.ts");
+  const failures: readonly unknown[] = [new Error("private-native-usage-detail"), undefined];
+  for (const key of ["inputTokens", "unknownField"]) {
+    for (const failure of failures) {
+      let reads = 0;
+      const input = { ...partialNativeUsage };
+      Object.defineProperty(input, key, {
+        enumerable: true,
+        get() {
+          reads++;
+          throw failure;
+        },
+      });
+      assert.throws(
+        () => nativeUsage(input),
+        (error: unknown) =>
+          error instanceof KernelError &&
+          error.code === "invalid" &&
+          error.message === "invalid" &&
+          !Object.hasOwn(error, "cause"),
+      );
+      assert.equal(reads, 1);
+    }
+  }
+});
+
+void test("native enrichment snapshot preserves own undefined keys and frozen copy order", async () => {
+  const { nativeUsage } = await import("../src/usage.ts");
+  const input = { inputTokens: undefined, ...partialNativeUsage };
+  const result = nativeUsage(input);
+  assert.deepEqual(result, input);
+  assert.deepEqual(Object.keys(result), [
+    "inputTokens",
+    "source",
+    "state",
+    "costState",
+    "finalized",
+  ]);
+  assert.equal(Object.hasOwn(result, "inputTokens"), true);
+  assert.equal(result.inputTokens, undefined);
+  assert.equal(Object.isFrozen(result), true);
+  assert.notEqual(result, input);
+});
+
+void test("native authority snapshots the optional usage capability before caller mutation", async () => {
   const { NativeAuthority } = await import("../src/native-authority.ts");
   const uuid = "00000000-0000-4000-8000-000000000001";
   const authority = new NativeAuthority({
@@ -185,7 +268,7 @@ test("native authority snapshots the optional usage capability before caller mut
   assert.equal(calls, 1);
 });
 
-test("fallback SSE discards contradictory cache and reasoning subdivisions before persistence", () => {
+void test("fallback SSE discards contradictory cache and reasoning subdivisions before persistence", () => {
   const capture = new ResponsesUsageCapture();
   capture.push(
     Buffer.from(

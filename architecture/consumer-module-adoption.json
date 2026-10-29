@@ -7,9 +7,9 @@
     "repository": "agent-teams-ai/get-modular",
     "path": "docs/architecture/common-assembly.md",
     "anchor": "consumer-module-standard",
-    "commit": "b70ba39304ac71964175c42a77309406a7c30ca2",
-    "sha256": "11a389b223506dc303fa986a7a37350b847013d85beb2de9d74cb8c97363e824",
-    "gitBlob": "bf6c64f5057c18cb3439c6b0e1a97b60428b0c53"
+    "commit": "8305ea6409757da8e60dca074dce163d95c85e88",
+    "sha256": "3c5814ebf1ab1bd17688e49955aa0baa2ee91dd3a369adcea4d38aaccd53ba86",
+    "gitBlob": "df4eff7235ac781ec574903c6b2aec13bcd7bfaa"
   },
   "retainedEvidence": "architecture/evidence/common-assembly.md",
   "reviewEvidence": "architecture/evidence/cms-pin-review.json",
@@ -20,6 +20,12 @@
     "Map the current facade/get-modular layout to current CMS layout and source rules without weakening the existing FMS v1 scope.",
     "Add consumer conformance, independent binding oracle and missing rejecting fixtures in fast/full gates before activating CMS adoption."
   ],
-  "enforcement": ["pnpm test:consumer-pin", "pnpm test:static", "pnpm test", "pnpm check:topology"],
+  "enforcement": [
+    "pnpm check:toolchain-config",
+    "pnpm test:consumer-pin",
+    "pnpm test:static",
+    "pnpm test",
+    "pnpm check:topology"
+  ],
   "reviewTrigger": "Before adding or replacing a composition boundary or upgrading Get Modular."
 }

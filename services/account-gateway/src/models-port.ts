@@ -6,9 +6,14 @@ import { providerConnectionDefinition } from "./provider-connections.ts";
 
 export function configuredAccountModelSource(profileId: string) {
   const profile = providerConnectionDefinition(profileId);
-  return profile && c.accountModelDiscoverySource({
-    profileId, protocol: profile.protocol, authKind: profile.oauth ? "oauth" : "api_key",
-  });
+  return (
+    profile &&
+    c.accountModelDiscoverySource({
+      profileId,
+      protocol: profile.protocol,
+      authKind: profile.oauth ? "oauth" : "api_key",
+    })
+  );
 }
 
 export interface AccountModelsSource {
@@ -24,17 +29,27 @@ export async function readAccountModels(
   let result: c.AccountModels = { status: "unknown" };
   try {
     const parsed = c.accountModels.safeParse(await source?.readAccountModels(input));
-    if (parsed.success) result = parsed.data;
+    if (parsed.success) {
+      result = parsed.data;
+    }
   } catch {
     // A failed observation cannot add model membership. Still enforce the final fence.
   }
   const after = await currentIdentity();
-  if (!sameCandidate(before, after)) throw new KernelError("denied");
+  if (!sameCandidate(before, after)) {
+    throw new KernelError("denied");
+  }
   if (result.status === "snapshot") {
-    if (result.source !== configuredAccountModelSource(input.profileId) || result.physicalGeneration !== after.generation) throw new KernelError("denied");
+    if (
+      result.source !== configuredAccountModelSource(input.profileId) ||
+      result.physicalGeneration !== after.generation
+    ) {
+      throw new KernelError("denied");
+    }
     const now = Date.now();
-    if (Date.parse(result.fetchedAt) > now || Date.parse(result.expiresAt) <= now)
+    if (Date.parse(result.fetchedAt) > now || Date.parse(result.expiresAt) <= now) {
       return { status: "unknown" };
+    }
   }
   return result;
 }
@@ -42,6 +57,14 @@ export async function readAccountModels(
 /** Empty/unknown observations admit nothing; only explicit unavailability retains the frozen anchor. */
 export function accountModelAdmission(result: c.AccountModels, anchor: string) {
   return result.status === "snapshot"
-    ? { modelIds: result.models.map((model) => model.modelId), models: result.models, enforceCapabilities: true }
-    : { modelIds: result.status === "unavailable" ? [anchor] : [], models: undefined, enforceCapabilities: false };
+    ? {
+        modelIds: result.models.map((model) => model.modelId),
+        models: result.models,
+        enforceCapabilities: true,
+      }
+    : {
+        modelIds: result.status === "unavailable" ? [anchor] : [],
+        models: undefined,
+        enforceCapabilities: false,
+      };
 }

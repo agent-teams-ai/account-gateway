@@ -130,15 +130,21 @@ export async function constructManagementClient(
     declarations: [managementHost, managementDeclaration],
     profile: managementProfile,
   });
-  if (!composition.ok) throw new GatewayError("invalid_input", "not_dispatched");
+  if (!composition.ok) {
+    throw new GatewayError("invalid_input", "not_dispatched");
+  }
   const prepared = await assembly.prepare({
     composition,
     factories: [host, client],
     roots: { client },
   });
-  if (prepared.status !== "prepared") throw new GatewayError("invalid_input", "not_dispatched");
+  if (prepared.status !== "prepared") {
+    throw new GatewayError("invalid_input", "not_dispatched");
+  }
   const result = await prepared.prepared.run();
-  if (result.status !== "succeeded") throw new GatewayError("invalid_input", "not_dispatched");
+  if (result.status !== "succeeded") {
+    throw new GatewayError("invalid_input", "not_dispatched");
+  }
   return result.roots.client;
 }
 export async function constructExecutionClient(
@@ -154,14 +160,20 @@ export async function constructExecutionClient(
     declarations: [executionHost, executionDeclaration],
     profile: executionProfile,
   });
-  if (!composition.ok) throw new GatewayError("invalid_input", "not_dispatched");
+  if (!composition.ok) {
+    throw new GatewayError("invalid_input", "not_dispatched");
+  }
   const prepared = await assembly.prepare({
     composition,
     factories: [host, client],
     roots: { client },
   });
-  if (prepared.status !== "prepared") throw new GatewayError("invalid_input", "not_dispatched");
+  if (prepared.status !== "prepared") {
+    throw new GatewayError("invalid_input", "not_dispatched");
+  }
   const result = await prepared.prepared.run();
-  if (result.status !== "succeeded") throw new GatewayError("invalid_input", "not_dispatched");
+  if (result.status !== "succeeded") {
+    throw new GatewayError("invalid_input", "not_dispatched");
+  }
   return result.roots.client;
 }

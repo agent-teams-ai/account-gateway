@@ -5,8 +5,11 @@ if (args.length !== 2 || args[0] !== "--config-file") {
   process.exitCode = 2;
 } else {
   const abort = new AbortController();
-  const stop = () => abort.abort();
+  const stop = () => {
+    abort.abort();
+  };
   let outputLost = false;
+  const outputIsLost = (): boolean => outputLost;
   const outputError = () => {
     outputLost = true;
     process.exitCode = 1;
@@ -22,19 +25,25 @@ if (args.length !== 2 || args[0] !== "--config-file") {
     // Import failures also cross the safe diagnostic boundary.
     const { startService } = await import("./service.ts");
     const service = await startService(args[1], abort.signal);
-    if (!outputLost) process.stdout.write("ready\n");
+    if (!outputIsLost()) {
+      process.stdout.write("ready\n");
+    }
     const result = await service.stopped;
-    if (!outputLost) process.stdout.write(result + "\n");
-    process.exitCode = result === "retired" && !outputLost ? 0 : 1;
+    if (!outputIsLost()) {
+      process.stdout.write(result + "\n");
+    }
+    process.exitCode = result === "retired" && !outputIsLost() ? 0 : 1;
   } catch (error) {
-    const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
-    if (!outputLost)
+    const code =
+      error !== null && typeof error === "object" && "code" in error ? error.code : undefined;
+    if (!outputIsLost()) {
       process.stderr.write(
         (typeof code === "string" &&
         ["config_denied", "startup_denied", "runtime_denied", "shutdown_pending"].includes(code)
           ? code
           : "startup_denied") + "\n",
       );
+    }
     process.exitCode = 1;
   } finally {
     process.removeListener("SIGINT", stop);
@@ -42,5 +51,7 @@ if (args.length !== 2 || args[0] !== "--config-file") {
   }
   // A pending protected parent is never force-killed. Exit the foreground Node
   // entry after its bounded handoff; Go retains its exact launcher evidence.
-  if (process.exitCode) process.exit(process.exitCode);
+  if (process.exitCode) {
+    process.exit(process.exitCode);
+  }
 }
