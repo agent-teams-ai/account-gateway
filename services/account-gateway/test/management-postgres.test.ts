@@ -1,11 +1,11 @@
-import test, { before, after } from "node:test";
+import test, { before as beforeTests, after as afterTests } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { readFile, readdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import pg from "pg";
+import { Pool } from "pg";
 import { PostgresKernel } from "../src/postgres.ts";
 import { KernelError, defaults } from "../src/domain.ts";
 import type {
@@ -27,8 +27,18 @@ import type {
 import { IntentSecrets, PostgresManagementStore } from "../src/management-store.ts";
 import { NativeManagementClient } from "../src/native-client.ts";
 
-let pool: pg.Pool,
-  lockPool: pg.Pool,
+function redactPostgresSetupFailure(error: unknown): Error {
+  if (error instanceof assert.AssertionError) {
+    return error;
+  }
+  return new Error("NOT_RUN: disposable PostgreSQL setup unavailable; vendor details withheld");
+}
+
+const constraint = (error: unknown): boolean =>
+  error !== null && typeof error === "object" && "code" in error && error.code === "23514";
+
+let pool: Pool,
+  lockPool: Pool,
   kernel: PostgresKernel,
   custody: IntentSecrets,
   store: PostgresManagementStore;
@@ -42,12 +52,15 @@ function disposable(): { dsn: string; database: string } {
   const dsn = process.env.AG_MANAGEMENT_TEST_DSN ?? process.env.AG_KERNEL_TEST_DSN,
     database = process.env.AG_MANAGEMENT_DISPOSABLE_DB ?? process.env.AG_KERNEL_DISPOSABLE_DB;
   if (
-    !dsn ||
-    !database ||
+    dsn === undefined ||
+    dsn === "" ||
+    database === undefined ||
+    database === "" ||
     !/^ag_kernel_test_[a-z0-9_]+$/.test(database) ||
     process.env.AG_KERNEL_TEST_ALLOW !== "disposable_pg17_10"
-  )
+  ) {
     throw new Error("NOT_RUN: explicit new disposable PG17.10 fixture required");
+  }
   let url: URL;
   try {
     url = new URL(dsn);
@@ -58,21 +71,22 @@ function disposable(): { dsn: string; database: string } {
     !["postgres:", "postgresql:"].includes(url.protocol) ||
     !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) ||
     url.pathname !== "/" + database ||
-    url.search ||
-    url.hash
-  )
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
     throw new Error("NOT_RUN: refusing remote or unspecified DB");
+  }
   return { dsn, database };
 }
-before(async () => {
+beforeTests(async () => {
   const selected = disposable();
-  pool = new pg.Pool({ connectionString: selected.dsn, max: 4, connectionTimeoutMillis: 5000 });
-  lockPool = new pg.Pool({ connectionString: selected.dsn, max: 1, connectionTimeoutMillis: 5000 });
-  pool.on("error", () => undefined);
-  lockPool.on("error", () => undefined);
+  pool = new Pool({ connectionString: selected.dsn, max: 4, connectionTimeoutMillis: 5000 });
+  lockPool = new Pool({ connectionString: selected.dsn, max: 1, connectionTimeoutMillis: 5000 });
+  pool.on("error", () => {});
+  lockPool.on("error", () => {});
   try {
     const version = (
-      await pool.query(
+      await pool.query<{ db: string; version: string }>(
         "SELECT current_database() AS db,current_setting('server_version') AS version",
       )
     ).rows[0];
@@ -83,18 +97,19 @@ before(async () => {
     );
     assert.equal(present.rowCount, 0, "requires empty disposable DB; never overwrite a schema");
     const directory = new URL("../migrations/", import.meta.url);
-    for (const file of (await readdir(directory)).filter((f) => /^\d{3}_.*\.sql$/.test(f)).sort()) {
+    for (const file of (await readdir(directory))
+      .filter((f) => /^\d{3}_.*\.sql$/.test(f))
+      .toSorted()) {
       await pool.query(await readFile(new URL(file, directory), "utf8"));
     }
     kernel = new PostgresKernel(pool);
     custody = new IntentSecrets(randomBytes(32), randomBytes(32));
     store = new PostgresManagementStore(pool, custody);
   } catch (e) {
-    if (e instanceof assert.AssertionError) throw e;
-    throw new Error("NOT_RUN: disposable PostgreSQL setup unavailable; vendor details withheld");
+    throw redactPostgresSetupFailure(e);
   }
 });
-after(async () => {
+afterTests(async () => {
   await Promise.all([pool, lockPool].filter(Boolean).map((p) => p.end()));
 });
 const ctx = (): TrustedContext => ({ consumerId: "synthetic-" + randomUUID() });
@@ -148,7 +163,7 @@ async function fixture(
     reads: string[] = [],
     rows = new Map<string, NativeReadback>();
   const server = createServer((req, res) => {
-    if (req.url?.startsWith("/provider")) {
+    if (req.url?.startsWith("/provider") === true) {
       providerCalls++;
       res.end("{}");
       return;
@@ -227,8 +242,11 @@ async function fixture(
         }
         const updated = { ...row, state: change.state };
         rows.set(generation, updated);
-        if (mode === "activation_lost_ack" && change.state === "active") req.socket.destroy();
-        else res.end(JSON.stringify(nativeBody(updated)));
+        if (mode === "activation_lost_ack" && change.state === "active") {
+          req.socket.destroy();
+        } else {
+          res.end(JSON.stringify(nativeBody(updated)));
+        }
       });
       return;
     }
@@ -255,7 +273,7 @@ async function fixture(
     server.listen(0, "127.0.0.1", resolve);
   });
   const addr = server.address();
-  assert.ok(addr && typeof addr === "object");
+  assert.ok(addr !== null && typeof addr === "object");
   const native = new NativeManagementClient({
     origin: "http://127.0.0.1:" + addr.port,
     consumerId: context.consumerId,
@@ -288,7 +306,11 @@ async function fixture(
     providerCalls: () => providerCalls,
     async close() {
       server.closeAllConnections();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await new Promise<void>((resolve) => {
+        server.close(() => {
+          resolve();
+        });
+      });
     },
   };
 }
@@ -307,7 +329,7 @@ async function staged(
   };
   intent.intentDigest = custody.digest({ context, intent, apiKey: command.apiKey });
   const operation = await kernel.beginAccount(context, intent);
-  assert.ok(operation.accountRef);
+  assert.ok(typeof operation.accountRef === "string" && operation.accountRef !== "");
   const scope: CandidateScope = {
     consumerId: context.consumerId,
     operationId: command.operationId,
@@ -330,7 +352,7 @@ async function owned(
 }
 
 // Regression: lost native ACK could authorize a second create or promote an unpersisted/lossy physical mapping.
-test("B3a actual HTTP lost ACK persists precise mapping before promotion and restart repeats no POST", async () => {
+void test("B3a actual HTTP lost ACK persists precise mapping before promotion and restart repeats no POST", async () => {
   const context = ctx(),
     command = input(),
     f = await fixture(context);
@@ -364,7 +386,7 @@ test("B3a actual HTTP lost ACK persists precise mapping before promotion and res
     assert.deepEqual(await restarted.create(context, command), result);
     assert.equal(f.creates(), 1);
     assert.equal(await freshStore.credential(journal), undefined);
-    assert.deepEqual(Object.keys(await restarted.account(context, result.accountRef!)).sort(), [
+    assert.deepEqual(Object.keys(await restarted.account(context, result.accountRef!)).toSorted(), [
       "accountRef",
       "displayName",
       "epoch",
@@ -380,9 +402,10 @@ test("B3a actual HTTP lost ACK persists precise mapping before promotion and res
       false,
     );
     const requestRows = (
-      await pool.query("SELECT count(*)::integer AS n FROM ag_kernel.requests WHERE consumer=$1", [
-        context.consumerId,
-      ])
+      await pool.query<{ n: number }>(
+        "SELECT count(*)::integer AS n FROM ag_kernel.requests WHERE consumer=$1",
+        [context.consumerId],
+      )
     ).rows[0].n;
     assert.equal(requestRows, 0, "management never preclaims an inference request");
   } finally {
@@ -391,7 +414,7 @@ test("B3a actual HTTP lost ACK persists precise mapping before promotion and res
 });
 
 // Regression: a crash after sole POST but before readback must recover only its journaled generation, erase intent and avoid recreating.
-test("B3a restart after native write uses persisted generation GET and spent permit", async () => {
+void test("B3a restart after native write uses persisted generation GET and spent permit", async () => {
   const context = ctx(),
     command = input(),
     f = await fixture(context);
@@ -425,7 +448,7 @@ test("B3a restart after native write uses persisted generation GET and spent per
 });
 
 // Regression: changed key/name/owner/profile intent reuse must conflict, while original ID+intent survives restart and encrypted staging.
-test("B3a same and changed intent are governed by kernel HMAC without plaintext JSONB", async () => {
+void test("B3a same and changed intent are governed by kernel HMAC without plaintext JSONB", async () => {
   const context = ctx(),
     command = input(),
     f = await fixture(context);
@@ -437,12 +460,13 @@ test("B3a same and changed intent are governed by kernel HMAC without plaintext 
       { ...command, displayName: "Changed" },
       { ...command, ownerRef: "other-owner" },
       { ...command, profile: "second-fixture-profile" },
-    ])
+    ]) {
       await assert.rejects(f.manager.create(context, changed), isCode("conflict"));
+    }
     const pendingCommand = input(),
       pending = await staged(context, pendingCommand);
     const row = (
-      await pool.query(
+      await pool.query<{ ciphertext: Buffer | null }>(
         "SELECT * FROM ag_management.transient_intents WHERE consumer=$1 AND operation_id=$2",
         [context.consumerId, pendingCommand.operationId],
       )
@@ -451,9 +475,10 @@ test("B3a same and changed intent are governed by kernel HMAC without plaintext 
     assert.equal(row.ciphertext.includes(Buffer.from(pendingCommand.apiKey)), false);
     assert.equal((await store.credential(pending.scope)) === pendingCommand.apiKey, true);
     const intents = (
-      await pool.query("SELECT intent FROM ag_kernel.operations WHERE consumer=$1", [
-        context.consumerId,
-      ])
+      await pool.query<{ intent: unknown }>(
+        "SELECT intent FROM ag_kernel.operations WHERE consumer=$1",
+        [context.consumerId],
+      )
     ).rows;
     assert.equal(JSON.stringify(intents).includes(command.apiKey), false);
     assert.equal(JSON.stringify(intents).includes(pendingCommand.apiKey), false);
@@ -464,7 +489,7 @@ test("B3a same and changed intent are governed by kernel HMAC without plaintext 
 });
 
 // Regression: TTL expiry and erase must remove all envelope bytes and must not resurrect credentials or issue a late create.
-test("B3a expired encrypted intents erase, remain nonrenewable and bounded at admission saturation", async () => {
+void test("B3a expired encrypted intents erase, remain nonrenewable and bounded at admission saturation", async () => {
   const context = ctx(),
     command = input();
   const short = new PostgresManagementStore(pool, custody, { ttlMs: 20, maxIntents: 1, batch: 1 });
@@ -473,7 +498,7 @@ test("B3a expired encrypted intents erase, remain nonrenewable and bounded at ad
   assert.equal(await short.credential(first.scope), undefined);
   await short.expire(context);
   const row = (
-    await pool.query(
+    await pool.query<{ nonce: Buffer | null; ciphertext: Buffer | null; tag: Buffer | null }>(
       "SELECT nonce,ciphertext,tag FROM ag_management.transient_intents WHERE consumer=$1 AND operation_id=$2",
       [context.consumerId, command.operationId],
     )
@@ -490,7 +515,7 @@ test("B3a expired encrypted intents erase, remain nonrenewable and bounded at ad
     displayName: next.displayName,
   };
   const second = await kernel.beginAccount(context, intent);
-  assert.ok(second.accountRef);
+  assert.ok(typeof second.accountRef === "string" && second.accountRef !== "");
   await assert.rejects(
     short.stage(
       { ...first.scope, operationId: next.operationId, accountRef: second.accountRef },
@@ -503,7 +528,7 @@ test("B3a expired encrypted intents erase, remain nonrenewable and bounded at ad
 });
 
 // Regression: duplicate physical row, altered creation precision, stale model or cross-consumer lookup must never replace immutable mapping.
-test("B3a mapping uniqueness, immutable precision/profile and consumer isolation fail closed", async () => {
+void test("B3a mapping uniqueness, immutable precision/profile and consumer isolation fail closed", async () => {
   const context = ctx(),
     f = await fixture(context);
   try {
@@ -544,7 +569,7 @@ test("B3a mapping uniqueness, immutable precision/profile and consumer isolation
     await kernel.issuer(other);
     assert.equal(await store.mapping(other, j.generation), undefined);
     assert.equal(await store.readJournal(other, one.operationId), undefined);
-    const attempt = await pool.query(
+    const attempt = await pool.query<{ native_created_at: string }>(
       `UPDATE ag_management.physical_mappings SET native_created_at=native_created_at
       WHERE consumer=$1 AND generation=$2 RETURNING native_created_at`,
       [context.consumerId, j.generation],
@@ -555,50 +580,76 @@ test("B3a mapping uniqueness, immutable precision/profile and consumer isolation
         "UPDATE ag_management.physical_mappings SET native_id=1 WHERE consumer=$1 AND generation=$2",
         [context.consumerId, j.generation],
       ),
-      (e: unknown) => !!e && typeof e === "object" && "code" in e && e.code === "23514",
+      (e: unknown) => e !== null && typeof e === "object" && "code" in e && e.code === "23514",
     );
   } finally {
     await f.close();
   }
 });
 
-test('mapping snapshots progress under a held consumer write lock and hide uncommitted mappings', async () => {
-  const context = ctx(), command = input(), f = await fixture(context);
+test("mapping snapshots progress under a held consumer write lock and hide uncommitted mappings", async () => {
+  const context = ctx(),
+    command = input(),
+    f = await fixture(context);
   const gate = await lockPool.connect();
   let pending: Promise<(CandidateMapping | undefined)[]> | undefined;
   let observed: (CandidateMapping | undefined)[] | undefined;
   let committed: CandidateMapping | undefined, fresh: CandidateJournal | undefined;
   try {
     await f.manager.create(context, command);
-    const journal = await store.readJournal(context, command.operationId); assert.ok(journal);
-    committed = await store.mapping(context, journal.generation); assert.ok(committed);
+    const journal = await store.readJournal(context, command.operationId);
+    assert.ok(journal);
+    committed = await store.mapping(context, journal.generation);
+    assert.ok(committed);
     fresh = await owned(context, input(), f.worker);
-    await gate.query('BEGIN');
-    await gate.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE', [context.consumerId]);
-    await gate.query(`INSERT INTO ag_management.physical_mappings
+    await gate.query("BEGIN");
+    await gate.query("SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE", [
+      context.consumerId,
+    ]);
+    await gate.query(
+      `INSERT INTO ag_management.physical_mappings
       (consumer,generation,native_physical_identity,native_id,native_created_at) VALUES ($1,$2,$2,$3,$4)`,
-    [context.consumerId, fresh.generation, nextNativeID++, '2026-10-03T04:05:06.123456789+00:00']);
-    pending = Promise.all([store.mapping(context, journal.generation), store.mapping(context, fresh.generation),
-      store.mapping(context, randomUUID())]);
+      [context.consumerId, fresh.generation, nextNativeID++, "2026-10-03T04:05:06.123456789+00:00"],
+    );
+    pending = Promise.all([
+      store.mapping(context, journal.generation),
+      store.mapping(context, fresh.generation),
+      store.mapping(context, randomUUID()),
+    ]);
     observed = await Promise.race([pending, delay(2000).then(() => undefined)]);
-    await gate.query('COMMIT');
+    await gate.query("COMMIT");
   } finally {
-    await gate.query('ROLLBACK'); gate.release();
-    await pending?.catch(() => undefined); await f.close();
+    await gate.query("ROLLBACK");
+    gate.release();
+    await pending?.catch(() => undefined);
+    await f.close();
   }
-  assert.ok(observed, 'read-only mapping snapshots must finish before the consumer writer releases its lock');
-  assert.deepEqual(observed, [committed, undefined, undefined], 'only committed immutable mappings are visible');
+  assert.ok(
+    observed,
+    "read-only mapping snapshots must finish before the consumer writer releases its lock",
+  );
+  assert.deepEqual(
+    observed,
+    [committed, undefined, undefined],
+    "only committed immutable mappings are visible",
+  );
   assert.ok(fresh);
-  assert.equal((await store.mapping(context, fresh.generation))?.generation, fresh.generation, 'a later snapshot observes the commit');
+  assert.equal(
+    (await store.mapping(context, fresh.generation))?.generation,
+    fresh.generation,
+    "a later snapshot observes the commit",
+  );
   const unknown = ctx();
-  await assert.rejects(store.mapping(unknown, fresh.generation), isCode('unknown'));
-  assert.equal((await pool.query('SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1', [unknown.consumerId])).rowCount, 0);
+  await assert.rejects(store.mapping(unknown, fresh.generation), isCode("unknown"));
+  assert.equal(
+    (await pool.query("SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1", [unknown.consumerId]))
+      .rowCount,
+    0,
+  );
 });
 
 // Regression: independently valid FKs can attach custody/journal rows to unrelated parents.
-test("B3a direct SQL inserts bind create/reconnect operation, account, owner, permit worker and profile", async () => {
-  const constraint = (e: unknown): boolean =>
-    !!e && typeof e === "object" && "code" in e && e.code === "23514";
+void test("B3a direct SQL inserts bind create/reconnect operation, account, owner, permit worker and profile", async () => {
   for (const purpose of ["create", "reconnect"] as const) {
     const context = ctx(),
       f = await fixture(context);
@@ -686,8 +737,9 @@ test("B3a direct SQL inserts bind create/reconnect operation, account, owner, pe
         ["rename operation", { ...scope, operationId: renamed.operationRef }],
         ["owner", { ...scope, ownerRef: "wrong-fixture-owner" }],
         ["purpose", { ...scope, purpose: purpose === "create" ? "reconnect" : "create" }],
-      ] satisfies [string, CandidateScope][])
+      ] satisfies [string, CandidateScope][]) {
         await assert.rejects(transient(row), constraint, name);
+      }
       await transient(scope);
       assert.equal(await store.credential(scope), "fixture-parent-scope");
       const worker = randomUUID();
@@ -733,8 +785,9 @@ test("B3a direct SQL inserts bind create/reconnect operation, account, owner, pe
         ["purpose", { ...journal, purpose: purpose === "create" ? "reconnect" : "create" }],
         ["worker", { ...journal, worker }],
         ["profile", { ...journal, profile: { ...profile, profile: "second-fixture-profile" } }],
-      ] satisfies [string, CandidateJournal][])
+      ] satisfies [string, CandidateJournal][]) {
         await assert.rejects(insertJournal(row), constraint, name);
+      }
       assert.equal(await store.readJournal(context, operationId), undefined);
       await insertJournal(journal);
       assert.deepEqual(await store.readJournal(context, operationId), journal);
@@ -778,7 +831,7 @@ test("B3a direct SQL inserts bind create/reconnect operation, account, owner, pe
 });
 
 // Regression: zero/ambiguous/wrong/error/redirect readback must quarantine without a provider call, raw body or second create.
-test("B3a wrong native readback, status and redirect quarantine and do not invoke provider", async () => {
+void test("B3a wrong native readback, status and redirect quarantine and do not invoke provider", async () => {
   for (const mode of ["wrong", "multiple", "zero", "error", "redirect"] as const) {
     const context = ctx(),
       command = input(),
@@ -804,7 +857,7 @@ test("B3a wrong native readback, status and redirect quarantine and do not invok
 });
 
 // Regression: rounded fractional readback could activate and persist a different native identity.
-test("B3a raw fractional HTTP identities quarantine without mapping, activation or replay", async () => {
+void test("B3a raw fractional HTTP identities quarantine without mapping, activation or replay", async () => {
   for (const mode of ["fraction_above", "fraction_below"] as const) {
     const context = ctx(),
       command = input(),
@@ -829,7 +882,7 @@ test("B3a raw fractional HTTP identities quarantine without mapping, activation 
 });
 
 // Regression: mutation during an awaited real PG lock could switch consumer, owner, intent or submitted credentials before native create.
-test("B3a accepted primitives snapshot before awaited consumer transaction", async () => {
+void test("B3a accepted primitives snapshot before awaited consumer transaction", async () => {
   const context = ctx(),
     originalConsumer = context.consumerId,
     command = input(),
@@ -845,7 +898,7 @@ test("B3a accepted primitives snapshot before awaited consumer transaction", asy
     let blocked = false;
     for (let i = 0; i < 100; i++) {
       const waiters = (
-        await blocker.query(`SELECT count(*)::integer AS n FROM pg_stat_activity
+        await blocker.query<{ n: number }>(`SELECT count(*)::integer AS n FROM pg_stat_activity
         WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock'`)
       ).rows[0].n;
       if (waiters > 0) {
@@ -885,7 +938,7 @@ test("B3a accepted primitives snapshot before awaited consumer transaction", asy
 });
 
 // Regression: rename could reconnect credentials or advance auth epoch; reconnect/disable could skip kernel epoch/fence semantics.
-test("B3a rename is metadata only; reconnect stages replacement and disable erases only mapped generation", async () => {
+void test("B3a rename is metadata only; reconnect stages replacement and disable erases only mapped generation", async () => {
   const context = ctx(),
     command = input(),
     f = await fixture(context);
@@ -931,7 +984,7 @@ test("B3a rename is metadata only; reconnect stages replacement and disable eras
 });
 
 // Regression: owner loss/restart could promote an expired candidate or guessed cleanup identity; exact readback should only enable fenced cleanup.
-test("B3a expired owner recovery records exact physical identity but cannot promote or recreate", async () => {
+void test("B3a expired owner recovery records exact physical identity but cannot promote or recreate", async () => {
   const context = ctx(),
     command = input(),
     f = await fixture(context);
@@ -970,7 +1023,7 @@ test("B3a expired owner recovery records exact physical identity but cannot prom
 });
 
 // Regression: encrypted DB rows alone cannot establish backup safety if pg_dump serializes plaintext or kernel JSONB retains the submitted key.
-test("B3a actual private schema dump contains encrypted envelope and no submitted plaintext", async () => {
+void test("B3a actual private schema dump contains encrypted envelope and no submitted plaintext", async () => {
   const context = ctx(),
     command = input();
   await staged(context, command);
@@ -993,11 +1046,18 @@ test("B3a actual private schema dump contains encrypted envelope and no submitte
     let size = 0;
     child.stdout.on("data", (chunk: Buffer) => {
       size += chunk.length;
-      if (size > 16_777_216) child.kill();
-      else chunks.push(chunk);
+      if (size > 16_777_216) {
+        child.kill();
+      } else {
+        chunks.push(chunk);
+      }
     });
-    child.once("error", () => reject(new Error("NOT_RUN: pg_dump unavailable")));
-    child.once("close", (status) => resolve({ status, bytes: Buffer.concat(chunks) }));
+    child.once("error", () => {
+      reject(new Error("NOT_RUN: pg_dump unavailable"));
+    });
+    child.once("close", (status) => {
+      resolve({ status, bytes: Buffer.concat(chunks) });
+    });
   });
   assert.equal(result.status, 0, "actual dump must finish");
   assert.equal(result.bytes.includes(Buffer.from(command.apiKey)), false);
@@ -1006,7 +1066,7 @@ test("B3a actual private schema dump contains encrypted envelope and no submitte
 });
 
 // Regression: a stale native ID, creation text or model readback must never authorize erasure even when the kernel UUID matches.
-test("B3a cleanup compares the complete mapped descriptor and refuses stale native row", async () => {
+void test("B3a cleanup compares the complete mapped descriptor and refuses stale native row", async () => {
   for (const variant of ["id", "createdAt", "model"] as const) {
     const context = ctx(),
       command = input(),
@@ -1043,7 +1103,7 @@ test("B3a cleanup compares the complete mapped descriptor and refuses stale nati
 
 // Regression: provider occupancy must block both adapter erase and trusted
 // settlement until the exact native closure ACK; all reconnect ages then retire.
-test("B3a held native transport defers complete generation retirement until exact closure", async () => {
+void test("B3a held native transport defers complete generation retirement until exact closure", async () => {
   const context = ctx(),
     command = input(),
     f = await fixture(context);
@@ -1066,7 +1126,7 @@ test("B3a held native transport defers complete generation retirement until exac
       deadline,
       limits: { requests: 2, concurrency: 1, requestBytes: 4096, outputBytes: 4096, tokens: 32 },
     });
-    assert.ok(prepared.executionRef);
+    assert.ok(typeof prepared.executionRef === "string" && prepared.executionRef !== "");
     const claim = await kernel.claim(
       context,
       prepared.executionRef,
@@ -1117,7 +1177,7 @@ test("B3a held native transport defers complete generation retirement until exac
     const other = input();
     other.ownerRef = "other-workspace-fixture";
     const otherOperation = await f.manager.create(context, other);
-    assert.ok(otherOperation.accountRef);
+    assert.ok(typeof otherOperation.accountRef === "string" && otherOperation.accountRef !== "");
     await assert.rejects(
       f.manager.retirement(context, account.accountRef, otherOperation.operationRef),
       isCode("conflict"),
@@ -1149,15 +1209,20 @@ test("B3a held native transport defers complete generation retirement until exac
     const jobs: CleanupClaim[] = [];
     for (let i = 0; i < 4; i++) {
       const job = await kernel.claimCleanup(context, f.worker);
-      if (!job) break;
-      if (job.scope.kind === "generation") jobs.push(job);
-      else assert.equal(await f.manager.cleanupClaim(context, job), "transport_pending");
+      if (!job) {
+        break;
+      }
+      if (job.scope.kind === "generation") {
+        jobs.push(job);
+      } else {
+        assert.equal(await f.manager.cleanupClaim(context, job), "transport_pending");
+      }
     }
     assert.equal(jobs.length, 2, "both retained reconnect generations have cleanup work");
     const heldGeneration = jobs.find(
       (j) =>
         j.scope.kind === "generation" &&
-        j.scope.generation === claim.dispatch!.closure.native.generation,
+        j.scope.generation === claim.dispatch.closure.native.generation,
     );
     const otherGeneration = jobs.find((j) => j !== heldGeneration);
     assert.ok(heldGeneration && otherGeneration);
@@ -1175,7 +1240,7 @@ test("B3a held native transport defers complete generation retirement until exac
     assert.equal(f.erases(), 0);
     assert.deepEqual(
       (
-        await pool.query(
+        await pool.query<{ transport_occupied: boolean; effect: string }>(
           `SELECT transport_occupied,effect FROM ag_kernel.requests
       WHERE consumer=$1 AND execution_ref=$2 AND id='held-request'`,
           [context.consumerId, prepared.executionRef],
@@ -1184,7 +1249,7 @@ test("B3a held native transport defers complete generation retirement until exac
       { transport_occupied: true, effect: "completed" },
     );
 
-    await kernel.acknowledgeTransportClosed(context, f.worker, claim.dispatch!.closure);
+    await kernel.acknowledgeTransportClosed(context, f.worker, claim.dispatch.closure);
     const fresh = await kernel.claimCleanup(context, f.worker);
     assert.ok(fresh && fresh.scope.kind === "generation");
     assert.equal(await f.manager.cleanupClaim(context, fresh), "erased");
@@ -1210,7 +1275,7 @@ test("B3a held native transport defers complete generation retirement until exac
     );
     assert.equal(
       (
-        await pool.query(
+        await pool.query<{ n: number }>(
           "SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
           [context.consumerId, prepared.executionRef],
         )
@@ -1235,18 +1300,18 @@ test("B3a held native transport defers complete generation retirement until exac
 });
 
 // Regression: a copied cleanup token after its DB lease expires must not authorize a native credential erase.
-test("policy-use closure fences borrower X while owner O and borrower Y remain live", async () => {
+void test("policy-use closure fences borrower X while owner O and borrower Y remain live", async () => {
   const context = ctx(),
     command = input(),
     f = await fixture(context);
-  const kernel = new PostgresKernel(pool, { ...defaults, maxConcurrent: 2 });
+  const policyKernel = new PostgresKernel(pool, { ...defaults, maxConcurrent: 2 });
   try {
     const created = await f.manager.create(context, command),
       account = await f.manager.account(context, created.accountRef!);
-    const issuer = await kernel.issuer(context),
+    const issuer = await policyKernel.issuer(context),
       limits = { requests: 2, concurrency: 2, requestBytes: 4096, outputBytes: 4096, tokens: 32 };
     const held = async (subject: string) => {
-      const op = await kernel.prepare(context, {
+      const op = await policyKernel.prepare(context, {
         operationId: randomUUID(),
         intentDigest: "controlled-" + subject,
         invocationRef: randomUUID(),
@@ -1260,10 +1325,10 @@ test("policy-use closure fences borrower X while owner O and borrower Y remain l
         deadline: new Date(Date.now() + 60000),
         limits,
       });
-      assert.ok(op.executionRef);
-      const saved = await kernel.savedExecution(context, op.executionRef),
+      assert.ok(typeof op.executionRef === "string" && op.executionRef !== "");
+      const saved = await policyKernel.savedExecution(context, op.executionRef),
         requestId = randomUUID();
-      const claim = await kernel.claim(
+      const claim = await policyKernel.claim(
         context,
         op.executionRef,
         requestId,
@@ -1276,14 +1341,14 @@ test("policy-use closure fences borrower X while owner O and borrower Y remain l
         },
       );
       assert.ok(claim.dispatch);
-      await kernel.effect(context, op.executionRef, requestId, f.worker, "response_started");
+      await policyKernel.effect(context, op.executionRef, requestId, f.worker, "response_started");
       return { ref: op.executionRef, requestId, proof: claim.dispatch.closure };
     };
     const x = await held("borrower-X"),
       y = await held("borrower-Y");
-    await kernel.effect(context, x.ref, x.requestId, f.worker, "effect_unknown");
+    await policyKernel.effect(context, x.ref, x.requestId, f.worker, "effect_unknown");
     const operationId = randomUUID();
-    await kernel.fence(context, operationId, "borrower-X", 1);
+    await policyKernel.fence(context, operationId, "borrower-X", 1);
     const pending = await f.manager.policyClosure(context, operationId);
     assert.equal(pending.state, "pending");
     assert.equal(pending.closed, false);
@@ -1304,11 +1369,11 @@ test("policy-use closure fences borrower X while owner O and borrower Y remain l
     );
     await assert.rejects(f.manager.policyClosure(context, randomUUID()), isCode("unknown"));
     const foreign = ctx();
-    await kernel.issuer(foreign);
+    await policyKernel.issuer(foreign);
     await assert.rejects(f.manager.policyClosure(foreign, operationId), isCode("unknown"));
     // This PG fixture supplies a trusted exact owner ACK. The joint Go fixture
     // separately proves real ContextDone/forward return/body close validation.
-    await kernel.acknowledgeTransportClosed(context, f.worker, x.proof);
+    await policyKernel.acknowledgeTransportClosed(context, f.worker, x.proof);
     const completed = await f.manager.policyClosure(context, operationId);
     assert.equal(completed.state, "completed");
     assert.equal(completed.closed, true);
@@ -1317,11 +1382,14 @@ test("policy-use closure fences borrower X while owner O and borrower Y remain l
       occupiedTransports: 0,
       acknowledgedNativeTransports: 1,
     });
-    assert.equal((await kernel.request(context, x.ref, x.requestId)).effect, "effect_unknown");
-    assert.equal((await kernel.savedExecution(context, y.ref)).state, "open");
+    assert.equal(
+      (await policyKernel.request(context, x.ref, x.requestId)).effect,
+      "effect_unknown",
+    );
+    assert.equal((await policyKernel.savedExecution(context, y.ref)).state, "open");
     assert.deepEqual(
       (
-        await pool.query(
+        await pool.query<{ transport_occupied: boolean; effect: string }>(
           `SELECT effect,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3`,
           [context.consumerId, y.ref, y.requestId],
         )
@@ -1332,18 +1400,18 @@ test("policy-use closure fences borrower X while owner O and borrower Y remain l
     assert.equal(f.erases(), 0);
     assert.equal(f.providerCalls(), 0);
     const emptyOp = randomUUID();
-    await kernel.fence(context, emptyOp, "no-retained-use", 1);
+    await policyKernel.fence(context, emptyOp, "no-retained-use", 1);
     const empty = await f.manager.policyClosure(context, emptyOp);
     assert.equal(empty.closed, true);
     assert.equal(empty.counts.retainedExecutions, 0);
     assert.equal(empty.counts.requests, 0);
-    await kernel.acknowledgeTransportClosed(context, f.worker, y.proof);
+    await policyKernel.acknowledgeTransportClosed(context, f.worker, y.proof);
   } finally {
     await f.close();
   }
 });
 
-test("B3a expired exact cleanup lease refuses native erasure", async () => {
+void test("B3a expired exact cleanup lease refuses native erasure", async () => {
   const context = ctx(),
     command = input(),
     f = await fixture(context);
@@ -1370,7 +1438,7 @@ test("B3a expired exact cleanup lease refuses native erasure", async () => {
 });
 
 // Regression: a lost native activation ACK could trigger a second create or acknowledge a candidate without exact active-state readback.
-test("B3a lost state activation ACK uses exact GET after persisted staging proof without another create", async () => {
+void test("B3a lost state activation ACK uses exact GET after persisted staging proof without another create", async () => {
   const context = ctx(),
     command = input(),
     f = await fixture(context, "activation_lost_ack");
@@ -1392,7 +1460,7 @@ test("B3a lost state activation ACK uses exact GET after persisted staging proof
 });
 
 // Regression: an unexplained active native row could bypass inert staging and be promoted without a persisted controlled-proof mapping.
-test("B3a unexplained already-active candidate quarantines without activation or promotion", async () => {
+void test("B3a unexplained already-active candidate quarantines without activation or promotion", async () => {
   const context = ctx(),
     command = input(),
     f = await fixture(context);
@@ -1413,7 +1481,7 @@ test("B3a unexplained already-active candidate quarantines without activation or
 });
 
 // Regression: expiry of a journaled create intent could leave ciphertext retained or let a repeated operation consume another create permit.
-test("B3a reconciliation erases expired owned intent and quarantines its spent create", async () => {
+void test("B3a reconciliation erases expired owned intent and quarantines its spent create", async () => {
   const context = ctx(),
     command = input(),
     f = await fixture(context);
@@ -1604,7 +1672,7 @@ async function lifecyclePrepared(
 
 // Regression: suspend must retain the exact native mapping while fencing old
 // and new dispatch; only a fresh post-resume epoch can dispatch again.
-test("Gateway lifecycle suspend/resume retains identity and fences old authority", async () => {
+void test("Gateway lifecycle suspend/resume retains identity and fences old authority", async () => {
   const f = await lifecycleActivate(),
     beforeSuspend = await kernel.account(f.context, f.accountRef);
   const first = await lifecyclePrepared(f, randomUUID());
@@ -1628,7 +1696,7 @@ test("Gateway lifecycle suspend/resume retains identity and fences old authority
   assert.equal(suspendedAccount.revision, beforeSuspend.revision + 1);
   assert.equal(suspendedAccount.epoch, beforeSuspend.epoch + 1);
   const row = (
-    await pool.query(
+    await pool.query<{ state: string; mapped_identity: string; generation_cleanup: string }>(
       `SELECT c.state,m.native_physical_identity AS mapped_identity,
     (SELECT count(*) FROM ag_kernel.cleanup j WHERE j.generation=c.generation) AS generation_cleanup
     FROM ag_kernel.candidates c JOIN ag_management.physical_mappings m ON m.consumer=c.consumer AND m.generation=c.generation
@@ -1637,7 +1705,7 @@ test("Gateway lifecycle suspend/resume retains identity and fences old authority
     )
   ).rows[0];
   assert.equal(row.state, "ready");
-  assert.ok(row.mapped_identity);
+  assert.ok(typeof row.mapped_identity === "string" && row.mapped_identity !== "");
   assert.equal(Number(row.generation_cleanup), 0);
   assert.equal(f.erases, 0);
 
@@ -1771,7 +1839,7 @@ test("Gateway lifecycle suspend/resume retains identity and fences old authority
 
 // Regression: lifecycle and destructive disable serialize on one authority, but
 // only disabled fresh credential recovery remains a separate reconnect path.
-test("Gateway lifecycle serializes with disable and keeps fresh reconnect distinct", async () => {
+void test("Gateway lifecycle serializes with disable and keeps fresh reconnect distinct", async () => {
   const f = await lifecycleActivate(),
     account = await kernel.account(f.context, f.accountRef);
   const results = await Promise.allSettled([
@@ -1809,7 +1877,7 @@ test("Gateway lifecycle serializes with disable and keeps fresh reconnect distin
     "applied",
   );
   const row = (
-    await pool.query(
+    await pool.query<{ state: string; cleanup: string }>(
       `SELECT c.state,(SELECT count(*) FROM ag_kernel.cleanup j
     WHERE j.generation=c.generation) AS cleanup FROM ag_kernel.candidates c
     WHERE c.consumer=$1 AND c.generation=$2`,
@@ -1853,7 +1921,7 @@ test("Gateway lifecycle serializes with disable and keeps fresh reconnect distin
 
 // A valid but delayed native attestation must never undo retirement committed
 // while the HTTP read was outstanding.
-test("delayed retained custody cannot resurrect a concurrently retired account", async () => {
+void test("delayed retained custody cannot resurrect a concurrently retired account", async () => {
   const f = await lifecycleActivate(),
     original = await kernel.account(f.context, f.accountRef);
   await f.manager.suspend(f.context, {
@@ -1890,7 +1958,7 @@ test("delayed retained custody cannot resurrect a concurrently retired account",
 });
 
 // Cleanup admission is itself a deny, even before physical erasure settles.
-test("retained custody cannot resume a generation already admitted to erasure", async () => {
+void test("retained custody cannot resume a generation already admitted to erasure", async () => {
   const f = await lifecycleActivate(),
     account = await kernel.account(f.context, f.accountRef);
   await f.manager.suspend(f.context, {
@@ -1918,7 +1986,7 @@ test("retained custody cannot resume a generation already admitted to erasure", 
   );
   const token = randomUUID();
   const job = (
-    await pool.query(
+    await pool.query<{ ref: string }>(
       `UPDATE ag_kernel.cleanup SET state='claimed',worker=$3,token=$4,
     lease_until=clock_timestamp()+interval '1 minute' WHERE consumer=$1 AND generation=$2 RETURNING ref`,
       [f.context.consumerId, f.generation, f.worker, token],

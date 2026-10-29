@@ -5,11 +5,11 @@ import assert from "node:assert/strict";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
 import { spawn, execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, readlink, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import type { Server } from "node:http";
-import pg from "pg";
+import { Pool } from "pg";
 import {
   createAccountLimitsClient,
   createManagementClient,
@@ -32,7 +32,7 @@ const report = (value: object): void => {
 };
 let phase = "guard";
 const servers: Server[] = [];
-let pool: pg.Pool | undefined;
+let pool: Pool | undefined;
 let child: ReturnType<typeof spawn> | undefined;
 let stopped = false;
 let childExit: Promise<number | null> | undefined;
@@ -40,12 +40,12 @@ let cliProcess: ReturnType<typeof spawn> | undefined;
 let releaseTerminalUsage: (() => void) | undefined;
 async function listen(server: Server): Promise<string> {
   servers.push(server);
-  await new Promise<void>((done, fail) => {
-    server.once("error", fail);
-    server.listen(0, "127.0.0.1", done);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
   });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   return "http://127.0.0.1:" + address.port;
 }
 async function bounded<T>(work: Promise<T>, milliseconds = 15_000): Promise<T> {
@@ -53,8 +53,10 @@ async function bounded<T>(work: Promise<T>, milliseconds = 15_000): Promise<T> {
   try {
     return await Promise.race([
       work,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("controlled joined timeout")), milliseconds);
+      new Promise<never>((resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error("controlled joined timeout"));
+        }, milliseconds);
       }),
     ]);
   } finally {
@@ -63,7 +65,7 @@ async function bounded<T>(work: Promise<T>, milliseconds = 15_000): Promise<T> {
 }
 function disposable(name: string, prefix: string): string {
   const raw = process.env[name];
-  assert.ok(raw);
+  assert.ok(raw !== undefined && raw !== "");
   const url = new URL(raw);
   assert.ok(["postgres:", "postgresql:"].includes(url.protocol));
   assert.equal(url.hostname, "127.0.0.1");
@@ -75,6 +77,18 @@ function disposable(name: string, prefix: string): string {
   assert.equal(url.search, "?sslmode=disable");
   return raw;
 }
+const sha256 = async (url: URL): Promise<string> =>
+  createHash("sha256")
+    .update(await readFile(url))
+    .digest("hex");
+
+const denied = (error: unknown): boolean =>
+  error instanceof GatewayError && error.diagnostic?.code === "forbidden";
+
+function isNonemptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
 async function run(): Promise<void> {
   assert.equal(process.env.AG_NATIVE_CLAUDE_JOINED_ALLOW, "disposable_pg17_10");
   const cliBinary = process.env.AG_NATIVE_CLAUDE_JOINED_CLI_BINARY;
@@ -117,7 +131,12 @@ async function run(): Promise<void> {
   );
   phase = "native-binary-input";
   const binary = process.env.AG_NATIVE_CLAUDE_JOINED_BINARY;
-  assert.ok(binary && isAbsolute(binary) && binary.includes("/tmp/native-claude-joined/"));
+  assert.ok(
+    binary !== undefined &&
+      binary !== "" &&
+      isAbsolute(binary) &&
+      binary.includes("/tmp/native-claude-joined/"),
+  );
   const binarySHA256 = createHash("sha256")
     .update(await readFile(binary))
     .digest("hex");
@@ -128,7 +147,7 @@ async function run(): Promise<void> {
     { encoding: "utf8", timeout: 5000, maxBuffer: 131072 },
   );
   const nativeHead = /vcs\.revision=([a-f0-9]{40})/.exec(buildInfo)?.[1];
-  assert.ok(nativeHead);
+  assert.ok(nativeHead !== undefined && nativeHead !== "");
   if (cliBinary !== undefined) {
     assert.match(process.env.AG_NATIVE_CLAUDE_JOINED_NATIVE_COMMIT ?? "", /^[a-f0-9]{40}$/);
     assert.equal(nativeHead, process.env.AG_NATIVE_CLAUDE_JOINED_NATIVE_COMMIT);
@@ -146,10 +165,6 @@ async function run(): Promise<void> {
           timeout: 5000,
         }).trim();
   assert.match(gatewayHead, /^[a-f0-9]{40}$/);
-  const sha256 = async (url: URL): Promise<string> =>
-    createHash("sha256")
-      .update(await readFile(url))
-      .digest("hex");
   const sourceHashes = {
     harness: await sha256(new URL(import.meta.url)),
     nativeFixture: await sha256(
@@ -164,7 +179,7 @@ async function run(): Promise<void> {
   phase = "gateway-scratch";
   const scratchRoot =
     process.env.AG_NATIVE_CLAUDE_JOINED_SCRATCH_ROOT ??
-    resolve(dirname(fileURLToPath(import.meta.url)), "../../../tmp");
+    resolvePath(dirname(fileURLToPath(import.meta.url)), "../../../tmp");
   assert.ok(isAbsolute(scratchRoot));
   if (cliBinary !== undefined)
     assert.ok(
@@ -194,17 +209,20 @@ async function run(): Promise<void> {
     env: { GIN_MODE: "release" },
     stdio: ["pipe", "pipe", "pipe"],
   });
-  child.stdin!.on("error", () => undefined);
+  child.stdin!.on("error", () => {});
   // Native diagnostics are retained privately, never reflected into public results.
   let diagnostic = Buffer.alloc(0),
     nativeDiagnosticBytes = 0;
   child.stderr!.on("data", (bytes: Buffer) => {
     nativeDiagnosticBytes += bytes.byteLength;
-    if (diagnostic.byteLength < 8192)
+    if (diagnostic.byteLength < 8192) {
       diagnostic = Buffer.concat([diagnostic, bytes.subarray(0, 8192 - diagnostic.byteLength)]);
+    }
   });
   childExit = new Promise((resolve) => {
-    child!.once("error", () => resolve(-1));
+    child!.once("error", () => {
+      resolve(-1);
+    });
     child!.once("close", resolve);
   });
   const frames = createInterface({ input: child.stdout!, crlfDelay: Infinity })[
@@ -228,15 +246,17 @@ async function run(): Promise<void> {
     assert.ok(url.port);
   }
   phase = "kernel-database-guard";
-  pool = new pg.Pool({
+  pool = new Pool({
     connectionString: kernelDSN,
     max: 8,
     connectionTimeoutMillis: 5000,
     query_timeout: 5000,
   });
-  pool.on("error", () => undefined);
+  pool.on("error", () => {});
   const version = (
-    await pool.query("SELECT current_database() AS db,current_setting('server_version') AS version")
+    await pool.query<{ db: string; version: string }>(
+      "SELECT current_database() AS db,current_setting('server_version') AS version",
+    )
   ).rows[0];
   assert.equal(version.db, new URL(kernelDSN).pathname.slice(1));
   assert.match(version.version, /^17\.10(?:$| )/);
@@ -248,10 +268,11 @@ async function run(): Promise<void> {
   phase = "kernel-migrations";
   const migrations = (await readdir(new URL("../migrations/", import.meta.url)))
     .filter((f) => /^\d{3}_.*\.sql$/.test(f))
-    .sort();
+    .toSorted();
   assert.ok(migrations.length > 0);
-  for (const name of migrations)
+  for (const name of migrations) {
     await pool.query(await readFile(new URL("../migrations/" + name, import.meta.url), "utf8"));
+  }
   const kernel = new PostgresKernel(pool),
     secrets = new IntentSecrets(randomBytes(32), randomBytes(32));
   const store = new PostgresManagementStore(pool, secrets),
@@ -409,12 +430,10 @@ async function run(): Promise<void> {
     assert.equal(response.status, 200);
     return (await response.json()) as Record<string, number>;
   };
-  const denied = (error: unknown): boolean =>
-    error instanceof GatewayError && error.diagnostic?.code === "forbidden";
   phase = "fresh-browser-handoff";
   const begun = await client.beginOAuth(command);
   assert.equal(begun.operation.state, "pending");
-  assert.ok(begun.authorizationURL);
+  assert.ok(isNonemptyString(begun.authorizationURL));
   assert.equal(begun.deviceAuthorization, undefined);
   const authorization = new URL(begun.authorizationURL);
   assert.equal(authorization.origin, "https://claude.com");
@@ -475,7 +494,7 @@ async function run(): Promise<void> {
   assert.deepEqual(beforeInference, { exchanges: 1, refreshes: 0, messages: 0, unexpected: 0 });
   assert.equal(
     (
-      await pool.query(
+      await pool.query<{ n: number }>(
         "SELECT count(*)::int AS n FROM ag_management.transient_intents WHERE consumer=$1",
         [consumerId],
       )
@@ -804,7 +823,9 @@ async function run(): Promise<void> {
   phase = "passive-cached-limits";
   const snapshot = await limitsClient.readAccountLimits(limitsInput);
   assert.equal(snapshot.status, "snapshot");
-  if (snapshot.status !== "snapshot") throw new Error("missing controlled snapshot");
+  if (!Object.is(snapshot.status, "snapshot")) {
+    throw new Error("missing controlled snapshot");
+  }
   assert.equal(snapshot.physicalGeneration, journal.generation);
   assert.match(snapshot.principalVersion, /^[a-f0-9]{64}$/);
   assert.equal(snapshot.scope, "account");
@@ -961,14 +982,21 @@ try {
       process.kill(-cliProcess.pid, "SIGKILL");
     } catch {}
   }
-  if (child && !stopped) child.stdin!.end("stop\n");
-  if (childExit)
+  if (child && !Object.is(stopped, true)) {
+    child.stdin!.end("stop\n");
+  }
+  if (childExit) {
     await bounded(childExit, 5000).catch(() => {
       child?.kill("SIGTERM");
     });
-  for (const server of servers.reverse()) {
+  }
+  for (const server of servers.toReversed()) {
     server.closeAllConnections();
-    await new Promise<void>((done) => server.close(() => done()));
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        resolve();
+      });
+    });
   }
   await pool?.end();
 }

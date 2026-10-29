@@ -1,4 +1,4 @@
-import pg from "pg";
+import { Pool } from "pg";
 import { boundedFacts, KernelError } from "./domain.ts";
 import { PostgresKernel } from "./postgres.ts";
 import type { Bounds, DurableFactBounds, DurableKernel, ExecutionRead } from "./domain.ts";
@@ -21,10 +21,11 @@ export function openKernel(
   } catch {
     throw new KernelError("invalid");
   }
-  if (!["postgres:", "postgresql:"].includes(url.protocol) || url.pathname.length < 2)
+  if (!["postgres:", "postgresql:"].includes(url.protocol) || url.pathname.length < 2) {
     throw new KernelError("invalid");
+  }
   const facts = durableFacts === undefined ? undefined : boundedFacts(durableFacts);
-  const pool = new pg.Pool({
+  const pool = new Pool({
     connectionString,
     max: 8,
     connectionTimeoutMillis: 5_000,
@@ -32,6 +33,6 @@ export function openKernel(
   });
   // Discarded idle connections must not emit raw vendor diagnostics.
   // Transaction failures remain observable through the safe unavailable code.
-  pool.on("error", () => undefined);
+  pool.on("error", () => {});
   return { kernel: new PostgresKernel(pool, bounds, facts), shutdown: () => pool.end() };
 }

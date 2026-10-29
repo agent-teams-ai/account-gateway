@@ -1,103 +1,249 @@
 // Bounded, synthetic qualification data. Never serialize credentials or bodies.
-import { createHash } from 'node:crypto';
+import { createHash } from "node:crypto";
 
-export const bounds = Object.freeze({ wallMs: 900_000, drainMs: 60_000, attempts: 4096,
-  executions: 96, churnPreparations: 130, accounts: 32, streamBytes: 8_388_608,
-  totalBytes: 536_870_912, artifactBytes: 67_108_864 });
-export const baselineScenarios = ['smoke', 'short-steps', 'long-steps', 'arrivals', 'slow-reader',
-  'cancellation', 'overload-recovery', 'bearer-churn'] as const;
-export const scenarios = [...baselineScenarios, 'scale-streams', 'scale-arrivals', 'sustained-arrivals', 'large-context'] as const;
-export type Scenario = typeof scenarios[number];
-export type Outcome = 'pass' | 'fail' | 'inconclusive';
+export const bounds = Object.freeze({
+  wallMs: 900_000,
+  drainMs: 60_000,
+  attempts: 4096,
+  executions: 96,
+  churnPreparations: 130,
+  accounts: 32,
+  streamBytes: 8_388_608,
+  totalBytes: 536_870_912,
+  artifactBytes: 67_108_864,
+});
+export const baselineScenarios = [
+  "smoke",
+  "short-steps",
+  "long-steps",
+  "arrivals",
+  "slow-reader",
+  "cancellation",
+  "overload-recovery",
+  "bearer-churn",
+] as const;
+export const scenarios = [
+  ...baselineScenarios,
+  "scale-streams",
+  "scale-arrivals",
+  "sustained-arrivals",
+  "large-context",
+] as const;
+export type Scenario = (typeof scenarios)[number];
+export type Outcome = "pass" | "fail" | "inconclusive";
 export interface Attempt {
-  requestId: string; executionRef: string; accountRef: string; scenario: Scenario;
-  mode: 'sdk' | 'raw-tcp'; offeredAt: number; startedAt: number; firstByteAt?: number;
-  finishedAt?: number; bytes: number; response?: 'stream' | 'status' | 'error' | 'disconnect';
-  error?: string; effect?: string; sqlCode?: string; occupied?: boolean;
-  preclaimRefused?: boolean; safeCode?: string;
-  intentionalCancel?: 'raw-disconnect' | 'sdk-abort' | 'sdk-close'; validatedStream?: boolean;
-  nativeClosed?: boolean; nativeAcknowledged?: boolean; exactProof?: boolean; providerEntries?: number;
-  nativeEntered?: boolean; nativeCompleted?: boolean; nativeEffect?: 'effect_unknown' | 'completed';
+  requestId: string;
+  executionRef: string;
+  accountRef: string;
+  scenario: Scenario;
+  mode: "sdk" | "raw-tcp";
+  offeredAt: number;
+  startedAt: number;
+  firstByteAt?: number;
+  finishedAt?: number;
+  bytes: number;
+  response?: "stream" | "status" | "error" | "disconnect";
+  error?: string;
+  effect?: string;
+  sqlCode?: string;
+  occupied?: boolean;
+  preclaimRefused?: boolean;
+  safeCode?: string;
+  intentionalCancel?: "raw-disconnect" | "sdk-abort" | "sdk-close";
+  validatedStream?: boolean;
+  nativeClosed?: boolean;
+  nativeAcknowledged?: boolean;
+  exactProof?: boolean;
+  providerEntries?: number;
+  nativeEntered?: boolean;
+  nativeCompleted?: boolean;
+  nativeEffect?: "effect_unknown" | "completed";
 }
 // Offer targets and actual SDK-call start spacing are separate measurements.
 // Queueing before SDK entry belongs in launch lag; refusal counts require
 // positive non-entry classification rather than subtracting completions.
-export function arrivalObservation(attempts: readonly Attempt[], targetRate: number, start: number, finish: number) {
-  const completed = attempts.filter(a => a.effect === 'completed').length;
+export function arrivalObservation(
+  attempts: readonly Attempt[],
+  targetRate: number,
+  start: number,
+  finish: number,
+) {
+  const completed = attempts.filter((a) => a.effect === "completed").length;
   const safeRefusals = attempts.filter(capacityRefusal).length;
-  const first = attempts.reduce((value, a) => Math.min(value, a.startedAt), Number.POSITIVE_INFINITY);
-  const last = attempts.reduce((value, a) => Math.max(value, a.startedAt), Number.NEGATIVE_INFINITY);
+  const first = attempts.reduce(
+    (value, a) => Math.min(value, a.startedAt),
+    Number.POSITIVE_INFINITY,
+  );
+  const last = attempts.reduce(
+    (value, a) => Math.max(value, a.startedAt),
+    Number.NEGATIVE_INFINITY,
+  );
   const offerWindowMs = attempts.length ? Math.max(0, last - first) : 0;
-  return { targetRate, offered: attempts.length, completed, safeRefusals,
-    unsettledOrFailed: attempts.length - completed - safeRefusals, offerWindowMs,
-    observedOfferedRate: attempts.length > 1 && offerWindowMs > 0 ? (attempts.length - 1) * 1000 / offerWindowMs : 0,
+  return {
+    targetRate,
+    offered: attempts.length,
+    completed,
+    safeRefusals,
+    unsettledOrFailed: attempts.length - completed - safeRefusals,
+    offerWindowMs,
+    observedOfferedRate:
+      attempts.length > 1 && offerWindowMs > 0 ? ((attempts.length - 1) * 1000) / offerWindowMs : 0,
     elapsedMs: finish - start,
-    maximumLaunchLagMs: attempts.reduce((value, a) => Math.max(value, a.startedAt - a.offeredAt), 0) };
+    maximumLaunchLagMs: attempts.reduce(
+      (value, a) => Math.max(value, a.startedAt - a.offeredAt),
+      0,
+    ),
+  };
 }
 export function capacityRefusal(attempt: Attempt): boolean {
-  return attempt.effect === 'not_dispatched' ? attempt.sqlCode === 'concurrency_limit'
-    : !attempt.effect && attempt.preclaimRefused === true && attempt.safeCode === 'admission_limited';
+  return attempt.effect === "not_dispatched"
+    ? attempt.sqlCode === "concurrency_limit"
+    : !attempt.effect &&
+        attempt.preclaimRefused === true &&
+        attempt.safeCode === "admission_limited";
 }
 export interface LedgerEvent {
-  event: 'entry' | 'headers' | 'blocked' | 'drain' | 'end' | 'close' | 'budget' | 'violation';
-  requestId: string; at: number; bytes: number; sequence: number;
+  event: "entry" | "headers" | "blocked" | "drain" | "end" | "close" | "budget" | "violation";
+  requestId: string;
+  at: number;
+  bytes: number;
+  sequence: number;
 }
 export function check(value: unknown, phase: string): asserts value {
-  if (!value) throw new Error('load:' + phase);
+  if (!value) throw new Error("load:" + phase);
 }
 export function identifier(runId: string, seed: number, sequence: number): string {
-  const h = createHash('sha256').update(runId + ':' + seed + ':' + sequence).digest('hex');
-  return h.slice(0, 8) + '-' + h.slice(8, 12) + '-4' + h.slice(13, 16) + '-a' + h.slice(17, 20) + '-' + h.slice(20, 32);
+  const h = createHash("sha256")
+    .update(runId + ":" + seed + ":" + sequence)
+    .digest("hex");
+  return (
+    h.slice(0, 8) +
+    "-" +
+    h.slice(8, 12) +
+    "-4" +
+    h.slice(13, 16) +
+    "-a" +
+    h.slice(17, 20) +
+    "-" +
+    h.slice(20, 32)
+  );
 }
 export function entries(events: readonly LedgerEvent[], requestId: string): number {
-  return events.filter(e => e.event === 'entry' && e.requestId === requestId).length;
+  return events.filter((e) => e.event === "entry" && e.requestId === requestId).length;
 }
 export function reconcile(attempt: Attempt, events: readonly LedgerEvent[]): string[] {
-  const count = entries(events, attempt.requestId), faults: string[] = [];
-  if (count > 1) faults.push('duplicate-provider-entry');
-  if (attempt.effect === 'not_dispatched' && count !== 0) faults.push('denial-entered-provider');
-  if (attempt.effect === 'completed' && count !== 1) faults.push('completed-without-one-entry');
-  if (count === 1 && !attempt.effect) faults.push('provider-entry-without-durable-effect');
-  if (attempt.preclaimRefused && attempt.safeCode !== 'admission_limited') faults.push('unexpected-preclaim-refusal');
-  if (attempt.effect === 'not_dispatched' && !capacityRefusal(attempt)) faults.push('unexpected-durable-refusal');
-  if (!attempt.effect && count === 0 && !capacityRefusal(attempt)) faults.push('unclassified-attempt');
-  if (!attempt.intentionalCancel && attempt.effect && attempt.effect !== 'not_dispatched' &&
-      (attempt.effect !== 'completed' || attempt.response !== 'stream' || !attempt.validatedStream)) faults.push('unexpected-effect-or-client-stream-failure');
-  if (attempt.occupied) faults.push('occupied-after-drain');
-  if ((count === 1 || attempt.effect && attempt.effect !== 'not_dispatched') &&
-      (!attempt.exactProof || !attempt.nativeClosed || !attempt.nativeAcknowledged)) faults.push('missing-exact-native-closure');
+  const count = entries(events, attempt.requestId),
+    faults: string[] = [];
+  if (count > 1) faults.push("duplicate-provider-entry");
+  if (attempt.effect === "not_dispatched" && count !== 0) faults.push("denial-entered-provider");
+  if (attempt.effect === "completed" && count !== 1) faults.push("completed-without-one-entry");
+  if (count === 1 && !attempt.effect) faults.push("provider-entry-without-durable-effect");
+  if (attempt.preclaimRefused && attempt.safeCode !== "admission_limited")
+    faults.push("unexpected-preclaim-refusal");
+  if (attempt.effect === "not_dispatched" && !capacityRefusal(attempt))
+    faults.push("unexpected-durable-refusal");
+  if (!attempt.effect && count === 0 && !capacityRefusal(attempt))
+    faults.push("unclassified-attempt");
+  if (
+    !attempt.intentionalCancel &&
+    attempt.effect &&
+    attempt.effect !== "not_dispatched" &&
+    (attempt.effect !== "completed" || attempt.response !== "stream" || !attempt.validatedStream)
+  )
+    faults.push("unexpected-effect-or-client-stream-failure");
+  if (attempt.occupied) faults.push("occupied-after-drain");
+  if (
+    (count === 1 || (attempt.effect && attempt.effect !== "not_dispatched")) &&
+    (!attempt.exactProof || !attempt.nativeClosed || !attempt.nativeAcknowledged)
+  )
+    faults.push("missing-exact-native-closure");
   return faults;
 }
 export function safeError(error: unknown): string {
-  if (error instanceof Error && /^load:[a-z0-9-]{1,100}$/.test(error.message)) return error.message.slice(5);
-  if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' &&
-      /^[a-z_]{1,40}$/.test(error.code)) return error.code;
-  return 'unclassified-failure';
+  if (error instanceof Error && /^load:[a-z0-9-]{1,100}$/.test(error.message))
+    return error.message.slice(5);
+  if (
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    /^[a-z_]{1,40}$/.test(error.code)
+  )
+    return error.code;
+  return "unclassified-failure";
 }
 export async function bounded<T>(work: Promise<T>, ms: number, phase: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  try { return await Promise.race([work, new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error('load:' + phase)), ms);
-  })]); } finally { clearTimeout(timer); }
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("load:" + phase)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 export interface Proof {
-  executionRef: string; requestRef: string; worker: string; token: string;
-  native: { originRef: string; engineIncarnation: string; requestNonce: string; generation: string };
+  executionRef: string;
+  requestRef: string;
+  worker: string;
+  token: string;
+  native: {
+    originRef: string;
+    engineIncarnation: string;
+    requestNonce: string;
+    generation: string;
+  };
 }
 export function closureProjection(value: unknown, consumerId: string, p: Proof) {
-  const r = value as Record<string, unknown>, proof = r?.proof as Proof | undefined;
-  const native = r?.native as Proof['native'] | undefined, l = r?.lifetime as Record<string, unknown> | undefined;
-  const exactProof = !!proof && r.consumerId === consumerId && r.executionRef === p.executionRef && r.requestRef === p.requestRef &&
-    ['executionRef','requestRef','worker','token'].every(k => proof[k as keyof Proof] === p[k as keyof Proof]) &&
-    !!native && !!proof.native && Object.keys(p.native).every(k => native[k as keyof Proof['native']] === p.native[k as keyof Proof['native']] &&
-      proof.native[k as keyof Proof['native']] === p.native[k as keyof Proof['native']]);
+  const r = value as Record<string, unknown>,
+    proof = r?.proof as Proof | undefined;
+  const native = r?.native as Proof["native"] | undefined,
+    l = r?.lifetime as Record<string, unknown> | undefined;
+  const exactProof =
+    !!proof &&
+    r.consumerId === consumerId &&
+    r.executionRef === p.executionRef &&
+    r.requestRef === p.requestRef &&
+    ["executionRef", "requestRef", "worker", "token"].every(
+      (k) => proof[k as keyof Proof] === p[k as keyof Proof],
+    ) &&
+    !!native &&
+    !!proof.native &&
+    Object.keys(p.native).every(
+      (k) =>
+        native[k as keyof Proof["native"]] === p.native[k as keyof Proof["native"]] &&
+        proof.native[k as keyof Proof["native"]] === p.native[k as keyof Proof["native"]],
+    );
   // These are observations of the same original native proof, not a provider
   // ledger substitute. Legacy or malformed receipts add no inferred facts.
-  const nativeFacts = exactProof && l && typeof l.entered === 'boolean' && typeof l.completed === 'boolean' &&
-    (r.effect === 'effect_unknown' || r.effect === 'completed') && (!l.completed || l.entered) &&
-    (r.effect === 'completed') === l.completed
-    ? { nativeEntered: l.entered, nativeCompleted: l.completed, nativeEffect: r.effect as 'effect_unknown' | 'completed' } : {};
-  return { exactProof, ...nativeFacts, nativeClosed: !!l && r.phase === 'closed' && l.contextDone === true &&
-    l.forwardingReturned === true && l.bodyKnown === true && l.bodyClosed === true && l.closeFailed === false,
-  nativeAcknowledged: r?.acknowledged === true };
+  const nativeFacts =
+    exactProof &&
+    l &&
+    typeof l.entered === "boolean" &&
+    typeof l.completed === "boolean" &&
+    (r.effect === "effect_unknown" || r.effect === "completed") &&
+    (!l.completed || l.entered) &&
+    (r.effect === "completed") === l.completed
+      ? {
+          nativeEntered: l.entered,
+          nativeCompleted: l.completed,
+          nativeEffect: r.effect as "effect_unknown" | "completed",
+        }
+      : {};
+  return {
+    exactProof,
+    ...nativeFacts,
+    nativeClosed:
+      !!l &&
+      r.phase === "closed" &&
+      l.contextDone === true &&
+      l.forwardingReturned === true &&
+      l.bodyKnown === true &&
+      l.bodyClosed === true &&
+      l.closeFailed === false,
+    nativeAcknowledged: r?.acknowledged === true,
+  };
 }

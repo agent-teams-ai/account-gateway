@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { boundedConfig, defaults, KernelError } from "../src/domain.ts";
 
 // Red if invalid runtime config can widen admission or create unbounded leases.
-test("bounds reject zero, fractions, nonfinite values and independent hard ceilings", () => {
+void test("bounds reject zero, fractions, nonfinite values and independent hard ceilings", () => {
   for (const value of [0, -1, 1.5, NaN, Infinity, 86_400_001]) {
     assert.throws(() => boundedConfig({ ...defaults, maxRunMs: value }), KernelError);
   }
@@ -28,7 +28,7 @@ test("bounds reject zero, fractions, nonfinite values and independent hard ceili
   assert.equal(boundedConfig({ ...defaults, maxRequests: 2, maxConcurrent: 2 }).maxConcurrent, 2);
 });
 // Red if later caller mutation can change limits after kernel construction.
-test("configured bounds are a frozen value copy", () => {
+void test("configured bounds are a frozen value copy", () => {
   const input = { ...defaults };
   const copy = boundedConfig(input);
   input.maxRequests = 999;

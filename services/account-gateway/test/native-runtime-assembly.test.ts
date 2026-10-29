@@ -11,7 +11,7 @@ import { createServer as createTLSServer } from "node:https";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { dirname, join } from "node:path";
-import pg from "pg";
+import { Pool } from "pg";
 import { createManagementClient, GatewayError } from "@agent-teams/account-gateway/http";
 import { PostgresKernel } from "../src/postgres.ts";
 import { KernelError } from "../src/domain.ts";
@@ -35,6 +35,9 @@ const profileId = "openai-responses-apikey-v1",
 const limits = { requests: 2, concurrency: 1, requestBytes: 4096, outputBytes: 65536, tokens: 32 };
 const token = () => randomBytes(32).toString("base64url");
 class FixtureFailure extends Error {}
+function nonempty(value: string | undefined): value is string {
+  return value !== undefined && value !== "";
+}
 const fail = (phase: string): never => {
   throw new FixtureFailure("assembly fixture: " + phase);
 };
@@ -46,11 +49,10 @@ async function bounded<T>(work: Promise<T>, phase: string): Promise<T> {
   try {
     return await Promise.race([
       work,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new FixtureFailure("assembly fixture: " + phase + " timeout")),
-          5000,
-        );
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new FixtureFailure("assembly fixture: " + phase + " timeout"));
+        }, 5000);
       }),
     ]);
   } finally {
@@ -61,23 +63,30 @@ async function protectedPath(path: string, directory = false): Promise<void> {
   const ancestors: string[] = [];
   for (let p = dirname(path); ; p = dirname(p)) {
     ancestors.push(p);
-    if (p === "/") break;
+    if (p === "/") {
+      break;
+    }
   }
-  for (const p of ancestors.reverse()) {
+  for (const p of ancestors.toReversed()) {
     const s = await lstat(p);
-    if (!s.isDirectory() || s.uid !== 0 || (s.mode & 0o022) !== 0) fail("unprotected ancestor");
+    if (!s.isDirectory() || s.uid !== 0 || (s.mode & 0o022) !== 0) {
+      fail("unprotected ancestor");
+    }
   }
   const s = await lstat(path);
   if (
     s.uid !== 0 ||
     (s.mode & 0o022) !== 0 ||
     (directory ? !s.isDirectory() : !s.isFile() || s.nlink !== 1)
-  )
+  ) {
     fail("unprotected fixture");
+  }
 }
 function dsn(name: string, prefix: string): string {
   const raw = process.env[name];
-  if (!raw) return fail("NOT_RUN missing " + name);
+  if (raw === undefined || raw === "") {
+    return fail("NOT_RUN missing " + name);
+  }
   let u: URL;
   try {
     u = new URL(raw);
@@ -92,30 +101,44 @@ function dsn(name: string, prefix: string): string {
     u.hash ||
     u.search !== "?sslmode=disable" ||
     !new RegExp("^/" + prefix + "[a-z0-9_]{1,32}$").test(u.pathname)
-  )
+  ) {
     fail("refusing non-fixture PostgreSQL");
+  }
   return raw;
 }
 async function listen(server: Server): Promise<number> {
   await bounded(
     new Promise<void>((resolve, reject) => {
-      server.once("error", () => reject(new FixtureFailure("assembly fixture: listener")));
+      server.once("error", () => {
+        reject(new FixtureFailure("assembly fixture: listener"));
+      });
       server.listen(0, "127.0.0.1", resolve);
     }),
     "listen",
   );
   const a = server.address();
-  if (!a || typeof a === "string") return fail("listener address");
+  if (a === null || typeof a === "string") {
+    return fail("listener address");
+  }
   return a.port;
 }
 async function stop(server: Server): Promise<void> {
   server.closeAllConnections();
-  if (server.listening)
-    await bounded(new Promise<void>((resolve) => server.close(() => resolve())), "listener stop");
+  if (server.listening) {
+    await bounded(
+      new Promise<void>((resolve) => {
+        server.close(() => {
+          resolve();
+        });
+      }),
+      "listener stop",
+    );
+  }
 }
 function object(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value))
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return fail("invalid fixture frame");
+  }
   return value as Record<string, unknown>;
 }
 interface Binding {
@@ -131,7 +154,7 @@ function binding(value: unknown): Binding {
   const b = object(value),
     uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
   if (
-    Object.keys(b).sort().join(",") !==
+    Object.keys(b).toSorted().join(",") !==
       "birthTicks,bootId,incarnation,lockDevice,lockInode,originRef,pid" ||
     b.originRef !== originRef ||
     typeof b.bootId !== "string" ||
@@ -141,16 +164,17 @@ function binding(value: unknown): Binding {
     !Number.isSafeInteger(b.pid) ||
     (b.pid as number) < 1 ||
     ["birthTicks", "lockDevice", "lockInode"].some(
-      (k) => typeof b[k] !== "string" || !/^[1-9][0-9]*$/.test(b[k] as string),
+      (k) => typeof b[k] !== "string" || !/^[1-9][0-9]*$/.test(b[k]),
     )
-  )
+  ) {
     fail("invalid actual launcher binding");
+  }
   return b as unknown as Binding;
 }
 function launch(root: string) {
   // No ambient secrets, PATH, CLI or provider environment inherited by parent.
   const child = spawn(image, ["parent", root], { env: {}, stdio: ["pipe", "pipe", "ignore"] });
-  child.stdin.on("error", () => undefined);
+  child.stdin.on("error", () => {});
   let pulse: ReturnType<typeof setInterval> | undefined,
     stopped = false;
   const exited = new Promise<number | null>((resolve) => {
@@ -172,19 +196,24 @@ function launch(root: string) {
   ]();
   const next = async (expected: string) => {
     const line = await bounded(lines.next(), "native " + expected);
-    if (line.done || size > 16384 || line.value.length > 8192) return fail("native control stream");
+    if (line.done === true || size > 16384 || line.value.length > 8192) {
+      return fail("native control stream");
+    }
     let m: Record<string, unknown>;
     try {
       m = object(JSON.parse(line.value) as unknown);
     } catch {
       return fail("native control frame");
     }
-    if (m.event === "failed")
+    if (m.event === "failed") {
       return fail(
         "native " +
           (typeof m.phase === "string" && /^[a-z-]+$/.test(m.phase) ? m.phase : "failure"),
       );
-    if (m.event !== expected) return fail("native event order");
+    }
+    if (m.event !== expected) {
+      return fail("native event order");
+    }
     // The actual helper expires an idle parent after five seconds. Keep its
     // bounded command wait live during management and the two sequential calls.
     if (expected === "ready" && !stopped) {
@@ -197,7 +226,9 @@ function launch(root: string) {
     next,
     exited,
     stop: () => {
-      if (stopped) return;
+      if (stopped) {
+        return;
+      }
       stopped = true;
       clearInterval(pulse);
       child.stdin.end('{"command":"stop"}\n');
@@ -205,13 +236,17 @@ function launch(root: string) {
   };
 }
 
-async function migrateKernel(pool: pg.Pool, database: string): Promise<void> {
+async function migrateKernel(pool: Pool, database: string): Promise<void> {
   const r = (
-    await pool.query(`SELECT current_database() AS db,current_setting('server_version') AS version,
+    await pool.query<{
+      db: string;
+      version: string;
+      empty: unknown;
+    }>(`SELECT current_database() AS db,current_setting('server_version') AS version,
     NOT EXISTS (SELECT 1 FROM pg_class WHERE relnamespace='public'::regnamespace)
     AND NOT EXISTS (SELECT 1 FROM pg_proc WHERE pronamespace='public'::regnamespace)
     AND NOT EXISTS (SELECT 1 FROM pg_type WHERE typnamespace='public'::regnamespace) AS empty`)
-  ).rows[0] as Record<string, unknown>;
+  ).rows[0];
   assert.ok(
     r.db === database &&
       typeof r.version === "string" &&
@@ -225,9 +260,11 @@ async function migrateKernel(pool: pg.Pool, database: string): Promise<void> {
     0,
   );
   const directory = new URL("../migrations/", import.meta.url);
-  const files = (await readdir(directory)).filter((f) => /^\d{3}_.*\.sql$/.test(f)).sort();
-  assert.equal(files.length, 6, "use the selected complete numbered kernel migration set");
-  for (const file of files) await pool.query(await readFile(new URL(file, directory), "utf8"));
+  const files = (await readdir(directory)).filter((f) => /^\d{3}_.*\.sql$/.test(f)).toSorted();
+  assert.equal(files.length, 8, "use the selected complete numbered kernel migration set");
+  for (const file of files) {
+    await pool.query(await readFile(new URL(file, directory), "utf8"));
+  }
 }
 
 function completed(bytes: Buffer, expected: string): void {
@@ -237,20 +274,21 @@ function completed(bytes: Buffer, expected: string): void {
     .replaceAll("\r\n", "\n")
     .split("\n\n")
     .filter(Boolean)
-    .map((frame) => {
+    .flatMap((frame) => {
       const data = frame
         .split("\n")
         .filter((l) => l.startsWith("data:"))
         .map((l) => l.slice(5).replace(/^ /, ""))
         .join("\n");
-      if (!data || data === "[DONE]") return undefined;
+      if (!data || data === "[DONE]") {
+        return [];
+      }
       try {
-        return object(JSON.parse(data) as unknown);
+        return [object(JSON.parse(data) as unknown)];
       } catch {
         return fail("invalid native Responses SSE");
       }
-    })
-    .filter((e) => e !== undefined);
+    });
   const terminal = events.filter((e) => e.type === "response.completed");
   assert.equal(terminal.length, 1, "one actual Responses completion event required");
   assert.ok(
@@ -267,7 +305,8 @@ function completed(bytes: Buffer, expected: string): void {
   const content = response.output
     .flatMap((item: unknown) => {
       const m = object(item);
-      return m.type === "message" && Array.isArray(m.content) ? m.content : [];
+      const parts: unknown[] = m.type === "message" && Array.isArray(m.content) ? m.content : [];
+      return parts;
     })
     .filter((part: unknown) => object(part).type === "output_text")
     .map((part: unknown) => object(part).text)
@@ -291,7 +330,7 @@ function completed(bytes: Buffer, expected: string): void {
   );
 }
 
-test(
+void test(
   "controlled actual Go/Node/PG: management birth, held retirement, positive closure, SAME OPEN concurrency1",
   { timeout: 45000 },
   async () => {
@@ -300,8 +339,9 @@ test(
       process.platform !== "linux" ||
       process.getuid?.() !== 0 ||
       !["v26.11.1", "v24.21.0"].includes(process.version)
-    )
+    ) {
       fail("NOT_RUN pinned disposable root Linux runner required");
+    }
     const kernelDSN = dsn("AG_ASSEMBLY_KERNEL_DSN", "ag_kernel_test_assembly_");
     const nativeDSN = dsn("AG_ASSEMBLY_NATIVE_DSN", "native_bootstrap_assembly_");
     for (const path of [
@@ -309,27 +349,28 @@ test(
       installation + "/tls/ca.pem",
       installation + "/tls/server.pem",
       installation + "/tls/server-key.pem",
-    ])
+    ]) {
       await protectedPath(path);
+    }
     assert.equal((await lstat(installation + "/tls/server-key.pem")).mode & 0o777, 0o600);
     await protectedPath("/root", true);
     const root = "/root/native_bootstrap_assembly_" + randomUUID().replaceAll("-", "");
     await mkdir(root, { mode: 0o700 });
     await mkdir(join(root, "authority"), { mode: 0o700 });
-    const kernelPool = new pg.Pool({
+    const kernelPool = new Pool({
       connectionString: kernelDSN,
       max: 4,
       connectionTimeoutMillis: 5000,
       query_timeout: 5000,
     });
-    const nativePool = new pg.Pool({
+    const nativePool = new Pool({
       connectionString: nativeDSN,
       max: 2,
       connectionTimeoutMillis: 5000,
       query_timeout: 5000,
     });
-    kernelPool.on("error", () => undefined);
-    nativePool.on("error", () => undefined);
+    kernelPool.on("error", () => {});
+    nativePool.on("error", () => {});
     const servers: Server[] = [];
     let parent: ReturnType<typeof launch> | undefined,
       retired = false,
@@ -373,7 +414,9 @@ test(
             for await (const chunk of req) {
               const b = Buffer.from(chunk as Uint8Array);
               size += b.length;
-              if (size > 4096) fail("upstream request bound");
+              if (size > 4096) {
+                fail("upstream request bound");
+              }
               chunks.push(b);
             }
             const body = object(JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown);
@@ -393,8 +436,9 @@ test(
               body.input.length !== 1 ||
               object(body.input[0]).role !== "user" ||
               object(body.input[0]).content !== "assembly question " + entry
-            )
+            ) {
               fail("controlled native Responses request");
+            }
             res.writeHead(200, {
               "content-type": "text/event-stream",
               "cache-control": "no-cache",
@@ -438,7 +482,9 @@ test(
             const pending = { ...response, status: "in_progress", output: [], usage: null };
             res.write(frame("response.created", { response: pending }));
             // Keep the third real Go upstream stream open until client cancellation.
-            if (entry === 3) return;
+            if (entry === 3) {
+              return;
+            }
             res.write(frame("response.in_progress", { response: pending }));
             res.write(
               frame("response.output_item.added", {
@@ -484,7 +530,9 @@ test(
             res.end(frame("response.completed", { response }));
           })().catch(() => {
             upstreamInvalid = true;
-            if (!res.headersSent) res.writeHead(500);
+            if (!res.headersSent) {
+              res.writeHead(500);
+            }
             res.end();
           });
         },
@@ -504,14 +552,24 @@ test(
             req.destroy();
             res.destroy();
           }, 5000);
-          res.once("close", () => clearTimeout(timer));
-          res.once("finish", () => clearTimeout(timer));
+          res.once("close", () => {
+            clearTimeout(timer);
+          });
+          res.once("finish", () => {
+            clearTimeout(timer);
+          });
           const route = req.url;
           res.once("finish", () => {
             if (res.statusCode === 200) {
-              if (route === "/private/native/v1/enrollment") callbacks.enrollment++;
-              if (route === "/private/native/v1/admit") callbacks.admit++;
-              if (route === "/private/native/v1/closure-ack") callbacks.closureAck++;
+              if (route === "/private/native/v1/enrollment") {
+                callbacks.enrollment++;
+              }
+              if (route === "/private/native/v1/admit") {
+                callbacks.admit++;
+              }
+              if (route === "/private/native/v1/closure-ack") {
+                callbacks.closureAck++;
+              }
             }
           });
           // Go enrolls after G but before R. Wait for the ACTUAL Start binding,
@@ -520,13 +578,18 @@ test(
             .then(async () => {
               // Model a delayed durable ACK using the actual native HTTP request.
               // No receipt is invented; the original authority validates it afterward.
-              if (route === "/private/native/v1/closure-ack" && holdRetirementACK)
+              if (route === "/private/native/v1/closure-ack" && holdRetirementACK) {
                 await bounded(retirementACK, "retirement ACK release");
-              if (!callbackHandler) return fail("authority installation");
-              callbackHandler.emit("request", req, res);
+              }
+              if (!callbackHandler) {
+                return fail("authority installation");
+              }
+              return callbackHandler.emit("request", req, res);
             })
             .catch(() => {
-              if (!res.headersSent) res.writeHead(503);
+              if (!res.headersSent) {
+                res.writeHead(503);
+              }
               res.end();
             });
         },
@@ -651,12 +714,12 @@ test(
         worker,
         profiles: [profile],
         proof: {
-          async verify(journal, descriptor) {
+          async verify(journal, candidate) {
             // Actual inert HTTP readback + actual encrypted SQL row + qualified
             // controlled endpoint/profile. No unconditional proof or manual mapping.
             const read = await native.read(journal);
             const row = (
-              await nativePool.query(
+              await nativePool.query<Record<string, unknown>>(
                 `SELECT id::text AS id,
           to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS birth,
           status, schedulable, NOT (extra ?| ARRAY['upstream_billing_probe_enabled','upstream_billing_rate_sync_enabled']) AS probes_off, extra->>'gateway_profile_v1' AS profile,
@@ -670,20 +733,20 @@ test(
                 [journal.generation, dummyKey, consumerId, ownerRef, journal.accountRef],
               )
             ).rows;
-            const r = row[0] as Record<string, unknown> | undefined;
+            const r = row.at(0);
             const valid =
-              exactCandidate(journal, descriptor) &&
+              exactCandidate(journal, candidate) &&
               journal.consumerId === consumerId &&
               journal.ownerRef === ownerRef &&
               journal.profile.qualificationRef === qualificationRef &&
               journal.profile.profile === profileId &&
               read.length === 1 &&
               read[0].state === "inactive" &&
-              sameCandidate(read[0], descriptor) &&
+              sameCandidate(read[0], candidate) &&
               row.length === 1 &&
               r !== undefined &&
-              r.id === String(descriptor.nativeId) &&
-              instant(r.birth) === instant(descriptor.createdAt) &&
+              r.id === String(candidate.nativeId) &&
+              instant(r.birth) === instant(candidate.createdAt) &&
               r.status === "disabled" &&
               r.schedulable === false &&
               r.probes_off === true &&
@@ -695,7 +758,9 @@ test(
               r.scope_matches === true &&
               r.group_free === true &&
               upstreamCalls === 0;
-            if (valid) stagingProofs++;
+            if (valid) {
+              stagingProofs++;
+            }
             return valid;
           },
         },
@@ -709,7 +774,7 @@ test(
         apiKey: dummyKey,
       });
       assert.ok(
-        created.state === "applied" && created.accountRef,
+        created.state === "applied" && nonempty(created.accountRef),
         "actual management.create must promote the native MiMo Responses profile",
       );
       assert.equal(stagingProofs, 1);
@@ -729,7 +794,7 @@ test(
           sameCandidate(nativeRead[0], mapping.descriptor),
         "mapping must read actual promoted native birth",
       );
-      const account = await kernel.account(context, created.accountRef!);
+      const account = await kernel.account(context, created.accountRef);
       assert.equal(account.state, "active");
       const prepared = await kernel.prepare(context, {
         operationId: randomUUID(),
@@ -745,7 +810,7 @@ test(
         deadline: new Date(Date.now() + 30000),
         limits,
       });
-      assert.ok(prepared.executionRef);
+      assert.ok(nonempty(prepared.executionRef));
       const saved = await kernel.savedExecution(context, prepared.executionRef);
       const bearer = token();
       const bearers = new FacadeBearers([{ role: "execution", consumerId, token: bearer, saved }]);
@@ -833,7 +898,7 @@ test(
           signal: AbortSignal.timeout(5000),
         });
         assert.equal(read.status, 202);
-        const closed = receipt((await read.json()) as unknown, consumerId, proof);
+        const closed = receipt(await read.json(), consumerId, proof);
         assert.ok(
           physicallyClosed(closed) &&
             closed.acknowledged &&
@@ -842,7 +907,7 @@ test(
           "authenticated positive native physical closure and durable ACK required",
         );
         const rows = (
-          await kernelPool.query(
+          await kernelPool.query<{ effect: string; transport_occupied: unknown }>(
             `SELECT effect,transport_occupied FROM ag_kernel.requests
         WHERE consumer=$1 AND execution_ref=$2 AND id=$3`,
             [consumerId, saved.admission.executionRef, requestId],
@@ -855,7 +920,7 @@ test(
           "one completed SQL claim with released local occupancy",
         );
         const execution = (
-          await kernelPool.query(
+          await kernelPool.query<{ state: string; request_count: number }>(
             "SELECT state,request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
             [consumerId, saved.admission.executionRef],
           )
@@ -866,7 +931,7 @@ test(
         );
       }
       const proofRows = (
-        await kernelPool.query(
+        await kernelPool.query<{ request_nonce: string }>(
           `SELECT request_nonce FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2`,
           [consumerId, saved.admission.executionRef],
         )
@@ -903,7 +968,7 @@ test(
       assert.equal(callbacks.closureAck, 2);
       assert.equal(
         (
-          await kernelPool.query(
+          await kernelPool.query<{ n: number }>(
             "SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1",
             [consumerId],
           )
@@ -912,7 +977,7 @@ test(
       );
       assert.ok(
         (
-          await nativePool.query(
+          await nativePool.query<{ n: number; safe: boolean | null }>(
             `SELECT count(*)::int AS n, bool_and(public.gateway_native_envelope_valid(credentials->'api_key')
       AND strpos(credentials::text,$1)=0 AND NOT schedulable AND NOT (extra ?| ARRAY['upstream_billing_probe_enabled','upstream_billing_rate_sync_enabled'])
       AND NOT EXISTS(SELECT 1 FROM public.account_groups g WHERE g.account_id=a.id)) AS safe FROM public.accounts a`,
@@ -922,7 +987,8 @@ test(
         "actual native ciphertext and group-free inert scheduling survive both requests",
       );
       assert.equal(
-        (await nativePool.query("SELECT count(*)::int AS n FROM public.accounts")).rows[0].n,
+        (await nativePool.query<{ n: number }>("SELECT count(*)::int AS n FROM public.accounts"))
+          .rows[0].n,
         1,
       );
 
@@ -941,7 +1007,7 @@ test(
         deadline: new Date(Date.now() + 30000),
         limits,
       });
-      assert.ok(heldPreparation.executionRef);
+      assert.ok(nonempty(heldPreparation.executionRef));
       const heldSaved = await kernel.savedExecution(context, heldPreparation.executionRef);
       const heldBearer = token(),
         controlBearer = token(),
@@ -1017,7 +1083,8 @@ test(
       assert.equal(heldResponse.status, 200);
       assert.ok(heldResponse.body);
       const heldReader = heldResponse.body.getReader();
-      assert.ok((await bounded(heldReader.read(), "held first frame")).value?.byteLength);
+      const firstFrame: unknown = (await bounded(heldReader.read(), "held first frame")).value;
+      assert.ok(firstFrame instanceof Uint8Array && firstFrame.byteLength > 0);
       const fenceId = randomUUID();
       assert.equal(
         (await control.fence({ operationId: fenceId, subjectRef: "assembly-binding", revision: 2 }))
@@ -1049,7 +1116,9 @@ test(
       let generationCleanup: CleanupClaim | undefined;
       for (let i = 0; i < 3; i++) {
         const job = await kernel.claimCleanup(context, worker);
-        if (job?.scope.kind === "generation") generationCleanup = job;
+        if (job?.scope.kind === "generation") {
+          generationCleanup = job;
+        }
       }
       assert.ok(generationCleanup);
       await assert.rejects(
@@ -1065,7 +1134,7 @@ test(
       assert.equal(await management.cleanupClaim(context, generationCleanup), "quarantined");
       assert.ok(
         (
-          await nativePool.query(
+          await nativePool.query<{ retained: unknown }>(
             `SELECT deleted_at IS NULL AND public.gateway_native_envelope_valid(credentials->'api_key') AS retained
       FROM public.accounts WHERE extra->>'gateway_generation_v1'=$1`,
             [journal.generation],
@@ -1093,9 +1162,13 @@ test(
           signal: AbortSignal.timeout(5000),
         });
         assert.equal(response.status, 202);
-        const actual = receipt((await response.json()) as unknown, consumerId, heldProof);
+        const actual = receipt(await response.json(), consumerId, heldProof);
         closed = physicallyClosed(actual) && actual.acknowledged;
-        if (!closed) await new Promise((resolve) => setTimeout(resolve, 20));
+        if (!closed) {
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, 20);
+          });
+        }
       }
       assert.equal(
         closed,
@@ -1118,7 +1191,7 @@ test(
       assert.equal(retiredAccount.counts.settledNativeErasureGenerations, 1);
       assert.ok(
         (
-          await nativePool.query(
+          await nativePool.query<{ erased: unknown }>(
             `SELECT deleted_at IS NOT NULL AND NOT (credentials ? 'api_key') AS erased
       FROM public.accounts WHERE extra->>'gateway_generation_v1'=$1`,
             [journal.generation],
@@ -1130,7 +1203,7 @@ test(
       assert.equal(heldStatus.effect, "effect_unknown");
       assert.equal(
         (
-          await kernelPool.query(
+          await kernelPool.query<{ request_count: number }>(
             "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
             [consumerId, heldSaved.admission.executionRef],
           )
@@ -1156,15 +1229,23 @@ test(
       assert.equal(await bounded(parent.exited, "parent exit"), 0);
       retired = true;
     } catch (error) {
-      if (error instanceof assert.AssertionError || error instanceof FixtureFailure) throw error;
+      if (error instanceof assert.AssertionError || error instanceof FixtureFailure) {
+        throw error;
+      }
       fail("controlled joint contract failed");
     } finally {
       releaseRetirementACK?.();
       parent?.stop();
-      if (parent && !retired) await bounded(parent.exited, "failed fixture exit");
-      for (const server of servers.reverse()) await stop(server);
+      if (parent && !retired) {
+        await bounded(parent.exited, "failed fixture exit");
+      }
+      for (const server of servers.toReversed()) {
+        await stop(server);
+      }
       await bounded(Promise.all([kernelPool.end(), nativePool.end()]), "SQL shutdown");
-      if (retired) await rm(root, { recursive: true }); // Failed authority evidence survives until primary disposes the runner.
+      if (retired) {
+        await rm(root, { recursive: true });
+      } // Failed authority evidence survives until primary disposes the runner.
     }
   },
 );

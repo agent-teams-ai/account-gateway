@@ -12,9 +12,9 @@ jobs:
       fail-fast: false
       matrix:
         # Active default first; Node 24 remains a required compatibility lane.
-        node: ['26.11.1', '24.21.0']
+        node: ["26.11.1", "24.21.0"]
     env:
-      NPM_CONFIG_ENGINE_STRICT: 'true'
+      NPM_CONFIG_ENGINE_STRICT: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -29,12 +29,17 @@ jobs:
           test "$(npm config get engine-strict)" = true
           test "$(node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --config.engine-strict=true config get engine-strict)" = true
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --config.engine-strict=true install --frozen-lockfile
+      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run check:toolchain-config
+      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run toolchain:doctor
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run build
+      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run lint
+      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run format:check
+      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run typecheck
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" test
       - run: node scripts/check-topology.mjs
-      - run: node node_modules/@agent-teams/engineering-foundation/dist/cli.js check architecture.source-dependencies --consumer .
-      - run: node node_modules/@agent-teams/engineering-foundation/dist/cli.js assert-dev-only --consumer . --json
-      - run: node node_modules/@agent-teams/docs-protocol/dist/cli.js check --consumer . --profile docs.config.yaml
+      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run foundation
+      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run foundation:dev-only
+      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run docs:check
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir packages/account-gateway pack --pack-destination "$RUNNER_TEMP/gateway-archive"
       - run: scripts/qualify-consumers.sh "$RUNNER_TEMP/gateway-archive/agent-teams-account-gateway-0.1.0.tgz" "$RUNNER_TEMP/gateway-consumers"
   qualify:

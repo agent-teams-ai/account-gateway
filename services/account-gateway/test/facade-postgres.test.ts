@@ -1,12 +1,12 @@
 import { claudeOAuthProfile } from "../src/oauth-profiles.ts";
-import test, { before, after } from "node:test";
+import test, { before as beforeTests, after as afterTests } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { connect as connectSocket } from "node:net";
 import { readFile, readdir } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
-import pg from "pg";
+import { Pool } from "pg";
 import * as c from "@agent-teams/account-gateway/contracts";
 import {
   createAccountLimitsClient,
@@ -35,17 +35,27 @@ import {
 } from "../src/native-client.ts";
 import type { NativeDispatchProof } from "../src/domain.ts";
 
-let pool: pg.Pool;
-before(async () => {
+function redactPostgresSetupFailure(error: unknown): Error {
+  if (error instanceof assert.AssertionError) {
+    return error;
+  }
+  return new Error("NOT_RUN: disposable PostgreSQL setup unavailable; vendor details withheld");
+}
+
+let pool: Pool;
+beforeTests(async () => {
   const dsn = process.env.AG_FACADE_TEST_DSN,
     database = process.env.AG_FACADE_DISPOSABLE_DB;
   if (
-    !dsn ||
-    !database ||
+    dsn === undefined ||
+    dsn === "" ||
+    database === undefined ||
+    database === "" ||
     !/^ag_kernel_test_[a-z0-9_]+$/.test(database) ||
     process.env.AG_KERNEL_TEST_ALLOW !== "disposable_pg17_10"
-  )
+  ) {
     throw new Error("NOT_RUN: explicit NEW disposable PG17.10 facade database required");
+  }
   let url: URL;
   try {
     url = new URL(dsn);
@@ -56,15 +66,16 @@ before(async () => {
     !["postgres:", "postgresql:"].includes(url.protocol) ||
     !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) ||
     url.pathname !== "/" + database ||
-    url.search ||
-    url.hash
-  )
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
     throw new Error("NOT_RUN: refusing remote or unspecified database");
-  pool = new pg.Pool({ connectionString: dsn, max: 6, connectionTimeoutMillis: 5000 });
-  pool.on("error", () => undefined);
+  }
+  pool = new Pool({ connectionString: dsn, max: 6, connectionTimeoutMillis: 5000 });
+  pool.on("error", () => {});
   try {
     const version = (
-      await pool.query(
+      await pool.query<{ db: string; version: string }>(
         "SELECT current_database() AS db,current_setting('server_version') AS version",
       )
     ).rows[0];
@@ -80,15 +91,17 @@ before(async () => {
       "requires empty disposable database",
     );
     const directory = new URL("../migrations/", import.meta.url);
-    for (const file of (await readdir(directory)).filter((f) => /^\d{3}_.*\.sql$/.test(f)).sort())
+    for (const file of (await readdir(directory))
+      .filter((f) => /^\d{3}_.*\.sql$/.test(f))
+      .toSorted()) {
       await pool.query(await readFile(new URL(file, directory), "utf8"));
+    }
   } catch (error) {
-    if (error instanceof assert.AssertionError) throw error;
-    throw new Error("NOT_RUN: disposable PostgreSQL setup unavailable; vendor details withheld");
+    throw redactPostgresSetupFailure(error);
   }
 });
-after(async () => {
-  await pool?.end();
+afterTests(async () => {
+  await Promise.all([pool].filter(Boolean).map((createdPool) => createdPool.end()));
 });
 let nextNativeId = 0;
 const profile = {
@@ -119,16 +132,22 @@ const denied =
   (error: unknown): boolean =>
     error instanceof GatewayError &&
     error.code === "safe_error" &&
-    (!effect || error.effect === effect);
+    (effect === undefined || effect === "" || error.effect === effect);
 async function listen(server: ReturnType<typeof createServer>): Promise<string> {
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   return "http://127.0.0.1:" + address.port;
 }
 async function stop(server: ReturnType<typeof createServer>): Promise<void> {
   server.closeAllConnections();
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  await new Promise<void>((resolve) => {
+    server.close(() => {
+      resolve();
+    });
+  });
 }
 
 // Explicit synthetic native peer, not Go/provider evidence. Real management
@@ -155,13 +174,16 @@ async function fixture(
     oauthReads = 0;
   let custodyReady = true;
   let last:
-    { callback: NativeCallback; proof: NativeDispatchProof; permit: NativePermit } | undefined;
+    | { callback: NativeCallback; proof: NativeDispatchProof; permit: NativePermit }
+    | undefined;
   const raws: Uint8Array[] = [],
     nativeRows = new Map<string, { descriptor: object; state: string }>();
   const native = createServer((req, res) => {
     void (async () => {
       const chunks: Buffer[] = [];
-      for await (const chunk of req) chunks.push(Buffer.from(chunk as Uint8Array));
+      for await (const chunk of req) {
+        chunks.push(Buffer.from(chunk as Uint8Array));
+      }
       const input = chunks.length
         ? (JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>)
         : {};
@@ -169,7 +191,9 @@ async function fixture(
         req.url === "/private/native/v1/oauth/connect" ||
         req.url === "/private/native/v1/oauth/connect/read"
       ) {
-        if (req.url.endsWith("/read")) oauthReads++;
+        if (req.url.endsWith("/read")) {
+          oauthReads++;
+        }
         res.setHeader("content-type", "application/json");
         res.end(
           JSON.stringify({
@@ -204,7 +228,9 @@ async function fixture(
         res.end("{}");
         return;
       }
-      if (req.method === "PUT") row.state = String(input.state);
+      if (req.method === "PUT") {
+        row.state = String(input.state);
+      }
       res.end(
         JSON.stringify({
           ...row,
@@ -284,11 +310,15 @@ async function fixture(
       const claims = await Promise.all([input.callback.admit(nonce), input.callback.admit(nonce)]);
       const permits = claims.filter((p) => p.claim.dispatch);
       assert.equal(permits.length <= 1, true);
-      const permit = permits[0];
-      if (!permit?.claim.dispatch) return { kind: "status" };
+      const permit = permits.at(0);
+      if (!permit?.claim.dispatch) {
+        return { kind: "status" };
+      }
       const proof = permit.claim.dispatch.closure;
       last = { callback: input.callback, proof, permit };
-      if (mode === "lost_ack") throw new Error("fixture-vendor-private-body fixture-key-private");
+      if (mode === "lost_ack") {
+        throw new Error("fixture-vendor-private-body fixture-key-private");
+      }
       entries++;
       await input.callback.effect(proof, "response_started");
       return {
@@ -310,17 +340,30 @@ async function fixture(
               try {
                 await delay(250, undefined, { signal: input.signal });
               } catch (error) {
-                if (input.signal.aborted) return;
+                if (input.signal.aborted) {
+                  return;
+                }
                 throw error;
               }
-              if (input.signal.aborted) return;
+              if (input.signal.aborted) {
+                return;
+              }
               yield Buffer.from("data: synthetic-progress\n\n");
             }
           }
           if (mode === "held") {
             await new Promise<void>((resolve) => {
-              if (input.signal.aborted) resolve();
-              else input.signal.addEventListener("abort", () => resolve(), { once: true });
+              if (input.signal.aborted) {
+                resolve();
+              } else {
+                input.signal.addEventListener(
+                  "abort",
+                  () => {
+                    resolve();
+                  },
+                  { once: true },
+                );
+              }
             });
             return;
           }
@@ -378,7 +421,7 @@ async function fixture(
       credential: { kind: "api_key", value: "fixture-key-private" },
     });
     assert.equal(created.state, "applied");
-    assert.ok(created.state === "applied" && created.result?.kind === "account");
+    assert.equal(created.result?.kind, "account");
     const accountRef = created.result.accountRef;
     managementGrant = {
       ...managementGrant,
@@ -431,7 +474,7 @@ async function fixture(
           accept: "application/json",
           ...headers,
         },
-        body: payload === undefined ? undefined : JSON.stringify(payload),
+        ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
       });
     return {
       context,
@@ -481,12 +524,14 @@ async function consume(
   if (result.kind === "stream") {
     const reader = result.body.getReader();
     for (;;) {
-      if ((await reader.read()).done) return;
+      if ((await reader.read()).done) {
+        return;
+      }
     }
   }
 }
 
-test("exported SDK management routes persist duplicate mutation/readback and safe metadata", async () => {
+void test("exported SDK management routes persist duplicate mutation/readback and safe metadata", async () => {
   const f = await fixture();
   try {
     assert.deepEqual(await f.client.profiles(), { profiles: [safeProfile] });
@@ -526,7 +571,7 @@ test("exported SDK management routes persist duplicate mutation/readback and saf
     await f.stop();
   }
 });
-test("feature default hides lifecycle writes; explicit gate suspends and resumes with old-reader fail-closed", async () => {
+void test("feature default hides lifecycle writes; explicit gate suspends and resumes with old-reader fail-closed", async () => {
   const off = await fixture();
   try {
     const hidden = createLifecycleClient({
@@ -629,10 +674,11 @@ test("feature default hides lifecycle writes; explicit gate suspends and resumes
     await f.stop();
   }
 });
-test("exported SDK preparation with fresh operation IDs reads the original execution before and after unknown fencing", async () => {
+void test("exported SDK preparation with fresh operation IDs reads the original execution before and after unknown fencing", async () => {
   const f = await fixture("lost_ack");
   try {
-    assert.ok(f.prepared.state === "applied" && f.prepared.result?.kind === "execution");
+    assert.equal(f.prepared.state, "applied");
+    assert.equal(f.prepared.result?.kind, "execution");
     const original = f.prepared.result;
     assert.equal(original.accountRef, f.accountRef);
     assert.equal(original.authorizationEpoch, f.saved.admission.authorizationEpoch);
@@ -643,7 +689,7 @@ test("exported SDK preparation with fresh operation IDs reads the original execu
       const result = await f.client.prepare({ ...f.preparedInput, operationId });
       assert.equal(result.operationRef, operationId);
       assert.equal(result.state, "applied");
-      assert.ok(result.state === "applied" && result.result?.kind === "execution");
+      assert.equal(result.result?.kind, "execution");
       assert.deepEqual(result.result, { ...original, state });
       assert.deepEqual(await f.client.operation(operationId), result);
       const saved = await f.kernel.savedExecution(f.context, original.executionRef);
@@ -651,7 +697,7 @@ test("exported SDK preparation with fresh operation IDs reads the original execu
       assert.equal(saved.generation, f.saved.generation);
       assert.equal(
         (
-          await pool.query(
+          await pool.query<{ n: number }>(
             "SELECT count(*)::int AS n FROM ag_kernel.executions WHERE consumer=$1",
             [f.context.consumerId],
           )
@@ -670,12 +716,13 @@ test("exported SDK preparation with fresh operation IDs reads the original execu
         code: "conflict",
       },
     ];
-    for (const key of Object.keys(limits) as (keyof typeof limits)[])
+    for (const key of Object.keys(limits) as (keyof typeof limits)[]) {
       changed.push({
         patch: { limits: { ...limits, [key]: key === "concurrency" ? 2 : limits[key] - 1 } },
         status: key === "concurrency" ? 403 : 409,
         code: key === "concurrency" ? "forbidden" : "conflict",
       });
+    }
     for (const { patch, status, code } of changed) {
       const response = await f.raw("/v1/executions", "POST", {
         ...f.preparedInput,
@@ -724,7 +771,7 @@ test("exported SDK preparation with fresh operation IDs reads the original execu
     assert.equal(f.stats().calls, 1);
     assert.equal(f.stats().entries, 0);
     const persisted = (
-      await pool.query(
+      await pool.query<{ request_count: number; state: string }>(
         "SELECT request_count,state FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
         [f.context.consumerId, f.executionRef],
       )
@@ -733,9 +780,10 @@ test("exported SDK preparation with fresh operation IDs reads the original execu
     assert.equal(persisted.state, "fenced");
     assert.equal(
       (
-        await pool.query("SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1", [
-          f.context.consumerId,
-        ])
+        await pool.query<{ n: number }>(
+          "SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1",
+          [f.context.consumerId],
+        )
       ).rows[0].n,
       1,
     );
@@ -747,7 +795,7 @@ test("exported SDK preparation with fresh operation IDs reads the original execu
     await f.stop();
   }
 });
-test("derived roles, immutable consumer scope and rotation deny unrelated management/operation/execution authority", async () => {
+void test("derived roles, immutable consumer scope and rotation deny unrelated management/operation/execution authority", async () => {
   const f = await fixture();
   try {
     const asManagement = createManagementClient({
@@ -778,7 +826,7 @@ test("derived roles, immutable consumer scope and rotation deny unrelated manage
     await f.stop();
   }
 });
-test("schemas, OAuth rejection and server preparation policy reject malformed or widened ingress without custody mutation", async () => {
+void test("schemas, OAuth rejection and server preparation policy reject malformed or widened ingress without custody mutation", async () => {
   const f = await fixture();
   try {
     for (const patch of [
@@ -830,7 +878,7 @@ test("schemas, OAuth rejection and server preparation policy reject malformed or
     await f.stop();
   }
 });
-test("all saved admission authority families and individual limits mismatch before native reservation", async () => {
+void test("all saved admission authority families and individual limits mismatch before native reservation", async () => {
   const f = await fixture();
   try {
     const variants: Partial<c.Admission>[] = [
@@ -844,9 +892,10 @@ test("all saved admission authority families and individual limits mismatch befo
       { profileId: "other" },
       { expiresAt: new Date(Date.now() + 1000).toISOString() },
     ];
-    for (const key of Object.keys(limits) as (keyof typeof limits)[])
+    for (const key of Object.keys(limits) as (keyof typeof limits)[]) {
       variants.push({ limits: { ...limits, [key]: limits[key] + 1 } });
-    for (const variant of variants)
+    }
+    for (const variant of variants) {
       await assert.rejects(
         f.execution.request(f.executionRef, {
           ...f.request(),
@@ -854,6 +903,7 @@ test("all saved admission authority families and individual limits mismatch befo
         }),
         denied("not_dispatched"),
       );
+    }
     for (const patch of [
       { generation: randomUUID() },
       { admission: { ...f.saved.admission, issuerEpoch: randomUUID() } },
@@ -870,9 +920,10 @@ test("all saved admission authority families and individual limits mismatch befo
     assert.equal(f.stats().calls, 0);
     assert.equal(
       (
-        await pool.query("SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1", [
-          f.context.consumerId,
-        ])
+        await pool.query<{ n: number }>(
+          "SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1",
+          [f.context.consumerId],
+        )
       ).rows[0].n,
       0,
     );
@@ -880,7 +931,7 @@ test("all saved admission authority families and individual limits mismatch befo
     await f.stop();
   }
 });
-test("body overcap and unsafe decoded native payload reject before callback; bytes otherwise stay exact", async () => {
+void test("body overcap and unsafe decoded native payload reject before callback; bytes otherwise stay exact", async () => {
   const f = await fixture();
   try {
     for (const raw of [
@@ -917,7 +968,7 @@ test("body overcap and unsafe decoded native payload reject before callback; byt
     await f.stop();
   }
 });
-test("concurrent duplicate SDK POST and native callbacks return one SQL permit and one synthetic entry", async () => {
+void test("concurrent duplicate SDK POST and native callbacks return one SQL permit and one synthetic entry", async () => {
   const f = await fixture();
   try {
     const request = f.request();
@@ -930,7 +981,10 @@ test("concurrent duplicate SDK POST and native callbacks return one SQL permit a
     assert.equal(results.filter((r) => r.kind === "status").length, 1);
     assert.equal((await f.execution.status(f.executionRef, request.requestId)).effect, "completed");
     const last = f.last();
-    assert.ok(last.permit.permitExpiresAt && last.permit.physical);
+    assert.ok(
+      typeof last.permit.permitExpiresAt === "string" && last.permit.permitExpiresAt !== "",
+    );
+    assert.ok(last.permit.physical);
     assert.equal(last.permit.physical.createdAt, "2026-10-03T04:05:06.123456789Z");
     assert.ok(
       Date.parse(last.permit.permitExpiresAt) <=
@@ -939,7 +993,7 @@ test("concurrent duplicate SDK POST and native callbacks return one SQL permit a
     assert.ok(Date.parse(last.permit.permitExpiresAt) <= Date.parse(f.saved.admission.expiresAt));
     assert.equal(
       (
-        await pool.query(
+        await pool.query<{ request_count: number }>(
           "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
           [f.context.consumerId, f.executionRef],
         )
@@ -949,7 +1003,7 @@ test("concurrent duplicate SDK POST and native callbacks return one SQL permit a
     // Output and TS socket closure did not release native occupancy.
     assert.equal(
       (
-        await pool.query(
+        await pool.query<{ transport_occupied: boolean }>(
           "SELECT transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND id=$2",
           [f.context.consumerId, request.requestId],
         )
@@ -962,10 +1016,16 @@ test("concurrent duplicate SDK POST and native callbacks return one SQL permit a
     assert.equal(busy.status.status, "failed");
     assert.equal(busy.status.effect, "not_dispatched");
     assert.equal(busy.status.error?.code, "admission_limited");
-    assert.deepEqual(busy.status.error?.retry, { kind: "after", milliseconds: 1000 });
+    assert.deepEqual(busy.status.error.retry, { kind: "after", milliseconds: 1000 });
     assert.equal(f.stats().entries, 1);
     const deniedRow = (
-      await pool.query(
+      await pool.query<{
+        code: string | null;
+        transport_occupied: boolean;
+        native_origin_ref: string | null;
+        engine_incarnation: string | null;
+        descriptor_generation: string | null;
+      }>(
         `SELECT code,transport_occupied,native_origin_ref,engine_incarnation,descriptor_generation
       FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3`,
         [f.context.consumerId, f.executionRef, blocked.requestId],
@@ -999,11 +1059,11 @@ test("concurrent duplicate SDK POST and native callbacks return one SQL permit a
     assert.equal(quota.status.status, "failed");
     assert.equal(quota.status.effect, "not_dispatched");
     assert.equal(quota.status.error?.code, "admission_limited");
-    assert.deepEqual(quota.status.error?.retry, { kind: "never" });
+    assert.deepEqual(quota.status.error.retry, { kind: "never" });
     assert.equal(f.stats().entries, limits.requests);
     assert.equal(
       (
-        await pool.query(
+        await pool.query<{ request_count: number }>(
           "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
           [f.context.consumerId, f.executionRef],
         )
@@ -1014,7 +1074,7 @@ test("concurrent duplicate SDK POST and native callbacks return one SQL permit a
     await f.stop();
   }
 });
-test("lost controlled transport ACK and absent readback preserve unknown without replay or secret diagnostics", async () => {
+void test("lost controlled transport ACK and absent readback preserve unknown without replay or secret diagnostics", async () => {
   const f = await fixture("lost_ack");
   try {
     const request = f.request();
@@ -1040,7 +1100,7 @@ test("lost controlled transport ACK and absent readback preserve unknown without
     await f.stop();
   }
 });
-test("missing protected composition, expired worker, policy fence and restore fail closed", async () => {
+void test("missing protected composition, expired worker, policy fence and restore fail closed", async () => {
   const missing = await fixture("missing");
   try {
     await assert.rejects(
@@ -1073,16 +1133,16 @@ test("missing protected composition, expired worker, policy fence and restore fa
     await f.stop();
   }
 });
-test("output byte cap and stream cancellation classify unknown and retain occupied native transport", async () => {
+void test("output byte cap and stream cancellation classify unknown and retain occupied native transport", async () => {
   for (const mode of ["overflow", "held"] as const) {
     const f = await fixture(mode);
     try {
       const request = f.request(),
         result = await f.execution.request(f.executionRef, request);
       assert.equal(result.kind, "stream");
-      if (result.kind !== "stream") throw new Error("expected synthetic stream");
-      if (mode === "overflow") await assert.rejects(consume(result));
-      else {
+      if (mode === "overflow") {
+        await assert.rejects(consume(result));
+      } else {
         const reader = result.body.getReader();
         assert.equal((await reader.read()).done, false);
         await result.cancel();
@@ -1093,15 +1153,16 @@ test("output byte cap and stream cancellation classify unknown and retain occupi
         (await f.kernel.request(f.context, f.executionRef, request.requestId)).effect !==
           "effect_unknown";
         tries++
-      )
+      ) {
         await delay(10);
+      }
       assert.equal(
         (await f.kernel.request(f.context, f.executionRef, request.requestId)).effect,
         "effect_unknown",
       );
       assert.equal(
         (
-          await pool.query(
+          await pool.query<{ transport_occupied: boolean }>(
             "SELECT transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND id=$2",
             [f.context.consumerId, request.requestId],
           )
@@ -1117,7 +1178,7 @@ test("output byte cap and stream cancellation classify unknown and retain occupi
 // The first scenario fails when the HTTP arrival timer cuts off a progressing
 // admitted stream. The companion fails if switching budgets loses saved expiry
 // or treats cancellation as proof of native closure/replay permission.
-test(
+void test(
   "progressing admitted HTTP stream completes beyond the ingress budget before saved expiry",
   { timeout: 20_000 },
   async () => {
@@ -1127,13 +1188,14 @@ test(
         startedAt = Date.now();
       const result = await f.execution.request(f.executionRef, request);
       assert.equal(result.kind, "stream");
-      if (result.kind !== "stream") throw new Error("expected synthetic stream");
       const reader = result.body.getReader();
       let lastProgressAt = startedAt,
         bytes = 0;
       for (;;) {
         const part = await reader.read();
-        if (part.done) break;
+        if (part.done) {
+          break;
+        }
         lastProgressAt = Date.now();
         bytes += part.value.byteLength;
       }
@@ -1152,7 +1214,7 @@ test(
       assert.equal(f.stats().cancelled, 0);
       assert.equal(
         (
-          await pool.query(
+          await pool.query<{ request_count: number }>(
             "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
             [f.context.consumerId, f.executionRef],
           )
@@ -1164,7 +1226,7 @@ test(
     }
   },
 );
-test(
+void test(
   "progressing admitted HTTP stream still expires and retains unknown native occupancy",
   { timeout: 25_000 },
   async () => {
@@ -1174,13 +1236,14 @@ test(
         startedAt = Date.now();
       const result = await f.execution.request(f.executionRef, request);
       assert.equal(result.kind, "stream");
-      if (result.kind !== "stream") throw new Error("expected synthetic stream");
       const reader = result.body.getReader();
       let lastProgressAt = startedAt;
       await assert.rejects(async () => {
         for (;;) {
           const part = await reader.read();
-          if (part.done) return;
+          if (part.done) {
+            return;
+          }
           lastProgressAt = Date.now();
         }
       });
@@ -1200,14 +1263,15 @@ test(
         (await f.kernel.request(f.context, f.executionRef, request.requestId)).effect !==
           "effect_unknown";
         tries++
-      )
+      ) {
         await delay(10);
+      }
       assert.equal(
         (await f.kernel.request(f.context, f.executionRef, request.requestId)).effect,
         "effect_unknown",
       );
       const persisted = (
-        await pool.query(
+        await pool.query<{ transport_occupied: boolean; request_count: number; state: string }>(
           "SELECT r.transport_occupied,e.request_count,e.state FROM ag_kernel.requests r JOIN ag_kernel.executions e ON e.consumer=r.consumer AND e.ref=r.execution_ref WHERE r.consumer=$1 AND r.id=$2",
           [f.context.consumerId, request.requestId],
         )
@@ -1227,7 +1291,7 @@ test(
     }
   },
 );
-test("execution close is scoped, idempotent acknowledgement without a wrong result variant", async () => {
+void test("execution close is scoped, idempotent acknowledgement without a wrong result variant", async () => {
   const f = await fixture();
   try {
     const input = { operationId: randomUUID(), reason: "cancelled" as const };
@@ -1249,16 +1313,18 @@ test("execution close is scoped, idempotent acknowledgement without a wrong resu
   }
 });
 
-test("expired persisted deadline and restored issuer independently prevent native entry", async () => {
+void test("expired persisted deadline and restored issuer independently prevent native entry", async () => {
   for (const kind of ["deadline", "restore"] as const) {
     const f = await fixture();
     try {
-      if (kind === "deadline")
+      if (kind === "deadline") {
         await pool.query(
           "UPDATE ag_kernel.executions SET deadline=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND ref=$2",
           [f.context.consumerId, f.executionRef],
         );
-      else await f.kernel.restore(f.context, f.saved.admission.issuerEpoch, randomUUID());
+      } else {
+        await f.kernel.restore(f.context, f.saved.admission.issuerEpoch, randomUUID());
+      }
       assert.equal(
         (await f.kernel.savedExecution(f.context, f.executionRef)).dispatchAllowed,
         false,
@@ -1270,7 +1336,7 @@ test("expired persisted deadline and restored issuer independently prevent nativ
     }
   }
 });
-test("native effect and cleanup cancellation require exact persisted proof and existing cleanup lease", async () => {
+void test("native effect and cleanup cancellation require exact persisted proof and existing cleanup lease", async () => {
   const f = await fixture();
   try {
     const request = f.request();
@@ -1289,7 +1355,7 @@ test("native effect and cleanup cancellation require exact persisted proof and e
     assert.equal(f.stats().cancelled, 1);
     assert.equal(
       (
-        await pool.query(
+        await pool.query<{ transport_occupied: boolean }>(
           "SELECT transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND id=$2",
           [f.context.consumerId, request.requestId],
         )
@@ -1307,7 +1373,7 @@ test("native effect and cleanup cancellation require exact persisted proof and e
   }
 });
 
-test("actual listener rejects absent/duplicate Authorization, duplicated content type and malformed request headers", async () => {
+void test("actual listener rejects absent/duplicate Authorization, duplicated content type and malformed request headers", async () => {
   const f = await fixture();
   try {
     const origin = new URL(f.origin);
@@ -1374,7 +1440,7 @@ test("actual listener rejects absent/duplicate Authorization, duplicated content
   }
 });
 
-test("original fractional admission tokens and prototype query names are rejected by the actual listener", async () => {
+void test("original fractional admission tokens and prototype query names are rejected by the actual listener", async () => {
   const f = await fixture();
   try {
     const header = JSON.stringify(f.admission);
@@ -1420,9 +1486,10 @@ test("original fractional admission tokens and prototype query names are rejecte
     assert.equal(f.stats().calls, 0);
     assert.equal(
       (
-        await pool.query("SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1", [
-          f.context.consumerId,
-        ])
+        await pool.query<{ n: number }>(
+          "SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1",
+          [f.context.consumerId],
+        )
       ).rows[0].n,
       0,
     );
@@ -1431,7 +1498,7 @@ test("original fractional admission tokens and prototype query names are rejecte
   }
 });
 
-test("exported SDK account pagination scopes single and multiple configured owners before sizing pages and cursors", async () => {
+void test("exported SDK account pagination scopes single and multiple configured owners before sizing pages and cursors", async () => {
   const f = await fixture();
   try {
     const owners = ["workspace-fixture", "workspace-other-fixture", "workspace-third-fixture"];
@@ -1452,17 +1519,17 @@ test("exported SDK account pagination scopes single and multiple configured owne
         created.push({ accountRef: result.result.accountRef, ownerRef });
       }
     }
-    created.sort((a, b) =>
+    const sortedCreated = created.toSorted((a, b) =>
       a.accountRef < b.accountRef ? -1 : a.accountRef > b.accountRef ? 1 : 0,
     );
     // Observed UUID order supplies deterministic expected pages. Exclude the
     // first row's owner so old consumer-wide pagination always leaks its cursor.
-    const foreignOwner = created[0].ownerRef,
+    const foreignOwner = sortedCreated[0].ownerRef,
       allowed = owners.filter((owner) => owner !== foreignOwner);
     for (const allowedOwners of [[allowed[0]], allowed]) {
       f.bearers.replace([{ ...f.managementGrant, ownerRefs: allowedOwners }, f.executionGrant]);
       for (const ownerRef of [undefined, ...allowedOwners]) {
-        const expected = created.filter(
+        const expected = sortedCreated.filter(
           (row) =>
             allowedOwners.includes(row.ownerRef) &&
             (ownerRef === undefined || row.ownerRef === ownerRef),
@@ -1476,11 +1543,12 @@ test("exported SDK account pagination scopes single and multiple configured owne
               ...(ownerRef === undefined ? {} : { ownerRef }),
               ...(cursor === undefined ? {} : { cursor }),
             });
-            if (page.nextCursor !== undefined)
+            if (page.nextCursor !== undefined) {
               assert.ok(
                 expected.some((row) => row.accountRef === page.nextCursor),
                 "cursor must belong to an allowed owner",
               );
+            }
             assert.ok(page.accounts.length > 0, "foreign accounts must not create empty pages");
             assert.deepEqual(
               page.accounts.map((a) => a.accountRef),
@@ -1513,7 +1581,7 @@ test("exported SDK account pagination scopes single and multiple configured owne
   }
 });
 
-test("management operation readback preserves the configured owner scope within one consumer", async () => {
+void test("management operation readback preserves the configured owner scope within one consumer", async () => {
   const f = await fixture();
   try {
     const otherToken = "fixture-other-owner-" + randomUUID();
@@ -1544,7 +1612,7 @@ test("management operation readback preserves the configured owner scope within 
   }
 });
 
-test("empty server-approved account set permits enrollment while denying execution preparation", async () => {
+void test("empty server-approved account set permits enrollment while denying execution preparation", async () => {
   const f = await fixture();
   try {
     f.bearers.replace([
@@ -1571,9 +1639,10 @@ test("empty server-approved account set permits enrollment while denying executi
     assert.equal(f.stats().calls, 0);
     assert.equal(
       (
-        await pool.query("SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1", [
-          f.context.consumerId,
-        ])
+        await pool.query<{ n: number }>(
+          "SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1",
+          [f.context.consumerId],
+        )
       ).rows[0].n,
       0,
     );
@@ -1582,7 +1651,7 @@ test("empty server-approved account set permits enrollment while denying executi
   }
 });
 
-test("consumer-control SDK admits a new opaque owner and fences profiles, consumers and execution roles", async () => {
+void test("consumer-control SDK admits a new opaque owner and fences profiles, consumers and execution roles", async () => {
   const f = await fixture("normal", true);
   try {
     const ownerRef = "new-opaque-owner",
@@ -1681,11 +1750,12 @@ test("consumer-control SDK admits a new opaque owner and fences profiles, consum
       client.runAccess({ ...prepare, profileId: "ungranted-profile" }),
       denied(),
     );
-    for (const key of Object.keys(limits) as (keyof typeof limits)[])
+    for (const key of Object.keys(limits) as (keyof typeof limits)[]) {
       await assert.rejects(
         client.runAccess({ ...prepare, limits: { ...limits, [key]: limits[key] + 1 } }),
         denied(),
       );
+    }
     await assert.rejects(
       client.runAccess({ ...prepare, deadline: new Date(Date.now() + 120_000).toISOString() }),
       denied(),
@@ -1720,7 +1790,7 @@ test("consumer-control SDK admits a new opaque owner and fences profiles, consum
       "/v1/executions",
       "/v1/executions/" + _ref + "/close",
       "/v1/executions/" + _ref + "/requests",
-    ])
+    ]) {
       assert.equal(
         (
           await f.raw(
@@ -1733,14 +1803,17 @@ test("consumer-control SDK admits a new opaque owner and fences profiles, consum
         ).status,
         403,
       );
+    }
     for (const path of [
       "/v1/executions/" + _ref,
       "/v1/executions/" + _ref + "/requests/request-fixture",
-    ])
+    ]) {
       assert.equal((await f.raw(path, "GET", undefined, token)).status, 403);
+    }
     assert.equal((await f.raw("/v1/accounts/" + ref, "GET", undefined, access.bearer)).status, 403);
-    for (const path of ["/v1/profiles", "/v1/accounts?ownerRef=" + ownerRef])
+    for (const path of ["/v1/profiles", "/v1/accounts?ownerRef=" + ownerRef]) {
       assert.equal((await f.raw(path, "GET", undefined, run.token)).status, 403);
+    }
     assert.equal(
       (
         await f.raw(
@@ -1810,7 +1883,7 @@ test("consumer-control SDK admits a new opaque owner and fences profiles, consum
   }
 });
 
-test("consumer-control replacement during real SQL waits denies readback and issuance and revokes derived execution", async () => {
+void test("consumer-control replacement during real SQL waits denies readback and issuance and revokes derived execution", async () => {
   const f = await fixture();
   const lock = await pool.connect();
   try {
@@ -1839,7 +1912,8 @@ test("consumer-control replacement during real SQL waits denies readback and iss
         await lock.query("SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE", [
           f.context.consumerId,
         ]);
-      const pid: number = (await lock.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      const pid: number = (await lock.query<{ pid: number }>("SELECT pg_backend_pid() AS pid"))
+        .rows[0].pid;
       const input = {
         ...f.preparedInput,
         operationId: randomUUID(),
@@ -1847,17 +1921,19 @@ test("consumer-control replacement during real SQL waits denies readback and iss
       };
       const pending =
         mode === "readback" ? client.operation(f.created.operationRef) : client.runAccess(input);
-      void pending.catch(() => undefined);
+      void pending.catch(() => {});
       const deadline = Date.now() + 2000;
       let waiting = false;
       while (!waiting && Date.now() < deadline) {
         waiting = (
-          await pool.query(
+          await pool.query<{ waiting: boolean }>(
             "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))) AS waiting",
             [pid],
           )
         ).rows[0].waiting;
-        if (!waiting) await delay(10);
+        if (!waiting) {
+          await delay(10);
+        }
       }
       assert.equal(
         waiting,
@@ -1867,11 +1943,12 @@ test("consumer-control replacement during real SQL waits denies readback and iss
       f.bearers.replace([f.managementGrant]);
       await lock.query("ROLLBACK");
       await assert.rejects(pending, denied());
-      if (mode === "issuance")
+      if (mode === "issuance") {
         await assert.rejects(
           f.kernel.operation(f.context, input.operationId),
           (e) => e instanceof Error && "code" in e && e.code === "unknown",
         );
+      }
       assert.equal(f.bearers.current(retired), false);
       assert.equal(await f.bearers.resolveExecution(access.bearer, f.kernel), undefined);
       assert.equal(
@@ -1896,7 +1973,7 @@ test("consumer-control replacement during real SQL waits denies readback and iss
 
 // Closing writes after a suspension must preserve compatible reads and exact
 // original receipts, so rollout rollback does not strand the account inventory.
-test("lifecycle off-on-off keeps v2 inventory and original operation reads while refusing writes", async () => {
+void test("lifecycle off-on-off keeps v2 inventory and original operation reads while refusing writes", async () => {
   const f = await fixture();
   let original: c.LifecycleOperation | undefined;
   try {
@@ -1927,7 +2004,7 @@ test("lifecycle off-on-off keeps v2 inventory and original operation reads while
           });
           assert.equal(original.state, "applied");
         } else {
-          for (const action of ["suspend", "resume"] as const)
+          for (const action of ["suspend", "resume"] as const) {
             await assert.rejects(
               client[action](f.accountRef, {
                 operationId: randomUUID(),
@@ -1935,6 +2012,7 @@ test("lifecycle off-on-off keeps v2 inventory and original operation reads while
               }),
               denied("not_dispatched"),
             );
+          }
           if (original) {
             assert.equal(current.state, "suspended");
             assert.equal(
@@ -1956,8 +2034,8 @@ test("lifecycle off-on-off keeps v2 inventory and original operation reads while
 
 // Regression: old quota could escape a reconnect/delete/revoke while the native
 // read is awaited. Real PG kernel+mapping and both HTTP adapters fence the result.
-for (const family of ["codex", "claude"] as const)
-  test(`cached ${family} native limits fence owner, epoch, pending reconnect and late revocation`, async () => {
+for (const family of ["codex", "claude"] as const) {
+  void test(`cached ${family} native limits fence owner, epoch, pending reconnect and late revocation`, async () => {
     const context = { consumerId: "limits-" + randomUUID() },
       kernel = new PostgresKernel(pool);
     const secrets = new IntentSecrets(randomBytes(32), randomBytes(32)),
@@ -1978,7 +2056,7 @@ for (const family of ["codex", "claude"] as const)
       profile: p.profile,
       displayName: "Limits fixture",
     });
-    assert.ok(created.accountRef);
+    assert.ok(typeof created.accountRef === "string" && created.accountRef !== "");
     const accountRef = created.accountRef;
     const permit = await kernel.startCandidate(context, operationId, worker);
     assert.ok(permit);
@@ -2036,7 +2114,7 @@ for (const family of ["codex", "claude"] as const)
       void (async () => {
         assert.equal(req.headers.authorization, "Bearer fixture-native-limits");
         res.setHeader("content-type", "application/json");
-        if (req.url?.endsWith("/capabilities")) {
+        if (req.url?.endsWith("/capabilities") === true) {
           res.end(
             JSON.stringify({
               contract: "account-limits/v1",
@@ -2125,7 +2203,7 @@ for (const family of ["codex", "claude"] as const)
         ...expectedSnapshot,
         windows: [
           {
-            ...expectedSnapshot.windows[0]!,
+            ...expectedSnapshot.windows[0],
             id: family === "claude" ? "primary" : "claude-5h",
             family: family === "claude" ? "codex" : "claude",
           },
@@ -2138,8 +2216,8 @@ for (const family of ["codex", "claude"] as const)
       );
       nativeResult = expectedSnapshot;
       assert.equal(entered, 2);
-      const forManagement = (token: string) =>
-        createAccountLimitsClient({ role: "management", origin, token });
+      const forManagement = (managementAccessToken: string) =>
+        createAccountLimitsClient({ role: "management", origin, token: managementAccessToken });
       assert.deepEqual(await forManagement(managementToken).readAccountLimits(input), nativeResult);
       const beforeForeign = entered;
       await assert.rejects(forManagement(foreignToken).readAccountLimits(input), denied());
@@ -2162,8 +2240,9 @@ for (const family of ["codex", "claude"] as const)
       for (const bad of [
         { ownerRef: "foreign-owner" },
         { expectedAuthorizationEpoch: a.epoch + 1 },
-      ])
+      ]) {
         await assert.rejects(client.readAccountLimits({ ...input, ...bad }), denied());
+      }
       assert.equal(entered, readsBeforeDenied, "owner and epoch rejected before native read");
       const response = await fetch(origin + "/v1/account-limits/read", {
         method: "POST",
@@ -2222,3 +2301,4 @@ for (const family of ["codex", "claude"] as const)
       await stop(native);
     }
   });
+}

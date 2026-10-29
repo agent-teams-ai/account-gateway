@@ -3,9 +3,6 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "engines": {
-    "node": "24.21.x || >=26.10.0 <27"
-  },
   "scripts": {
     "start": "node src/serve.ts",
     "typecheck": "tsc --project tsconfig.json",
@@ -19,10 +16,13 @@
     "qualify:usage": "node --test test/service-usage-runtime.test.ts"
   },
   "dependencies": {
-    "pg": "8.23.1",
-    "@agent-teams/account-gateway": "workspace:*"
+    "@agent-teams/account-gateway": "workspace:*",
+    "pg": "8.23.1"
   },
   "devDependencies": {
     "@types/pg": "8.23.1"
+  },
+  "engines": {
+    "node": "24.21.x || >=26.10.0 <27"
   }
 }

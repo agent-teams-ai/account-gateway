@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 
 // Regression: a pin or retained document changes without its reviewed migration,
 // or pending qualification is silently promoted to a CMS conformance claim.
-test("consumer pin rejects unreviewed identities, retained-byte drift and adoption promotion", async () => {
+void test("consumer pin rejects unreviewed identities, retained-byte drift and adoption promotion", async () => {
   await mkdir(".cache/consumer-pin-tests", { recursive: true });
   const root = await mkdtemp(resolve(".cache/consumer-pin-tests/run-"));
   try {
@@ -21,9 +21,9 @@ test("consumer pin rejects unreviewed identities, retained-byte drift and adopti
       spawnSync(process.execPath, ["scripts/check-topology.mjs", root], { encoding: "utf8" });
     assert.equal(check().status, 0);
     for (const [before, after, code] of [
-      ["b70ba39304ac71964175c42a77309406a7c30ca2", "0".repeat(40), "review-mismatch"],
+      ["8305ea6409757da8e60dca074dce163d95c85e88", "0".repeat(40), "review-mismatch"],
       [
-        "11a389b223506dc303fa986a7a37350b847013d85beb2de9d74cb8c97363e824",
+        "3c5814ebf1ab1bd17688e49955aa0baa2ee91dd3a369adcea4d38aaccd53ba86",
         "0".repeat(64),
         "review-mismatch",
       ],

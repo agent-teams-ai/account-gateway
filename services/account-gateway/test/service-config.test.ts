@@ -7,6 +7,7 @@ import {
   glmProfile,
   kimiProfile,
   minimaxProfile,
+  openRouterProfile,
   captureGrokOAuthEnrollmentConfig,
   ServiceError,
 } from "../src/service-config.ts";
@@ -25,10 +26,11 @@ const serviceProfile = (requests: number) => ({
   },
   providerTokenUpperBound: 100_000,
 });
-const denied = (body: () => unknown) =>
+const denied = (body: () => unknown) => {
   assert.throws(body, (e) => e instanceof ServiceError && e.code === "config_denied");
+};
 
-test("new keyed profiles accept only immutable provider tuples and GLM owner policy is not config-selectable", () => {
+void test("new keyed profiles accept only immutable provider tuples and GLM owner policy is not config-selectable", () => {
   const limits = {
     requests: 2,
     concurrency: 1,
@@ -54,7 +56,7 @@ test("new keyed profiles accept only immutable provider tuples and GLM owner pol
   }
 });
 
-test("all keyed provider leaves coexist and duplicate or invented leaves deny", () => {
+void test("all keyed provider leaves coexist and duplicate or invented leaves deny", () => {
   const limits = {
     requests: 2,
     concurrency: 1,
@@ -86,7 +88,7 @@ test("all keyed provider leaves coexist and duplicate or invented leaves deny", 
 
 // Red if raising the run budget needs a code change again: the operational knob is the service
 // profile, the code keeps only the acceptance ceiling.
-test("service profile admits production budgets up to the code ceiling and denies above it", () => {
+void test("service profile admits production budgets up to the code ceiling and denies above it", () => {
   const [prod] = captureServiceProfiles({ profile: serviceProfile(640) });
   assert.equal(prod.limits.requests, 640);
   const [ceiling] = captureServiceProfiles({ profile: serviceProfile(10_000) });
@@ -135,7 +137,7 @@ test("request readback retention requires an explicit positive bounded duration"
 
 // Red if configuration intersects output across profiles instead of capturing
 // the selected envelope, or grants borrow an unselected profile's authority.
-test("consumer output envelope uses only selected profiles and preserves all other grant bounds", () => {
+void test("consumer output envelope uses only selected profiles and preserves all other grant bounds", () => {
   const profiles = [
     serviceProfile(640),
     {
@@ -157,10 +159,11 @@ test("consumer output envelope uses only selected profiles and preserves all oth
   denied(() => capture({ ...control, profileIds: [profiles[0].profile] }));
   denied(() => capture({ ...control, profileIds: [...control.profileIds, "missing"] }));
   denied(() => capture({ ...control, limits: { ...control.limits, outputBytes: 8_388_609 } }));
-  for (const field of ["requests", "concurrency", "requestBytes", "tokens"] as const)
+  for (const field of ["requests", "concurrency", "requestBytes", "tokens"] as const) {
     denied(() =>
       capture({ ...control, limits: { ...control.limits, [field]: control.limits[field] + 1 } }),
     );
+  }
   denied(() => capture({ ...control, role: "run-control", ownerRefs: ["fixture-owner"] }));
   denied(() =>
     capture({
@@ -186,7 +189,7 @@ test("consumer output envelope uses only selected profiles and preserves all oth
 
 // Red if the canonical configuration parser still rejects the native raw-SSE
 // ceiling, or if widening total response bytes also widens unrelated limits.
-test("qualified Codex profile admits eight MiB raw SSE and rejects one byte above", () => {
+void test("qualified Codex profile admits eight MiB raw SSE and rejects one byte above", () => {
   const limits = {
     requests: 1,
     concurrency: 1,
@@ -234,7 +237,7 @@ test("qualified Codex profile admits eight MiB raw SSE and rejects one byte abov
 });
 
 // The independent opt-in must not borrow Codex qualification or accept caller endpoints.
-test("Claude enrollment captures only the fixed qualified tuple alongside Codex", () => {
+void test("Claude enrollment captures only the fixed qualified tuple alongside Codex", () => {
   const profile = serviceProfile(4);
   const claudeOAuthEnrollment = {
     enabled: true as const,
@@ -267,7 +270,7 @@ test("Claude enrollment captures only the fixed qualified tuple alongside Codex"
     { baseURL: "https://fixture.invalid" },
     { qualificationRef: undefined },
     { limits: undefined },
-  ])
+  ]) {
     denied(() =>
       captureServiceProfiles({
         profile,
@@ -277,9 +280,10 @@ test("Claude enrollment captures only the fixed qualified tuple alongside Codex"
         } as typeof claudeOAuthEnrollment,
       }),
     );
+  }
 });
 
-test("Grok needs explicit deployment qualification and cannot bypass it through the key profile", () => {
+void test("Grok needs explicit deployment qualification and cannot bypass it through the key profile", () => {
   const limits = {
     requests: 2,
     concurrency: 1,
@@ -313,6 +317,35 @@ test("Grok needs explicit deployment qualification and cannot bypass it through 
         limits,
         providerTokenUpperBound: 1000,
       },
+    }),
+  );
+});
+
+// Enrollment captures a safe immutable anchor; Native owns live membership qualification.
+void test("OpenRouter enrollment accepts future safe anchors without loosening its fixed provider tuple", () => {
+  const selected = {
+    ...serviceProfile(2),
+    ...openRouterProfile,
+    model: "future-vendor/review:model-9",
+  };
+  const first = serviceProfile(2);
+  assert.deepEqual(captureServiceProfiles({ profile: selected }), [selected]);
+  assert.deepEqual(captureServiceProfiles({ profile: first, secondProfile: selected }), [
+    first,
+    selected,
+  ]);
+  for (const model of ["bad model", "../model", "", "x".repeat(129)]) {
+    denied(() => captureServiceProfiles({ profile: { ...selected, model } }));
+    denied(() => captureServiceProfiles({ profile: first, secondProfile: { ...selected, model } }));
+  }
+  const foreign = { ...selected, baseURL: "https://attacker.example/v1" };
+  denied(() => captureServiceProfiles({ profile: foreign }));
+  denied(() => captureServiceProfiles({ profile: first, secondProfile: foreign }));
+  denied(() => captureServiceProfiles({ profile: selected, secondProfile: selected }));
+  denied(() =>
+    captureServiceProfiles({
+      profile: first,
+      secondProfile: { ...selected, profile: "different-profile" },
     }),
   );
 });

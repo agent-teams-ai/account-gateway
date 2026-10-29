@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import * as c from "../packages/account-gateway/dist/contracts/index.js";
 import {
@@ -22,7 +22,7 @@ const pending = {
 
 // Regression: accepting native IDs/unknown origins or handoff fields in an
 // ordinary operation would turn safe receipts into credential-bearing storage.
-test("device contracts isolate transient handoff from ordinary operation receipts", () => {
+void test("device contracts isolate transient handoff from ordinary operation receipts", () => {
   const begin = { operation: pending, deviceAuthorization: handoff };
   assert.deepEqual(c.oauthBeginResponse.parse(begin), begin);
   for (const changed of [
@@ -61,12 +61,18 @@ test("device contracts isolate transient handoff from ordinary operation receipt
   );
 });
 
-test("SDK polls only explicit POST and never retries ambiguous device dispatch", async (t) => {
+void test("SDK polls only explicit POST and never retries ambiguous device dispatch", async (t) => {
   const requests: { path: string | undefined; method: string | undefined; body?: unknown }[] = [];
   let loseACK = false;
-  const server = createServer(async (req, res) => {
-    const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(chunk);
+  const settlements: Promise<void>[] = [];
+  const failures: unknown[] = [];
+  async function handleRequest(req: IncomingMessage, res: ServerResponse) {
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of req) {
+      const bytes: unknown = chunk;
+      assert.ok(bytes instanceof Uint8Array);
+      chunks.push(bytes);
+    }
     requests.push({
       path: req.url,
       method: req.method,
@@ -80,20 +86,30 @@ test("SDK polls only explicit POST and never retries ambiguous device dispatch",
     res.writeHead(200, { "content-type": "application/json" });
     res.end(
       JSON.stringify(
-        req.url?.endsWith("/begin")
+        req.url?.endsWith("/begin") === true
           ? { operation: pending, deviceAuthorization: handoff }
           : pending,
       ),
     );
+  }
+  const server = createServer((req, res) => {
+    settlements.push(
+      handleRequest(req, res).catch((error: unknown) => {
+        failures.push(error);
+        res.destroy();
+      }),
+    );
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
-  t.after(() => {
+  t.after(async () => {
     server.closeAllConnections();
     server.close();
+    await Promise.all(settlements);
+    assert.deepEqual(failures, [], "HTTP fixture handler failed");
   });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   const client = createManagementClient({
     origin: `http://127.0.0.1:${address.port}`,
     role: "management",

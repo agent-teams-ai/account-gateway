@@ -58,9 +58,10 @@ const valid = {
   service_tier: "default",
   input: "fixture",
 };
-const invalid = (fn: () => unknown) =>
+const invalid = (fn: () => unknown) => {
   assert.throws(fn, (e) => e instanceof KernelError && e.code === "invalid");
-test("capability projection omits new profiles without configuration and does not invent model settings", () => {
+};
+void test("capability projection omits new profiles without configuration and does not invent model settings", () => {
   const configured = [
     {
       profileId: "openai-responses-apikey-v1",
@@ -78,9 +79,28 @@ test("capability projection omits new profiles without configuration and does no
   );
   const glm = providerConnectionDefinition("glm-coding-global-responses-apikey-v1");
   assert.equal(glm?.models[0].modelId, "glm-5.3-flash");
-  assert.equal(glm?.models[0].reasoning, null);
+  assert.equal(glm.models[0].reasoning, null);
+  const openrouter = projectProviderConnections([
+    {
+      profileId: "openrouter-openai-responses-apikey-v1",
+      protocol: "openai-responses",
+      modelIds: ["future-vendor/birth-anchor"],
+    },
+  ]);
+  assert.deepEqual(
+    providerConnectionDefinition("openrouter-openai-responses-apikey-v1")?.models,
+    [],
+  );
+  assert.deepEqual(openrouter.capabilities[0]?.models, [
+    {
+      modelId: "future-vendor/birth-anchor",
+      reasoning: null,
+      fast: null,
+      tools: { allowed: ["none"], default: "none" },
+    },
+  ]);
 });
-test("Grok manual callback grammar is profile-owned and cannot select another provider", () => {
+void test("Grok manual callback grammar is profile-owned and cannot select another provider", () => {
   const state = "a".repeat(64);
   assert.deepEqual(
     secretSubmission.parseGrokManualCallbackURL(
@@ -93,10 +113,11 @@ test("Grok manual callback grammar is profile-owned and cannot select another pr
     `http://127.0.0.1:56121/callback?code=fixture&state=${state}&provider=claude`,
     `http://127.0.0.1:56121/callback?code=fixture%23fragment&state=${state}`,
     `http://127.0.0.1:56121/callback?code=fixture&state=${state}&state=${state}`,
-  ])
+  ]) {
     assert.equal(secretSubmission.parseGrokManualCallbackURL(value), undefined);
+  }
 });
-test("decoded duplicate names, malformed UTF-8 and bounded nesting deny ingress", () => {
+void test("decoded duplicate names, malformed UTF-8 and bounded nesting deny ingress", () => {
   invalid(() => strictJSON(bytes('{"model":"a","\\u006dodel":"b"}')));
   invalid(() => strictJSON(bytes('{"outer":{"key":1,"\\u006bey":2}}')));
   invalid(() => strictJSON(new Uint8Array([0x22, 0xff, 0x22])));
@@ -106,52 +127,91 @@ test("decoded duplicate names, malformed UTF-8 and bounded nesting deny ingress"
     value: 'literal "key"',
   });
 });
-test("Responses permits the provider default when no service tier is requested", () => {
-  const { service_tier: _tier, ...request } = valid;
+void test("Responses permits the provider default when no service tier is requested", () => {
+  const { service_tier: _tier, ...requestWithoutTier } = valid;
   assert.equal(
-    validateResponses(bytes(JSON.stringify(request)), ["fixture-model"], 100),
+    validateResponses(bytes(JSON.stringify(requestWithoutTier)), ["fixture-model"], 100),
     "fixture-model",
   );
-  for (const service_tier of [null, false, "auto", "priority", "flex"])
+  for (const service_tier of [null, false, "auto", "priority", "flex"]) {
     invalid(() =>
       validateResponses(
-        bytes(JSON.stringify({ ...request, service_tier })),
+        bytes(JSON.stringify({ ...requestWithoutTier, service_tier })),
         ["fixture-model"],
         100,
       ),
     );
+  }
 });
 
-test("source-qualified model capabilities reject configured reasoning for the four new profiles", () => {
+void test("OpenRouter admission preserves exactly the selected snapshot reasoning efforts", () => {
+  const model = {
+    modelId: "future-vendor/review-model",
+    reasoning: { allowed: ["high", "medium"], default: "medium" },
+  };
+  const responseBody = (effort?: string) =>
+    bytes(
+      JSON.stringify({
+        ...valid,
+        model: model.modelId,
+        ...(effort === undefined ? {} : { reasoning: { effort } }),
+      }),
+    );
+  for (const effort of [undefined, "high", "medium"]) {
+    assert.equal(
+      validateResponses(responseBody(effort), [model.modelId], 100, [model], true, "openrouter"),
+      model.modelId,
+    );
+  }
+  for (const effort of ["low", "max", "none"]) {
+    invalid(() =>
+      validateResponses(responseBody(effort), [model.modelId], 100, [model], true, "openrouter"),
+    );
+  }
+  invalid(() =>
+    validateResponses(
+      responseBody("high"),
+      [model.modelId],
+      100,
+      [{ ...model, reasoning: null }],
+      true,
+      "openrouter",
+    ),
+  );
+});
+
+void test("source-qualified model capabilities reject configured reasoning for the four new profiles", () => {
   const profiles = providerConnectionRegistry.filter(
     (profile) => profile.limitsContract === "account-limits/v2",
   );
   assert.equal(profiles.length, 4);
   for (const profile of profiles) {
     const model = profile.models[0];
-    const request = { ...valid, model: model.modelId };
-    for (const reasoning of [undefined, null])
+    const modelRequest = { ...valid, model: model.modelId };
+    for (const reasoning of [undefined, null]) {
       assert.equal(
         validateResponses(
-          bytes(JSON.stringify({ ...request, reasoning })),
+          bytes(JSON.stringify({ ...modelRequest, reasoning })),
           [model.modelId],
           100,
           profile.models,
         ),
         model.modelId,
       );
-    for (const reasoning of [{ effort: "xhigh" }, {}, false, "high"])
+    }
+    for (const reasoning of [{ effort: "xhigh" }, {}, false, "high"]) {
       invalid(() =>
         validateResponses(
-          bytes(JSON.stringify({ ...request, reasoning })),
+          bytes(JSON.stringify({ ...modelRequest, reasoning })),
           [model.modelId],
           100,
           profile.models,
         ),
       );
+    }
     invalid(() =>
       validateResponses(
-        bytes(JSON.stringify({ ...request, service_tier: "priority" })),
+        bytes(JSON.stringify({ ...modelRequest, service_tier: "priority" })),
         [model.modelId],
         100,
         profile.models,
@@ -159,8 +219,8 @@ test("source-qualified model capabilities reject configured reasoning for the fo
     );
   }
   for (const profile of providerConnectionRegistry.filter(
-    (profile) => profile.limitsContract === "account-limits/v1",
-  ))
+    (registeredProfile) => registeredProfile.limitsContract === "account-limits/v1",
+  )) {
     assert.equal(
       validateResponses(
         bytes(
@@ -176,15 +236,16 @@ test("source-qualified model capabilities reject configured reasoning for the fo
       ),
       profile.models[0].modelId,
     );
+  }
 });
 
-test("account-disabled reasoning accepts precisely the empty Codex JSON object without changing request bytes", () => {
+void test("account-disabled reasoning accepts precisely the empty Codex JSON object without changing request bytes", () => {
   const policy = [{ modelId: "fixture-model", reasoning: null }];
   const raw = bytes('{"model":"fixture-model","stream":true,"store":false,"reasoning":{}}');
   const before = Buffer.from(raw);
   assert.equal(validateResponses(raw, ["fixture-model"], 100, policy, true), "fixture-model");
   assert.deepEqual(raw, before);
-  for (const reasoning of [undefined, null])
+  for (const reasoning of [undefined, null]) {
     assert.equal(
       validateResponses(
         bytes(JSON.stringify({ ...valid, reasoning })),
@@ -195,7 +256,8 @@ test("account-disabled reasoning accepts precisely the empty Codex JSON object w
       ),
       "fixture-model",
     );
-  for (const reasoning of [
+  }
+  const invalidReasoning: unknown[] = [
     { effort: "high" },
     { summary: "none" },
     { context: "all_turns" },
@@ -206,7 +268,8 @@ test("account-disabled reasoning accepts precisely the empty Codex JSON object w
     false,
     0,
     "",
-  ])
+  ];
+  for (const reasoning of invalidReasoning) {
     invalid(() =>
       validateResponses(
         bytes(JSON.stringify({ ...valid, reasoning })),
@@ -216,11 +279,12 @@ test("account-disabled reasoning accepts precisely the empty Codex JSON object w
         true,
       ),
     );
+  }
   // Existing static provider admission does not acquire the Codex-only exception.
   invalid(() => validateResponses(raw, ["fixture-model"], 100, policy));
 });
 
-test("Responses policy rejects critical aliases and unsafe provider options before transport", () => {
+void test("Responses policy rejects critical aliases and unsafe provider options before transport", () => {
   for (const patch of [
     { store: true },
     { stream: false },
@@ -235,7 +299,7 @@ test("Responses policy rejects critical aliases and unsafe provider options befo
     );
   }
 });
-test("output cap lexical precision cannot round a fractional or exponential authority into an integer", () => {
+void test("output cap lexical precision cannot round a fractional or exponential authority into an integer", () => {
   for (const cap of ["1.000000000000000001", "1e1", "0", "-1", "null", '"10"', "101"]) {
     invalid(() =>
       validateResponses(
@@ -251,7 +315,7 @@ test("output cap lexical precision cannot round a fractional or exponential auth
     100,
   );
 });
-test("qualified canonical escapes and unrelated tool text preserve original request bytes", () => {
+void test("qualified canonical escapes and unrelated tool text preserve original request bytes", () => {
   const raw = bytes(
     '{"\\u006dodel":"fixture-model","stream":true,"store":false,"service_tier":"default","input":[{"content":"MAX_OUTPUT_TOKENS user text"}]}',
   );
@@ -260,7 +324,7 @@ test("qualified canonical escapes and unrelated tool text preserve original requ
   assert.deepEqual(raw, before);
 });
 
-test("SDK control numeric tokens cannot round into an accepted integer authority", () => {
+void test("SDK control numeric tokens cannot round into an accepted integer authority", () => {
   for (const token of [
     "1.000000000000000001",
     "0.0000000000000000000000000000000000000000000000000001",
@@ -298,7 +362,7 @@ test("SDK control numeric tokens cannot round into an accepted integer authority
 
 // RED if browser URL normalization admits aliases or silently changes code,
 // or if UTF-8 byte bounds are replaced by JavaScript character counts.
-test("OAuth callback ingress accepts genuine encoding and rejects aliases, malformed bytes and secret overflow", () => {
+void test("OAuth callback ingress accepts genuine encoding and rejects aliases, malformed bytes and secret overflow", () => {
   const state = "a".repeat(64),
     callback = (code: string, scope = "") =>
       "http://localhost:1455/auth/callback?code=" + code + "&state=" + state + scope;
@@ -355,6 +419,54 @@ test("OAuth callback ingress accepts genuine encoding and rejects aliases, malfo
   );
 });
 
+function nonempty(value: string | undefined): value is string {
+  return Boolean(value);
+}
+function closedRecord(
+  value: unknown,
+  keys: readonly string[],
+): asserts value is Record<string, unknown> {
+  assert.ok(value !== null && typeof value === "object" && !Array.isArray(value));
+  assert.deepEqual(Object.keys(value).toSorted(), keys.toSorted());
+}
+const scopeKey = (c: { consumerId: string }, id: string) => JSON.stringify([c.consumerId, id]);
+const missing = (): never => {
+  throw new KernelError("unknown");
+};
+async function listen(server: Server) {
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const a = server.address();
+  assert.ok(a !== null && typeof a === "object");
+  return "http://127.0.0.1:" + a.port;
+}
+
+interface FixtureKernel extends DurableKernel, ExecutionRead {
+  issuer(
+    this: void,
+    ...args: Parameters<DurableKernel["issuer"]>
+  ): ReturnType<DurableKernel["issuer"]>;
+  operation(
+    this: void,
+    ...args: Parameters<DurableKernel["operation"]>
+  ): ReturnType<DurableKernel["operation"]>;
+  prepare(
+    this: void,
+    ...args: Parameters<DurableKernel["prepare"]>
+  ): ReturnType<DurableKernel["prepare"]>;
+  savedExecution(
+    this: void,
+    ...args: Parameters<ExecutionRead["savedExecution"]>
+  ): ReturnType<ExecutionRead["savedExecution"]>;
+}
+const journalLookup = (j: CandidateJournal) => ({
+  consumerId: j.consumerId,
+  operationId: j.operationId,
+  accountRef: j.accountRef,
+  generation: j.generation,
+});
+
 // Source boundary fixtures have test-owned committed state and real HTTP hops.
 // They qualify neither SQL transactions nor Go middleware/provider transport.
 async function sourceHTTP(
@@ -363,6 +475,7 @@ async function sourceHTTP(
   usage?: UsageJournal,
   callbackAdmission?: Parameters<NativeAuthority["createServer"]>[0],
   limitsRead?: { contract: "v1" | "v2"; enter(): Promise<void> },
+  omitModelSource = false,
 ) {
   const oauthProfile =
     oauth === "grok"
@@ -437,11 +550,7 @@ async function sourceHTTP(
   const executionCleanup = new Set<string>();
   const custody = new IntentSecrets(randomBytes(32), randomBytes(32));
   const staged = new Map<string, string>();
-  const scopeKey = (c: { consumerId: string }, id: string) => JSON.stringify([c.consumerId, id]);
-  const missing = (): never => {
-    throw new KernelError("unknown");
-  };
-  const kernel: DurableKernel & ExecutionRead = {
+  const kernel: FixtureKernel = {
     issuer: async () => issuer,
     heartbeat: async () => {},
     reconcile: async () => {},
@@ -451,7 +560,9 @@ async function sourceHTTP(
       const mapping = [...mappings.values()].find(
         (m) => m.consumerId === c.consumerId && m.accountRef === id,
       );
-      if (!mapping) return missing();
+      if (!mapping) {
+        return missing();
+      }
       return {
         ...account,
         generation: mapping.generation,
@@ -464,11 +575,11 @@ async function sourceHTTP(
         .filter(
           (a) =>
             accounts.has(scopeKey(c, a.accountRef)) &&
-            (!query.ownerRef || a.ownerRef === query.ownerRef) &&
+            (!nonempty(query.ownerRef) || a.ownerRef === query.ownerRef) &&
             (!query.allowedOwnerRefs || query.allowedOwnerRefs.includes(a.ownerRef)) &&
-            (!query.cursor || a.accountRef > query.cursor),
+            (!nonempty(query.cursor) || a.accountRef > query.cursor),
         )
-        .sort((a, b) => a.accountRef.localeCompare(b.accountRef));
+        .toSorted((a, b) => a.accountRef.localeCompare(b.accountRef));
       const page = rows.slice(0, query.limit ?? 100);
       return {
         accounts: page,
@@ -478,18 +589,23 @@ async function sourceHTTP(
     async beginAccount(c, intent) {
       const key = scopeKey(c, intent.operationId),
         old = operations.get(key);
-      if (old) return old;
+      if (old) {
+        return old;
+      }
       if (intent.kind !== "create") {
         const account = await kernel.account(c, intent.accountRef!);
-        if (account.revision !== intent.expectedRevision) throw new KernelError("conflict");
+        if (account.revision !== intent.expectedRevision) {
+          throw new KernelError("conflict");
+        }
         const op: OperationStatus = {
           operationRef: intent.operationId,
           accountRef: account.accountRef,
           state: "pending",
         };
         if (intent.kind === "rename" || intent.kind === "disable") {
-          if (intent.kind === "rename") account.displayName = intent.displayName!;
-          else {
+          if (intent.kind === "rename") {
+            account.displayName = intent.displayName!;
+          } else {
             account.state = "disabled";
             account.epoch++;
           }
@@ -501,7 +617,9 @@ async function sourceHTTP(
         operations.set(key, op);
         return op;
       }
-      if (!intent.ownerRef || !intent.profile) return missing();
+      if (!nonempty(intent.ownerRef) || !nonempty(intent.profile)) {
+        return missing();
+      }
       const accountRef = randomUUID();
       accounts.set(scopeKey(c, accountRef), {
         accountRef,
@@ -532,7 +650,9 @@ async function sourceHTTP(
     async acknowledgeCandidate(c, id) {
       const op = await kernel.operation(c, id),
         account = await kernel.account(c, op.accountRef!);
-      if (op.state !== "pending") return op;
+      if (op.state !== "pending") {
+        return op;
+      }
       if (account.state === "active") {
         account.revision++;
         account.epoch++;
@@ -552,15 +672,18 @@ async function sourceHTTP(
       const key = scopeKey(c, approval.operationId),
         old = operations.get(key);
       if (old) {
-        if (preparationIntents.get(key) !== approval.intentDigest)
+        if (preparationIntents.get(key) !== approval.intentDigest) {
           throw new KernelError("conflict");
+        }
         return old;
       }
       const account = await kernel.account(c, approval.permittedAccounts[0]);
       const mapping = [...mappings.values()].find(
         (m) => m.consumerId === c.consumerId && m.accountRef === account.accountRef,
       );
-      if (!mapping || account.state !== "active") return missing();
+      if (!mapping || account.state !== "active") {
+        return missing();
+      }
       const executionRef = randomUUID(),
         deadline = approval.deadline.toISOString();
       const saved: SavedExecution = {
@@ -602,7 +725,9 @@ async function sourceHTTP(
     async claim(c, ref, id, w, admission, reservation) {
       const key = scopeKey(c, ref + ":" + id),
         old = requests.get(key);
-      if (old) return { status: old };
+      if (old) {
+        return { status: old };
+      }
       const saved = await kernel.savedExecution(c, ref),
         mapping = mappings.get(scopeKey(c, saved.generation))!;
       const status: RequestStatus = {
@@ -649,12 +774,13 @@ async function sourceHTTP(
     async close(c, operationId, executionRef) {
       const saved = await kernel.savedExecution(c, executionRef);
       // SQL close transitions only open rows; fenced rows retain scoped readback.
-      if (saved.state === "open")
+      if (saved.state === "open") {
         executions.set(scopeKey(c, executionRef), {
           ...saved,
           state: "closed",
           dispatchAllowed: false,
         });
+      }
       executionCleanup.add(scopeKey(c, executionRef));
       const op: OperationStatus = {
         operationRef: operationId,
@@ -666,11 +792,15 @@ async function sourceHTTP(
       return op;
     },
     async restore(c, expectedIssuer, freshIssuer) {
-      if (expectedIssuer !== issuer) throw new KernelError("conflict");
-      if (expectedIssuer === freshIssuer) throw new KernelError("invalid");
+      if (expectedIssuer !== issuer) {
+        throw new KernelError("conflict");
+      }
+      if (expectedIssuer === freshIssuer) {
+        throw new KernelError("invalid");
+      }
       issuer = freshIssuer;
       // Restore fences every execution, including closed rows, without repinning.
-      for (const [key, saved] of executions)
+      for (const [key, saved] of executions) {
         if (key === scopeKey(c, saved.admission.executionRef)) {
           executions.set(key, {
             ...saved,
@@ -679,7 +809,8 @@ async function sourceHTTP(
           });
           executionCleanup.add(key);
         }
-      for (const [key, account] of accounts)
+      }
+      for (const [key, account] of accounts) {
         if (
           key === scopeKey(c, account.accountRef) &&
           ["active", "staging"].includes(account.state)
@@ -687,6 +818,7 @@ async function sourceHTTP(
           account.state = "quarantined";
           account.epoch++;
         }
+      }
     },
     currentCleanupLease: missing,
     rejectBeforeDispatch: missing,
@@ -733,8 +865,9 @@ async function sourceHTTP(
         op.state !== "pending" ||
         a.state !== "staging" ||
         mappings.has(scopeKey(c, j.generation))
-      )
-        return undefined;
+      ) {
+        return;
+      }
       return j;
     },
     credential: async (s) => staged.get(scopeKey(s, s.operationId)),
@@ -779,12 +912,17 @@ async function sourceHTTP(
       body: JSON.stringify(body),
       redirect: "manual",
     });
-  let modelResult: lifecycleWire.AccountModels = { status: "unavailable" };
+  const failures: unknown[] = [];
+  const settlements: Promise<void>[] = [];
+  let modelResult: unknown = { status: "unavailable" };
+  let modelHTTPStatus = 200;
   let modelRead: (() => Promise<void>) | undefined;
   const peer = createServer((req, res) => {
-    void (async () => {
+    const settled = (async () => {
       const chunks: Buffer[] = [];
-      for await (const chunk of req) chunks.push(Buffer.from(chunk as Uint8Array));
+      for await (const chunk of req) {
+        chunks.push(Buffer.from(chunk as Uint8Array));
+      }
       const tuple = chunks.length
         ? (strictJSON(Buffer.concat(chunks)) as Record<string, unknown>)
         : {};
@@ -797,7 +935,7 @@ async function sourceHTTP(
       if (req.method === "POST" && path === "/private/native/v1/account-models/read") {
         assert.equal(req.headers.authorization, "Bearer " + consumer.managementCredential);
         await modelRead?.();
-        reply(modelResult);
+        reply(modelResult, modelHTTPStatus);
         return;
       }
       if (req.method === "GET" && path === "/private/native/v1/account-limits/capabilities") {
@@ -855,7 +993,7 @@ async function sourceHTTP(
         assert.equal(req.method, "POST");
         assert.equal(req.headers.authorization, "Bearer " + consumer.managementCredential);
         assert.deepEqual(
-          Object.keys(tuple).sort(),
+          Object.keys(tuple).toSorted(),
           path.endsWith("/complete")
             ? oauth === "grok" && "authorizationCode" in tuple
               ? ["account_ref", "authorizationCode", "generation", "operation", "owner_ref"]
@@ -888,13 +1026,17 @@ async function sourceHTTP(
             return;
           }
           if (descriptorMode === "headers") {
-            for (let i = 0; i < 65; i++) res.setHeader("x-fixture-" + i, "a");
+            for (let i = 0; i < 65; i++) {
+              res.setHeader("x-fixture-" + i, "a");
+            }
           }
           if (descriptorMode === "utf8") {
             res.end(Buffer.from([0xff]));
             return;
           }
-          if (descriptorMode === "timeout") return;
+          if (descriptorMode === "timeout") {
+            return;
+          }
           reply(
             descriptorReply ?? {
               operation: tuple.operation,
@@ -905,9 +1047,13 @@ async function sourceHTTP(
           );
           return;
         }
-        if (path === oauthPath + "/connect") begins++;
+        if (path === oauthPath + "/connect") {
+          begins++;
+        }
         if (path.endsWith("/complete")) {
-          if (!("authorizationCode" in tuple)) assert.equal(tuple.state, "a".repeat(64));
+          if (!("authorizationCode" in tuple)) {
+            assert.equal(tuple.state, "a".repeat(64));
+          }
           completions++;
           if (loseCompletion) {
             req.socket.destroy();
@@ -923,7 +1069,7 @@ async function sourceHTTP(
         return;
       }
       if (path === "/private/native/v1/candidates" && req.method === "POST") {
-        const p = [profile, secondProfile].find((p) => p.profile === tuple.profile)!;
+        const p = [profile, secondProfile].find((candidate) => candidate.profile === tuple.profile);
         assert.ok(p);
         assert.equal(req.headers.authorization, "Bearer " + consumer.managementCredential);
         assert.equal(tuple.api_key, "fixture-write-only");
@@ -942,7 +1088,7 @@ async function sourceHTTP(
         return;
       }
       if (path.startsWith("/private/native/v1/candidates/")) {
-        const row = nativeRows.get(path.split("/").at(-1)!)!;
+        const row = nativeRows.get(path.split("/").at(-1)!);
         assert.ok(row);
         if (req.method === "PUT") {
           assert.deepEqual(tuple.descriptor, row.descriptor);
@@ -962,7 +1108,9 @@ async function sourceHTTP(
         const { payload, ...admit } = tuple;
         const d = tuple.descriptor as Record<string, unknown>,
           generation = d.generation as string;
-        const p = [profile, secondProfile, oauthProfile].find((p) => p.profile === d.profile)!;
+        const p = [profile, secondProfile, oauthProfile].find(
+          (candidate) => candidate.profile === d.profile,
+        )!;
         assert.equal(d.base_url, p.baseURL);
         assert.equal(d.model, p.model);
         const native = {
@@ -982,16 +1130,71 @@ async function sourceHTTP(
           native: nativeBinding,
         });
         assert.equal(result.status, 200);
-        const permit = (await result.json()) as {
-          dispatch: { closure: NativeDispatchProof };
-        };
-        assert.ok(permit.dispatch);
-        forwarded.push({
-          profile: d.profile,
-          baseURL: d.base_url,
-          body: payload,
+        const permit: unknown = await result.json();
+        closedRecord(permit, [
+          "consumerId",
+          "admission",
+          "status",
+          "dispatch",
+          "nativeDescriptor",
+          "leaseExpiresAt",
+        ]);
+        const dispatch = permit.dispatch;
+        closedRecord(dispatch, [
+          "descriptor",
+          "executionRef",
+          "requestRef",
+          "closure",
+          "limits",
+          "deadline",
+        ]);
+        const closure = dispatch.closure;
+        closedRecord(closure, ["executionRef", "requestRef", "worker", "token", "native"]);
+        assert.ok(typeof closure.requestRef === "string");
+        const originalAdmission = admit.admission;
+        assert.ok(
+          originalAdmission !== null &&
+            typeof originalAdmission === "object" &&
+            "executionRef" in originalAdmission &&
+            typeof originalAdmission.executionRef === "string",
+        );
+        assert.ok(typeof admit.requestRef === "string");
+        const requestKey = scopeKey(
+          context,
+          originalAdmission.executionRef + ":" + admit.requestRef,
+        );
+        const proof = proofs.get(requestKey);
+        assert.ok(proof);
+        assert.deepEqual(closure, proof);
+        const saved = executions.get(scopeKey(context, proof.executionRef));
+        assert.ok(saved);
+        const mapping = mappings.get(scopeKey(context, saved.generation));
+        assert.ok(mapping);
+        assert.deepEqual(dispatch, {
+          descriptor: mapping.descriptor,
+          executionRef: proof.executionRef,
+          requestRef: proof.requestRef,
+          closure: proof,
+          limits: saved.admission.limits,
+          deadline: saved.admission.expiresAt,
         });
-        const proof = permit.dispatch.closure;
+        const requestState = requests.get(requestKey);
+        assert.ok(requestState);
+        assert.equal(permit.consumerId, consumerId);
+        assert.deepEqual(permit.admission, saved.admission);
+        assert.deepEqual(permit.status, requestState);
+        assert.deepEqual(permit.nativeDescriptor, {
+          account_id: mapping.descriptor.nativeId,
+          generation: mapping.descriptor.generation,
+          created_at: mapping.descriptor.createdAt,
+          profile: mapping.descriptor.profile,
+          base_url: mapping.descriptor.baseURL,
+          model: mapping.descriptor.model,
+        });
+        const lease = permit.leaseExpiresAt;
+        assert.ok(typeof lease === "string");
+        assert.equal(new Date(lease).toISOString(), lease);
+        forwarded.push({ profile: d.profile, baseURL: d.base_url, body: payload });
         receipts.set(proof.requestRef, {
           consumerId,
           executionRef: proof.executionRef,
@@ -1029,7 +1232,7 @@ async function sourceHTTP(
         path === "/private/native/v1/transports/ack-owner"
       ) {
         const proof = tuple.proof as NativeDispatchProof,
-          r = receipts.get(proof.requestRef)!;
+          r = receipts.get(proof.requestRef);
         assert.ok(r);
         if (path.endsWith("/ack-owner")) {
           const ack = await callback("closure-ack", {
@@ -1045,19 +1248,15 @@ async function sourceHTTP(
         return;
       }
       reply({ code: "denied" }, 404);
-    })().catch(() => {
+    })().catch((error: unknown) => {
+      failures.push(error);
       res.destroy();
     });
+    settlements.push(settled);
   });
   const servers: Server[] = [peer];
-  const listen = async (server: Server) => {
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const a = server.address();
-    assert.ok(a && typeof a === "object");
-    return "http://127.0.0.1:" + a.port;
-  };
   const origin = await listen(peer);
-  const selected = oauth ? oauthProfile.profile : profile.profile;
+  const selected = oauth !== false ? oauthProfile.profile : profile.profile;
   const preparation = {
     accountRefs: [],
     subjectRef: "source-subject",
@@ -1074,20 +1273,21 @@ async function sourceHTTP(
     ownerRefs: ["owner-one", "owner-two"],
     preparation,
   };
-  const bearers = oauth
-    ? [managementGrant]
-    : [
-        managementGrant,
-        {
-          token: "source-public-run",
-          role: "run-control" as const,
-          consumerId,
-          ownerRefs: managementGrant.ownerRefs,
-          profileIds: [profile.profile, secondProfile.profile],
-          limits: secondProfile.limits,
-          maxRunMs: 20_000,
-        },
-      ];
+  const bearers =
+    oauth !== false
+      ? [managementGrant]
+      : [
+          managementGrant,
+          {
+            token: "source-public-run",
+            role: "run-control" as const,
+            consumerId,
+            ownerRefs: managementGrant.ownerRefs,
+            profileIds: [profile.profile, secondProfile.profile],
+            limits: secondProfile.limits,
+            maxRunMs: 20_000,
+          },
+        ];
   const cfg = {
     native: {
       executable: "/unused",
@@ -1156,10 +1356,16 @@ async function sourceHTTP(
           : {}),
   };
   const closeServers = async () => {
-    for (const s of servers.reverse()) {
+    for (const s of servers.toReversed()) {
       s.closeAllConnections();
-      await new Promise<void>((resolve) => s.close(() => resolve()));
+      await new Promise<void>((resolve) => {
+        s.close(() => {
+          resolve();
+        });
+      });
     }
+    await Promise.all(settlements);
+    assert.deepEqual(failures, [], "source HTTP fixture handler failed");
   };
   try {
     const control = composeServiceControl(cfg, kernel, store, custody, worker);
@@ -1184,6 +1390,7 @@ async function sourceHTTP(
       enrollment,
       transport,
       ...composeServiceCachedLimits(control),
+      ...(omitModelSource ? { accountModels: undefined } : {}),
       intentHmacKey,
       ingressBytes: outputEnvelope ? 1_048_576 : 4096,
     });
@@ -1232,14 +1439,15 @@ async function sourceHTTP(
         connectState = state;
         loseCompletion = lose;
       },
-      owner: (value: string | undefined) => {
+      owner: (value?: string) => {
         bodyOwner = value;
       },
-      descriptor: (value: unknown, mode: typeof descriptorMode = "normal") => {
+      descriptor: (value?: unknown, mode: typeof descriptorMode = "normal") => {
         descriptorReply = value;
         descriptorMode = mode;
       },
-      modelResult: (value: lifecycleWire.AccountModels, enter?: () => Promise<void>) => {
+      modelResult: (value: unknown, enter?: () => Promise<void>, httpStatus = 200) => {
+        modelHTTPStatus = httpStatus;
         modelResult = value;
         modelRead = enter;
       },
@@ -1254,8 +1462,8 @@ async function sourceHTTP(
       nativeRows,
       scopeKey,
       intentHmacKey,
-      callbackOriginTo: (origin: string) => {
-        callbackOrigin = origin;
+      callbackOriginTo: (nextOrigin: string) => {
+        callbackOrigin = nextOrigin;
       },
     };
   } catch (error) {
@@ -1264,11 +1472,12 @@ async function sourceHTTP(
   }
 }
 
-test("source HTTP: consumer-scoped management isolates explicit owner lists and consumer custody while OAuth enrollment stays separate from execution policy", async () => {
+void test("source HTTP: consumer-scoped management isolates explicit owner lists and consumer custody while OAuth enrollment stays separate from execution policy", async () => {
   const f = await sourceHTTP(true);
   try {
     const initial = f.cfg.bearers.find((b) => b.role === "management");
-    assert.ok(initial && initial.role === "management");
+    assert.ok(initial);
+    assert.equal(initial.role, "management");
     const { ownerRefs: _owners, ...base } = initial;
     const scoped = {
       ...base,
@@ -1452,11 +1661,12 @@ test("source HTTP: consumer-scoped management isolates explicit owner lists and 
   }
 });
 
-test("source HTTP: current management fences monotonically for its exact subject while prepare stays pinned", async () => {
+void test("source HTTP: current management fences monotonically for its exact subject while prepare stays pinned", async () => {
   const f = await sourceHTTP(false);
   try {
     const initial = f.cfg.bearers.find((b) => b.role === "management");
-    assert.ok(initial && initial.role === "management");
+    assert.ok(initial);
+    assert.equal(initial.role, "management");
     const accountRef = randomUUID();
     f.accounts.set(f.scopeKey(f.context, accountRef), {
       accountRef,
@@ -1616,7 +1826,7 @@ test("source HTTP: current management fences monotonically for its exact subject
   }
 });
 
-test("source HTTP: owner lookup resolves two original pending journals, revocation and foreign selectors deny", async () => {
+void test("source HTTP: owner lookup resolves two original pending journals, revocation and foreign selectors deny", async () => {
   const f = await sourceHTTP(true);
   try {
     const ids = [randomUUID(), randomUUID()];
@@ -1636,14 +1846,8 @@ test("source HTTP: owner lookup resolves two original pending journals, revocati
     const js = ids.map((id) => f.journals.get(f.scopeKey(f.context, id))!);
     assert.equal(js[0].ownerRef, "owner-one");
     assert.equal(js[1].ownerRef, "owner-two");
-    const lookup = (j: CandidateJournal) => ({
-      consumerId: j.consumerId,
-      operationId: j.operationId,
-      accountRef: j.accountRef,
-      generation: j.generation,
-    });
     for (const j of js) {
-      const r = await f.callback("oauth-owner-authority", lookup(j));
+      const r = await f.callback("oauth-owner-authority", journalLookup(j));
       assert.equal(r.status, 200);
       assert.deepEqual(await r.json(), { ok: true, ownerRef: j.ownerRef });
       const before = f.seen.length,
@@ -1658,14 +1862,16 @@ test("source HTTP: owner lookup resolves two original pending journals, revocati
           "POST /private/native/v1/oauth/connect/descriptor",
         ],
       );
+      const observedTuples = f.seen.slice(before).map((s) => s.tuple);
+      const expectedTuple = {
+        operation: j.operationId,
+        owner_ref: j.ownerRef,
+        account_ref: j.accountRef,
+        generation: j.generation,
+      };
       assert.deepEqual(
-        f.seen.slice(before).map((s) => s.tuple),
-        Array(3).fill({
-          operation: j.operationId,
-          owner_ref: j.ownerRef,
-          account_ref: j.accountRef,
-          generation: j.generation,
-        }),
+        observedTuples,
+        Array.from({ length: 3 }, () => ({ ...expectedTuple })),
       );
     }
     for (const patch of [
@@ -1678,18 +1884,18 @@ test("source HTTP: owner lookup resolves two original pending journals, revocati
       { generation: js[0].generation.toUpperCase() },
     ]) {
       assert.equal(
-        (
-          await f.callback("oauth-owner-authority", {
-            ...lookup(js[0]),
-            ...patch,
-          })
-        ).status,
+        (await f.callback("oauth-owner-authority", { ...journalLookup(js[0]), ...patch })).status,
         403,
       );
     }
     assert.equal(
-      (await f.callback("oauth-owner-authority", lookup(js[0]), f.consumer.managementCredential))
-        .status,
+      (
+        await f.callback(
+          "oauth-owner-authority",
+          journalLookup(js[0]),
+          f.consumer.managementCredential,
+        )
+      ).status,
       403,
     );
     const rawLookup = (body: string) =>
@@ -1704,7 +1910,7 @@ test("source HTTP: owner lookup resolves two original pending journals, revocati
     assert.equal(
       (
         await rawLookup(
-          JSON.stringify(lookup(js[0])).slice(0, -1) +
+          JSON.stringify(journalLookup(js[0])).slice(0, -1) +
             ',"\\u0067eneration":"' +
             js[1].generation +
             '"}',
@@ -1713,21 +1919,21 @@ test("source HTTP: owner lookup resolves two original pending journals, revocati
       403,
     );
     await assert.rejects(
-      rawLookup(JSON.stringify({ ...lookup(js[0]), operationId: "x".repeat(1025) })),
+      rawLookup(JSON.stringify({ ...journalLookup(js[0]), operationId: "x".repeat(1025) })),
     );
     const originalOp = f.operations.get(f.scopeKey(f.context, js[0].operationId))!;
     f.operations.set(f.scopeKey(f.context, js[0].operationId), {
       ...originalOp,
       accountRef: js[1].accountRef,
     });
-    assert.equal((await f.callback("oauth-owner-authority", lookup(js[0]))).status, 403);
+    assert.equal((await f.callback("oauth-owner-authority", journalLookup(js[0]))).status, 403);
     f.operations.set(f.scopeKey(f.context, js[0].operationId), originalOp);
     const originalJournal = js[0];
     f.journals.set(f.scopeKey(f.context, js[0].operationId), {
       ...originalJournal,
       ownerRef: js[1].ownerRef,
     });
-    assert.equal((await f.callback("oauth-owner-authority", lookup(js[0]))).status, 403);
+    assert.equal((await f.callback("oauth-owner-authority", journalLookup(js[0]))).status, 403);
     f.journals.set(f.scopeKey(f.context, js[0].operationId), originalJournal);
     const tuple = { ...js[0], ownerRef: js[1].ownerRef };
     const fixed = new NativeOAuthEnrollmentClient({
@@ -1745,7 +1951,7 @@ test("source HTTP: owner lookup resolves two original pending journals, revocati
     f.owner(js[1].ownerRef);
     await assert.rejects(fixed.begin(js[0]));
     assert.equal(f.begins(), 2);
-    f.owner(undefined);
+    f.owner();
     const physical: PhysicalCandidate = {
       generation: js[0].generation,
       nativePhysicalIdentity: js[0].generation,
@@ -1757,10 +1963,10 @@ test("source HTTP: owner lookup resolves two original pending journals, revocati
       ...js[0],
       descriptor: { ...physical, nativePhysicalIdentity: randomUUID() },
     });
-    assert.equal((await f.callback("oauth-owner-authority", lookup(js[0]))).status, 403);
+    assert.equal((await f.callback("oauth-owner-authority", journalLookup(js[0]))).status, 403);
     f.mappings.delete(f.scopeKey(f.context, js[0].generation));
     f.control.bearers.replace([]);
-    assert.equal((await f.callback("oauth-owner-authority", lookup(js[0]))).status, 403);
+    assert.equal((await f.callback("oauth-owner-authority", journalLookup(js[0]))).status, 403);
     await assert.rejects(fixed.begin(js[0]));
     assert.equal(f.begins(), 2);
   } finally {
@@ -1770,7 +1976,7 @@ test("source HTTP: owner lookup resolves two original pending journals, revocati
 
 // RED if completion switches owner/journal, repeats a spent handoff, reflects
 // callback material, or replays after a lost ACK while native still reads prepared.
-test("source HTTP: sensitive SDK completion pins original owner and journal, then becomes readback only", async () => {
+void test("source HTTP: sensitive SDK completion pins original owner and journal, then becomes readback only", async () => {
   const f = await sourceHTTP(true);
   try {
     f.connect("prepared");
@@ -1866,7 +2072,6 @@ test("source HTTP: sensitive SDK completion pins original owner and journal, the
     const replay = await sdk.completeOAuth({ ...input, operationId: another });
     assert.equal(replay.operationRef, lost.operationRef);
     assert.equal(replay.state, "unknown");
-    assert.ok(replay.state === "unknown");
     assert.equal(replay.error?.effect, "effect_unknown");
     assert.equal(f.seen.length, spentReads);
     assert.equal(f.completions(), 2);
@@ -1886,7 +2091,7 @@ test("source HTTP: sensitive SDK completion pins original owner and journal, the
   }
 });
 
-test("source HTTP: strict fixed POST descriptor readback keeps custody pending and pins physical birth", async () => {
+void test("source HTTP: strict fixed POST descriptor readback keeps custody pending and pins physical birth", async () => {
   const f = await sourceHTTP(true);
   try {
     const operationId = randomUUID();
@@ -1923,10 +2128,8 @@ test("source HTTP: strict fixed POST descriptor readback keeps custody pending a
     f.descriptor(reply);
     const d = await client.describe(j);
     assert.equal(d.state, "qualified");
-    if (d.state === "qualified") {
-      assert.equal(d.native.createdAt, native.created_at);
-      assert.equal(d.native.nativePhysicalIdentity, j.generation);
-    }
+    assert.equal(d.native.createdAt, native.created_at);
+    assert.equal(d.native.nativePhysicalIdentity, j.generation);
     for (const value of [
       { ...reply, operation: randomUUID() },
       { ...reply, account_ref: randomUUID() },
@@ -1951,9 +2154,15 @@ test("source HTTP: strict fixed POST descriptor readback keeps custody pending a
       f.descriptor(undefined, mode);
       await assert.rejects(
         client.describe(j),
-        (e) =>
-          e instanceof NativeFailure &&
-          (mode !== "headers" || (e.code === "bounded" && e.classification === "uncertain")),
+        (e) => {
+          if (!(e instanceof NativeFailure) || (mode === "headers" && e.code !== "bounded")) {
+            return false;
+          }
+          if (mode === "headers") {
+            assert.equal(e.classification, "uncertain");
+          }
+          return true;
+        },
         mode,
       );
     }
@@ -1961,7 +2170,7 @@ test("source HTTP: strict fixed POST descriptor readback keeps custody pending a
       f.seen.some((s) => s.path.includes("/escaped")),
       false,
     );
-    f.descriptor(undefined);
+    f.descriptor();
     const pending = await f.publicCall("/v1/operations/" + operationId);
     assert.equal(pending.status, 200);
     assert.equal(((await pending.json()) as { state: string }).state, "pending");
@@ -1991,7 +2200,7 @@ test("source HTTP: strict fixed POST descriptor readback keeps custody pending a
       false,
     );
     const secondId = randomUUID();
-    f.descriptor(undefined);
+    f.descriptor();
     assert.equal(
       (
         await f.publicCall("/v1/accounts/oauth/begin", {
@@ -2024,7 +2233,7 @@ test("source HTTP: strict fixed POST descriptor readback keeps custody pending a
   }
 });
 
-test("source HTTP: same fenced original remints only scoped readback and close, never dispatch", async () => {
+void test("source HTTP: same fenced original remints only scoped readback and close, never dispatch", async () => {
   const f = await sourceHTTP(false);
   try {
     const creationId = randomUUID();
@@ -2195,7 +2404,9 @@ test("source HTTP: same fenced original remints only scoped readback and close, 
     // Even an applied prepare cannot supply the exception without the original lookup.
     const operation = f.kernel.operation;
     f.kernel.operation = async (context, id) => {
-      if (id === input.operationId) throw new KernelError("unknown");
+      if (id === input.operationId) {
+        throw new KernelError("unknown");
+      }
       return operation(context, id);
     };
     f.kernel.prepare = prepare;
@@ -2304,8 +2515,9 @@ test("source HTTP: same fenced original remints only scoped readback and close, 
     let reads = 0;
     f.kernel.savedExecution = async (...args) => {
       const saved = await savedExecution(...args);
-      if (++reads === 2)
+      if (++reads === 2) {
         await f.kernel.restore(f.context, original.admission.issuerEpoch, freshIssuer);
+      }
       return saved;
     };
     const restoredDenied = await mint();
@@ -2330,11 +2542,12 @@ test("source HTTP: same fenced original remints only scoped readback and close, 
   }
 });
 
-test("source HTTP: explicit management profile capability denies same-owner MiMo before effects and permits OpenRouter", async () => {
+void test("source HTTP: explicit management profile capability denies same-owner MiMo before effects and permits OpenRouter", async () => {
   const f = await sourceHTTP(false);
   try {
     const initial = f.cfg.bearers.find((b) => b.role === "management");
-    assert.ok(initial && initial.role === "management");
+    assert.ok(initial);
+    assert.equal(initial.role, "management");
     assert.equal(initial.preparation.profileId, f.profile.profile);
     const restricted = {
       ...initial,
@@ -2535,7 +2748,7 @@ test("source HTTP: explicit management profile capability denies same-owner MiMo
 
 // Red if an output envelope bypasses selected-profile admission, widens any
 // other limit, or changes the immutable cap of an already captured execution.
-test("source HTTP: consumer output envelope preserves physical and historical admission caps", async () => {
+void test("source HTTP: consumer output envelope preserves physical and historical admission caps", async () => {
   const f = await sourceHTTP(true, true);
   try {
     const profiles = captureServiceProfiles(f.cfg),
@@ -2631,7 +2844,9 @@ test("source HTTP: consumer output envelope preserves physical and historical ad
       assert.equal(accepted.status, 200);
       const access = (await accepted.json()) as Access;
       assert.deepEqual(access.admission.limits, p.limits);
-      if (p.profile === f.profile.profile) historic = access;
+      if (p.profile === f.profile.profile) {
+        historic = access;
+      }
       assert.equal(f.forwarded.length, 0, "admission never dispatches");
     }
     assert.ok(historic);
@@ -2674,12 +2889,12 @@ test("source HTTP: consumer output envelope preserves physical and historical ad
       service_tier: "default",
       input: "fixture",
     };
-    const request = (admission: Access["admission"]) =>
-      f.publicCall("/v1/executions/" + ref + "/requests", body, historic!.bearer, {
+    const requestWithAdmission = (admission: Access["admission"]) =>
+      f.publicCall("/v1/executions/" + ref + "/requests", body, historic.bearer, {
         "x-gateway-request-id": randomUUID(),
         "x-gateway-admission": JSON.stringify(admission),
       });
-    const widened = await request({
+    const widened = await requestWithAdmission({
       ...historic.admission,
       limits: { ...historic.admission.limits, outputBytes: 8_388_608 },
     });
@@ -2704,12 +2919,8 @@ test("source HTTP: consumer output envelope preserves physical and historical ad
       },
     ]);
     assert.equal(
-      (
-        await request({
-          ...historic.admission,
-          limits: oversized.admission.limits,
-        })
-      ).status,
+      (await requestWithAdmission({ ...historic.admission, limits: oversized.admission.limits }))
+        .status,
       403,
     );
     assert.equal(f.forwarded.length, 0);
@@ -2723,11 +2934,11 @@ test("source HTTP: consumer output envelope preserves physical and historical ad
       },
     ]);
     f.responseBytes(1_048_576);
-    const exact = await request(historic.admission);
+    const exact = await requestWithAdmission(historic.admission);
     assert.equal(exact.status, 200);
     assert.equal((await exact.arrayBuffer()).byteLength, 1_048_576);
     f.responseBytes(1_048_577);
-    const overflow = await request(historic.admission);
+    const overflow = await requestWithAdmission(historic.admission);
     assert.equal(overflow.status, 200);
     await assert.rejects(
       overflow.arrayBuffer(),
@@ -2739,7 +2950,7 @@ test("source HTTP: consumer output envelope preserves physical and historical ad
   }
 });
 
-test("source HTTP: simultaneous finite tuples create/read/admit/forward independently and reject cross-profile authority", async () => {
+void test("source HTTP: simultaneous finite tuples create/read/admit/forward independently and reject cross-profile authority", async () => {
   const f = await sourceHTTP(false);
   try {
     const catalog = await f.publicCall("/v1/profiles");
@@ -2893,7 +3104,7 @@ test("source HTTP: simultaneous finite tuples create/read/admit/forward independ
 
 // Suspended OAuth may attest retained custody, but that purpose must not grant
 // the existing enrollment or refresh authorities.
-test("source HTTP: suspended OAuth custody purpose excludes enrollment and refresh", async () => {
+void test("source HTTP: suspended OAuth custody purpose excludes enrollment and refresh", async () => {
   const f = await sourceHTTP(true);
   try {
     const operationId = randomUUID();
@@ -2958,7 +3169,7 @@ test("source HTTP: suspended OAuth custody purpose excludes enrollment and refre
 
 // Operation readback cannot enter enrollment recovery before lifecycle/owner
 // authorization, even if the caller knows another owner's exact operation ID.
-test("v2 lifecycle readback never recovers foreign or same-owner enrollment operations", async () => {
+void test("v2 lifecycle readback never recovers foreign or same-owner enrollment operations", async () => {
   const f = await sourceHTTP(true);
   const facade = createFacade({
     kernel: f.kernel,
@@ -2991,11 +3202,12 @@ test("v2 lifecycle readback never recovers foreign or same-owner enrollment oper
     }
     const grant = f.cfg.bearers[0];
     assert.equal(grant.role, "management");
-    assert.ok(grant.role === "management");
     f.control.bearers.replace([{ ...grant, ownerRefs: ["owner-one"] }]);
-    await new Promise<void>((resolve) => facade.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve) => {
+      facade.listen(0, "127.0.0.1", resolve);
+    });
     const address = facade.address();
-    assert.ok(address && typeof address === "object");
+    assert.ok(address !== null && typeof address === "object");
     const before = f.seen.length;
     for (const journal of pending) {
       const response = await fetch(
@@ -3019,13 +3231,17 @@ test("v2 lifecycle readback never recovers foreign or same-owner enrollment oper
     assert.equal(f.seen.length, before, "no protected OAuth readback/promotion attempted");
   } finally {
     facade.closeAllConnections();
-    await new Promise<void>((resolve) => facade.close(() => resolve()));
+    await new Promise<void>((resolve) => {
+      facade.close(() => {
+        resolve();
+      });
+    });
     await f.close();
   }
 });
 
 // The journal model is the validated request model; response model authority is absent.
-test("usage request selection preserves the second allowed model", async () => {
+void test("usage request selection preserves the second allowed model", async () => {
   const requested = validateResponses(
     Buffer.from(
       JSON.stringify({
@@ -3043,7 +3259,7 @@ test("usage request selection preserves the second allowed model", async () => {
 
 // Red if family is caller-selected, a Claude device flow enters native HTTP,
 // or a spent secret can be replayed after an ambiguous completion.
-test("source HTTP: Claude browser completion follows saved profile and qualified physical birth", async () => {
+void test("source HTTP: Claude browser completion follows saved profile and qualified physical birth", async () => {
   const f = await sourceHTTP("claude");
   try {
     f.connect("prepared");
@@ -3183,7 +3399,7 @@ test("source HTTP: Claude browser completion follows saved profile and qualified
 // Independent HTTP callback contract: public Go requests never need a volatile
 // TS body/stream association. SQL claim/proof and positive closure remain sole
 // effect authority, including after the execution capability is revoked.
-test("source HTTP: public execution callbacks hydrate authority, claim once and settle after revoke without pending routing state", async () => {
+void test("source HTTP: public execution callbacks hydrate authority, claim once and settle after revoke without pending routing state", async () => {
   let usageFault = true,
     recorded: lifecycleWire.UsageObservation | null = null;
   const callbackGate = new NativeControlAdmission(1, 0);
@@ -3451,7 +3667,7 @@ test("source HTTP: public execution callbacks hydrate authority, claim once and 
   }
 });
 
-test("source HTTP: only authenticated public-admit gate refusal proves this reservation never started claim work", async () => {
+void test("source HTTP: only authenticated public-admit gate refusal proves this reservation never started claim work", async () => {
   const gate = new NativeControlAdmission(1, 0),
     release = await gate.acquire(Date.now() + 10_000);
   let scheduled = 0;
@@ -3517,7 +3733,7 @@ test("source HTTP: only authenticated public-admit gate refusal proves this rese
   }
 });
 
-test("production cached-read composition advertises native v2 through the real facade and native HTTP client", async () => {
+void test("production cached-read composition advertises native v2 through the real facade and native HTTP client", async () => {
   const f = await sourceHTTP(false);
   try {
     const response = await f.publicCall("/v2/capabilities/account-limits");
@@ -3540,8 +3756,8 @@ test("production cached-read composition advertises native v2 through the real f
   }
 });
 
-for (const contract of ["v1", "v2"] as const)
-  test(
+for (const contract of ["v1", "v2"] as const) {
+  void test(
     "protected concurrent " +
       contract +
       " limits reads reserve sockets for real native authority and control callbacks",
@@ -3558,14 +3774,20 @@ for (const contract of ["v1", "v2"] as const)
         sixEntered = resolve;
       });
       const seventh = new Promise<"entered">((resolve) => {
-        seventhEntered = () => resolve("entered");
+        seventhEntered = () => {
+          resolve("entered");
+        };
       });
       const f = await sourceHTTP(true, false, undefined, undefined, {
         contract,
         enter: async () => {
           entered++;
-          if (entered === 6) sixEntered();
-          if (entered === 7) seventhEntered();
+          if (entered === 6) {
+            sixEntered();
+          }
+          if (entered === 7) {
+            seventhEntered();
+          }
           await gate;
         },
       });
@@ -3574,7 +3796,9 @@ for (const contract of ["v1", "v2"] as const)
       const callbackHandler = f.authority.createServer();
       const listener = createServer((req, res) => {
         if (facadeControlRoute(req.method, req.url)) {
-          if (reserve(req, res)) f.facade.emit("request", req, res);
+          if (reserve(req, res)) {
+            f.facade.emit("request", req, res);
+          }
           return;
         }
         authorityCalls++;
@@ -3584,9 +3808,11 @@ for (const contract of ["v1", "v2"] as const)
       listener.maxRequestsPerSocket = 1;
       const pending: Promise<Response>[] = [];
       try {
-        await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve));
+        await new Promise<void>((resolve) => {
+          listener.listen(0, "127.0.0.1", resolve);
+        });
         const address = listener.address();
-        assert.ok(address && typeof address === "object");
+        assert.ok(address !== null && typeof address === "object");
         const origin = "http://127.0.0.1:" + address.port;
         f.callbackOriginTo(origin);
         const accountRef = randomUUID(),
@@ -3647,7 +3873,9 @@ for (const contract of ["v1", "v2"] as const)
             },
             body: JSON.stringify(input),
           });
-        for (let i = 0; i < 6; i++) pending.push(read());
+        for (let i = 0; i < 6; i++) {
+          pending.push(read());
+        }
         await Promise.race([
           six,
           Promise.all(pending).then((responses) => {
@@ -3686,22 +3914,28 @@ for (const contract of ["v1", "v2"] as const)
           "/" + contract + "/account-limits/read?extra=1",
           "/" + contract + "/account-limits/read/extra",
           "/" + contract + "/account-limits/%72ead",
-        ])
+        ]) {
           assert.equal(facadeBoundedReadRoute("POST", path), false);
+        }
         assert.equal(facadeBoundedReadRoute("GET", "/" + contract + "/account-limits/read"), false);
         assert.equal(facadeBoundedReadRoute("GET", "/v2/capabilities/account-limits"), false);
       } finally {
         release();
         await Promise.allSettled(pending);
         listener.closeAllConnections();
-        await new Promise<void>((resolve) => listener.close(() => resolve()));
+        await new Promise<void>((resolve) => {
+          listener.close(() => {
+            resolve();
+          });
+        });
         callbackHandler.closeAllConnections();
         await f.close();
       }
     },
   );
+}
 
-test("source HTTP: Grok displayed code uses saved profile and never projects original state", async () => {
+void test("source HTTP: Grok displayed code uses saved profile and never projects original state", async () => {
   const f = await sourceHTTP("grok");
   try {
     f.connect("prepared");
@@ -3725,7 +3959,7 @@ test("source HTTP: Grok displayed code uses saved profile and never projects ori
     });
     const j = f.journals.get(f.scopeKey(f.context, operationId))!;
     const before = f.seen.length;
-    for (const authorizationCode of ["claude-code#" + "a".repeat(64), "bad?query"])
+    for (const authorizationCode of ["claude-code#" + "a".repeat(64), "bad?query"]) {
       assert.equal(
         (
           await f.publicCall("/v1/accounts/oauth/complete", {
@@ -3736,6 +3970,7 @@ test("source HTTP: Grok displayed code uses saved profile and never projects ori
         ).status,
         400,
       );
+    }
     assert.equal(
       (
         await f.publicCall("/v1/accounts/oauth/complete", {
@@ -3787,15 +4022,21 @@ test("source HTTP: Grok displayed code uses saved profile and never projects ori
   }
 });
 
-function modelAccount(f: Awaited<ReturnType<typeof sourceHTTP>>) {
+function modelAccount(
+  f: Awaited<ReturnType<typeof sourceHTTP>>,
+  source: "codex" | "openrouter" = "codex",
+) {
   const accountRef = randomUUID(),
     generation = randomUUID();
-  const profile = {
-    ...codexOAuthProfile,
-    qualificationRef: "source-codex",
-    limits: f.profile.limits,
-    providerTokenUpperBound: 1000,
-  };
+  const profile =
+    source === "codex"
+      ? {
+          ...codexOAuthProfile,
+          qualificationRef: "source-codex",
+          limits: f.profile.limits,
+          providerTokenUpperBound: 1000,
+        }
+      : f.cfg.secondProfile;
   const account: AccountStatus = {
     accountRef,
     ownerRef: "owner-one",
@@ -3845,83 +4086,172 @@ function modelAccount(f: Awaited<ReturnType<typeof sourceHTTP>>) {
       },
     ],
   };
-  return { account, profile, generation, input, snapshot };
+  const discovered: lifecycleWire.AccountModels =
+    source === "codex"
+      ? snapshot
+      : {
+          ...snapshot,
+          source: "openrouter",
+          models: snapshot.models.map((model) => ({
+            ...model,
+            modelId: "future-vendor/review:model",
+            reasoning: null,
+            fast: null,
+          })),
+        };
+  return { account, profile, generation, input, snapshot: discovered };
 }
 
-// Detects a broken SDK route/schema, leaked static membership, or lost authority fences after native I/O.
-test("account model SDK read uses scoped native catalogue and fences owner, epoch, generation and bearer changes", async () => {
+void test("OpenRouter model discovery uses native owner authority without granting a quota contract", async () => {
   const f = await sourceHTTP(true);
   try {
-    const { account, input, snapshot, generation } = modelAccount(f);
+    const { account, input, snapshot } = modelAccount(f, "openrouter");
     const sdk = createManagementClient({
       role: "management",
       origin: f.facadeOrigin,
       token: "source-public-management",
+      responseBytes: 2 * 1024 * 1024,
     });
-    f.modelResult(snapshot);
-    assert.deepEqual(await sdk.readAccountModels({ ...input, forceRefresh: true }), snapshot);
-    assert.deepEqual(
-      f.seen.find((r) => r.path === "POST /private/native/v1/account-models/read")?.tuple,
-      { ...input, forceRefresh: true },
+    const callbackStatuses: number[] = [];
+    f.modelResult(snapshot, async () => {
+      const grant = await f.callback("account-limits-authority", { ...f.context, ...input });
+      callbackStatuses.push(grant.status);
+      await grant.arrayBuffer();
+      f.modelResult(grant.status === 200 ? snapshot : { status: "unavailable" });
+    });
+    const observed = await sdk.readAccountModels(input);
+    assert.deepEqual(callbackStatuses, [200]);
+    assert.deepEqual(observed, snapshot);
+    for (const version of ["v1", "v2"]) {
+      const result = await f.publicCall(`/${version}/account-limits/read`, input);
+      assert.equal(result.status, 200);
+      assert.deepEqual(await result.json(), { status: "unsupported" });
+    }
+    assert.equal(
+      f.seen.some((entry) => entry.path.endsWith("/account-limits/read")),
+      false,
     );
-    for (const change of [
+    for (const patch of [
+      { consumerId: "foreign" },
       { ownerRef: "foreign" },
       { expectedAuthorizationEpoch: 2 },
-      { profileId: "foreign" },
+      { profileId: "arbitrary-profile" },
     ]) {
-      await assert.rejects(sdk.readAccountModels({ ...input, ...change }));
+      const denied = await f.callback("account-limits-authority", {
+        ...f.context,
+        ...input,
+        ...patch,
+      });
+      assert.equal(denied.status, 403);
+      await denied.arrayBuffer();
     }
-    for (const mutation of [
-      () => {
-        account.epoch++;
-      },
-      () => {
-        account.ownerRef = "foreign";
-      },
-      () => {
-        const current = f.mappings.get(f.scopeKey(f.context, generation))!;
-        f.mappings.set(f.scopeKey(f.context, generation), {
-          ...current,
-          descriptor: { ...current.descriptor, nativeId: 99 },
-        });
-      },
-      () => {
-        f.control.bearers.replace([]);
-      },
-    ]) {
-      const old = { epoch: account.epoch, ownerRef: account.ownerRef };
-      const mapping = f.mappings.get(f.scopeKey(f.context, generation))!;
-      f.modelResult(snapshot, async () => mutation());
-      await assert.rejects(sdk.readAccountModels(input));
-      Object.assign(account, old);
-      f.mappings.set(f.scopeKey(f.context, generation), mapping);
-      f.control.bearers.replace(f.cfg.bearers);
-    }
-    f.modelResult({ ...snapshot, physicalGeneration: randomUUID() });
-    await assert.rejects(sdk.readAccountModels(input));
-    f.modelResult({ ...snapshot, models: [] });
-    assert.deepEqual(await sdk.readAccountModels(input), {
-      ...snapshot,
-      models: [],
-    });
-    f.modelResult({
-      ...snapshot,
-      fetchedAt: new Date(Date.now() - 5000).toISOString(),
-      expiresAt: new Date(Date.now() - 1).toISOString(),
-    });
-    assert.deepEqual(await sdk.readAccountModels(input), {
-      status: "unavailable",
-    });
+    account.state = "suspended";
+    const suspended = await f.callback("account-limits-authority", { ...f.context, ...input });
+    assert.equal(suspended.status, 200);
+    await suspended.arrayBuffer();
+    f.control.bearers.replace([]);
+    const revoked = await f.callback("account-limits-authority", { ...f.context, ...input });
+    assert.equal(revoked.status, 403);
+    await revoked.arrayBuffer();
   } finally {
     await f.close();
   }
 });
 
+// Detects a broken SDK route/schema, leaked static membership, or lost authority fences after native I/O.
+for (const source of ["codex", "openrouter"] as const) {
+  void test(`${source} account model SDK read uses scoped native catalogue and fences owner, epoch, generation and bearer changes`, async () => {
+    const f = await sourceHTTP(true);
+    try {
+      const { account, input, snapshot, generation } = modelAccount(f, source);
+      const sdk = createManagementClient({
+        role: "management",
+        origin: f.facadeOrigin,
+        token: "source-public-management",
+        responseBytes: 2 * 1024 * 1024,
+      });
+      f.modelResult(snapshot);
+      assert.deepEqual(await sdk.readAccountModels({ ...input, forceRefresh: true }), snapshot);
+      if (snapshot.source === "openrouter") {
+        const complete = {
+          ...snapshot,
+          models: Array.from({ length: 2048 }, (_, index) => ({
+            ...snapshot.models[0],
+            modelId: `future-vendor/model-${index}`,
+          })),
+        };
+        f.modelResult(complete);
+        assert.deepEqual(await sdk.readAccountModels(input), complete);
+        f.modelResult(snapshot);
+      }
+
+      assert.deepEqual(
+        f.seen.find((r) => r.path === "POST /private/native/v1/account-models/read")?.tuple,
+        { ...input, forceRefresh: true },
+      );
+      for (const change of [
+        { ownerRef: "foreign" },
+        { expectedAuthorizationEpoch: 2 },
+        { profileId: "foreign" },
+      ]) {
+        await assert.rejects(sdk.readAccountModels({ ...input, ...change }));
+      }
+      for (const mutation of [
+        () => {
+          account.epoch++;
+        },
+        () => {
+          account.ownerRef = "foreign";
+        },
+        () => {
+          const current = f.mappings.get(f.scopeKey(f.context, generation))!;
+          f.mappings.set(f.scopeKey(f.context, generation), {
+            ...current,
+            descriptor: { ...current.descriptor, nativeId: 99 },
+          });
+        },
+        () => {
+          f.control.bearers.replace([]);
+        },
+      ]) {
+        const old = { epoch: account.epoch, ownerRef: account.ownerRef };
+        const mapping = f.mappings.get(f.scopeKey(f.context, generation))!;
+        f.modelResult(snapshot, async () => {
+          mutation();
+        });
+        await assert.rejects(sdk.readAccountModels(input));
+        Object.assign(account, old);
+        f.mappings.set(f.scopeKey(f.context, generation), mapping);
+        f.control.bearers.replace(f.cfg.bearers);
+      }
+      f.modelResult({ ...snapshot, physicalGeneration: randomUUID() });
+      await assert.rejects(sdk.readAccountModels(input));
+      f.modelResult({
+        ...snapshot,
+        source: source === "codex" ? "openrouter" : "codex",
+        models: [],
+      });
+      await assert.rejects(sdk.readAccountModels(input));
+      f.modelResult({ ...snapshot, models: [] });
+      assert.deepEqual(await sdk.readAccountModels(input), { ...snapshot, models: [] });
+      f.modelResult({
+        ...snapshot,
+        fetchedAt: new Date(Date.now() - 5000).toISOString(),
+        expiresAt: new Date(Date.now() - 1).toISOString(),
+      });
+      assert.deepEqual(await sdk.readAccountModels(input), { status: "unknown" });
+    } finally {
+      await f.close();
+    }
+  });
+}
+
 // Dynamic membership must reach the existing transport without changing its persisted enrollment anchor.
-test("dynamic Codex selection reaches native transport; unknown, unsupported effort and empty catalogues never enter", async () => {
+void test("dynamic Codex selection reaches native transport; unknown, unsupported effort and empty catalogues never enter", async () => {
   const f = await sourceHTTP(true);
   try {
     const { account, profile, generation, snapshot } = modelAccount(f);
+    assert.ok(snapshot.source === "codex");
     const executionRef = randomUUID();
     const saved: SavedExecution = {
       generation,
@@ -3965,12 +4295,54 @@ test("dynamic Codex selection reaches native transport; unknown, unsupported eff
           ...patch,
         },
         "source-model-execution",
-        {
-          "x-gateway-request-id": randomUUID(),
-          "x-gateway-admission": JSON.stringify(admission),
-        },
+        { "x-gateway-request-id": randomUUID(), "x-gateway-admission": JSON.stringify(admission) },
       );
     f.modelResult(snapshot);
+    const trace: string[] = [];
+    const controller = new AbortController();
+    const malformed = bytes("{");
+    const unexpected = async () => {
+      trace.push("dispatch");
+      throw new Error("prepare must not dispatch");
+    };
+    const { association } = f.authority.begin(
+      {
+        context: f.context,
+        saved,
+        requestId: randomUUID(),
+        body: malformed,
+        signal: controller.signal,
+        callback: {
+          admit: unexpected,
+          effect: unexpected,
+          rejectBeforeDispatch: unexpected,
+          closed: unexpected,
+        },
+      },
+      malformed,
+    );
+    const beforeAbort = f.seen.length;
+    f.modelResult(snapshot, async () => {
+      trace.push("models");
+      controller.abort();
+      trace.push("abort");
+    });
+    try {
+      await assert.rejects(f.authority.prepare(association, malformed), (error) => {
+        assert.ok(error instanceof KernelError);
+        trace.push(error.code);
+        return error.code === "denied";
+      });
+      assert.deepEqual(trace, ["models", "abort", "denied"]);
+      assert.deepEqual(
+        f.seen.slice(beforeAbort).map((entry) => entry.path),
+        ["POST /private/native/v1/account-models/read"],
+      );
+      assert.equal(f.forwarded.length, 0);
+    } finally {
+      f.authority.reclaimUnstarted(association);
+      f.modelResult(snapshot);
+    }
     for (const patch of [
       { model: "unknown" },
       { reasoning: { effort: "low" } },
@@ -3999,11 +4371,7 @@ test("dynamic Codex selection reaches native transport; unknown, unsupported eff
         type: "custom",
         name: "apply_patch",
         description: "Apply a patch",
-        format: {
-          type: "grammar",
-          syntax: "lark",
-          definition: "start: /(.|\\n)*/",
-        },
+        format: { type: "grammar", syntax: "lark", definition: "start: /(.|\\n)*/" },
       },
     ];
     const custom = await submit({ tools: customTools });
@@ -4044,6 +4412,193 @@ test("dynamic Codex selection reaches native transport; unknown, unsupported eff
     const anchor = await submit({ model: profile.model, reasoning: undefined });
     assert.equal(anchor.status, 200);
     await anchor.text();
+  } finally {
+    await f.close();
+  }
+});
+
+// Both public and native saved-lease admission consume the same discovered set.
+void test("dynamic OpenRouter membership reaches transport without rewriting the immutable enrollment anchor", async () => {
+  const f = await sourceHTTP(true);
+  try {
+    const { account, profile, generation, snapshot } = modelAccount(f, "openrouter");
+    assert.ok(snapshot.source === "openrouter");
+    const executionRef = randomUUID();
+    const saved: SavedExecution = {
+      generation,
+      state: "open",
+      dispatchAllowed: true,
+      admission: {
+        executionRef,
+        issuerEpoch: await f.kernel.issuer(f.context),
+        invocationRef: "openrouter-models",
+        attemptRef: "attempt",
+        accountRef: account.accountRef,
+        authorizationEpoch: 1,
+        subjectRef: "subject",
+        policyRevision: 1,
+        bindingRevision: 1,
+        profileId: profile.profile,
+        limits: profile.limits,
+        expiresAt: new Date(Date.now() + 20_000).toISOString(),
+      },
+    };
+    f.executions.set(f.scopeKey(f.context, executionRef), saved);
+    f.control.bearers.replace([
+      ...f.cfg.bearers,
+      {
+        role: "execution",
+        consumerId: f.context.consumerId,
+        token: "source-openrouter-model-execution",
+        saved,
+      },
+    ]);
+    const { executionRef: _, issuerEpoch: __, ...admission } = saved.admission;
+    const submit = (model = "future-vendor/review:model", patch: Record<string, unknown> = {}) =>
+      f.publicCall(
+        "/v1/executions/" + executionRef + "/requests",
+        {
+          model,
+          stream: true,
+          store: false,
+          tools: [{ type: "function", name: "fixture", parameters: {} }],
+          ...patch,
+        },
+        "source-openrouter-model-execution",
+        { "x-gateway-request-id": randomUUID(), "x-gateway-admission": JSON.stringify(admission) },
+      );
+    f.modelResult(snapshot);
+    assert.equal((await submit("outside-the-live-set")).status, 400);
+    assert.equal((await submit(undefined, { reasoning: { effort: "high" } })).status, 400);
+    assert.equal(f.forwarded.length, 0);
+    const claimsBeforeRoutingRejections = f.requests.size;
+    for (const patch of [
+      { models: ["another/model"] },
+      { provider: { order: ["other"] } },
+      { plugins: [] },
+      { background: true },
+    ]) {
+      assert.equal((await submit(undefined, patch)).status, 400);
+    }
+    assert.equal(
+      f.requests.size,
+      claimsBeforeRoutingRejections,
+      "unsupported routing/async fields never acquire a request claim",
+    );
+    assert.equal(f.forwarded.length, 0);
+    const accepted = await submit(undefined, {
+      input: "Opaque provider/models/plugins/background text",
+      instructions: "Controlled input",
+      service_tier: "default",
+      max_output_tokens: 20,
+      tool_choice: "auto",
+      reasoning: {},
+      parallel_tool_calls: true,
+      temperature: 0.5,
+      top_p: 0.9,
+      text: { format: { type: "text" } },
+      include: [],
+      prompt_cache_key: "fixture",
+      client_metadata: { provider: "opaque", models: ["opaque"] },
+    });
+    assert.equal(accepted.status, 200);
+    await accepted.text();
+    assert.equal(
+      (f.forwarded[0].body as Record<string, unknown>).model,
+      "future-vendor/review:model",
+    );
+    assert.equal(
+      f.mappings.get(f.scopeKey(f.context, generation))!.descriptor.model,
+      profile.model,
+    );
+    assert.ok(
+      f.seen.filter((r) => r.path === "POST /private/native/v1/account-models/read").length >= 2,
+    );
+    f.modelResult({ ...snapshot, models: [] });
+    assert.equal((await submit(profile.model)).status, 400);
+    for (const status of ["unknown", "unsupported"] as const) {
+      f.modelResult({ status });
+      assert.equal((await submit(profile.model)).status, 400);
+    }
+    // Failed observations never acquire the explicit unavailable fallback authority.
+    for (const observed of [
+      { ...snapshot, models: [{ modelId: "invalid model" }] },
+      {
+        ...snapshot,
+        fetchedAt: new Date(Date.now() - 5000).toISOString(),
+        expiresAt: new Date(Date.now() - 1).toISOString(),
+      },
+      {
+        ...snapshot,
+        fetchedAt: new Date(Date.now() + 50_000).toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+      undefined,
+    ]) {
+      f.modelResult(observed);
+      assert.equal((await submit(profile.model)).status, 400);
+    }
+    f.modelResult({ status: "unavailable" }, undefined, 503);
+    assert.equal((await submit(profile.model)).status, 400);
+    f.modelResult({ status: "unavailable" });
+    assert.equal((await submit()).status, 400);
+    const anchor = await submit(profile.model);
+    assert.equal(anchor.status, 200);
+    await anchor.text();
+  } finally {
+    await f.close();
+  }
+});
+
+// Missing composition is not an observed outage and cannot grant fallback membership.
+void test("qualified OpenRouter execution with a missing discovery source denies its anchor before transport", async () => {
+  const f = await sourceHTTP(true, false, undefined, undefined, undefined, true);
+  try {
+    const { account, profile, generation, input } = modelAccount(f, "openrouter");
+    const sdk = createManagementClient({
+      role: "management",
+      origin: f.facadeOrigin,
+      token: "source-public-management",
+    });
+    assert.deepEqual(await sdk.readAccountModels(input), { status: "unknown" });
+    const executionRef = randomUUID();
+    const saved: SavedExecution = {
+      generation,
+      state: "open",
+      dispatchAllowed: true,
+      admission: {
+        executionRef,
+        issuerEpoch: await f.kernel.issuer(f.context),
+        invocationRef: "missing-source",
+        attemptRef: "attempt",
+        accountRef: account.accountRef,
+        authorizationEpoch: 1,
+        subjectRef: "subject",
+        policyRevision: 1,
+        bindingRevision: 1,
+        profileId: profile.profile,
+        limits: profile.limits,
+        expiresAt: new Date(Date.now() + 20_000).toISOString(),
+      },
+    };
+    f.executions.set(f.scopeKey(f.context, executionRef), saved);
+    f.control.bearers.replace([
+      ...f.cfg.bearers,
+      { role: "execution", consumerId: f.context.consumerId, token: "missing-model-source", saved },
+    ]);
+    const { executionRef: _, issuerEpoch: __, ...admission } = saved.admission;
+    const result = await f.publicCall(
+      "/v1/executions/" + executionRef + "/requests",
+      { model: profile.model, stream: true, store: false },
+      "missing-model-source",
+      { "x-gateway-request-id": randomUUID(), "x-gateway-admission": JSON.stringify(admission) },
+    );
+    assert.equal(result.status, 400);
+    assert.equal(f.forwarded.length, 0);
+    assert.equal(
+      f.seen.some((row) => row.path === "POST /private/native/v1/transports"),
+      false,
+    );
   } finally {
     await f.close();
   }

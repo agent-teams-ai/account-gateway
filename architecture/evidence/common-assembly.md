@@ -1094,14 +1094,14 @@ cover the public carrier. The [resource scope tests](../../tests/resources/assem
 [input tests](../../tests/assembly/inputs.test.mjs), [builder tests](../../tests/assembly/builder.test.mjs),
 the [example compile test](../../tests/assembly/consumer-standard-examples.test.mjs)
 for the examples of this document and of the [module authoring guide](../guides/module-authoring.md) and the [packed conformance consumer](../../packages/conformance/tests/packed-root.test.mjs)
-extend them, with the [profile completion tests](../../tests/assembly/profile-completion.test.mjs). These belong to the existing `pnpm assembly:test`, `pnpm resources:check`
-and `pnpm conformance:check` commands, invoked by both fast and full gates, after
-`pnpm assembly:build`.
+extend them, with the [profile completion tests](../../tests/assembly/profile-completion.test.mjs). These belong to the existing `bun run assembly:test`, `bun run resources:check`
+and `bun run conformance:check` commands, invoked by both fast and full gates, after
+`bun run assembly:build`.
 The [production import lint test](../../tests/assembly/consumer-standard-lint.test.mjs)
 checks the documented observation testing-entry restriction. The guide's compiled
 [communication example](../guides/module-authoring.md#21-module-communication) shows
 the ownership recipe. Observation runtime, type, writer, mutation and archive
-tests run in `pnpm observation:check`.
+tests run in `bun run observation:check`.
 Consumers must additionally link their own executable slice and independent
 binding oracle; copied Markdown examples do not count as evidence.
 

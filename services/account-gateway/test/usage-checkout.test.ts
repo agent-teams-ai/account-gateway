@@ -32,8 +32,12 @@ function fixture(failAt: string, rollbackFails = false) {
   const client = Object.assign(new EventEmitter(), {
     async query(sql: string) {
       queries.push(sql);
-      if (sql === failAt) throw original;
-      if (sql === "ROLLBACK" && rollbackFails) throw new Error("rollback failure");
+      if (sql === failAt) {
+        throw original;
+      }
+      if (sql === "ROLLBACK" && rollbackFails) {
+        throw new Error("rollback failure");
+      }
       return { rows: [] };
     },
     release(error?: unknown) {
@@ -57,7 +61,7 @@ function fixture(failAt: string, rollbackFails = false) {
   };
 }
 
-test("append destroys the single checkout when BEGIN fails and preserves the original failure", async () => {
+void test("append destroys the single checkout when BEGIN fails and preserves the original failure", async () => {
   const f = fixture("BEGIN");
   await assert.rejects(
     f.journal.append({ consumerId: "consumer" }, fact),
@@ -69,7 +73,7 @@ test("append destroys the single checkout when BEGIN fails and preserves the ori
   assert.equal(f.client.listenerCount("error"), 0);
 });
 
-test("append rollback failure never masks the query failure or leaks a reserved checkout", async () => {
+void test("append rollback failure never masks the query failure or leaks a reserved checkout", async () => {
   const f = fixture(
     "SELECT value FROM ag_kernel.usage_feed_counter WHERE singleton FOR UPDATE",
     true,
@@ -84,7 +88,7 @@ test("append rollback failure never masks the query failure or leaks a reserved 
   assert.equal(f.client.listenerCount("error"), 0);
 });
 
-test("read/list query errors and malformed cursors release or avoid the one shared checkout", async () => {
+void test("read/list query errors and malformed cursors release or avoid the one shared checkout", async () => {
   for (const operation of ["observe", "list"] as const) {
     const sql =
       operation === "observe"

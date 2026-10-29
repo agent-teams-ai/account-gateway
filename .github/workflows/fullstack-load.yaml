@@ -26,7 +26,7 @@ jobs:
     env:
       NPM_CONFIG_ENGINE_STRICT: 'true'
       LOAD_SUITE: ${{ matrix.suite }}
-      NATIVE_COMMIT: a04f63eeb2bd5adf0e7193beb696afaa1e516b30
+      NATIVE_COMMIT: a6bc1e36a1cd0d542af2806f3f8ae1e098e7cc76
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
       GATEWAY_LOAD_IMAGE: account-gateway-fullstack:qualified
     steps:
@@ -99,7 +99,9 @@ jobs:
           test "$(pnpm --version)" = 11.28.2
           test "$(pnpm --config.engine-strict=true config get engine-strict)" = true
           pnpm --config.engine-strict=true install --frozen-lockfile --store-dir "$GATEWAY_LOAD_ROOT/store" --virtual-store-dir "$GATEWAY_LOAD_ROOT/virtual"
-          node node_modules/typescript/bin/tsc --project tsconfig.json --outDir "$GATEWAY_LOAD_ROOT/sdk-dist"
+          node node_modules/typescript/bin/tsc --project tsconfig.build.json --outDir "$GATEWAY_LOAD_ROOT/sdk-dist"
+          test -f "$GATEWAY_LOAD_ROOT/sdk-dist/index.js"
+          test -f "$GATEWAY_LOAD_ROOT/sdk-dist/index.d.ts"
           ln -s "$GITHUB_WORKSPACE/packages/account-gateway/node_modules" "$GATEWAY_LOAD_ROOT/sdk-dist/node_modules"
           ln -s "$GATEWAY_LOAD_ROOT/sdk-dist" packages/account-gateway/dist
           pnpm --dir services/account-gateway run typecheck

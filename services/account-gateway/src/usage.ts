@@ -7,9 +7,54 @@ import type {
   UsageQuery,
 } from "@agent-teams/account-gateway/contracts";
 import { KernelError } from "./domain.ts";
-import type { TrustedContext } from "./domain.ts";
+import type { PrivateAdmission, TrustedContext } from "./domain.ts";
 import { sharedCheckout } from "./service-admission.ts";
 import type { Checkout } from "./service-admission.ts";
+
+const record = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+const numeric = (value: unknown): number | null =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+
+/** Stable request identity shared by the proxy and native-public ingress adapters. */
+export function executionUsageBase(
+  admission: PrivateAdmission,
+  requestRef: string,
+  model: string,
+  occurredAt: string,
+) {
+  return {
+    schemaVersion: 1 as const,
+    eventId: createHash("sha256")
+      .update(admission.executionRef + ":" + requestRef)
+      .digest("hex"),
+    executionRef: admission.executionRef,
+    requestRef,
+    invocationRef: admission.invocationRef,
+    attemptRef: admission.attemptRef,
+    accountRef: admission.accountRef,
+    profileId: admission.profileId,
+    model,
+    occurredAt,
+    cost: null,
+  };
+}
+
+/** Native counters are observations; absent values remain unknown in both paths. */
+export function nativeUsageFields(
+  observed: NativeUsage | undefined,
+): Pick<
+  UsageObservation,
+  "completeness" | "inputTokens" | "outputTokens" | "cachedInputTokens" | "reasoningTokens"
+> {
+  return {
+    completeness: observed?.state === "complete" ? "complete" : "partial",
+    inputTokens: observed?.inputTokens ?? null,
+    outputTokens: observed?.outputTokens ?? null,
+    cachedInputTokens: observed?.cachedInputTokens ?? null,
+    reasoningTokens: observed?.reasoningOutputTokens ?? null,
+  };
+}
 
 export interface UsageJournal {
   observe(
@@ -35,45 +80,52 @@ export class PostgresUsageJournal implements UsageJournal {
     requestRef: string,
   ): Promise<UsageObservation | null> {
     const db = await this.#checkout();
-    let failed = false;
+    const health = { failed: false };
+    const failed = (): boolean => health.failed;
     const onError = () => {
-      failed = true;
+      health.failed = true;
     };
     db.on("error", onError);
     try {
-      const result = await db.query(
+      const result = await db.query<{ fact: unknown }>(
         "SELECT fact FROM ag_kernel.usage_observations WHERE consumer=$1 AND execution_ref=$2 AND request_ref=$3 ORDER BY revision DESC LIMIT 1",
         [context.consumerId, executionRef, requestRef],
       );
-      if (failed) throw new KernelError("unavailable");
-      return result.rows.length ? usageObservation.parse(result.rows[0].fact) : null;
+      if (failed()) {
+        throw new KernelError("unavailable");
+      }
+      const row = result.rows.at(0);
+      return row === undefined ? null : usageObservation.parse(row.fact);
     } finally {
       db.removeListener("error", onError);
-      db.release(failed);
+      db.release(failed());
     }
   }
   async append(context: TrustedContext, input: UsageObservation): Promise<void> {
     const fact = usageObservation.parse(input),
       db = await this.#checkout();
-    let transaction = false,
-      destroy = false;
+    let transaction = false;
+    const health = { destroy: false };
+    const destroy = (): boolean => health.destroy;
     const onError = () => {
-      destroy = true;
+      health.destroy = true;
     };
     db.on("error", onError);
     try {
       await db.query("BEGIN");
       transaction = true;
       await db.query("SELECT value FROM ag_kernel.usage_feed_counter WHERE singleton FOR UPDATE");
-      const previous = await db.query(
+      const previous = await db.query<{ fact: unknown }>(
         "SELECT fact FROM ag_kernel.usage_observations WHERE consumer=$1 AND execution_ref=$2 AND request_ref=$3 AND revision=$4",
         [context.consumerId, fact.executionRef, fact.requestRef, fact.revision],
       );
-      if (previous.rows.length) {
-        if (JSON.stringify(usageObservation.parse(previous.rows[0].fact)) !== JSON.stringify(fact))
+      const previousRow = previous.rows.at(0);
+      if (previousRow !== undefined) {
+        if (JSON.stringify(usageObservation.parse(previousRow.fact)) !== JSON.stringify(fact)) {
           throw new KernelError("conflict");
+        }
       } else {
-        const position = await db.query(
+        const position = await db.query<{ value: string }>(
           "UPDATE ag_kernel.usage_feed_counter SET value=value+1 WHERE singleton RETURNING value",
         );
         await db.query(
@@ -90,19 +142,23 @@ export class PostgresUsageJournal implements UsageJournal {
       }
       await db.query("COMMIT");
       transaction = false;
-      if (destroy) throw new KernelError("unavailable");
+      if (destroy()) {
+        throw new KernelError("unavailable");
+      }
     } catch (error) {
       if (transaction) {
         try {
           await db.query("ROLLBACK");
         } catch {
-          destroy = true;
+          health.destroy = true;
         }
-      } else destroy = true;
+      } else {
+        health.destroy = true;
+      }
       throw error;
     } finally {
       db.removeListener("error", onError);
-      db.release(destroy);
+      db.release(destroy());
     }
   }
   #cursor(consumer: string, after: string, high: string): string {
@@ -117,9 +173,13 @@ export class PostgresUsageJournal implements UsageJournal {
   #readCursor(consumer: string, cursor: string): readonly [string, string] {
     let values: unknown;
     try {
-      if (cursor.length > 512 || !/^[A-Za-z0-9_-]+$/.test(cursor)) throw new Error();
+      if (cursor.length > 512 || !/^[A-Za-z0-9_-]+$/.test(cursor)) {
+        throw new Error("invalid usage cursor encoding");
+      }
       const bytes = Buffer.from(cursor, "base64url");
-      if (bytes.length < 29) throw new Error();
+      if (bytes.length < 29) {
+        throw new Error("invalid usage cursor encoding");
+      }
       const decipher = createDecipheriv("aes-256-gcm", this.#key, bytes.subarray(0, 12));
       decipher.setAuthTag(bytes.subarray(12, 28));
       values = JSON.parse(
@@ -128,37 +188,51 @@ export class PostgresUsageJournal implements UsageJournal {
     } catch {
       throw new KernelError("invalid");
     }
-    if (
-      !Array.isArray(values) ||
-      values.length !== 3 ||
-      values[0] !== consumer ||
-      values.slice(1).some((v) => typeof v !== "string" || !/^(0|[1-9]\d{0,18})$/.test(v))
-    )
+    if (!Array.isArray(values) || values.length !== 3 || values[0] !== consumer) {
       throw new KernelError("denied");
-    if (BigInt(values[1]) > BigInt(values[2])) throw new KernelError("invalid");
-    return [values[1], values[2]];
+    }
+    const after: unknown = values[1],
+      high: unknown = values[2];
+    if (
+      typeof after !== "string" ||
+      !/^(0|[1-9]\d{0,18})$/.test(after) ||
+      typeof high !== "string" ||
+      !/^(0|[1-9]\d{0,18})$/.test(high)
+    ) {
+      throw new KernelError("denied");
+    }
+    if (BigInt(after) > BigInt(high)) {
+      throw new KernelError("invalid");
+    }
+    return [after, high];
   }
   async list(context: TrustedContext, query: UsageQuery): Promise<UsagePage> {
     const limit = query.limit ?? 100;
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new KernelError("invalid");
-    const previous = query.afterCursor
-      ? this.#readCursor(context.consumerId, query.afterCursor)
-      : undefined;
-    const bound = query.highWaterCursor
-      ? this.#readCursor(context.consumerId, query.highWaterCursor)
-      : undefined;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new KernelError("invalid");
+    }
+    const previous =
+      query.afterCursor !== undefined && query.afterCursor !== ""
+        ? this.#readCursor(context.consumerId, query.afterCursor)
+        : undefined;
+    const bound =
+      query.highWaterCursor !== undefined && query.highWaterCursor !== ""
+        ? this.#readCursor(context.consumerId, query.highWaterCursor)
+        : undefined;
     const after = previous?.[0] ?? "0";
     if (
       bound &&
       (bound[0] !== bound[1] ||
         (previous && previous[1] !== bound[1]) ||
         BigInt(after) > BigInt(bound[1]))
-    )
+    ) {
       throw new KernelError("invalid");
+    }
     const db = await this.#checkout();
-    let failed = false;
+    const health = { failed: false };
+    const failed = (): boolean => health.failed;
     const onError = () => {
-      failed = true;
+      health.failed = true;
     };
     db.on("error", onError);
     try {
@@ -167,11 +241,12 @@ export class PostgresUsageJournal implements UsageJournal {
         bound?.[1] ??
         (previous && previous[0] !== previous[1]
           ? previous[1]
-          : String(
-              (await db.query("SELECT value FROM ag_kernel.usage_feed_counter WHERE singleton"))
-                .rows[0].value,
-            ));
-      const rows = await db.query(
+          : (
+              await db.query<{ value: string }>(
+                "SELECT value FROM ag_kernel.usage_feed_counter WHERE singleton",
+              )
+            ).rows[0].value);
+      const rows = await db.query<{ position: string; fact: unknown }>(
         "SELECT position,fact FROM ag_kernel.usage_observations WHERE consumer=$1 AND position>$2 AND position<=$3 ORDER BY position LIMIT $4",
         [context.consumerId, after, high, limit],
       );
@@ -183,14 +258,20 @@ export class PostgresUsageJournal implements UsageJournal {
       for (const row of rows.rows) {
         const fact = usageObservation.parse(row.fact),
           size = Buffer.byteLength(JSON.stringify(fact)) + 1;
-        if (bytes + size > 55_000) break;
+        if (bytes + size > 55_000) {
+          break;
+        }
         observations.push(fact);
         bytes += size;
-        last = String(row.position);
+        last = row.position;
       }
-      if (observations.length === rows.rows.length && rows.rows.length < limit) last = high;
+      if (observations.length === rows.rows.length && rows.rows.length < limit) {
+        last = high;
+      }
       const highWaterCursor = query.highWaterCursor ?? this.#cursor(context.consumerId, high, high);
-      if (failed) throw new KernelError("unavailable");
+      if (failed()) {
+        throw new KernelError("unavailable");
+      }
       return {
         observations,
         nextCursor: last === high ? highWaterCursor : this.#cursor(context.consumerId, last, high),
@@ -198,7 +279,7 @@ export class PostgresUsageJournal implements UsageJournal {
       };
     } finally {
       db.removeListener("error", onError);
-      db.release(failed);
+      db.release(failed());
     }
   }
 }
@@ -207,14 +288,16 @@ export class PostgresUsageJournal implements UsageJournal {
 // Missing/invalid terminal metadata stays unknown; transport success is not usage.
 export class ResponsesUsageCapture {
   #pending = "";
-  #decoder = new TextDecoder();
+  readonly #decoder = new TextDecoder();
   #dropped = false;
   #usage: Pick<
     UsageObservation,
     "inputTokens" | "outputTokens" | "cachedInputTokens" | "reasoningTokens"
   > = { inputTokens: null, outputTokens: null, cachedInputTokens: null, reasoningTokens: null };
   push(bytes: Uint8Array): void {
-    if (this.#dropped) return;
+    if (this.#dropped) {
+      return;
+    }
     this.#pending += this.#decoder.decode(bytes, { stream: true });
     while (this.#pending.includes("\n")) {
       const end = this.#pending.indexOf("\n"),
@@ -225,31 +308,40 @@ export class ResponsesUsageCapture {
         this.#pending = "";
         return;
       }
-      if (!line.startsWith("data:")) continue;
+      if (!line.startsWith("data:")) {
+        continue;
+      }
       try {
-        const event = JSON.parse(line.slice(5));
-        if (event.type !== "response.completed") continue;
-        const u = event.response?.usage;
-        const numeric = (v: unknown): number | null =>
-          typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null;
+        const event: unknown = JSON.parse(line.slice(5));
+        if (!record(event) || event.type !== "response.completed") {
+          continue;
+        }
+        const response = record(event.response) ? event.response : undefined;
+        const u = response !== undefined && record(response.usage) ? response.usage : undefined;
+        const inputDetails = u?.input_tokens_details,
+          outputDetails = u?.output_tokens_details;
         this.#usage = {
           inputTokens: numeric(u?.input_tokens),
           outputTokens: numeric(u?.output_tokens),
-          cachedInputTokens: numeric(u?.input_tokens_details?.cached_tokens),
-          reasoningTokens: numeric(u?.output_tokens_details?.reasoning_tokens),
+          cachedInputTokens: numeric(record(inputDetails) ? inputDetails.cached_tokens : undefined),
+          reasoningTokens: numeric(
+            record(outputDetails) ? outputDetails.reasoning_tokens : undefined,
+          ),
         };
         if (
           this.#usage.cachedInputTokens !== null &&
           (this.#usage.inputTokens === null ||
             this.#usage.cachedInputTokens > this.#usage.inputTokens)
-        )
+        ) {
           this.#usage.cachedInputTokens = null;
+        }
         if (
           this.#usage.reasoningTokens !== null &&
           (this.#usage.outputTokens === null ||
             this.#usage.reasoningTokens > this.#usage.outputTokens)
-        )
+        ) {
           this.#usage.reasoningTokens = null;
+        }
       } catch {
         /* malformed usage cannot become a zero */
       }
@@ -274,35 +366,60 @@ export interface NativeUsage {
   costState: "unknown";
   finalized: boolean;
 }
-export function nativeUsage(value: unknown): NativeUsage {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new KernelError("invalid");
-  const r = value as Record<string, unknown>;
+function optionalCounter(value: unknown): asserts value is number | undefined {
+  if (
+    value !== undefined &&
+    (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+  ) {
+    throw new KernelError("invalid");
+  }
+}
+function validateNativeUsage(value: unknown): asserts value is NativeUsage {
+  if (!record(value)) {
+    throw new KernelError("invalid");
+  }
+  const r = value;
   const required = ["source", "state", "costState", "finalized"],
     optional = ["inputTokens", "outputTokens", "cachedInputTokens", "reasoningOutputTokens"];
   if (
     required.some((key) => !Object.hasOwn(r, key)) ||
     Object.keys(r).some((key) => !required.includes(key) && !optional.includes(key))
-  )
+  ) {
     throw new KernelError("invalid");
+  }
   if (
     r.source !== "native_provider_response" ||
-    !["unknown", "partial", "complete"].includes(r.state as string) ||
+    (r.state !== "unknown" && r.state !== "partial" && r.state !== "complete") ||
     r.costState !== "unknown" ||
     typeof r.finalized !== "boolean"
-  )
+  ) {
     throw new KernelError("invalid");
-  for (const key of ["inputTokens", "outputTokens", "cachedInputTokens", "reasoningOutputTokens"])
-    if (r[key] !== undefined && (!Number.isSafeInteger(r[key]) || (r[key] as number) < 0))
-      throw new KernelError("invalid");
+  }
+  optionalCounter(r.inputTokens);
+  optionalCounter(r.outputTokens);
+  optionalCounter(r.cachedInputTokens);
+  optionalCounter(r.reasoningOutputTokens);
   if (
     (r.state === "complete" && (r.inputTokens === undefined || r.outputTokens === undefined)) ||
     (r.cachedInputTokens !== undefined &&
-      (r.inputTokens === undefined ||
-        (r.cachedInputTokens as number) > (r.inputTokens as number))) ||
+      (r.inputTokens === undefined || r.cachedInputTokens > r.inputTokens)) ||
     (r.reasoningOutputTokens !== undefined &&
-      (r.outputTokens === undefined ||
-        (r.reasoningOutputTokens as number) > (r.outputTokens as number)))
-  )
+      (r.outputTokens === undefined || r.reasoningOutputTokens > r.outputTokens))
+  ) {
     throw new KernelError("invalid");
-  return Object.freeze({ ...r }) as unknown as NativeUsage;
+  }
+}
+export function nativeUsage(value: unknown): NativeUsage {
+  if (!record(value)) {
+    throw new KernelError("invalid");
+  }
+  let snapshot: Record<string, unknown>;
+  try {
+    snapshot = { ...value };
+  } catch {
+    throw new KernelError("invalid");
+  }
+  validateNativeUsage(snapshot);
+  // Return the same validated snapshot, preserving own-key and symbol semantics.
+  return Object.freeze(snapshot);
 }

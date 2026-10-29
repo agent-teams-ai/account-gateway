@@ -1,5 +1,14 @@
 import { z } from "zod";
 import * as c from "../contracts/index.js";
+const hasControl = (value: string): boolean => {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) {
+      return true;
+    }
+  }
+  return false;
+};
 // Secret ingress is deliberately absent from the browser-safe contracts entry.
 export const credential = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("api_key"), value: z.string().min(1).max(16384) }),
@@ -37,7 +46,7 @@ export const oauthCallbackCode = z
     (value) =>
       !/[\uD800-\uDFFF]/u.test(value) &&
       new TextEncoder().encode(value).byteLength <= 4096 &&
-      !/[\u0000-\u001f\u007f-\u009f]/u.test(value) &&
+      !hasControl(value) &&
       !/^[\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|[\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]$/u.test(
         value,
       ),
@@ -55,15 +64,21 @@ export function parseOAuthCallbackURL(
       value.length > 8192 ||
       new TextEncoder().encode(value).byteLength > 8192 ||
       !value.startsWith(prefix) ||
-      /[\u0000-\u0020\u007f-\u009f#\\]/u.test(value)
-    )
+      hasControl(value) ||
+      /[ #\\]/u.test(value)
+    ) {
       return undefined;
+    }
     const fields = new Map<string, string>();
     for (const part of value.slice(prefix.length).split("&")) {
       const equal = part.indexOf("=");
-      if (equal < 1) return undefined;
+      if (equal < 1) {
+        return undefined;
+      }
       const key = part.slice(0, equal);
-      if (!["code", "state", "scope"].includes(key) || fields.has(key)) return undefined;
+      if (!["code", "state", "scope"].includes(key) || fields.has(key)) {
+        return undefined;
+      }
       fields.set(key, decodeURIComponent(part.slice(equal + 1).replace(/\+/g, " ")));
     }
     const code = fields.get("code"),
@@ -73,8 +88,9 @@ export function parseOAuthCallbackURL(
       !oauthCallbackCode.safeParse(code).success ||
       !oauthCallbackState.safeParse(state).success ||
       (scope !== undefined && new TextEncoder().encode(scope).byteLength > 1024)
-    )
+    ) {
       return undefined;
+    }
     return { code: code!, state: state! };
   } catch {
     return undefined;
@@ -97,28 +113,37 @@ export function parseGrokManualCallbackURL(
       value.length > 8192 ||
       new TextEncoder().encode(value).byteLength > 8192 ||
       !value.startsWith(prefix) ||
-      /[\u0000-\u0020\u007f-\u009f#\\]/u.test(value)
-    )
+      hasControl(value) ||
+      /[ #\\]/u.test(value)
+    ) {
       return undefined;
+    }
     const fields = new Map<string, string>();
     for (const part of value.slice(prefix.length).split("&")) {
       const equal = part.indexOf("=");
-      if (equal < 1) return undefined;
+      if (equal < 1) {
+        return undefined;
+      }
       const key = part.slice(0, equal);
-      if (!["code", "state", "scope"].includes(key) || fields.has(key)) return undefined;
+      if (!["code", "state", "scope"].includes(key) || fields.has(key)) {
+        return undefined;
+      }
       fields.set(key, decodeURIComponent(part.slice(equal + 1).replace(/\+/g, " ")));
     }
     const code = fields.get("code"),
       state = fields.get("state"),
       scope = fields.get("scope");
     if (
-      !code ||
-      !state ||
+      code === undefined ||
+      code.length === 0 ||
+      state === undefined ||
+      state.length === 0 ||
       !oauthCallbackState.safeParse(state).success ||
       !grokOAuthAuthorizationCode.safeParse(code).success ||
       (scope !== undefined && new TextEncoder().encode(scope).byteLength > 1024)
-    )
+    ) {
       return undefined;
+    }
     return { code, state };
   } catch {
     return undefined;
@@ -138,18 +163,27 @@ export const claudeOAuthCallbackCode = z
     (value) =>
       !/[\uD800-\uDFFF]/u.test(value) &&
       new TextEncoder().encode(value).byteLength <= 8192 &&
-      !/[\s\u0000-\u001f\u007f-\u009f#]/u.test(value),
+      !hasControl(value) &&
+      !/[\s#]/u.test(value),
   );
 export function parseClaudeOAuthAuthorizationCode(
   value: unknown,
 ): { readonly state: string; readonly code: string } | undefined {
-  if (typeof value !== "string" || value.length > 8257) return undefined;
-  const [code, state, extra] = value.split("#");
-  return extra === undefined &&
-    claudeOAuthCallbackCode.safeParse(code).success &&
-    oauthCallbackState.safeParse(state).success
-    ? { code: code!, state: state! }
-    : undefined;
+  if (typeof value !== "string" || value.length > 8257) {
+    return undefined;
+  }
+  const parts = value.split("#");
+  if (parts.length !== 2) {
+    return undefined;
+  }
+  const [code, state] = parts;
+  if (
+    !claudeOAuthCallbackCode.safeParse(code).success ||
+    !oauthCallbackState.safeParse(state).success
+  ) {
+    return undefined;
+  }
+  return { code, state };
 }
 export const claudeOAuthAuthorizationCode = z
   .string()

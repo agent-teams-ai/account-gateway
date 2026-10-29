@@ -1,15 +1,16 @@
 // Synthetic Go peer over real TCP + real disposable SQL. This suite does not
 // qualify actual Go, provider protocol conversion, launcher, or RR assembly.
-import test, { before, after } from "node:test";
+import test, { before as beforeTests, after as afterTests } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import type { Server, ServerResponse } from "node:http";
-import { once } from 'node:events';
+import { once } from "node:events";
 import { connect } from "node:net";
 import { readFile, readdir } from "node:fs/promises";
-import { setTimeout as delay } from 'node:timers/promises';
-import pg from "pg";
+import { setTimeout as delay } from "node:timers/promises";
+import { Pool } from "pg";
+import type { PoolClient } from "pg";
 import { PostgresKernel } from "../src/postgres.ts";
 import { AccountManagement } from "../src/management.ts";
 import { IntentSecrets, PostgresManagementStore } from "../src/management-store.ts";
@@ -20,27 +21,55 @@ import {
 } from "../src/native-client.ts";
 import type { OAuthScope } from "../src/management.ts";
 import { createFacade, FacadeBearers } from "../src/facade.ts";
-import type { NativeTransport } from '../src/facade.ts';
+import type { NativeTransport } from "../src/facade.ts";
 import { NativeAuthority } from "../src/native-authority.ts";
 import { NativeHTTPTransport } from "../src/native-transport.ts";
-import { NativeControlAdmission, admitNativeCallback, inServiceLane, sharedCheckout } from '../src/service-admission.ts';
+import {
+  NativeControlAdmission,
+  admitNativeCallback,
+  inServiceLane,
+  sharedCheckout,
+} from "../src/service-admission.ts";
 import { KernelError } from "../src/domain.ts";
 import type { NativeDispatchProof, PrivateAdmission } from "../src/domain.ts";
 import type { Descriptor, Receipt } from "../src/native-wire.ts";
+import {
+  descriptor as nativeDescriptor,
+  object as nativeObject,
+  proof as nativeProof,
+} from "../src/native-wire.ts";
+import { PostgresUsageJournal } from "../src/usage.ts";
+import { requestBoundNonce } from "../src/native-reservation.ts";
 
-let pool: pg.Pool;
+let pool: Pool;
 // Each synthetic creation has its own native identity, as the native DB sequence does.
 let nextNativeAccountId = 1;
-before(async () => {
+function postgresSetupFailure(error: unknown): Error {
+  return error instanceof assert.AssertionError
+    ? error
+    : new Error("NOT_RUN: disposable PostgreSQL setup unavailable");
+}
+function refreshFixtureFailure(error: unknown): Error {
+  return error instanceof assert.AssertionError
+    ? error
+    : new Error("synthetic refresh fixture failed");
+}
+function isNonemptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+beforeTests(async () => {
   const dsn = process.env.AG_NATIVE_BRIDGE_TEST_DSN,
     database = process.env.AG_NATIVE_BRIDGE_DISPOSABLE_DB;
   if (
-    !dsn ||
-    !database ||
+    dsn === undefined ||
+    dsn === "" ||
+    database === undefined ||
+    database === "" ||
     !/^ag_kernel_test_[a-z0-9_]+$/.test(database) ||
     process.env.AG_KERNEL_TEST_ALLOW !== "disposable_pg17_10"
-  )
+  ) {
     throw new Error("NOT_RUN: NEW disposable PG17.10 native bridge database required");
+  }
   let u: URL;
   try {
     u = new URL(dsn);
@@ -53,13 +82,14 @@ before(async () => {
     u.pathname !== "/" + database ||
     u.search ||
     u.hash
-  )
+  ) {
     throw new Error("NOT_RUN: refusing remote or unspecified database");
-  pool = new pg.Pool({ connectionString: dsn, max: 8, connectionTimeoutMillis: 5000 });
-  pool.on("error", () => undefined);
+  }
+  pool = new Pool({ connectionString: dsn, max: 8, connectionTimeoutMillis: 5000 });
+  pool.on("error", () => {});
   try {
     const r = (
-      await pool.query(
+      await pool.query<{ db: string; version: string }>(
         "SELECT current_database() AS db,current_setting('server_version') AS version",
       )
     ).rows[0];
@@ -74,15 +104,20 @@ before(async () => {
       0,
     );
     const directory = new URL("../migrations/", import.meta.url);
-    for (const file of (await readdir(directory)).filter((f) => /^\d{3}_.*\.sql$/.test(f)).sort())
+    for (const file of (await readdir(directory))
+      .filter((f) => /^\d{3}_.*\.sql$/.test(f))
+      .toSorted()) {
       await pool.query(await readFile(new URL(file, directory), "utf8"));
-  } catch (e) {
-    if (e instanceof assert.AssertionError) throw e;
-    throw new Error("NOT_RUN: disposable PostgreSQL setup unavailable");
+    }
+  } catch (error) {
+    throw postgresSetupFailure(error);
   }
 });
-after(async () => {
-  await pool?.end();
+afterTests(async () => {
+  const ownedPool: unknown = pool;
+  if (ownedPool instanceof Pool) {
+    await ownedPool.end();
+  }
 });
 
 const profile = {
@@ -101,21 +136,27 @@ const credentials = {
   callbackCredential: "test-fixture-literal-callback",
 };
 async function listen(s: Server): Promise<string> {
-  await new Promise<void>((resolve) => s.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => {
+    s.listen(0, "127.0.0.1", resolve);
+  });
   const a = s.address();
-  assert.ok(a && typeof a === "object");
+  assert.ok(a !== null && typeof a === "object");
   return "http://127.0.0.1:" + a.port;
 }
 async function stop(s: Server): Promise<void> {
   s.closeAllConnections();
-  await new Promise<void>((resolve) => s.close(() => resolve()));
+  await new Promise<void>((resolve) => {
+    s.close(() => {
+      resolve();
+    });
+  });
 }
 
 // Decoder/transport risk only: the journal/current owner authority is exercised
 // once at the real F PostgreSQL boundary in oauth-enrollment-postgres.test.ts.
 // RED if this maintenance method accepts token/version DTOs, an identity alias,
 // a redirect replay, or the enrollment client's configurable 30s refresh deadline.
-test(
+void test(
   "private refresh HTTP: original four fields, finite safe ACK and one capped attempt",
   { timeout: 15_000 },
   async () => {
@@ -138,16 +179,20 @@ test(
         assert.equal(req.url, "/private/native/v1/oauth/refresh");
         assert.equal(req.headers.authorization, "Bearer " + control);
         const chunks: Buffer[] = [];
-        for await (const chunk of req) chunks.push(chunk as Buffer);
+        for await (const chunk of req) {
+          chunks.push(chunk as Buffer);
+        }
         sent.push(JSON.parse(Buffer.concat(chunks).toString()) as unknown);
         requestObserved.resolve();
-        if (reply === undefined) return; // Hold only this local fixture socket.
+        if (reply === undefined) {
+          return;
+        } // Hold only this local fixture socket.
         res.writeHead(status, {
           "content-type": "application/json",
           ...(status === 307 ? { location: "/other-route" } : {}),
         });
         res.end(reply);
-      })().catch((error) => {
+      })().catch((error: unknown) => {
         fixtureError = error;
         res.destroy();
       });
@@ -229,7 +274,7 @@ test(
       before = sent.length;
       requestObserved = Promise.withResolvers<void>();
       const pending = client.refresh(scope);
-      void pending.catch(() => undefined);
+      void pending.catch(() => {});
       await requestObserved.promise;
       // Input replacement after dispatch cannot alter the original identity tuple.
       const originalOperation = scope.operationId;
@@ -237,11 +282,10 @@ test(
       await assert.rejects(
         Promise.race([
           pending,
-          new Promise<never>((_, reject) => {
-            const timer = setTimeout(
-              () => reject(new Error("refresh exceeded 5s deadline allowance")),
-              6000,
-            );
+          new Promise<never>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              reject(new Error("refresh exceeded 5s deadline allowance"));
+            }, 6000);
             timer.unref();
           }),
         ]),
@@ -249,7 +293,10 @@ test(
       );
       assert.equal(originalOperation, expected.operation);
       assert.deepEqual(sent.slice(before), [expected]);
-      if (fixtureError) throw fixtureError;
+      const hasFixtureError = Boolean(fixtureError);
+      if (hasFixtureError) {
+        throw refreshFixtureFailure(fixtureError);
+      }
     } finally {
       await stop(peer);
     }
@@ -265,7 +312,8 @@ type Mode =
   | "lost-admit-ack"
   | "redirect"
   | "held"
-  | "early-ack" | 'large';
+  | "early-ack"
+  | "large";
 interface NativeInput {
   requestRef: string;
   worker: string;
@@ -273,11 +321,11 @@ interface NativeInput {
   descriptor: Descriptor;
 }
 function latch() {
-  let resolve!: () => void;
-  const promise = new Promise<void>((r) => {
-    resolve = r;
+  let resolveLatch!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    resolveLatch = resolve;
   });
-  return { promise, resolve };
+  return { promise, resolve: resolveLatch };
 }
 function admissionBarrier(requestId: string) {
   return { requestId, reached: latch(), release: latch(), acked: latch(), latched: false };
@@ -287,8 +335,10 @@ async function waitFor(promise: Promise<void>): Promise<void> {
   try {
     await Promise.race([
       promise,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("fixture barrier timeout")), 4000);
+      new Promise<never>((resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error("fixture barrier timeout"));
+        }, 4000);
       }),
     ]);
   } finally {
@@ -296,14 +346,24 @@ async function waitFor(promise: Promise<void>): Promise<void> {
   }
 }
 
+const ignoreEntry = (): void => {};
+
 async function fixture(
   mode: Mode = "complete",
   options: { maxPending?: number; timeoutMs?: number } = {},
 ) {
-  const executionLimits = mode === 'large' ? { ...limits, outputBytes: 1_048_576 } : limits;
-  const streamFrames = mode === 'large' ? Array.from({ length: 256 }, () => Buffer.from('data: ' +
-    JSON.stringify({ type: 'response.output_text.delta', delta: 'x'.repeat(2197) }) + '\n\n')) : [];
-  const expectedStream = Buffer.concat([Buffer.from('data: fixture\n\n'), ...streamFrames]);
+  const executionLimits = mode === "large" ? { ...limits, outputBytes: 1_048_576 } : limits;
+  const streamFrames =
+    mode === "large"
+      ? Array.from({ length: 256 }, () =>
+          Buffer.from(
+            "data: " +
+              JSON.stringify({ type: "response.output_text.delta", delta: "x".repeat(2197) }) +
+              "\n\n",
+          ),
+        )
+      : [];
+  const expectedStream = Buffer.concat([Buffer.from("data: fixture\n\n"), ...streamFrames]);
   const transportChunkSizes: number[] = [];
   const context = { consumerId: "native-" + randomUUID() },
     worker = randomUUID(),
@@ -320,7 +380,7 @@ async function fixture(
     profile: profile.profile,
     displayName: "Fixture",
   });
-  assert.ok(account.accountRef);
+  assert.ok(isNonemptyString(account.accountRef));
   const candidate = await kernel.startCandidate(context, operationId, worker);
   assert.ok(candidate);
   const scope = {
@@ -354,9 +414,9 @@ async function fixture(
     bindingRevision: 3,
     issuerEpoch: await kernel.issuer(context),
     deadline: new Date(Date.now() + 45_000),
-    limits: executionLimits
+    limits: executionLimits,
   });
-  assert.ok(prepared.executionRef);
+  assert.ok(isNonemptyString(prepared.executionRef));
   const saved = await kernel.savedExecution(context, prepared.executionRef);
   let barrier: ReturnType<typeof admissionBarrier> | undefined;
   const currentWorkerLease = kernel.currentWorkerLease.bind(kernel);
@@ -366,13 +426,15 @@ async function fixture(
     // Pause the REAL facade callback at its lease read AFTER the SQL claim,
     // before NativeAuthority can receive/attach the returned closure proof.
     if (b && !b.latched) {
-      let persisted: NativeDispatchProof | undefined = undefined;
+      let persisted: NativeDispatchProof | undefined;
       try {
         persisted = await kernel.requestProof(context, saved.admission.executionRef, b.requestId);
       } catch (error) {
         // PostgreSQL requestProof throws on an absent request ROW. Only that
         // pre-claim absence can bypass the barrier; other SQL failures propagate.
-        if (!(error instanceof KernelError) || error.code !== "unknown") throw error;
+        if (!(error instanceof KernelError) || error.code !== "unknown") {
+          throw error;
+        }
       }
       if (persisted) {
         b.latched = true;
@@ -390,7 +452,7 @@ async function fixture(
   let heldResponse: ServerResponse | undefined,
     heldReceipt: Receipt | undefined,
     closeOnCancel = false;
-  let resolveEntry: () => void = () => undefined;
+  let resolveEntry: () => void = ignoreEntry;
   const entered = new Promise<void>((resolve) => {
     resolveEntry = resolve;
   });
@@ -406,7 +468,9 @@ async function fixture(
   const peer = createServer((req, res) => {
     void (async () => {
       const chunks: Buffer[] = [];
-      for await (const c of req) chunks.push(Buffer.from(c as Uint8Array));
+      for await (const c of req) {
+        chunks.push(Buffer.from(c as Uint8Array));
+      }
       const raw = Buffer.concat(chunks),
         action = req.url?.slice("/private/native/v1/transports".length) ?? "";
       if (action === "") {
@@ -432,7 +496,7 @@ async function fixture(
         };
         delete admit.payload;
         const admitting = call("admit", admit);
-        void admitting.catch(() => undefined);
+        void admitting.catch(() => {});
         let early: Receipt | undefined;
         const b = barrier;
         if (mode === "early-ack" && b?.requestId === input.requestRef) {
@@ -498,7 +562,7 @@ async function fixture(
         }
         permits++;
         const p = reply.dispatch.closure;
-        assert.ok(reply.leaseExpiresAt);
+        assert.ok(isNonemptyString(reply.leaseExpiresAt));
         const equivalent = reply.leaseExpiresAt.replace(
           /\.(\d{3})Z$/,
           (_, ms: string) => "." + ms + "000000Z",
@@ -527,8 +591,10 @@ async function fixture(
           ).status,
           403,
         );
-        const entered = !["noentry", "lost-admit-ack", "early-ack"].includes(mode);
-        if (entered) entries++;
+        const didEnter = !["noentry", "lost-admit-ack", "early-ack"].includes(mode);
+        if (didEnter) {
+          entries++;
+        }
         const r: Receipt = early ?? {
           consumerId: context.consumerId,
           executionRef: input.admission.executionRef,
@@ -536,26 +602,33 @@ async function fixture(
           native,
           proof: p,
           phase: "closed",
-          effect: entered ? "completed" : "effect_unknown",
+          effect: didEnter ? "completed" : "effect_unknown",
           sealed: true,
           acknowledged: false,
           lifetime: {
-            entered,
+            entered: didEnter,
             contextDone: !["unclosed", "held"].includes(mode),
             forwardingReturned: mode !== "held",
             bodyKnown: true,
             bodyClosed: !["closeFailed", "held"].includes(mode),
             closeFailed: mode === "closeFailed",
             completed:
-              entered && !["partial", "overflow", "unclosed", "closeFailed", "held"].includes(mode),
+              didEnter &&
+              !["partial", "overflow", "unclosed", "closeFailed", "held"].includes(mode),
             sealed: true,
           },
         };
-        if (["unclosed", "closeFailed", "held"].includes(mode)) r.phase = "entered";
-        if (!r.lifetime.completed) r.effect = "effect_unknown";
-        if (mode === "lost-admit-ack") delete r.proof;
+        if (["unclosed", "closeFailed", "held"].includes(mode)) {
+          r.phase = "entered";
+        }
+        if (!r.lifetime.completed) {
+          r.effect = "effect_unknown";
+        }
+        if (mode === "lost-admit-ack") {
+          delete r.proof;
+        }
         records.set(input.requestRef, r);
-        if (!entered) {
+        if (!didEnter) {
           // First receipt may precede ContextDone. Same-proof readback supplies
           // later positive closure; cached claim status remains dispatch_started.
           res.writeHead(202, { "content-type": "application/json" });
@@ -587,15 +660,18 @@ async function fixture(
           return;
         }
         if (mode === "overflow") res.write(Buffer.alloc(limits.outputBytes + 1, 0x20));
-        if (mode === 'large') {
-          const closed = new AbortController(), onClose = () => closed.abort();
-          res.once('close', onClose);
+        if (mode === "large") {
+          const closed = new AbortController(),
+            onClose = () => closed.abort();
+          res.once("close", onClose);
           try {
             for (const frame of streamFrames) {
               if (res.destroyed) return;
-              if (!res.write(frame)) await once(res, 'drain', { signal: closed.signal });
+              if (!res.write(frame)) await once(res, "drain", { signal: closed.signal });
             }
-          } finally { res.removeListener('close', onClose); }
+          } finally {
+            res.removeListener("close", onClose);
+          }
         }
         res.end();
         return;
@@ -659,7 +735,9 @@ async function fixture(
       res.writeHead(202, { "content-type": "application/json" });
       res.end(JSON.stringify({ ...r, proof: p }));
     })().catch(() => {
-      if (!res.headersSent) res.writeHead(500);
+      if (!res.headersSent) {
+        res.writeHead(500);
+      }
       res.end("{}");
     });
   });
@@ -691,7 +769,9 @@ async function fixture(
     },
   });
   const callbackBudget = new NativeControlAdmission(8, 22);
-  const callbacks = authority.createServer((req, res, work) => admitNativeCallback(callbackBudget, req, res, work));
+  const callbacks = authority.createServer((req, res, work) =>
+    admitNativeCallback(callbackBudget, req, res, work),
+  );
   callbackOrigin = await listen(callbacks);
   const callbackServers = [callbacks];
   const enrollment = await call("enrollment", {
@@ -702,21 +782,28 @@ async function fixture(
   assert.equal(enrollment.status, 200);
   assert.deepEqual(await enrollment.json(), { ok: true });
   const transport = new NativeHTTPTransport(authority);
-  const facadeTransport: NativeTransport = mode === 'large' ? {
-    request: async input => {
-      const response = await transport.request(input);
-      if (response.kind !== 'stream') return response;
-      return {
-        ...response, body: (async function*() {
-          // Real native HTTP has already arrived while the consumer is paused.
-          // Node 24 may coalesce multiple reads beyond its 64-KiB high-water mark.
-          await delay(30);
-          for await (const chunk of response.body) { transportChunkSizes.push(chunk.byteLength); yield chunk; }
-        })()
-      };
-    },
-    cancel: transport.cancel.bind(transport)
-  } : transport;
+  const facadeTransport: NativeTransport =
+    mode === "large"
+      ? {
+          request: async (input) => {
+            const response = await transport.request(input);
+            if (response.kind !== "stream") return response;
+            return {
+              ...response,
+              body: (async function* () {
+                // Real native HTTP has already arrived while the consumer is paused.
+                // Node 24 may coalesce multiple reads beyond its 64-KiB high-water mark.
+                await delay(30);
+                for await (const chunk of response.body) {
+                  transportChunkSizes.push(chunk.byteLength);
+                  yield chunk;
+                }
+              })(),
+            };
+          },
+          cancel: transport.cancel.bind(transport),
+        }
+      : transport;
   const management = new AccountManagement({
     kernel,
     store,
@@ -783,8 +870,7 @@ async function fixture(
     let failed = response.status !== 200 && response.status !== 202;
     let bytes: Buffer | undefined;
     try {
-      bytes = Buffer.from(
-        await response.arrayBuffer());
+      bytes = Buffer.from(await response.arrayBuffer());
     } catch {
       failed = true;
     }
@@ -792,11 +878,11 @@ async function fixture(
   };
   const occupied = async (requestId: string) =>
     (
-      await pool.query(
+      await pool.query<{ transport_occupied: boolean }>(
         "SELECT transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND id=$2",
         [context.consumerId, requestId],
       )
-    ).rows[0].transport_occupied as boolean;
+    ).rows[0].transport_occupied;
   return {
     context,
     kernel,
@@ -812,7 +898,8 @@ async function fixture(
     request,
     occupied,
     entered,
-    expectedStream, transportChunkSizes,
+    expectedStream,
+    transportChunkSizes,
     armBarrier: (id: string) => {
       barrier = admissionBarrier(id);
       return barrier;
@@ -833,16 +920,18 @@ async function fixture(
     enableCancelClosure: () => {
       closeOnCancel = true;
     },
-    delegate: async (worker: string) => {
+    delegate: async (delegateWorker: string) => {
       const delegateAuthority = new NativeAuthority({
         kernel,
         store,
         config: {
           ...authority.configuration,
-          enrollment: { ...authority.configuration.enrollment, worker },
+          enrollment: { ...authority.configuration.enrollment, worker: delegateWorker },
         },
       });
-      const listener = delegateAuthority.createServer((req, res, work) => admitNativeCallback(callbackBudget, req, res, work));
+      const listener = delegateAuthority.createServer((req, res, work) =>
+        admitNativeCallback(callbackBudget, req, res, work),
+      );
       callbackServers.push(listener);
       callbackOrigin = await listen(listener);
       return new NativeHTTPTransport(delegateAuthority);
@@ -852,71 +941,142 @@ async function fixture(
       barrier?.release.resolve();
       await stop(facade);
       for (const listener of callbackServers) await stop(listener);
-      await stop(peer); await callbackBudget.stop();
+      await stop(peer);
+      await callbackBudget.stop();
     },
   };
 }
 
-test('synthetic TCP/SQL: coalesced native HTTP reads preserve bounded delivery, exact bytes and acknowledged EOF', { timeout: 15_000 }, async () => {
-  const f = await fixture('large', { timeoutMs: 5000 });
-  try {
-    const result = await f.request();
-    assert.equal(result.response.status, 200);
-    assert.equal(result.failed, false, 'a valid accepted stream must reach client EOF after delayed initial reading');
-    assert.ok(result.bytes);
-    assert.ok(result.bytes.byteLength > 65_536, 'the real TCP stream exceeds one delivery buffer');
-    assert.equal(Buffer.compare(result.bytes, f.expectedStream), 0, 'every original stream byte arrives in order');
-    assert.ok(f.transportChunkSizes.length > 1);
-    assert.ok(f.transportChunkSizes.every(size => size > 0 && size <= 65_536), 'every actual transport yield respects the existing facade buffer bound');
-    assert.equal(f.transportChunkSizes.reduce((sum, size) => sum + size, 0), f.expectedStream.byteLength);
-    assert.equal((await f.kernel.request(f.context, f.saved.admission.executionRef, result.requestId)).effect, 'completed');
-    assert.equal(await f.occupied(result.requestId), false);
-    const receipt = f.records.get(result.requestId); assert.ok(receipt);
-    assert.equal(receipt.phase, 'closed'); assert.equal(receipt.acknowledged, true);
-    assert.deepEqual(receipt.proof, await f.kernel.requestProof(f.context, f.saved.admission.executionRef, result.requestId));
-    assert.deepEqual(f.stats(), { posts: 1, entries: 1, permits: 1, ackCalls: 1 });
-  } finally { await f.stop(); }
-});
-
-test('synthetic TCP/SQL: trusted preparation, first byte and terminal EOF survive a saturated data checkout lane', { timeout: 15_000 }, async () => {
-  const f = await fixture('held', { timeoutMs: 5000 }), reached = latch(), resume = latch();
-  const savedExecution = f.kernel.savedExecution.bind(f.kernel);
-  let initial = true;
-  f.kernel.savedExecution = async (...args: Parameters<typeof savedExecution>) => {
-    const saved = await savedExecution(...args);
-    // Pause only after the real ingress transaction has released its checkout.
-    // NativeAuthority must still perform its independent original validation.
-    if (initial) { initial = false; reached.resolve(); await resume.promise; }
-    return saved;
-  };
-  const requestId = randomUUID(), request = f.request(requestId);
-  void request.catch(() => undefined);
-  const held: pg.PoolClient[] = [], waiting: Promise<void>[] = [];
-  try {
-    await waitFor(reached.promise);
-    const checkout = sharedCheckout(pool);
-    held.push(...await Promise.all(Array.from({ length: 6 }, () => inServiceLane('data', checkout))));
-    const backends = await Promise.all(held.map(client => client.query('SELECT pg_backend_pid() AS pid')));
-    assert.equal(new Set(backends.map(result => result.rows[0].pid)).size, 6, 'six real physical data clients');
-    for (let n = 0; n < 8; n++) {
-      const pending = inServiceLane('data', checkout).then(client => client.release());
-      void pending.catch(() => undefined); waiting.push(pending);
+test(
+  "synthetic TCP/SQL: coalesced native HTTP reads preserve bounded delivery, exact bytes and acknowledged EOF",
+  { timeout: 15_000 },
+  async () => {
+    const f = await fixture("large", { timeoutMs: 5000 });
+    try {
+      const result = await f.request();
+      assert.equal(result.response.status, 200);
+      assert.equal(
+        result.failed,
+        false,
+        "a valid accepted stream must reach client EOF after delayed initial reading",
+      );
+      assert.ok(result.bytes);
+      assert.ok(
+        result.bytes.byteLength > 65_536,
+        "the real TCP stream exceeds one delivery buffer",
+      );
+      assert.equal(
+        Buffer.compare(result.bytes, f.expectedStream),
+        0,
+        "every original stream byte arrives in order",
+      );
+      assert.ok(f.transportChunkSizes.length > 1);
+      assert.ok(
+        f.transportChunkSizes.every((size) => size > 0 && size <= 65_536),
+        "every actual transport yield respects the existing facade buffer bound",
+      );
+      assert.equal(
+        f.transportChunkSizes.reduce((sum, size) => sum + size, 0),
+        f.expectedStream.byteLength,
+      );
+      assert.equal(
+        (await f.kernel.request(f.context, f.saved.admission.executionRef, result.requestId))
+          .effect,
+        "completed",
+      );
+      assert.equal(await f.occupied(result.requestId), false);
+      const receipt = f.records.get(result.requestId);
+      assert.ok(receipt);
+      assert.equal(receipt.phase, "closed");
+      assert.equal(receipt.acknowledged, true);
+      assert.deepEqual(
+        receipt.proof,
+        await f.kernel.requestProof(f.context, f.saved.admission.executionRef, result.requestId),
+      );
+      assert.deepEqual(f.stats(), { posts: 1, entries: 1, permits: 1, ackCalls: 1 });
+    } finally {
+      await f.stop();
     }
-    await assert.rejects(inServiceLane('data', checkout), (error: unknown) => error instanceof KernelError && error.code === 'unavailable');
-    resume.resolve(); await waitFor(f.entered);
-    f.releaseHeld();
-    const result = await request;
-    assert.equal(result.response.status, 200); assert.equal(result.failed, false, 'HTTP EOF arrives while data checkouts remain saturated');
-    assert.equal((await inServiceLane('control', () => f.kernel.request(f.context, f.saved.admission.executionRef, requestId))).effect, 'completed');
-    assert.equal(await f.occupied(requestId), false);
-    const receipt = f.records.get(requestId); assert.ok(receipt);
-    assert.equal(receipt.phase, 'closed'); assert.equal(receipt.acknowledged, true);
-    assert.deepEqual(f.stats(), { posts: 1, entries: 1, permits: 1, ackCalls: 1 });
-  } finally {
-    resume.resolve(); held.forEach(client => client.release());
-    await Promise.allSettled(waiting); await f.stop(); await request.catch(() => undefined);
-  }
-});
+  },
+);
+
+test(
+  "synthetic TCP/SQL: trusted preparation, first byte and terminal EOF survive a saturated data checkout lane",
+  { timeout: 15_000 },
+  async () => {
+    const f = await fixture("held", { timeoutMs: 5000 }),
+      reached = latch(),
+      resume = latch();
+    const savedExecution = f.kernel.savedExecution.bind(f.kernel);
+    let initial = true;
+    f.kernel.savedExecution = async (...args: Parameters<typeof savedExecution>) => {
+      const saved = await savedExecution(...args);
+      // Pause only after the real ingress transaction has released its checkout.
+      // NativeAuthority must still perform its independent original validation.
+      if (initial) {
+        initial = false;
+        reached.resolve();
+        await resume.promise;
+      }
+      return saved;
+    };
+    const requestId = randomUUID(),
+      request = f.request(requestId);
+    void request.catch(() => undefined);
+    const held: PoolClient[] = [],
+      waiting: Promise<void>[] = [];
+    try {
+      await waitFor(reached.promise);
+      const checkout = sharedCheckout(pool);
+      held.push(
+        ...(await Promise.all(Array.from({ length: 6 }, () => inServiceLane("data", checkout)))),
+      );
+      const backends = await Promise.all(
+        held.map((client) => client.query("SELECT pg_backend_pid() AS pid")),
+      );
+      assert.equal(
+        new Set(backends.map((result) => result.rows[0].pid)).size,
+        6,
+        "six real physical data clients",
+      );
+      for (let n = 0; n < 8; n++) {
+        const pending = inServiceLane("data", checkout).then((client) => client.release());
+        void pending.catch(() => undefined);
+        waiting.push(pending);
+      }
+      await assert.rejects(
+        inServiceLane("data", checkout),
+        (error: unknown) => error instanceof KernelError && error.code === "unavailable",
+      );
+      resume.resolve();
+      await waitFor(f.entered);
+      f.releaseHeld();
+      const result = await request;
+      assert.equal(result.response.status, 200);
+      assert.equal(result.failed, false, "HTTP EOF arrives while data checkouts remain saturated");
+      assert.equal(
+        (
+          await inServiceLane("control", () =>
+            f.kernel.request(f.context, f.saved.admission.executionRef, requestId),
+          )
+        ).effect,
+        "completed",
+      );
+      assert.equal(await f.occupied(requestId), false);
+      const receipt = f.records.get(requestId);
+      assert.ok(receipt);
+      assert.equal(receipt.phase, "closed");
+      assert.equal(receipt.acknowledged, true);
+      assert.deepEqual(f.stats(), { posts: 1, entries: 1, permits: 1, ackCalls: 1 });
+    } finally {
+      resume.resolve();
+      held.forEach((client) => client.release());
+      await Promise.allSettled(waiting);
+      await f.stop();
+      await request.catch(() => undefined);
+    }
+  },
+);
 
 test("synthetic TCP/SQL: positive owner closure releases concurrency1 for two requests in the SAME OPEN execution", async () => {
   const f = await fixture();
@@ -937,7 +1097,7 @@ test("synthetic TCP/SQL: positive owner closure releases concurrency1 for two re
     assert.deepEqual(f.stats(), { posts: 2, entries: 2, permits: 2, ackCalls: 2 });
     assert.equal(
       (
-        await pool.query(
+        await pool.query<{ request_count: number }>(
           "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
           [f.context.consumerId, f.saved.admission.executionRef],
         )
@@ -957,7 +1117,7 @@ test("synthetic TCP/SQL: positive owner closure releases concurrency1 for two re
     await f.stop();
   }
 });
-test("synthetic TCP/SQL: EOF, CloseFailed, partial and output cap retain occupancy and fence fresh request IDs", async () => {
+void test("synthetic TCP/SQL: EOF, CloseFailed, partial and output cap retain occupancy and fence fresh request IDs", async () => {
   for (const mode of ["unclosed", "closeFailed", "partial", "overflow"] as const) {
     const f = await fixture(mode);
     try {
@@ -966,8 +1126,9 @@ test("synthetic TCP/SQL: EOF, CloseFailed, partial and output cap retain occupan
         (await f.kernel.request(f.context, f.saved.admission.executionRef, r.requestId)).effect,
         "effect_unknown",
       );
-      if (mode === "unclosed" || mode === "closeFailed")
+      if (mode === "unclosed" || mode === "closeFailed") {
         assert.equal(await f.occupied(r.requestId), true);
+      }
       const again = await f.request();
       assert.equal(again.failed, true);
       assert.equal(f.stats().posts, 1);
@@ -977,7 +1138,7 @@ test("synthetic TCP/SQL: EOF, CloseFailed, partial and output cap retain occupan
     }
   }
 });
-test("synthetic TCP/SQL: exact positive no-entry and sealed lost admit ACK spend one claim, never enter, then close independently", async () => {
+void test("synthetic TCP/SQL: exact positive no-entry and sealed lost admit ACK spend one claim, never enter, then close independently", async () => {
   for (const mode of ["noentry", "lost-admit-ack"] as const) {
     const f = await fixture(mode);
     try {
@@ -995,7 +1156,7 @@ test("synthetic TCP/SQL: exact positive no-entry and sealed lost admit ACK spend
       assert.equal(f.stats().posts, 1);
       assert.equal(
         (
-          await pool.query(
+          await pool.query<{ request_count: number }>(
             "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
             [f.context.consumerId, f.saved.admission.executionRef],
           )
@@ -1007,7 +1168,7 @@ test("synthetic TCP/SQL: exact positive no-entry and sealed lost admit ACK spend
     }
   }
 });
-test("synthetic TCP/SQL: expired original owner may ACK immutable completed proof but cannot dispatch; foreign authority denies", async () => {
+void test("synthetic TCP/SQL: expired original owner may ACK immutable completed proof but cannot dispatch; foreign authority denies", async () => {
   const f = await fixture();
   try {
     const r = await f.request(),
@@ -1051,7 +1212,7 @@ test("synthetic TCP/SQL: expired original owner may ACK immutable completed proo
       { ...p, token: randomUUID() },
       { ...p, worker: randomUUID() },
       { ...p, native: { ...p.native, engineIncarnation: randomUUID() } },
-    ])
+    ]) {
       assert.equal(
         (
           await f.call("owner-closure-authority", {
@@ -1061,6 +1222,7 @@ test("synthetic TCP/SQL: expired original owner may ACK immutable completed proo
         ).status,
         403,
       );
+    }
     assert.equal(
       (await f.call("owner-closure-authority", { consumerId: "foreign-consumer", proof: p }))
         .status,
@@ -1074,7 +1236,7 @@ test("synthetic TCP/SQL: expired original owner may ACK immutable completed proo
     await f.stop();
   }
 });
-test(
+void test(
   "synthetic TCP/SQL: owner closure before delegated ACK preserves exact claimed and done retries",
   { timeout: 30_000 },
   async () => {
@@ -1082,7 +1244,7 @@ test(
     try {
       const requestId = randomUUID(),
         pending = f.request(requestId);
-      void pending.catch(() => undefined);
+      void pending.catch(() => {});
       await waitFor(f.entered);
       const p = await f.kernel.requestProof(f.context, f.saved.admission.executionRef, requestId);
       assert.ok(p);
@@ -1116,7 +1278,7 @@ test(
       f.releaseHeld();
       assert.equal((await pending).failed, false);
       const receipt = f.records.get(requestId);
-      assert.ok(receipt?.acknowledged);
+      assert.ok(receipt?.acknowledged === true);
       assert.equal(f.stats().ackCalls, 1);
       assert.equal(await f.occupied(requestId), false);
       const status = await f.kernel.request(f.context, p.executionRef, requestId);
@@ -1136,7 +1298,7 @@ test(
         deadline: new Date(Date.now() + 10_000),
         limits,
       });
-      assert.ok(other.executionRef);
+      assert.ok(isNonemptyString(other.executionRef));
       await f.kernel.close(f.context, randomUUID(), other.executionRef);
       const otherJob = await f.kernel.claimCleanup(f.context, f.worker);
       assert.ok(otherJob && otherJob.scope.kind === "execution");
@@ -1182,14 +1344,15 @@ test(
         );
       };
       for (const state of ["claimed", "done"] as const) {
-        if (state === "done")
+        if (state === "done") {
           await f.kernel.settleCleanup(f.context, job.cleanupRef, f.worker, job.token, true);
+        }
         assert.equal(
           (
-            await pool.query("SELECT state FROM ag_kernel.cleanup WHERE consumer=$1 AND ref=$2", [
-              f.context.consumerId,
-              job.cleanupRef,
-            ])
+            await pool.query<{ state: string }>(
+              "SELECT state FROM ag_kernel.cleanup WHERE consumer=$1 AND ref=$2",
+              [f.context.consumerId, job.cleanupRef],
+            )
           ).rows[0].state,
           state,
         );
@@ -1206,8 +1369,9 @@ test(
           { ...c, worker: randomUUID() },
           { ...c, cleanupRef: randomUUID() },
           otherLease,
-        ])
+        ]) {
           await ack(changed, 403);
+        }
         await ack(c, 403, openReceipt);
         await ack(c, 403, { ...receipt, lifetime: { ...receipt.lifetime, closeFailed: true } });
         await ack(c, 403, { ...receipt, proof: { ...p, token: randomUUID() } });
@@ -1217,8 +1381,9 @@ test(
           { ...p, worker: randomUUID() },
           { ...p, token: randomUUID() },
           { ...p, native: { ...p.native, requestNonce: randomUUID() } },
-        ])
+        ]) {
           await ack(c, 403, receipt, changed);
+        }
         await ack(c, 403, receipt, p, "foreign-consumer");
         await ack(c, 403, receipt, p, f.context.consumerId, credentials.cleanupCredential);
         // A closure retry never grants read/dispatch authority for an unoccupied
@@ -1248,7 +1413,7 @@ test(
         assert.deepEqual(await f.kernel.request(f.context, p.executionRef, requestId), status);
         assert.equal(
           (
-            await pool.query(
+            await pool.query<{ request_count: number }>(
               "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
               [f.context.consumerId, p.executionRef],
             )
@@ -1258,13 +1423,13 @@ test(
       }
       // Done readback is harmless after lease expiry only with its exact instant.
       const expired = (
-        await pool.query(
+        await pool.query<{ expires: string }>(
           `UPDATE ag_kernel.cleanup SET lease_until=clock_timestamp()-interval '1 second'
       WHERE consumer=$1 AND ref=$2 RETURNING to_char(lease_until AT TIME ZONE 'UTC',
         'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS expires`,
           [f.context.consumerId, job.cleanupRef],
         )
-      ).rows[0].expires as string;
+      ).rows[0].expires;
       await ack({ ...c, leaseExpiresAt: expired }, 200);
       await ack(c, 403);
       assert.equal(await f.occupied(requestId), false);
@@ -1276,7 +1441,7 @@ test(
     }
   },
 );
-test("synthetic TCP/SQL: an expired claimed lease denies an exact delegated duplicate with genuine closed receipt", async () => {
+void test("synthetic TCP/SQL: an expired claimed lease denies an exact delegated duplicate with genuine closed receipt", async () => {
   const f = await fixture();
   try {
     const r = await f.request();
@@ -1289,13 +1454,13 @@ test("synthetic TCP/SQL: an expired claimed lease denies an exact delegated dupl
     assert.ok(job && job.scope.kind === "execution");
     assert.equal(job.scope.executionRef, p.executionRef);
     const expired = (
-      await pool.query(
+      await pool.query<{ expires: string }>(
         `UPDATE ag_kernel.cleanup SET lease_until=clock_timestamp()-interval '1 second'
       WHERE consumer=$1 AND ref=$2 RETURNING to_char(lease_until AT TIME ZONE 'UTC',
         'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS expires`,
         [f.context.consumerId, job.cleanupRef],
       )
-    ).rows[0].expires as string;
+    ).rows[0].expires;
     const cleanup = {
       cleanupRef: job.cleanupRef,
       worker: f.worker,
@@ -1328,7 +1493,7 @@ test("synthetic TCP/SQL: an expired claimed lease denies an exact delegated dupl
     await f.stop();
   }
 });
-test("synthetic TCP/SQL: delegate needs the actual current cleanup row/token/execution scope; no guessed expiry", async () => {
+void test("synthetic TCP/SQL: delegate needs the actual current cleanup row/token/execution scope; no guessed expiry", async () => {
   const f = await fixture("unclosed");
   try {
     const r = await f.request(),
@@ -1357,7 +1522,7 @@ test("synthetic TCP/SQL: delegate needs the actual current cleanup row/token/exe
       { ...c, token: randomUUID() },
       { ...c, cleanupRef: randomUUID() },
       { ...c, leaseExpiresAt: new Date(Date.now() + 10_000).toISOString() },
-    ])
+    ]) {
       assert.equal(
         (
           await f.call("cleanup-authority", {
@@ -1368,6 +1533,7 @@ test("synthetic TCP/SQL: delegate needs the actual current cleanup row/token/exe
         ).status,
         403,
       );
+    }
     const other = await f.kernel.prepare(f.context, {
       operationId: randomUUID(),
       intentDigest: "other-fixture",
@@ -1382,7 +1548,7 @@ test("synthetic TCP/SQL: delegate needs the actual current cleanup row/token/exe
       deadline: new Date(Date.now() + 10_000),
       limits,
     });
-    assert.ok(other.executionRef);
+    assert.ok(isNonemptyString(other.executionRef));
     await f.kernel.close(f.context, randomUUID(), other.executionRef);
     const otherJob = await f.kernel.claimCleanup(f.context, f.worker);
     assert.ok(otherJob && otherJob.scope.kind === "execution");
@@ -1440,7 +1606,7 @@ test("synthetic TCP/SQL: delegate needs the actual current cleanup row/token/exe
     await f.stop();
   }
 });
-test("synthetic TCP/SQL: control HTTP rejects duplicate headers, aliases, duplicates, query, body cap and forged enrollment safely", async () => {
+void test("synthetic TCP/SQL: control HTTP rejects duplicate headers, aliases, duplicates, query, body cap and forged enrollment safely", async () => {
   const f = await fixture();
   try {
     const endpoint = new URL(f.callbackOrigin);
@@ -1456,9 +1622,13 @@ test("synthetic TCP/SQL: control HTTP rejects duplicate headers, aliases, duplic
           s.destroy();
           reject(new Error("fixture timeout"));
         });
-        s.on("error", () => resolve(Buffer.concat(chunks).toString()));
+        s.on("error", () => {
+          resolve(Buffer.concat(chunks).toString());
+        });
         s.on("data", (b) => chunks.push(b));
-        s.once("end", () => resolve(Buffer.concat(chunks).toString()));
+        s.once("end", () => {
+          resolve(Buffer.concat(chunks).toString());
+        });
         s.once("connect", () =>
           s.write(
             "POST " +
@@ -1513,7 +1683,7 @@ test("synthetic TCP/SQL: control HTTP rejects duplicate headers, aliases, duplic
     await f.stop();
   }
 });
-test("synthetic TCP/SQL: redirects do not replay inference, and uncertainty fences the original execution", async () => {
+void test("synthetic TCP/SQL: redirects do not replay inference, and uncertainty fences the original execution", async () => {
   const f = await fixture("redirect");
   try {
     await f.request();
@@ -1530,7 +1700,7 @@ test("synthetic TCP/SQL: redirects do not replay inference, and uncertainty fenc
     await f.stop();
   }
 });
-test("synthetic TCP/SQL: the complete association rejects each tuple/cap, nanosecond birth, nonce and issuer substitution", async () => {
+void test("synthetic TCP/SQL: the complete association rejects each tuple/cap, nanosecond birth, nonce and issuer substitution", async () => {
   const f = await fixture();
   try {
     const r = await f.request(),
@@ -1564,13 +1734,15 @@ test("synthetic TCP/SQL: the complete association rejects each tuple/cap, nanose
         ),
       },
     ];
-    for (const key of Object.keys(limits) as (keyof typeof limits)[])
+    for (const key of Object.keys(limits) as (keyof typeof limits)[]) {
       variants.push({ limits: { ...limits, [key]: limits[key] + 1 } });
-    for (const variant of variants)
+    }
+    for (const variant of variants) {
       assert.equal(
         (await f.call("admit", { ...tuple, admission: { ...admission, ...variant } })).status,
         403,
       );
+    }
     for (const descriptorPatch of [
       { account_id: descriptor.account_id + 1 },
       { generation: randomUUID() },
@@ -1578,12 +1750,13 @@ test("synthetic TCP/SQL: the complete association rejects each tuple/cap, nanose
       { profile: "openrouter-openai-responses-apikey-v1" },
       { base_url: "https://openrouter.ai/api/v1" },
       { model: "openai/gpt-5.4-mini" },
-    ])
+    ]) {
       assert.equal(
         (await f.call("admit", { ...tuple, descriptor: { ...descriptor, ...descriptorPatch } }))
           .status,
         403,
       );
+    }
     assert.equal(
       (await f.call("admit", { ...tuple, native: { ...p.native, requestNonce: randomUUID() } }))
         .status,
@@ -1593,7 +1766,7 @@ test("synthetic TCP/SQL: the complete association rejects each tuple/cap, nanose
     assert.equal(f.stats().entries, 1);
     assert.equal(
       (
-        await pool.query(
+        await pool.query<{ request_count: number }>(
           "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
           [f.context.consumerId, admission.executionRef],
         )
@@ -1604,12 +1777,12 @@ test("synthetic TCP/SQL: the complete association rejects each tuple/cap, nanose
     await f.stop();
   }
 });
-test("synthetic TCP/SQL: client abort fences the original attempt and cannot certify held native body closure", async () => {
+void test("synthetic TCP/SQL: client abort fences the original attempt and cannot certify held native body closure", async () => {
   const f = await fixture("held");
   try {
     const controller = new AbortController(),
       id = randomUUID();
-    const result = f.request(id, payload, controller.signal).catch(() => undefined);
+    const result = f.request(id, payload, controller.signal).catch(() => {});
     await f.entered;
     controller.abort();
     await result;
@@ -1619,8 +1792,11 @@ test("synthetic TCP/SQL: client abort fences the original attempt and cannot cer
       (await f.kernel.request(f.context, f.saved.admission.executionRef, id)).effect !==
         "effect_unknown";
       n++
-    )
-      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    ) {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 10);
+      });
+    }
     assert.equal(
       (await f.kernel.request(f.context, f.saved.admission.executionRef, id)).effect,
       "effect_unknown",
@@ -1634,7 +1810,7 @@ test("synthetic TCP/SQL: client abort fences the original attempt and cannot cer
   }
 });
 
-test(
+void test(
   "synthetic TCP/SQL: current cleanup worker B closes expired original owner A without changing its proof or effect",
   { timeout: 30_000 },
   async () => {
@@ -1697,7 +1873,7 @@ test(
         { ...original, token: randomUUID() },
         { ...original, native: { ...original.native, requestNonce: randomUUID() } },
         { ...original, native: { ...original.native, generation: randomUUID() } },
-      ])
+      ]) {
         assert.equal(
           (
             await f.call("cleanup-authority", {
@@ -1708,6 +1884,7 @@ test(
           ).status,
           403,
         );
+      }
       assert.equal(
         (
           await f.call("cleanup-authority", {
@@ -1745,7 +1922,7 @@ test(
         deadline: new Date(Date.now() + 10_000),
         limits,
       });
-      assert.ok(fresh.executionRef);
+      assert.ok(isNonemptyString(fresh.executionRef));
       const saved = await f.kernel.savedExecution(f.context, fresh.executionRef);
       const claim = await f.kernel.claim(
         f.context,
@@ -1781,7 +1958,7 @@ test(
   },
 );
 
-test(
+void test(
   "synthetic TCP/SQL: repeated safe pre-POST preparation failures leave routing capacity for a fresh request",
   { timeout: 30_000 },
   async () => {
@@ -1793,11 +1970,13 @@ test(
         "DELETE FROM ag_management.physical_mappings WHERE consumer=$1 AND generation=$2",
         [f.context.consumerId, f.saved.generation],
       );
-      for (let n = 0; n < 6; n++) assert.equal((await f.request()).failed, true);
+      for (let n = 0; n < 6; n++) {
+        assert.equal((await f.request()).failed, true);
+      }
       assert.equal(f.stats().posts, 0);
       assert.equal(
         (
-          await pool.query(
+          await pool.query<{ count: number }>(
             "SELECT count(*)::int AS count FROM ag_kernel.requests WHERE consumer=$1",
             [f.context.consumerId],
           )
@@ -1806,7 +1985,7 @@ test(
       );
       assert.equal(
         (
-          await pool.query(
+          await pool.query<{ request_count: number }>(
             "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
             [f.context.consumerId, f.saved.admission.executionRef],
           )
@@ -1828,7 +2007,7 @@ test(
   },
 );
 
-test(
+void test(
   "synthetic TCP/SQL: no-permit limit refusals beyond maxPending retain SQL tombstones and recover after held closure",
   { timeout: 30_000 },
   async () => {
@@ -1836,7 +2015,7 @@ test(
     try {
       const heldId = randomUUID(),
         held = f.request(heldId);
-      void held.catch(() => undefined);
+      void held.catch(() => {});
       await waitFor(f.entered);
       const denied: string[] = [];
       for (let n = 0; n < 7; n++) {
@@ -1857,7 +2036,7 @@ test(
       assert.equal(await f.occupied(heldId), true);
       assert.equal(
         (
-          await pool.query(
+          await pool.query<{ request_count: number }>(
             "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
             [f.context.consumerId, f.saved.admission.executionRef],
           )
@@ -1883,7 +2062,7 @@ test(
       assert.equal(f.stats().permits, 2);
       assert.equal(
         (
-          await pool.query(
+          await pool.query<{ request_count: number }>(
             "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
             [f.context.consumerId, f.saved.admission.executionRef],
           )
@@ -1900,7 +2079,7 @@ test(
   },
 );
 
-test(
+void test(
   "synthetic TCP/SQL: authenticated ACK before actual facade callback returns proof is reusable without re-admit or second closure callback",
   { timeout: 30_000 },
   async () => {
@@ -1910,7 +2089,7 @@ test(
         const id = randomUUID(),
           barrier = f.armBarrier(id),
           pending = f.request(id);
-        void pending.catch(() => undefined);
+        void pending.catch(() => {});
         try {
           await waitFor(barrier.acked.promise);
           assert.equal(await f.occupied(id), false);
@@ -1937,7 +2116,7 @@ test(
           assert.equal(f.stats().permits, n);
           assert.equal(
             (
-              await pool.query(
+              await pool.query<{ request_count: number }>(
                 "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
                 [f.context.consumerId, f.saved.admission.executionRef],
               )
@@ -1965,3 +2144,323 @@ test(
     }
   },
 );
+
+async function publicExecutionFixture(
+  selectedProfile = {
+    profile: "openrouter-openai-responses-apikey-v1",
+    baseURL: "https://openrouter.ai/api/v1",
+    model: "openai/gpt-5.4-mini",
+    qualificationRef: "synthetic-public-metadata",
+  },
+) {
+  const context = { consumerId: "public-native-" + randomUUID() };
+  const worker = randomUUID(),
+    incarnation = randomUUID();
+  const kernel = new PostgresKernel(pool);
+  const store = new PostgresManagementStore(
+    pool,
+    new IntentSecrets(randomBytes(32), randomBytes(32)),
+  );
+  const usage = new PostgresUsageJournal(pool, randomBytes(32));
+  await kernel.heartbeat(context, worker);
+  const operationId = randomUUID();
+  const account = await kernel.beginAccount(context, {
+    operationId,
+    kind: "create",
+    intentDigest: "synthetic-public-account",
+    ownerRef: "synthetic-public-owner",
+    profile: selectedProfile.profile,
+    displayName: "Fixture",
+  });
+  assert.ok(account.accountRef);
+  const candidate = await kernel.startCandidate(context, operationId, worker);
+  assert.ok(candidate);
+  const journal = await store.journal(
+    {
+      consumerId: context.consumerId,
+      operationId,
+      accountRef: account.accountRef,
+      ownerRef: "synthetic-public-owner",
+      purpose: "create",
+    },
+    candidate.candidate,
+    worker,
+    selectedProfile,
+  );
+  const physical = {
+    generation: candidate.candidate,
+    nativePhysicalIdentity: candidate.candidate,
+    nativeId: nextNativeAccountId++,
+    createdAt: "2026-10-03T04:05:06.123456789Z",
+    profile: selectedProfile.profile,
+    baseURL: selectedProfile.baseURL,
+    model: selectedProfile.model,
+  };
+  await store.saveMapping({ ...journal, descriptor: physical });
+  await kernel.acknowledgeCandidate(context, operationId, worker, physical);
+  const prepared = await kernel.prepare(context, {
+    operationId: randomUUID(),
+    intentDigest: "synthetic-public-approval",
+    invocationRef: "public-invocation-" + randomUUID(),
+    attemptRef: "public-attempt",
+    permittedAccounts: [account.accountRef],
+    profile: selectedProfile.profile,
+    policySubject: "synthetic-public-policy",
+    policyRevision: 2,
+    bindingRevision: 3,
+    issuerEpoch: await kernel.issuer(context),
+    deadline: new Date(Date.now() + 45_000),
+    limits,
+  });
+  assert.ok(prepared.executionRef);
+  const saved = await kernel.savedExecution(context, prepared.executionRef);
+  const controlToken = "synthetic-public-control-" + randomUUID();
+  const bearers = new FacadeBearers([
+    {
+      token: controlToken,
+      role: "consumer-control",
+      consumerId: context.consumerId,
+      profileIds: [selectedProfile.profile],
+      limits,
+      maxRunMs: 60_000,
+    },
+  ]);
+  bearers.configureExecutionKey(randomBytes(32));
+  const control = bearers.resolve(controlToken);
+  assert.ok(control && control.role === "consumer-control");
+  const executionBearer = bearers.upsertExecution(control, saved);
+  const authority = new NativeAuthority({
+    kernel,
+    store,
+    usage,
+    executionBearers: bearers,
+    config: {
+      origin: "http://127.0.0.1:1",
+      enrollment: {
+        originRef: "synthetic-public-origin",
+        engineIncarnation: incarnation,
+        worker,
+        qualificationRef: selectedProfile.qualificationRef,
+      },
+      consumers: [{ consumerId: context.consumerId, ...credentials }],
+      profiles: [
+        {
+          ...selectedProfile,
+          requestBytes: limits.requestBytes,
+          outputBytes: limits.outputBytes,
+          tokens: limits.tokens,
+          providerTokenUpperBound: 1000,
+        },
+      ],
+    },
+  });
+  const server = authority.createServer();
+  const origin = await listen(server);
+  const requestRef = randomUUID();
+  const native = {
+    originRef: authority.configuration.enrollment.originRef,
+    engineIncarnation: incarnation,
+    requestNonce: requestBoundNonce(
+      context,
+      authority.configuration.enrollment,
+      saved.admission.executionRef,
+      requestRef,
+    ),
+    generation: saved.generation,
+  };
+  const tuple = {
+    consumerId: context.consumerId,
+    requestRef,
+    worker,
+    admission: saved.admission,
+    descriptor: nativeDescriptor(physical),
+    native,
+    executionBearer,
+  };
+  const call = (route: string, body: unknown) =>
+    fetch(origin + "/private/native/v1/" + route, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer " + credentials.callbackCredential,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  return {
+    context,
+    kernel,
+    usage,
+    bearers,
+    saved,
+    tuple,
+    physical,
+    call,
+    stop: () => stop(server),
+  };
+}
+
+// This controlled native peer qualifies metadata callbacks against real SQL.
+// Actual public payload/catalogue/provider admission is qualified in the pinned Go suite.
+void test("public native callbacks retain alternate OpenRouter attribution and exact closure after revoke", async () => {
+  const f = await publicExecutionFixture();
+  const requestedModel = "future-vendor/review:model";
+  try {
+    const admitted = await f.call("public-admit", { ...f.tuple, requestedModel });
+    assert.equal(admitted.status, 200);
+    const reply = nativeObject(await admitted.json(), [
+      "consumerId",
+      "admission",
+      "status",
+      "dispatch",
+      "nativeDescriptor",
+      "leaseExpiresAt",
+    ]);
+    const dispatch = nativeObject(reply.dispatch, [
+      "descriptor",
+      "executionRef",
+      "requestRef",
+      "limits",
+      "deadline",
+      "closure",
+    ]);
+    const originalProof = nativeProof(dispatch.closure);
+    assert.deepEqual(
+      reply.nativeDescriptor,
+      nativeDescriptor(f.physical),
+      "selected usage model never replaces the canonical physical descriptor",
+    );
+    const initial = await f.usage.observe(
+      f.context,
+      originalProof.executionRef,
+      originalProof.requestRef,
+    );
+    assert.equal(initial?.model, requestedModel);
+    assert.equal(initial?.effect, "dispatch_started");
+    const replay = await f.call("public-admit", { ...f.tuple, requestedModel });
+    assert.equal(replay.status, 200);
+    nativeObject(await replay.json(), ["consumerId", "admission", "status"]);
+    assert.deepEqual(
+      await f.kernel.requestProof(f.context, originalProof.executionRef, originalProof.requestRef),
+      originalProof,
+      "duplicate callback cannot grant another dispatch",
+    );
+    f.bearers.replace([]);
+    const receipt: Receipt = {
+      consumerId: f.context.consumerId,
+      executionRef: originalProof.executionRef,
+      requestRef: originalProof.requestRef,
+      native: originalProof.native,
+      proof: originalProof,
+      phase: "closed",
+      effect: "completed",
+      sealed: true,
+      acknowledged: false,
+      lifetime: {
+        entered: true,
+        contextDone: true,
+        forwardingReturned: true,
+        bodyKnown: true,
+        bodyClosed: true,
+        closeFailed: false,
+        completed: true,
+        sealed: true,
+      },
+      nativeUsage: {
+        source: "native_provider_response",
+        state: "complete",
+        inputTokens: 7,
+        outputTokens: 3,
+        costState: "unknown",
+        finalized: true,
+      },
+    };
+    const changedModel = await f.call("execution-settle", {
+      consumerId: f.context.consumerId,
+      proof: originalProof,
+      receipt,
+      requestedModel: f.physical.model,
+    });
+    assert.equal(changedModel.status, 403);
+    await changedModel.arrayBuffer();
+    assert.equal(
+      (await f.kernel.request(f.context, originalProof.executionRef, originalProof.requestRef))
+        .effect,
+      "completed",
+      "accepted completion survives rejected metadata",
+    );
+    const stillOccupied = await pool.query<{ transport_occupied: boolean }>(
+      "SELECT transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
+      [f.context.consumerId, originalProof.executionRef, originalProof.requestRef],
+    );
+    assert.equal(
+      stillOccupied.rows.at(0)?.transport_occupied,
+      true,
+      "inconsistent model metadata cannot acknowledge physical closure",
+    );
+    assert.deepEqual(
+      await f.usage.observe(f.context, originalProof.executionRef, originalProof.requestRef),
+      initial,
+      "rejected metadata cannot rewrite the initial usage fact",
+    );
+    const settled = await f.call("execution-settle", {
+      consumerId: f.context.consumerId,
+      proof: originalProof,
+      receipt,
+      requestedModel,
+    });
+    assert.equal(settled.status, 200);
+    await settled.arrayBuffer();
+    const observed = await f.usage.observe(
+      f.context,
+      originalProof.executionRef,
+      originalProof.requestRef,
+    );
+    assert.equal(observed?.model, requestedModel);
+    assert.equal(observed?.effect, "completed");
+    assert.equal(observed?.completeness, "complete");
+    assert.equal(observed?.inputTokens, 7);
+    assert.equal(observed?.outputTokens, 3);
+    const occupied = await pool.query<{ transport_occupied: boolean }>(
+      "SELECT transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
+      [f.context.consumerId, originalProof.executionRef, originalProof.requestRef],
+    );
+    assert.equal(occupied.rows.at(0)?.transport_occupied, false);
+    const duplicate = await f.call("execution-settle", {
+      consumerId: f.context.consumerId,
+      proof: originalProof,
+      receipt,
+      requestedModel,
+    });
+    assert.equal(duplicate.status, 200);
+    await duplicate.arrayBuffer();
+    assert.deepEqual(
+      await f.usage.observe(f.context, originalProof.executionRef, originalProof.requestRef),
+      observed,
+      "identical settlement remains idempotent after revoke",
+    );
+  } finally {
+    await f.stop();
+  }
+});
+
+void test("public native model attribution rejects malformed labels and alternate static-profile models before claim", async () => {
+  for (const selectedProfile of [undefined, profile]) {
+    const f = await publicExecutionFixture(selectedProfile);
+    try {
+      const requestedModel = selectedProfile ? "another-static-model" : "vendor/model?untrusted";
+      const response = await f.call("public-admit", { ...f.tuple, requestedModel });
+      assert.equal(response.status, 403);
+      await response.arrayBuffer();
+      await assert.rejects(
+        f.kernel.request(f.context, f.saved.admission.executionRef, f.tuple.requestRef),
+        (error: unknown) => error instanceof KernelError && error.code === "unknown",
+      );
+      assert.equal(
+        await f.usage.observe(f.context, f.saved.admission.executionRef, f.tuple.requestRef),
+        null,
+      );
+    } finally {
+      await f.stop();
+    }
+  }
+});

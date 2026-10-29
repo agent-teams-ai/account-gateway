@@ -5,8 +5,7 @@ import { inServiceLane } from "./service-admission.ts";
 import type { NativeControlAdmission } from './service-admission.ts';
 import type { CleanupAuthority, NativeDispatchProof, TrustedContext } from "./domain.ts";
 import type { NativeTransport } from "./facade.ts";
-import type { NativeAuthority } from "./native-authority.ts";
-import type { Association } from "./native-authority.ts";
+import type { NativeAuthority, Association } from "./native-authority.ts";
 import {
   denied,
   instant,
@@ -22,6 +21,9 @@ import type { CleanupLease, Receipt } from "./native-wire.ts";
 
 const path = "/private/native/v1/transports";
 const streamChunkBytes = 65_536;
+function finalized(value: boolean | undefined): value is true {
+  return Boolean(value);
+}
 export class NativeHTTPTransport implements NativeTransport {
   readonly #authority: NativeAuthority;
   readonly #controls?: NativeControlAdmission;
@@ -38,7 +40,9 @@ export class NativeHTTPTransport implements NativeTransport {
       cfg = authority.configuration,
       consumer = authority.consumer(ctx);
     await authority.persisted(ctx, p);
-    if (c) await authority.delegated(ctx, p, c);
+    if (c) {
+      await authority.delegated(ctx, p, c);
+    }
     const hop = await post(
       cfg,
       c ? consumer.cleanupCredential : consumer.executionCredential,
@@ -52,15 +56,16 @@ export class NativeHTTPTransport implements NativeTransport {
         hop.response.rawHeaders.some(
           (h, i) => i % 2 === 0 && h.toLowerCase() === "content-encoding",
         )
-      )
+      ) {
         return denied();
+      }
       return receipt(await jsonBody(hop.response, cfg.controlBytes), ctx.consumerId, p);
     } finally {
       hop.abort();
     }
   }
   async #recover(a: Association): Promise<NativeDispatchProof | undefined> {
-    if (a.proof) return a.proof;
+    if (a.proof) { return a.proof; }
     return inServiceLane('control', async () => {
       const actual = await this.#authority.kernel.requestProof(
       a.context,
@@ -73,8 +78,9 @@ export class NativeHTTPTransport implements NativeTransport {
       if (
         p.native.generation !== a.saved.generation ||
         (a.native && p.native.requestNonce !== a.native.requestNonce)
-      )
+      ) {
         return denied();
+      }
       a.proof = p;
     }
       return a.proof;
@@ -98,44 +104,65 @@ export class NativeHTTPTransport implements NativeTransport {
       cfg = authority.configuration,
       p = await this.#recover(a);
     if (!p) {
-      if (a.admitStarted) await this.#unknown(a);
+      if (a.admitStarted) {
+        await this.#unknown(a);
+      }
       return;
     }
     let r = initial;
     const deadline = Date.now() + cfg.closureWaitMs;
     while (!r || !physicallyClosed(r)) {
       r = await this.#control(a.context, p, "read-owner");
-      if (physicallyClosed(r)) break;
-      if (Date.now() >= deadline) return denied();
+      if (physicallyClosed(r)) {
+        break;
+      }
+      if (Date.now() >= deadline) {
+        return denied();
+      }
       await delay(Math.min(25, Math.max(1, deadline - Date.now())));
     }
     const status = await authority.kernel.request(a.context, p.executionRef, p.requestRef);
-    if (interrupted) await this.#unknown(a);
-    else if (!r.lifetime.entered) {
+    if (interrupted) {
+      await this.#unknown(a);
+    } else if (!r.lifetime.entered) {
       // An authenticated positive no-entry receipt spends the original claim;
       // neither HTTP failure nor missing readback is a non-entry fact.
-      if (status.effect === "dispatch_started") await a.callback.rejectBeforeDispatch(p, false);
+      if (status.effect === "dispatch_started") {
+        await a.callback.rejectBeforeDispatch(p, false);
+      }
     } else if (r.lifetime.completed && r.effect === "completed") {
-      if (status.effect === "dispatch_started") await a.callback.effect(p, "response_started");
+      if (status.effect === "dispatch_started") {
+        await a.callback.effect(p, "response_started");
+      }
       const current = await authority.kernel.request(a.context, p.executionRef, p.requestRef);
-      if (current.effect === "response_started") await a.callback.effect(p, "completed");
-    } else await this.#unknown(a);
-    if (r.nativeUsage?.finalized && a.callback.usage) {
+      if (current.effect === "response_started") {
+        await a.callback.effect(p, "completed");
+      }
+    } else {
+      await this.#unknown(a);
+    }
+    if (finalized(r.nativeUsage?.finalized) && a.callback.usage) {
       // Analytics delivery failure cannot repeat provider entry or block closure.
-      await a.callback.usage(p, r.nativeUsage).catch(() => undefined);
+      await a.callback.usage(p, r.nativeUsage).catch(() => {});
     }
     // The Go ack-owner performs the authenticated Node closure callback. Only
     // that callback durably releases SQL occupancy; EOF does not call closed().
-    if (a.ackStarted) return denied(); // No automatic replay of an uncertain ACK.
+    if (a.ackStarted ?? false) {
+      return denied();
+    } // No automatic replay of an uncertain ACK.
     a.ackStarted = true;
     const ack = await this.#control(a.context, p, "ack-owner");
-    if (!physicallyClosed(ack) || !ack.acknowledged) return denied();
+    if (!physicallyClosed(ack) || !ack.acknowledged) {
+      return denied();
+    }
   }
   async request(
     input: Parameters<NativeTransport["request"]>[0],
   ): Promise<Awaited<ReturnType<NativeTransport["request"]>>> {
     // Snapshot caller bytes and all routing authority before the first await.
-    if (input.body.byteLength > 4_194_304) return denied();
+    if (input.body.byteLength > 4_194_304) {
+      return denied();
+    }
     const bytes = new Uint8Array(input.body),
       authority = this.#authority,
       cfg = authority.configuration;
@@ -164,7 +191,9 @@ export class NativeHTTPTransport implements NativeTransport {
         bytes,
         Buffer.from("}"),
       ]);
-      if (a.signal.aborted || instant(a.saved.admission.expiresAt) <= now()) return denied();
+      if (a.signal.aborted || instant(a.saved.admission.expiresAt) <= now()) {
+        return denied();
+      }
     } catch (error) {
       authority.reclaimUnstarted(a);
       throw error;
@@ -176,10 +205,12 @@ export class NativeHTTPTransport implements NativeTransport {
       responseUnknown: Promise<void> | undefined;
     const uncertain = () =>
       inServiceLane("control", async () => {
-        if (!finished) await this.#unknown(a);
+        if (!finished) {
+          await this.#unknown(a);
+        }
       });
     const onResponseAbort = () => {
-      responseUnknown ??= uncertain().catch(() => undefined);
+      responseUnknown ??= uncertain().catch(() => {});
     };
     const detach = () => {
       a.signal.removeEventListener("abort", onAbort);
@@ -187,12 +218,16 @@ export class NativeHTTPTransport implements NativeTransport {
     };
     const settleRetained = async () => {
       detach();
-      await Promise.all([cancellation?.catch(() => undefined), responseUnknown]);
+      await Promise.all([cancellation?.catch(() => {}), responseUnknown]);
     };
     const cancel = (): Promise<void> => {
-      if (finished) return Promise.resolve();
-      if (cancellation) return cancellation;
-      cancellation = inServiceLane("control", async () => {
+      if (finished) {
+        return Promise.resolve();
+      }
+      if (cancellation) {
+        return cancellation;
+      }
+      const work = inServiceLane("control", async () => {
         hop?.abort();
         await uncertain();
         const p = await this.#recover(a);
@@ -200,14 +235,19 @@ export class NativeHTTPTransport implements NativeTransport {
           const r = await this.#control(a.context, p, "cancel-owner");
           await this.#settle(a, r, true);
         }
-      }).finally(async () => {
-        detach();
-        await responseUnknown;
       });
+      cancellation = (async () => {
+        try {
+          await work;
+        } finally {
+          detach();
+          await responseUnknown;
+        }
+      })();
       return cancellation;
     };
     const onAbort = () => {
-      void cancel().catch(() => undefined);
+      void cancel().catch(() => {});
     };
     a.signal.addEventListener("abort", onAbort, { once: true });
     try {
@@ -237,8 +277,10 @@ export class NativeHTTPTransport implements NativeTransport {
         if (!p) {
           // A status-only admission has no dispatch proof. Verify actual SQL
           // readback; an uncertain first claim is conservatively fenced.
-          await inServiceLane('control', () => authority.reclaimDenied(a));
-        } else await inServiceLane("control", () => this.#settle(a));
+          await inServiceLane("control", () => authority.reclaimDenied(a));
+        } else {
+          await inServiceLane("control", () => this.#settle(a));
+        }
         finished = true;
         hop.abort();
         await settleRetained();
@@ -250,10 +292,11 @@ export class NativeHTTPTransport implements NativeTransport {
         singleton(response, "x-gateway-request-ref") !== a.requestId ||
         response.rawHeaders.some((h, i) => i % 2 === 0 && h.toLowerCase() === "content-encoding") ||
         !(await this.#recover(a))
-      )
+      ) {
         return denied();
-      const transport = this,
-        active = hop;
+      }
+      const settleStream = () => this.#settle(a);
+      const active = hop;
       return {
         kind: "stream",
         cancel,
@@ -273,8 +316,9 @@ export class NativeHTTPTransport implements NativeTransport {
                   a.saved.admission.executionRef,
                   a.requestId,
                 ));
-                if (current.effect === "dispatch_started")
+                if (current.effect === "dispatch_started") {
                   await a.callback.effect(a.proof!, "response_started");
+                }
               }
               // IncomingMessage iteration may coalesce reads beyond its high-water
               // mark. Deliver bounded copies only as the facade pulls each slice.
@@ -283,15 +327,19 @@ export class NativeHTTPTransport implements NativeTransport {
                 yield new Uint8Array(chunk.subarray(offset, offset + streamChunkBytes));
               }
             }
-            if (!response.complete || a.signal.aborted || cancellation) return denied();
-            await inServiceLane("control", () => transport.#settle(a));
+            if (!response.complete || a.signal.aborted || cancellation) {
+              return denied();
+            }
+            await inServiceLane("control", settleStream);
             finished = true;
           } catch {
-            await uncertain().catch(() => undefined);
+            await uncertain().catch(() => {});
             throw new KernelError("unavailable");
           } finally {
             active.abort();
-            if (!finished) await cancel().catch(() => undefined);
+            if (!finished) {
+              await cancel().catch(() => {});
+            }
             await settleRetained();
           }
         })(),
@@ -299,7 +347,7 @@ export class NativeHTTPTransport implements NativeTransport {
     } catch {
       hop?.abort();
       a.signal.removeEventListener("abort", onAbort);
-      await uncertain().catch(() => undefined);
+      await uncertain().catch(() => {});
       await settleRetained();
       throw new KernelError("unavailable");
     }
@@ -324,11 +372,15 @@ export class NativeHTTPTransport implements NativeTransport {
     let r = await this.#control(ctx, p, "cancel", c);
     const until = Date.now() + this.#authority.configuration.closureWaitMs;
     while (!physicallyClosed(r)) {
-      if (Date.now() >= until) return denied();
+      if (Date.now() >= until) {
+        return denied();
+      }
       await delay(25);
       r = await this.#control(ctx, p, "read", c);
     }
     r = await this.#control(ctx, p, "ack", c);
-    if (!physicallyClosed(r) || !r.acknowledged) return denied();
+    if (!physicallyClosed(r) || !r.acknowledged) {
+      return denied();
+    }
   }
 }

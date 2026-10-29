@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
-import pg from "pg";
+import { Pool } from "pg";
 import * as c from "@agent-teams/account-gateway/contracts";
 import { createExecutionClient, GatewayError } from "@agent-teams/account-gateway/http";
 import { createFacade, FacadeBearers } from "../src/facade.ts";
@@ -23,18 +23,28 @@ import { IntentSecrets, PostgresManagementStore } from "../src/management-store.
 // Same fresh-disposable contract and migrated SQL adapters as facade-postgres.
 // Its fixture is private to that test file; use the exported production helpers
 // here, without copying its native HTTP emulator or exposing test-only hooks.
-let pool: pg.Pool;
+function redactPostgresSetupFailure(error: unknown): Error {
+  if (error instanceof assert.AssertionError) {
+    return error;
+  }
+  return new Error("NOT_RUN: disposable PostgreSQL setup unavailable; vendor details withheld");
+}
+
+let pool: Pool;
 let nextNativeId = 0;
 before(async () => {
   const dsn = process.env.AG_RUN_ACCESS_TEST_DSN,
     database = process.env.AG_RUN_ACCESS_DISPOSABLE_DB;
   if (
-    !dsn ||
-    !database ||
+    dsn === undefined ||
+    dsn === "" ||
+    database === undefined ||
+    database === "" ||
     !/^ag_kernel_test_[a-z0-9_]+$/.test(database) ||
     process.env.AG_KERNEL_TEST_ALLOW !== "disposable_pg17_10"
-  )
+  ) {
     throw new Error("NOT_RUN: explicit NEW disposable PG17.10 run-access database required");
+  }
   let url: URL;
   try {
     url = new URL(dsn);
@@ -45,15 +55,16 @@ before(async () => {
     !["postgres:", "postgresql:"].includes(url.protocol) ||
     !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) ||
     url.pathname !== "/" + database ||
-    url.search ||
-    url.hash
-  )
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
     throw new Error("NOT_RUN: refusing remote or unspecified database");
-  pool = new pg.Pool({ connectionString: dsn, max: 6, connectionTimeoutMillis: 5000 });
-  pool.on("error", () => undefined);
+  }
+  pool = new Pool({ connectionString: dsn, max: 6, connectionTimeoutMillis: 5000 });
+  pool.on("error", () => {});
   try {
     const row = (
-      await pool.query(
+      await pool.query<{ db: string; version: string }>(
         "SELECT current_database() AS db,current_setting('server_version') AS version",
       )
     ).rows[0];
@@ -69,15 +80,17 @@ before(async () => {
       "requires empty disposable database",
     );
     const directory = new URL("../migrations/", import.meta.url);
-    for (const file of (await readdir(directory)).filter((f) => /^\d{3}_.*\.sql$/.test(f)).sort())
+    for (const file of (await readdir(directory))
+      .filter((f) => /^\d{3}_.*\.sql$/.test(f))
+      .toSorted()) {
       await pool.query(await readFile(new URL(file, directory), "utf8"));
+    }
   } catch (error) {
-    if (error instanceof assert.AssertionError) throw error;
-    throw new Error("NOT_RUN: disposable PostgreSQL setup unavailable; vendor details withheld");
+    throw redactPostgresSetupFailure(error);
   }
 });
 after(async () => {
-  await pool?.end();
+  await Promise.all([pool].filter(Boolean).map((createdPool) => createdPool.end()));
 });
 const limits = { requests: 4, concurrency: 1, requestBytes: 4096, outputBytes: 4096, tokens: 100 };
 const profile = {
@@ -154,7 +167,7 @@ async function fixture(runControlMaxRunMs = 60_000) {
       apiKey: randomUUID(),
     });
     assert.equal(op.state, "applied");
-    assert.ok(op.accountRef);
+    assert.ok(typeof op.accountRef === "string" && op.accountRef !== "");
     return op.accountRef;
   }
   const accountRef = await account();
@@ -190,7 +203,9 @@ async function fixture(runControlMaxRunMs = 60_000) {
     async request(input) {
       transportCalls++;
       const permit = await input.callback.admit(randomUUID());
-      if (!permit.claim.dispatch) return { kind: "status" };
+      if (!permit.claim.dispatch) {
+        return { kind: "status" };
+      }
       entries++;
       const proof = permit.claim.dispatch.closure;
       await input.callback.effect(proof, "response_started");
@@ -225,9 +240,11 @@ async function fixture(runControlMaxRunMs = 60_000) {
     bufferBytes: 4096,
   };
   let server = createFacade(options);
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   let origin = "http://127.0.0.1:" + address.port;
   const input = (patch: Partial<c.Prepare> = {}): c.Prepare => ({
     operationId: randomUUID(),
@@ -257,20 +274,22 @@ async function fixture(runControlMaxRunMs = 60_000) {
         accept: "application/json",
         ...headers,
       },
-      body: value === undefined ? undefined : JSON.stringify(value),
+      ...(value === undefined ? {} : { body: JSON.stringify(value) }),
     });
   async function mint(value: c.Prepare): Promise<RunAccess> {
     const res = await raw(value);
     assert.equal(res.status, 200);
-    const json = (await res.json()) as Record<string, unknown>;
-    assert.deepEqual(Object.keys(json).sort(), ["admission", "bearer", "operation"]);
-    assert.equal(typeof json.bearer, "string");
-    assert.match(json.bearer as string, /^agx1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/);
+    const json: unknown = await res.json();
+    assert.ok(json !== null && typeof json === "object" && !Array.isArray(json));
+    assert.deepEqual(Object.keys(json).toSorted(), ["admission", "bearer", "operation"]);
+    assert.ok("bearer" in json && typeof json.bearer === "string");
+    assert.match(json.bearer, /^agx1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/);
+    assert.ok("operation" in json && "admission" in json);
     const op = c.preparationOperation.parse(json.operation);
     assert.ok(op.state === "applied" && op.result?.kind === "execution");
     return {
       operation: op,
-      bearer: json.bearer as string,
+      bearer: json.bearer,
       admission: c.admission.parse(json.admission),
     };
   }
@@ -306,15 +325,17 @@ async function fixture(runControlMaxRunMs = 60_000) {
       ),
     });
     assert.equal(result.kind, "stream");
-    if (result.kind === "stream") {
-      const reader = result.body.getReader();
-      while (!(await reader.read()).done) {}
-    }
+    const reader = result.body.getReader();
+    while (!(await reader.read()).done) {}
     assert.equal((await client.status(ref, requestId)).effect, "completed");
   }
   async function stop() {
     server.closeAllConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        resolve();
+      });
+    });
   }
   async function restart() {
     await stop();
@@ -341,10 +362,12 @@ async function fixture(runControlMaxRunMs = 60_000) {
         },
       ],
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const address = server.address();
-    assert.ok(address && typeof address === "object");
-    origin = "http://127.0.0.1:" + address.port;
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const restartAddress = server.address();
+    assert.ok(restartAddress !== null && typeof restartAddress === "object");
+    origin = "http://127.0.0.1:" + restartAddress.port;
   }
   return {
     context,
@@ -368,9 +391,10 @@ async function fixture(runControlMaxRunMs = 60_000) {
     count: async () =>
       Number(
         (
-          await pool.query("SELECT count(*) AS n FROM ag_kernel.executions WHERE consumer=$1", [
-            context.consumerId,
-          ])
+          await pool.query<{ n: string }>(
+            "SELECT count(*) AS n FROM ag_kernel.executions WHERE consumer=$1",
+            [context.consumerId],
+          )
         ).rows[0].n,
       ),
     restart,
@@ -386,7 +410,7 @@ async function denied(response: Response, statuses = [403]) {
 
 // Red if execution/management bearer is promoted to control, body chooses a
 // consumer, or configured consumer/owner/profile/limit/deadline bounds are ignored.
-test("HTTP control requires distinct configured consumer authority before any provider entry", async () => {
+void test("HTTP control requires distinct configured consumer authority before any provider entry", async () => {
   const f = await fixture();
   try {
     const value = f.input(),
@@ -430,7 +454,7 @@ test("HTTP control requires distinct configured consumer authority before any pr
   }
 });
 
-test("explicit six-hour control admits long runs and recovers the same immutable ID tuple", async () => {
+void test("explicit six-hour control admits long runs and recovers the same immutable ID tuple", async () => {
   const f = await fixture(21_600_000);
   try {
     const threeHours = f.input({ deadline: new Date(Date.now() + 3 * 3_600_000).toISOString() });
@@ -442,7 +466,7 @@ test("explicit six-hour control admits long runs and recovers the same immutable
     assert.equal(lost.status, 200);
     await lost.body?.cancel();
     const operation = await f.kernel.operation(f.context, sixHours.operationId);
-    assert.ok(operation.executionRef);
+    assert.ok(typeof operation.executionRef === "string" && operation.executionRef !== "");
     const original = await f.kernel.savedExecution(f.context, operation.executionRef);
     const recovered = await f.mint(sixHours),
       replay = await f.mint(sixHours);
@@ -468,7 +492,7 @@ test("explicit six-hour control admits long runs and recovers the same immutable
   }
 });
 
-test("default one-hour kernel composition still denies a long run before native", async () => {
+void test("default one-hour kernel composition still denies a long run before native", async () => {
   const f = await fixture(defaults.maxRunMs);
   try {
     await denied(
@@ -485,7 +509,7 @@ test("default one-hour kernel composition still denies a long run before native"
 
 // Red if issuance globally replaces the registry, concurrent retries rotate a
 // run's token, or closing X also retires the unrelated Y execution capability.
-test("parallel run issuance and same-run retry preserve independent HTTP execution grants", async () => {
+void test("parallel run issuance and same-run retry preserve independent HTTP execution grants", async () => {
   const f = await fixture();
   try {
     const x = f.input(),
@@ -509,8 +533,8 @@ test("parallel run issuance and same-run retry preserve independent HTTP executi
 // Red if a lost prepare response repins after settings/metadata change, modified
 // intent silently mints, restart changes original capability scope, or fenced
 // recovery bypasses SQL dispatch, close, deadline or restore issuer denial.
-test("original prepare recovery survives settings drift and preserves scoped fenced authority", async (t) => {
-  for (const terminal of ["close", "fence", "reconnect", "expiry", "restore"] as const)
+void test("original prepare recovery survives settings drift and preserves scoped fenced authority", async (t) => {
+  for (const terminal of ["close", "fence", "reconnect", "expiry", "restore"] as const) {
     await t.test(terminal, async () => {
       const f = await fixture();
       try {
@@ -521,7 +545,7 @@ test("original prepare recovery survives settings drift and preserves scoped fen
         assert.equal(lost.status, 200);
         await lost.body?.cancel(); // Caller discarded the private reply.
         const op = await f.kernel.operation(f.context, value.operationId);
-        assert.ok(op.executionRef);
+        assert.ok(typeof op.executionRef === "string" && op.executionRef !== "");
         const original = await f.kernel.savedExecution(f.context, op.executionRef);
         const metadata = await f.management.account(f.context, f.accountRef);
         await f.management.rename(f.context, {
@@ -593,9 +617,9 @@ test("original prepare recovery survives settings drift and preserves scoped fen
           recovered = reinstalled;
           const e = f.execution(recovered);
           await e.client.close(e.ref, { operationId: randomUUID(), reason: "completed" });
-        } else if (terminal === "fence")
+        } else if (terminal === "fence") {
           await f.kernel.fence(f.context, randomUUID(), value.subjectRef, value.policyRevision + 1);
-        else if (terminal === "reconnect") {
+        } else if (terminal === "reconnect") {
           const current = await f.management.account(f.context, f.accountRef);
           await f.management.reconnect(f.context, {
             operationId: randomUUID(),
@@ -613,7 +637,9 @@ test("original prepare recovery survives settings drift and preserves scoped fen
           await f.kernel.restore(f.context, original.admission.issuerEpoch, freshIssuer);
           assert.equal(await f.kernel.issuer(f.context), freshIssuer);
           assert.equal((await f.kernel.savedExecution(f.context, op.executionRef)).state, "fenced");
-        } else await delay(Math.max(1, Date.parse(value.deadline) - Date.now() + 30));
+        } else {
+          await delay(Math.max(1, Date.parse(value.deadline) - Date.now() + 30));
+        }
         if (terminal === "fence" || terminal === "reconnect") {
           // Lose volatile grants, then recover only the immutable original scope.
           const previous = recovered;
@@ -659,7 +685,7 @@ test("original prepare recovery survives settings drift and preserves scoped fen
           const closeId = randomUUID();
           await e.client.close(e.ref, { operationId: closeId, reason: "cancelled" });
           assert.deepEqual(await f.kernel.savedExecution(f.context, e.ref), saved);
-          const cleanup = await pool.query(
+          const cleanup = await pool.query<{ execution_ref: string | null }>(
             "SELECT execution_ref FROM ag_kernel.cleanup WHERE consumer=$1 AND execution_ref=$2",
             [f.context.consumerId, e.ref],
           );
@@ -679,8 +705,9 @@ test("original prepare recovery survives settings drift and preserves scoped fen
           assert.equal(error.effect, "effect_unknown"); // Accepted original preparation survives mint denial.
         }
         const e = f.execution(recovered);
-        if (terminal !== "expiry")
+        if (terminal !== "expiry") {
           assert.equal((await e.client.status(e.ref, requestId)).effect, "completed");
+        }
         for (const id of [requestId, randomUUID()]) {
           const response = await f.raw(
             {
@@ -714,4 +741,5 @@ test("original prepare recovery survives settings drift and preserves scoped fen
         await f.stop();
       }
     });
+  }
 });

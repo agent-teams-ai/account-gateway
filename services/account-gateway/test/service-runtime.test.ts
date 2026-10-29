@@ -25,7 +25,7 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { createServer } from "node:https";
 import { setTimeout as delay } from "node:timers/promises";
-import pg from "pg";
+import { Pool } from "pg";
 import * as c from "@agent-teams/account-gateway/contracts";
 import {
   createManagementClient,
@@ -70,6 +70,45 @@ function composeServiceRetirementReadback(
   return composition.composeServiceRetirementReadback(native);
 }
 
+function assertConfigDenied(work: () => unknown): void {
+  assert.throws(work, (e) => e instanceof ServiceError && e.code === "config_denied");
+}
+
+function firstRow<Row>(rows: readonly Row[]): Row | undefined {
+  return rows[0];
+}
+
+const bounded = async <T>(work: Promise<T>, ms: number): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error("service fixture: pinned bridge deadline"));
+        }, ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+
+const processState = (pid: string) => {
+  try {
+    const stat = readFileSync("/proc/" + pid + "/stat", "utf8"),
+      fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    return { state: fields[0], parent: fields[1], birthTicks: fields[19] };
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+};
+
 const workspace = fileURLToPath(new URL("../../../", import.meta.url));
 async function typecheckFixture(path: string): Promise<void> {
   await promisify(execFile)(
@@ -97,7 +136,7 @@ async function typecheckFixture(path: string): Promise<void> {
   );
 }
 
-test(
+void test(
   "retirement readback: real readonly child, exact decimal binding, strict bounded EOF/exit and disposal",
   { timeout: 25_000 },
   async () => {
@@ -178,14 +217,17 @@ if (mode === 'no-eof' || mode === 'abort') setTimeout(() => process.stdout.write
       const first = latched(current, selector, new AbortController().signal);
       try {
         const readyDeadline = Date.now() + 3000;
-        while (!existsSync(latchedPath + ".pid") && Date.now() < readyDeadline) await delay(10);
+        while (!existsSync(latchedPath + ".pid") && Date.now() < readyDeadline) {
+          await delay(10);
+        }
         assert.ok(existsSync(latchedPath + ".pid"), "exact owned helper is active");
-        for (let tick = 0; tick < 3; tick++)
+        for (let tick = 0; tick < 3; tick++) {
           assert.equal(
             await latched(current, selector, new AbortController().signal),
             undefined,
             "active helper denies another tick",
           );
+        }
         assert.equal(
           readFileSync(latchedPath + ".spawns", "utf8"),
           "spawn\n",
@@ -214,8 +256,8 @@ if (mode === 'no-eof' || mode === 'abort') setTimeout(() => process.stdout.write
       for (const mode of ["observed", "reacquired"]) {
         const receipt = await read(mode);
         assert.equal(receipt?.binding.incarnation, selector.engineIncarnation);
-        assert.equal(receipt?.binding.birthTicks, "9007199254740997");
-        assert.equal(receipt?.binding.lockDevice, current.lockDevice);
+        assert.equal(receipt.binding.birthTicks, "9007199254740997");
+        assert.equal(receipt.binding.lockDevice, current.lockDevice);
       }
       for (const mode of [
         "boot",
@@ -241,15 +283,18 @@ if (mode === 'no-eof' || mode === 'abort') setTimeout(() => process.stdout.write
         "stderr",
         "utf8",
         "nonzero",
-      ])
+      ]) {
         assert.equal(await read(mode), undefined, mode);
+      }
       const start = Date.now();
       assert.equal(await read("no-eof"), undefined);
       assert.ok(Date.now() - start < 5500, "five-second call with scheduling tolerance");
       const abort = new AbortController(),
         pending = read("abort", abort.signal);
       const abortDeadline = Date.now() + 3000;
-      while (!existsSync(join(dir, "abort.pid")) && Date.now() < abortDeadline) await delay(10);
+      while (!existsSync(join(dir, "abort.pid")) && Date.now() < abortDeadline) {
+        await delay(10);
+      }
       assert.ok(existsSync(join(dir, "abort.pid")), "owned child reached stdin EOF before abort");
       abort.abort();
       assert.equal(await pending, undefined);
@@ -294,7 +339,7 @@ if (mode === 'no-eof' || mode === 'abort') setTimeout(() => process.stdout.write
       for (const selected of [
         { originRef: current.originRef, engineIncarnation: current.incarnation },
         { ...selector, originRef: "foreign" },
-      ])
+      ]) {
         assert.equal(
           await composeServiceRetirementReadback({
             executable,
@@ -303,6 +348,7 @@ if (mode === 'no-eof' || mode === 'abort') setTimeout(() => process.stdout.write
           })(current, selected, new AbortController().signal),
           undefined,
         );
+      }
       assert.equal(
         existsSync(join(dir, "invalid-selector.pid")),
         false,
@@ -314,7 +360,7 @@ if (mode === 'no-eof' || mode === 'abort') setTimeout(() => process.stdout.write
   },
 );
 
-test("source catalog: singleton compatibility and finite simultaneous per-profile grants", () => {
+void test("source catalog: singleton compatibility and finite simultaneous per-profile grants", () => {
   const limits = {
     requests: 4,
     concurrency: 1,
@@ -348,7 +394,11 @@ test("source catalog: singleton compatibility and finite simultaneous per-profil
   const profiles = captureServiceProfiles({ profile, secondProfile });
   assert.deepEqual(profiles, [profile, secondProfile]);
   assert.ok(Object.isFrozen(profiles[1].limits));
-  for (const model of ["openai/gpt-5.4-mini", "openai/gpt-5.4-nano"]) {
+  for (const model of [
+    "openai/gpt-5.4-mini",
+    "openai/gpt-5.4-nano",
+    "future-vendor/review-model:free",
+  ]) {
     const selected = { ...secondProfile, model };
     assert.deepEqual(captureServiceProfiles({ profile, secondProfile: selected }), [
       profile,
@@ -360,7 +410,7 @@ test("source catalog: singleton compatibility and finite simultaneous per-profil
     () =>
       captureServiceProfiles({
         profile,
-        secondProfile: { ...secondProfile, model: "unapproved-model" },
+        secondProfile: { ...secondProfile, model: "invalid model" },
       }),
     (e) => e instanceof ServiceError && e.code === "config_denied",
   );
@@ -386,8 +436,7 @@ test("source catalog: singleton compatibility and finite simultaneous per-profil
     false,
     "canonical capture preserves absent broad authority",
   );
-  const denied = (work: () => unknown) =>
-    assert.throws(work, (e) => e instanceof ServiceError && e.code === "config_denied");
+
   const managementOneHour = {
     ...grant,
     preparation: { ...grant.preparation, maxRunMs: 3_600_000 },
@@ -396,7 +445,7 @@ test("source catalog: singleton compatibility and finite simultaneous per-profil
     captureServiceBearers([managementOneHour], grant.consumerId, profiles)[0],
     managementOneHour,
   );
-  denied(() =>
+  assertConfigDenied(() =>
     captureServiceBearers(
       [
         {
@@ -429,10 +478,15 @@ test("source catalog: singleton compatibility and finite simultaneous per-profil
       () => new FacadeBearers([{ ...grant, profileIds }]),
       (e) => e instanceof Error && "code" in e && e.code === "invalid",
     );
-    denied(() => captureServiceBearers([{ ...grant, profileIds }], grant.consumerId, profiles));
+    assertConfigDenied(() =>
+      captureServiceBearers([{ ...grant, profileIds }], grant.consumerId, profiles),
+    );
   }
-  for (const profileIds of [["unconfigured"], [1], null, "profile"])
-    denied(() => captureServiceBearers([{ ...grant, profileIds }], grant.consumerId, profiles));
+  for (const profileIds of [["unconfigured"], [1], null, "profile"]) {
+    assertConfigDenied(() =>
+      captureServiceBearers([{ ...grant, profileIds }], grant.consumerId, profiles),
+    );
+  }
   assert.equal(
     new FacadeBearers([
       { ...grant, profileIds: Array.from({ length: 128 }, (_, i) => "profile-" + i) },
@@ -497,16 +551,16 @@ test("source catalog: singleton compatibility and finite simultaneous per-profil
     { profile: profile.profile },
     { profile: "openrouter-alias" },
     { baseURL: profile.baseURL },
-    { model: profile.model },
+    { model: "invalid model" },
     { endpoint: secondProfile.baseURL },
     { providerTokenUpperBound: 49 },
     { limits: { ...limits, concurrency: 5 } },
   ]) {
-    denied(() =>
+    assertConfigDenied(() =>
       captureServiceProfiles({ profile, secondProfile: { ...secondProfile, ...patch } }),
     );
   }
-  denied(() =>
+  assertConfigDenied(() =>
     captureServiceBearers(
       [{ ...grant, preparation: { ...grant.preparation, limits } }],
       grant.consumerId,
@@ -525,14 +579,14 @@ test("source catalog: singleton compatibility and finite simultaneous per-profil
   assert.equal(captureServiceBearers([run], run.consumerId, profiles).length, 1);
   const runSixHours = { ...run, maxRunMs: 21_600_000 };
   assert.deepEqual(captureServiceBearers([runSixHours], run.consumerId, profiles)[0], runSixHours);
-  denied(() =>
+  assertConfigDenied(() =>
     captureServiceBearers([{ ...runSixHours, maxRunMs: 21_600_001 }], run.consumerId, profiles),
   );
-  denied(() => captureServiceBearers([{ ...run, limits }], run.consumerId, profiles));
-  denied(() =>
+  assertConfigDenied(() => captureServiceBearers([{ ...run, limits }], run.consumerId, profiles));
+  assertConfigDenied(() =>
     captureServiceBearers([{ ...run, profileIds: ["unconfigured"] }], run.consumerId, profiles),
   );
-  denied(() =>
+  assertConfigDenied(() =>
     captureServiceBearers(
       [{ ...run, profileIds: [profile.profile, profile.profile] }],
       run.consumerId,
@@ -546,7 +600,7 @@ test("source catalog: singleton compatibility and finite simultaneous per-profil
     profile: "openai-codex-oauth-responses-v1",
     modelScope: ["gpt-5.6-sol"],
   });
-  denied(() => captureServiceProfiles({ profile, oauthEnrollment }));
+  assertConfigDenied(() => captureServiceProfiles({ profile, oauthEnrollment }));
   const catalog = captureServiceProfiles({
     profile,
     secondProfile,
@@ -559,12 +613,14 @@ test("source catalog: singleton compatibility and finite simultaneous per-profil
   });
   assert.equal(catalog[2].profile, "openai-codex-oauth-responses-v1");
   assert.equal(catalog[2].model, "gpt-5.6-sol");
-  denied(() => captureOAuthEnrollmentConfig({ ...oauthEnrollment, modelScope: ["gpt-6.1-sol"] }));
+  assertConfigDenied(() =>
+    captureOAuthEnrollmentConfig({ ...oauthEnrollment, modelScope: ["gpt-6.1-sol"] }),
+  );
   assert.equal(catalog[2].baseURL, "https://chatgpt.com/backend-api/codex");
   assert.equal(catalog[2].qualificationRef, "source-codex");
 });
 
-test("consumer-control capture is finite, detached and single-read before composition", () => {
+void test("consumer-control capture is finite, detached and single-read before composition", () => {
   const limits = {
     requests: 4,
     concurrency: 1,
@@ -599,11 +655,12 @@ test("consumer-control capture is finite, detached and single-read before compos
     ).length,
     1,
   );
-  const denied = (value: unknown) =>
+  const denied = (value: unknown): void => {
     assert.throws(
       () => capture(value),
       (e) => e instanceof ServiceError && e.code === "config_denied",
     );
+  };
   for (const profileIds of [
     undefined,
     [],
@@ -614,24 +671,29 @@ test("consumer-control capture is finite, detached and single-read before compos
     Array.from({ length: 129 }, (_, i) => "profile-" + i),
     null,
     "profile",
-  ])
+  ]) {
     denied({ ...control, profileIds });
+  }
   const { profileIds: _ids, ...absent } = control;
   denied(absent);
-  for (const maxRunMs of [0, 21_600_001, 1.5]) denied({ ...control, maxRunMs });
+  for (const maxRunMs of [0, 21_600_001, 1.5]) {
+    denied({ ...control, maxRunMs });
+  }
   const maximum = capture({ ...control, maxRunMs: 21_600_000 })[0];
   assert.ok(maximum.role === "consumer-control");
   assert.equal(maximum.maxRunMs, 21_600_000);
-  for (const key of Object.keys(limits) as (keyof typeof limits)[])
+  for (const key of Object.keys(limits) as (keyof typeof limits)[]) {
     denied({ ...control, limits: { ...limits, [key]: limits[key] + 1 } });
+  }
   denied({ ...control, limits: { ...limits, concurrency: 5 } });
   for (const extra of [
     { consumerId: "foreign" },
     { ownerRefs: ["owner"] },
     { preparation: {} },
     { role: "*" },
-  ])
+  ]) {
     denied({ ...control, ...extra });
+  }
   const callerIds = [profile.profile],
     reads = new Map<string, number>();
   const supplied = { ...control, profileIds: callerIds, limits: { ...limits } };
@@ -654,7 +716,7 @@ test("consumer-control capture is finite, detached and single-read before compos
   supplied.limits.tokens = 1000;
   supplied.maxRunMs = 1000;
   assert.deepEqual(captured, [control]);
-  assert.ok(captured[0].role === "consumer-control");
+  assert.ok(Object.is(captured[0].role, "consumer-control"));
   assert.ok(
     Object.isFrozen(captured[0]) &&
       Object.isFrozen(captured[0].profileIds) &&
@@ -705,7 +767,7 @@ test("consumer-control capture is finite, detached and single-read before compos
   );
 });
 
-test("kernel composition derives a detached control duration while preserving defaults", () => {
+void test("kernel composition derives a detached control duration while preserving defaults", () => {
   const management = { role: "management" } as ConfiguredBearer;
   const execution = { role: "execution" } as ConfiguredBearer;
   assert.deepEqual(serviceComposition.composeKernelBounds([management, execution]), defaults);
@@ -721,12 +783,22 @@ test("kernel composition derives a detached control duration while preserving de
   consumer.maxRunMs = 1000;
   assert.deepEqual(derived, { ...defaults, maxRunMs: 21_600_000 });
   assert.ok(Object.isFrozen(derived));
-  const high = { profile: 'openai-responses-apikey-v1', model: 'synthetic-model', baseURL: 'https://fixture.invalid/v1',
-    qualificationRef: 'synthetic-concurrency', limits: { ...consumer.limits, requests: 64, concurrency: 32 }, providerTokenUpperBound: 100 };
+  const high = {
+    profile: "openai-responses-apikey-v1",
+    model: "synthetic-model",
+    baseURL: "https://fixture.invalid/v1",
+    qualificationRef: "synthetic-concurrency",
+    limits: { ...consumer.limits, requests: 64, concurrency: 32 },
+    providerTokenUpperBound: 100,
+  };
   const qualified = serviceComposition.composeKernelBounds([], [high]);
   high.limits.concurrency = 64;
-  assert.equal(qualified.maxConcurrent, 32, 'captured profile capacity does not track later input mutations');
-  assert.equal(defaults.maxConcurrent, 1, 'explicit qualified capacity never raises the default');
+  assert.equal(
+    qualified.maxConcurrent,
+    32,
+    "captured profile capacity does not track later input mutations",
+  );
+  assert.equal(defaults.maxConcurrent, 1, "explicit qualified capacity never raises the default");
 });
 
 // Fixture-owned input projection. Actual startService validates production
@@ -769,6 +841,17 @@ interface FixtureConfig {
   }[];
 }
 
+interface RequestProofRow {
+  effect: string;
+  transport_occupied: boolean;
+  worker: string | null;
+  closure_token: string | null;
+  native_origin_ref: string | null;
+  engine_incarnation: string | null;
+  request_nonce: string | null;
+  descriptor_generation: string | null;
+}
+
 // TEST numbers only, deliberately distinct from safety defaults. These are not
 // measured production caps. The protected fixture factory must supply them.
 const testFacts: FixtureConfig["durableFacts"] = Object.freeze({
@@ -779,7 +862,7 @@ const testFacts: FixtureConfig["durableFacts"] = Object.freeze({
   issuerSlots: 3,
 });
 async function assertStoredFacts(
-  pool: pg.Pool,
+  pool: Pool,
   consumer: string,
   expected: FixtureConfig["durableFacts"],
 ): Promise<void> {
@@ -800,13 +883,18 @@ const fail = (phase: string): never => {
   throw new Error("service fixture: " + phase);
 };
 const ensure = (value: unknown, phase: string): void => {
-  if (!value) fail(phase);
+  const present = Boolean(value);
+  if (!present) {
+    fail(phase);
+  }
 };
 function protectedFile(path: string): Buffer {
   for (let a = dirname(path); ; a = dirname(a)) {
     const s = lstatSync(a);
     ensure(s.isDirectory() && s.uid === 0 && !(s.mode & 0o022), "protected ancestor");
-    if (a === "/") break;
+    if (a === "/") {
+      break;
+    }
   }
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
@@ -958,21 +1046,23 @@ finally:
     pending?.reject(new Error("service fixture: pinned bridge lost"));
     pending = undefined;
   };
-  const closed = new Promise<boolean>((resolve) =>
+  const closed = new Promise<boolean>((resolve) => {
     child.once("close", (code, exitSignal) => {
       const accepted = !lost && !pending && code === 0 && exitSignal === null && output === "";
       ended = true;
       deny();
       resolve(accepted);
-    }),
-  );
+    });
+  });
   child.on("error", deny);
   child.stdin.on("error", deny);
   child.stdout.on("error", deny);
   child.stderr.on("error", deny);
   child.stderr.on("data", (chunk: Buffer) => {
     diagnostics += chunk.length;
-    if (diagnostics > 1024) deny();
+    if (diagnostics > 1024) {
+      deny();
+    }
   });
   child.stdout.on("data", (chunk: Buffer) => {
     bytes += chunk.length;
@@ -982,7 +1072,9 @@ finally:
     }
     output += chunk.toString("utf8");
     const newline = output.indexOf("\n");
-    if (newline < 0) return;
+    if (newline < 0) {
+      return;
+    }
     const line = output.slice(0, newline);
     output = output.slice(newline + 1);
     try {
@@ -998,24 +1090,10 @@ finally:
       deny();
     }
   });
-  const bounded = async <T>(work: Promise<T>, ms: number): Promise<T> => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      return await Promise.race([
-        work,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error("service fixture: pinned bridge deadline")),
-            ms,
-          );
-        }),
-      ]);
-    } finally {
-      clearTimeout(timer);
-    }
-  };
   const send = async (message: FixturePinRequest, expected: "pinned" | "exited") => {
-    if (lost || ended || pending) fail("pinned bridge unavailable");
+    if (lost || ended || pending) {
+      fail("pinned bridge unavailable");
+    }
     const input = Buffer.from(JSON.stringify(message) + "\n");
     ensure(input.length <= 4096, "pinned bridge input bound");
     const receipt = new Promise<void>((resolve, reject) => {
@@ -1025,13 +1103,18 @@ finally:
     await bounded(receipt, 6000);
   };
   const close = async () => {
-    if (!ended && !lost) child.stdin.end('{"command":"close"}\n');
-    else if (!ended) child.kill("SIGKILL"); // Only our retained bridge ChildProcess.
+    if (!ended && !lost) {
+      child.stdin.end('{"command":"close"}\n');
+    } else if (!ended) {
+      child.kill("SIGKILL");
+    } // Only our retained bridge ChildProcess.
     try {
       ensure(await bounded(closed, 5000), "pinned bridge exact close");
     } catch (error) {
-      if (!ended) child.kill("SIGKILL");
-      await bounded(closed, 1000).catch(() => undefined);
+      if (!ended) {
+        child.kill("SIGKILL");
+      }
+      await bounded(closed, 1000).catch(() => {});
       throw error;
     }
   };
@@ -1039,12 +1122,14 @@ finally:
     await send({ bootId, processes }, "pinned");
   } catch {
     deny();
-    await close().catch(() => undefined);
+    await close().catch(() => {});
     return fail("pinned bridge capture");
   }
   return {
     async kill() {
-      if (killed) return;
+      if (killed) {
+        return;
+      }
       try {
         await send({ command: "kill" }, "exited");
         killed = true;
@@ -1057,15 +1142,16 @@ finally:
   };
 }
 
-test(
+void test(
   "production service entry: startup rollback, SAME OPEN, abrupt held-stream loss and automatic exact old retirement closure",
   { timeout: 150_000 },
   async () => {
     if (
       process.env.AG_SERVICE_ENTRY_ALLOW !== "new_disposable_root_pg17_10" ||
       process.geteuid?.() !== 0
-    )
+    ) {
       fail("NOT_RUN explicit root disposable fixture required");
+    }
     // Manifest contains root/server-only fixture configuration. No keys/DSNs
     // or native bootstrap JSON are accepted through environment variables.
     const manifest = object(strictJSON(protectedFile(installation + "/fixture.json")), [
@@ -1085,7 +1171,6 @@ test(
       "testSha256",
       "nativeExecutableSha256",
     ]);
-    const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
     ensure(
       selected.gatewayBaseRef === "bc36b9ad16a90d1e45f7b6e30e16e0070b7905e5" &&
         selected.nativeBaseRef === "b7d746411cb590af5156fe16436d3182c209b379" &&
@@ -1159,29 +1244,42 @@ test(
     );
     const ownerRef = management!.ownerRefs[0],
       dummy = "dummy-service-entry-only-" + randomUUID();
-    const kernelPool = new pg.Pool({
+    const kernelPool = new Pool({
       connectionString: cfg.kernelDSN,
       max: 2,
       connectionTimeoutMillis: 5000,
       query_timeout: 5000,
     });
-    const nativePool = new pg.Pool({
+    const nativePool = new Pool({
       connectionString: nativeDSN,
       max: 2,
       connectionTimeoutMillis: 5000,
       query_timeout: 5000,
     });
-    kernelPool.on("error", () => undefined);
-    nativePool.on("error", () => undefined);
+    kernelPool.on("error", () => {});
+    nativePool.on("error", () => {});
     let service: Service | undefined,
       calls = 0,
       violation = false,
       phase = "fixture";
+    const upstreamViolated = (): boolean => violation;
     // Observe the REAL current tick and its REAL SQL cleanup claim without
     // replacing either result or authority. RED if refresh moves before cleanup
     // or receives false after any acquired claim, including old-incarnation work.
-    const claimCleanup = PostgresKernel.prototype.claimCleanup,
-      refreshOAuth = AccountManagement.prototype.refreshOAuth;
+    const kernelPrototype: {
+      claimCleanup: (
+        this: PostgresKernel,
+        ...args: Parameters<PostgresKernel["claimCleanup"]>
+      ) => ReturnType<PostgresKernel["claimCleanup"]>;
+    } = PostgresKernel.prototype;
+    const managementPrototype: {
+      refreshOAuth: (
+        this: AccountManagement,
+        ...args: Parameters<AccountManagement["refreshOAuth"]>
+      ) => ReturnType<AccountManagement["refreshOAuth"]>;
+    } = AccountManagement.prototype;
+    const claimCleanup = kernelPrototype.claimCleanup,
+      refreshOAuth = managementPrototype.refreshOAuth;
     let acquiredThisTick = false,
       skippedRefreshTicks = 0,
       tickViolation = false;
@@ -1190,7 +1288,9 @@ test(
       ...args: Parameters<typeof claimCleanup>
     ) {
       const claim = await claimCleanup.apply(this, args);
-      if (args[0].consumerId === cfg.consumer.consumerId) acquiredThisTick = claim !== undefined;
+      if (args[0].consumerId === cfg.consumer.consumerId) {
+        acquiredThisTick = claim !== undefined;
+      }
       return claim;
     };
     AccountManagement.prototype.refreshOAuth = async function (
@@ -1199,10 +1299,14 @@ test(
     ) {
       const result = await refreshOAuth.apply(this, args);
       if (args[0].consumerId === cfg.consumer.consumerId) {
-        if ((args[1] ?? false) !== acquiredThisTick) tickViolation = true;
+        if ((args[1] ?? false) !== acquiredThisTick) {
+          tickViolation = true;
+        }
         if (acquiredThisTick) {
           skippedRefreshTicks++;
-          if (result !== "idle") tickViolation = true;
+          if (result !== "idle") {
+            tickViolation = true;
+          }
         }
         acquiredThisTick = false;
       }
@@ -1212,16 +1316,6 @@ test(
     // These references are captured only from this test's fresh owned process
     // tree, never an existing daemon or an unverified/reused numeric PID.
     let owned: FixtureProcessHandles | undefined;
-    const processState = (pid: string) => {
-      try {
-        const stat = readFileSync("/proc/" + pid + "/stat", "utf8"),
-          fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-        return { state: fields[0], parent: fields[1], birthTicks: fields[19] };
-      } catch (error) {
-        if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
-        throw error;
-      }
-    };
     const upstream = createServer(
       {
         cert: protectedFile(installation + "/tls/server.pem"),
@@ -1335,7 +1429,9 @@ test(
               res.once("close", resolve);
             });
             held.delete(entry);
-            if (res.destroyed) return;
+            if (res.destroyed) {
+              return;
+            }
           }
           frame("response.output_text.done", {
             item_id: itemId,
@@ -1365,11 +1461,11 @@ test(
         [nativePool, nativeDB],
       ] as const) {
         const r = (
-          await pool.query(
+          await pool.query<{ db: string; version: string }>(
             "SELECT current_database() AS db,current_setting('server_version') AS version",
           )
         ).rows[0];
-        ensure(r.db === database && /^17\.10(?:$| )/.test(r.version as string), "PG17.10 identity");
+        ensure(r.db === database && /^17\.10(?:$| )/.test(r.version), "PG17.10 identity");
       }
       // Operator already applied native and kernel migrations; empty new rows
       // are required, but no migration/build/install runs inside this test.
@@ -1428,7 +1524,8 @@ test(
         // Block the LAST schema probe: earlier probes are followed by SQL that
         // pool.end() rejects, so they cannot expose the historical listener leak.
         await lock.query("LOCK TABLE ag_kernel.requests IN ACCESS EXCLUSIVE MODE");
-        const blocker = (await lock.query("SELECT pg_backend_pid() AS pid")).rows[0].pid as number;
+        const blocker = (await lock.query<{ pid: number }>("SELECT pg_backend_pid() AS pid"))
+          .rows[0].pid;
         startup = startService(configFile, abort.signal).then(
           (s) => {
             service = s;
@@ -1440,10 +1537,13 @@ test(
             assert.ok(error.cause instanceof ServiceError);
             assert.equal(error.cause.code, "startup_denied");
             assert.equal(Object.getOwnPropertyDescriptor(error, "startupStage")?.value, "starting");
+            const enumerableError: object = error;
             for (const field of ["cause", "startupStage"]) {
               assert.equal(Object.getOwnPropertyDescriptor(error, field)?.enumerable, false);
-              assert.equal(Object.hasOwn({ ...error }, field), false);
-              assert.equal(Object.hasOwn(JSON.parse(JSON.stringify(error)), field), false);
+              assert.equal(Object.hasOwn({ ...enumerableError }, field), false);
+              const serialized: unknown = JSON.parse(JSON.stringify(error));
+              assert.ok(typeof serialized === "object" && serialized !== null);
+              assert.equal(Object.hasOwn(serialized, field), false);
             }
             return true;
           },
@@ -1461,7 +1561,9 @@ test(
               [probe, blocker],
             )
           ).rows[0].blocked;
-          if (!blocked) await delay(10);
+          if (!blocked) {
+            await delay(10);
+          }
         } while (!blocked && Date.now() < deadline);
         ensure(blocked, "observed startup relation-lock wait");
         abort.abort(); // Shutdown snapshots the still-unbound callback here.
@@ -1472,7 +1574,7 @@ test(
         } finally {
           lock.release();
         }
-        if (startup)
+        if (startup) {
           assert.equal(
             await Promise.race([
               startup,
@@ -1481,6 +1583,7 @@ test(
             true,
             "aborted awaited startup rejects",
           );
+        }
       }
       ensure(
         readFileSync(children, "utf8").trim() === "" &&
@@ -1493,16 +1596,20 @@ test(
         try {
           await Promise.race([
             new Promise<void>((resolve, reject) => {
-              listener.once("error", () =>
-                reject(new Error("service fixture: rollback port available")),
-              );
+              listener.once("error", () => {
+                reject(new Error("service fixture: rollback port available"));
+              });
               listener.listen(Number(new URL(origin).port), "127.0.0.1", resolve);
             }),
             delay(1000, undefined, { ref: false }).then(() => fail("rollback port bind bound")),
           ]);
         } finally {
           await Promise.race([
-            new Promise<void>((resolve) => listener.close(() => resolve())),
+            new Promise<void>((resolve) => {
+              listener.close(() => {
+                resolve();
+              });
+            }),
             delay(1000, undefined, { ref: false }).then(() => fail("rollback port close bound")),
           ]);
         }
@@ -1549,8 +1656,9 @@ test(
         created.state === "applied" && created.result?.kind === "account",
         "authenticated physical account staging",
       );
-      if (created.state !== "applied" || created.result?.kind !== "account")
+      if (created.state !== "applied" || created.result?.kind !== "account") {
         return fail("account result");
+      }
       const accountRef = created.result.accountRef;
       assert.equal(calls, 0, "staging must not dispatch a paid probe");
       const prepare: c.Prepare = {
@@ -1586,8 +1694,9 @@ test(
           typeof access.bearer === "string",
         "persisted run-control preparation",
       );
-      if (op.state !== "applied" || op.result?.kind !== "execution")
+      if (op.state !== "applied" || op.result?.kind !== "execution") {
         return fail("execution result");
+      }
       const executionRef = op.result.executionRef;
       const execution = createExecutionClient({
         role: "execution",
@@ -1622,13 +1731,17 @@ test(
             ),
           });
         ensure(result.kind === "stream", "actual stream");
-        if (result.kind !== "stream") return fail("stream");
+        if (result.kind !== "stream") {
+          return fail("stream");
+        }
         const reader = result.body.getReader(),
           chunks: Uint8Array[] = [];
         let size = 0;
         for (;;) {
           const next = await reader.read();
-          if (next.done) break;
+          if (next.done) {
+            break;
+          }
           size += next.value.length;
           ensure(size <= 65_536, "output bound");
           chunks.push(next.value);
@@ -1641,18 +1754,22 @@ test(
         assert.equal((await execution.status(executionRef, requestId)).effect, "completed");
         let released = false;
         for (let n = 0; n < 100 && !released; n++) {
-          const row = (
-            await kernelPool.query(
-              "SELECT effect,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
-              [cfg.consumer.consumerId, executionRef, requestId],
-            )
-          ).rows[0];
-          released = row?.effect === "completed" && row.transport_occupied === false;
-          if (!released) await delay(25);
+          const row = firstRow(
+            (
+              await kernelPool.query<{ effect: string; transport_occupied: boolean }>(
+                "SELECT effect,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
+                [cfg.consumer.consumerId, executionRef, requestId],
+              )
+            ).rows,
+          );
+          released = row?.effect === "completed" && Object.is(row.transport_occupied, false);
+          if (!released) {
+            await delay(25);
+          }
         }
         ensure(released, "authenticated physical closure releases occupancy");
         const row = (
-          await kernelPool.query(
+          await kernelPool.query<{ state: string; request_count: number }>(
             "SELECT state,request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
             [cfg.consumer.consumerId, executionRef],
           )
@@ -1662,7 +1779,12 @@ test(
       assert.equal(calls, 2);
       ensure(!violation, "controlled upstream assertions");
       const rows = (
-        await kernelPool.query(
+        await kernelPool.query<{
+          native_origin_ref: string | null;
+          engine_incarnation: string | null;
+          request_nonce: string | null;
+          transport_occupied: boolean;
+        }>(
           "SELECT native_origin_ref,engine_incarnation,request_nonce,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2",
           [cfg.consumer.consumerId, executionRef],
         )
@@ -1697,8 +1819,9 @@ test(
           operation.state !== "applied" ||
           operation.result?.kind !== "execution" ||
           typeof r.bearer !== "string"
-        )
+        ) {
           return fail("restart run-access");
+        }
         return {
           executionRef: operation.result.executionRef,
           admission: c.admission.parse(r.admission),
@@ -1736,12 +1859,14 @@ test(
         admission: old.admission,
         body: body(3),
       });
-      if (oldStream.kind !== "stream") return fail("old held stream");
+      if (oldStream.kind !== "stream") {
+        return fail("old held stream");
+      }
       const oldReader = oldStream.body.getReader();
       assert.equal((await oldReader.read()).done, false);
       const oldRow = async () =>
         (
-          await kernelPool.query(
+          await kernelPool.query<RequestProofRow>(
             `SELECT effect,transport_occupied,worker,closure_token,native_origin_ref,
         engine_incarnation,request_nonce,descriptor_generation FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3`,
             [cfg.consumer.consumerId, old.executionRef, oldId],
@@ -1773,7 +1898,7 @@ test(
       await owned.close();
       owned = undefined;
       assert.equal(await service.stopped, "pending", "abrupt loss has no graceful parent receipt");
-      await oldReader.cancel().catch(() => undefined);
+      await oldReader.cancel().catch(() => {});
       service = undefined;
       assert.equal((await oldRow()).transport_occupied, true, "death alone is not SQL closure");
 
@@ -1809,7 +1934,7 @@ test(
           { ...current, birthTicks: String(BigInt(current.birthTicks) + 1n) },
           { ...current, bootId: randomUUID() },
           { ...current, lockInode: String(BigInt(current.lockInode) + 1n) },
-        ])
+        ]) {
           assert.equal(
             await composeServiceRetirementReadback(cfg.native)(
               bad,
@@ -1818,6 +1943,7 @@ test(
             ),
             undefined,
           );
+        }
         assert.deepEqual(await oldRow(), before, "wrong current binding performs no SQL closure");
       } finally {
         try {
@@ -1826,17 +1952,24 @@ test(
           readbackLock.release();
         }
       }
-      for (const key of [
+      const proofFields: readonly (keyof RequestProofRow)[] = [
         "worker",
         "closure_token",
         "native_origin_ref",
         "engine_incarnation",
         "request_nonce",
         "descriptor_generation",
-      ])
+      ];
+      for (const key of proofFields) {
         assert.equal(recovered[key], originalProof[key], "original immutable proof " + key);
+      }
       const facts = (
-        await kernelPool.query(
+        await kernelPool.query<{
+          state: string;
+          request_count: number;
+          max_requests: number;
+          max_tokens: number;
+        }>(
           "SELECT state,request_count,max_requests,max_tokens FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
           [cfg.consumer.consumerId, old.executionRef],
         )
@@ -1846,12 +1979,14 @@ test(
       assert.equal(facts.max_requests, oldInput.limits.requests);
       assert.equal(facts.max_tokens, oldInput.limits.tokens);
       const cleanupRow = async () =>
-        (
-          await kernelPool.query(
-            "SELECT state,worker,token FROM ag_kernel.cleanup WHERE consumer=$1 AND execution_ref=$2",
-            [cfg.consumer.consumerId, old.executionRef],
-          )
-        ).rows[0];
+        firstRow(
+          (
+            await kernelPool.query<{ state: string; worker: string | null; token: string | null }>(
+              "SELECT state,worker,token FROM ag_kernel.cleanup WHERE consumer=$1 AND execution_ref=$2",
+              [cfg.consumer.consumerId, old.executionRef],
+            )
+          ).rows,
+        );
       let cleanup = await cleanupRow();
       const settlementDeadline = Date.now() + 5000;
       while (cleanup?.state !== "done" && Date.now() < settlementDeadline) {
@@ -1909,7 +2044,9 @@ test(
         admission: next.admission,
         body: body(4),
       });
-      if (nextStream.kind !== "stream") return fail("new held stream after old closure");
+      if (nextStream.kind !== "stream") {
+        return fail("new held stream after old closure");
+      }
       const nextReader = nextStream.body.getReader();
       assert.equal((await nextReader.read()).done, false);
       const valid = await composeServiceRetirementReadback(cfg.native)(
@@ -1933,7 +2070,7 @@ test(
       );
       assert.equal(
         (
-          await kernelPool.query(
+          await kernelPool.query<{ transport_occupied: boolean }>(
             "SELECT transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
             [cfg.consumer.consumerId, next.executionRef, nextId],
           )
@@ -1947,7 +2084,9 @@ test(
       let nextBytes = 0;
       for (;;) {
         const chunk = await nextReader.read();
-        if (chunk.done) break;
+        if (chunk.done) {
+          break;
+        }
         nextBytes += chunk.value.length;
         ensure(nextBytes <= 65_536, "new output bound");
         nextChunks.push(chunk.value);
@@ -1957,7 +2096,7 @@ test(
         "new request completes normally",
       );
       assert.equal((await next.client.status(next.executionRef, nextId)).effect, "completed");
-      ensure(!violation && calls === 4, "exact controlled entries without replay");
+      ensure(!upstreamViolated() && calls === 4, "exact controlled entries without replay");
       phase = "retirement";
       assert.equal(
         await service.stop(),
@@ -1971,30 +2110,41 @@ test(
       );
       service = undefined;
     } catch (error) {
-      if (error instanceof Error && error.message === "service fixture: rollback port available")
+      if (error instanceof Error && error.message === "service fixture: rollback port available") {
         throw error;
+      }
       fail("lifecycle failed: " + phase);
     } finally {
       try {
         try {
-          if (owned) await owned.kill();
+          if (owned) {
+            await owned.kill();
+          }
         } finally {
-          if (owned) await owned.close();
+          if (owned) {
+            await owned.close();
+          }
         }
       } finally {
         await service?.stop();
-        held.forEach((resolve) => resolve());
+        held.forEach((resolve) => {
+          resolve();
+        });
         PostgresKernel.prototype.claimCleanup = claimCleanup;
         AccountManagement.prototype.refreshOAuth = refreshOAuth;
         upstream.closeAllConnections();
-        await new Promise<void>((resolve) => upstream.close(() => resolve()));
+        await new Promise<void>((resolve) => {
+          upstream.close(() => {
+            resolve();
+          });
+        });
         await Promise.all([kernelPool.end(), nativePool.end()]);
       }
     }
   },
 );
 
-test("runtime failure diagnostic exposes only the fixed callsite and safe code", async () => {
+void test("runtime failure diagnostic exposes only the fixed callsite and safe code", async () => {
   const { runtimeFailureDiagnostic } = await import("../src/service.ts");
   const privateError = Object.assign(new Error("PRIVATE_MESSAGE_SENTINEL"), {
     code: "ETIMEDOUT",
@@ -2052,14 +2202,19 @@ test("runtime failure diagnostic exposes only the fixed callsite and safe code",
   assert.equal(codeReads, 1, "untrusted error code is captured only once");
 });
 
-test("closed stderr cannot interrupt runtime failure reporting", async () => {
+void test("closed stderr cannot interrupt runtime failure reporting", async () => {
   const at = process.execArgv.indexOf("--import");
-  assert.ok(at >= 0 && process.execArgv[at + 1]);
+  const loaderArguments: string[] = [];
+  if (at >= 0) {
+    const loader = process.execArgv.at(at + 1);
+    assert.ok(loader !== undefined && loader.length > 0);
+    loaderArguments.push("--import", loader);
+  }
   const serviceURL = new URL("../src/service.ts", import.meta.url).href;
   const script = `import {closeSync} from 'node:fs'; import {writeRuntimeFailureDiagnostic} from ${JSON.stringify(serviceURL)}; closeSync(2); writeRuntimeFailureDiagnostic('maintenance_failed', new Error('PRIVATE_SENTINEL')); process.stdout.write('AFTER_DIAGNOSTIC');`;
   const result = await promisify(execFile)(
     process.execPath,
-    ["--import", process.execArgv[at + 1]!, "--input-type=module", "-e", script],
+    [...loaderArguments, "--input-type=module", "-e", script],
     { timeout: 10000, maxBuffer: 4096 },
   );
   assert.equal(result.stdout, "AFTER_DIAGNOSTIC");

@@ -6,10 +6,10 @@ import type { OAuthComplete } from "./ingress.js";
 export * as secretSubmission from "./ingress.js";
 const config = z.strictObject({
   role: z.enum(["management", "execution", "consumer-control"]),
-  origin: z.string().url(),
-  inferenceOrigin: z.string().url().optional(),
+  origin: z.string().check(z.url()),
+  inferenceOrigin: z.string().check(z.url()).optional(),
   token: z.string().min(1).max(16384),
-  responseBytes: z.number().int().min(1024).max(1048576).default(65536),
+  responseBytes: z.number().int().min(1024).max(2097152).default(65536),
   timeoutMs: z.number().int().min(1).max(3600000).default(30000),
   bufferBytes: z.number().int().min(1024).max(1048576).default(65536),
 });
@@ -42,7 +42,9 @@ export class GatewayError extends Error {
 }
 function valid<T>(schema: z.ZodType<T>, input: unknown): T {
   const result = schema.safeParse(input);
-  if (!result.success) throw new GatewayError("invalid_input", "not_dispatched");
+  if (!result.success) {
+    throw new GatewayError("invalid_input", "not_dispatched");
+  }
   return result.data;
 }
 const id = (value: string) => encodeURIComponent(valid(c.reference, value));
@@ -51,14 +53,50 @@ export const requestPath = (executionRef: string, requestId: string) =>
   `/v1/executions/${id(executionRef)}/requests/${id(requestId)}`;
 
 type Identity = { operationRef?: string; requestRef?: string };
+async function bounded(response: Response, maximum: number): Promise<unknown> {
+  if (!response.body) {
+    throw new Error("Gateway response body is absent.");
+  }
+  const reader = response.body.getReader();
+  let size = 0;
+  const chunks: Uint8Array[] = [];
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      size += value.byteLength;
+      if (size > maximum) {
+        throw new Error("Gateway response exceeds its byte limit.");
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+}
 function transport(
   input: ManagementConfig | ExecutionConfig | ConsumerControlConfig,
   role: "management" | "execution" | "consumer-control",
 ) {
-  if (typeof process === "undefined" || !process.versions?.node)
+  const versions: { readonly node?: unknown } | null | undefined =
+    typeof process === "undefined" ? undefined : process.versions;
+  const nodeAvailable = Boolean(versions?.node);
+  if (!nodeAvailable) {
     throw new GatewayError("invalid_input", "not_dispatched");
+  }
   const settings = valid(config, input);
-  if (settings.role !== role) throw new GatewayError("invalid_input", "not_dispatched");
+  if (settings.role !== role) {
+    throw new GatewayError("invalid_input", "not_dispatched");
+  }
   const origin = new URL(settings.origin);
   if (
     origin.username ||
@@ -70,8 +108,9 @@ function transport(
       !(
         origin.protocol === "http:" && ["127.0.0.1", "[::1]", "localhost"].includes(origin.hostname)
       ))
-  )
+  ) {
     throw new GatewayError("invalid_input", "not_dispatched");
+  }
   const inferenceOrigin = settings.inferenceOrigin ? new URL(settings.inferenceOrigin) : origin;
   if (
     (settings.inferenceOrigin && role !== "execution") ||
@@ -85,8 +124,9 @@ function transport(
         inferenceOrigin.protocol === "http:" &&
         ["127.0.0.1", "[::1]", "localhost"].includes(inferenceOrigin.hostname)
       ))
-  )
+  ) {
     throw new GatewayError("invalid_input", "not_dispatched");
+  }
   async function enter(
     path: string,
     method: string,
@@ -96,15 +136,18 @@ function transport(
     identity: Identity,
     targetOrigin = origin,
   ) {
-    if (options.signal?.aborted)
+    if (options.signal?.aborted === true) {
       throw new GatewayError(
         "cancelled",
         "not_dispatched",
         identity.operationRef,
         identity.requestRef,
       );
+    }
     const controller = new AbortController();
-    const abort = () => controller.abort();
+    const abort = () => {
+      controller.abort();
+    };
     options.signal?.addEventListener("abort", abort, { once: true });
     const timer = setTimeout(abort, settings.timeoutMs);
     const dispose = () => {
@@ -127,35 +170,11 @@ function transport(
       throw failure(controller.signal.aborted ? "cancelled" : "transport");
     }
   }
-  async function bounded(response: Response, maximum: number): Promise<unknown> {
-    if (!response.body) throw new Error();
-    const reader = response.body.getReader();
-    let size = 0;
-    const chunks: Uint8Array[] = [];
-    try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        size += value.byteLength;
-        if (size > maximum) throw new Error();
-        chunks.push(value);
-      }
-      const bytes = new Uint8Array(size);
-      let offset = 0;
-      for (const chunk of chunks) {
-        bytes.set(chunk, offset);
-        offset += chunk.byteLength;
-      }
-      return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-    } finally {
-      await reader.cancel().catch(() => {});
-    }
-  }
   async function json<T>(
     path: string,
     schema: z.ZodType<T>,
     method = "GET",
-    input?: unknown,
+    bodyInput?: unknown,
     options: CallOptions = {},
     identity: Identity = {},
     extraHeaders: Record<string, string> = {},
@@ -163,7 +182,7 @@ function transport(
     const handle = await enter(
       path,
       method,
-      input === undefined ? undefined : JSON.stringify(input),
+      bodyInput === undefined ? undefined : JSON.stringify(bodyInput),
       { "content-type": "application/json", accept: "application/json", ...extraHeaders },
       options,
       identity,
@@ -173,21 +192,27 @@ function transport(
       if (
         (response.status >= 300 && response.status < 400) ||
         response.headers.get("content-type")?.split(";")[0] !== "application/json"
-      )
+      ) {
         throw handle.failure("invalid_response");
+      }
       const parsed = await bounded(response, settings.responseBytes);
       if (!response.ok) {
         const error = c.safeError.safeParse(parsed);
         if (
           !error.success ||
-          (identity.operationRef &&
-            error.data.operationRef &&
+          (identity.operationRef !== undefined &&
+            identity.operationRef !== "" &&
+            error.data.operationRef !== undefined &&
+            error.data.operationRef !== "" &&
             error.data.operationRef !== identity.operationRef) ||
-          (identity.requestRef &&
-            error.data.requestRef &&
+          (identity.requestRef !== undefined &&
+            identity.requestRef !== "" &&
+            error.data.requestRef !== undefined &&
+            error.data.requestRef !== "" &&
             error.data.requestRef !== identity.requestRef)
-        )
+        ) {
           throw handle.failure("invalid_response");
+        }
         // A missing readback record cannot establish absence of a prior effect.
         const readbackMissing =
           response.status === 404 &&
@@ -210,25 +235,32 @@ function transport(
         );
       }
       const result = schema.safeParse(parsed);
-      if (!result.success) throw handle.failure("invalid_response");
+      if (!result.success) {
+        throw handle.failure("invalid_response");
+      }
       const operation =
         "operation" in (result.data as object)
           ? (result.data as c.OAuthBeginResponse).operation
           : (result.data as c.Operation);
       if (
-        identity.operationRef &&
+        identity.operationRef !== undefined &&
+        identity.operationRef !== "" &&
         "operationRef" in operation &&
         operation.operationRef !== identity.operationRef
-      )
+      ) {
         throw handle.failure("invalid_response");
+      }
       if (
-        identity.requestRef &&
+        identity.requestRef !== undefined &&
+        identity.requestRef !== "" &&
         "requestRef" in (result.data as object) &&
         (result.data as c.RequestStatus).requestRef !== identity.requestRef
-      )
+      ) {
         throw handle.failure("invalid_response");
-      if (response.status === 202 && "state" in operation && operation.state !== "pending")
+      }
+      if (response.status === 202 && "state" in operation && operation.state !== "pending") {
         throw handle.failure("invalid_response");
+      }
       return result.data;
     } catch (error) {
       const failure =
@@ -270,8 +302,9 @@ function transport(
         const status = c.requestStatus.safeParse(
           await bounded(handle.response, settings.responseBytes),
         );
-        if (!status.success || status.data.requestRef !== request.requestId)
+        if (!status.success || status.data.requestRef !== request.requestId) {
           throw handle.failure("invalid_response");
+        }
         handle.dispose();
         return { kind: "status", status: status.data };
       }
@@ -281,9 +314,12 @@ function transport(
         );
         if (
           !result.success ||
-          (result.data.requestRef && result.data.requestRef !== request.requestId)
-        )
+          (result.data.requestRef !== undefined &&
+            result.data.requestRef !== "" &&
+            result.data.requestRef !== request.requestId)
+        ) {
           throw handle.failure("invalid_response");
+        }
         throw new GatewayError(
           "safe_error",
           result.data.effect,
@@ -298,8 +334,9 @@ function transport(
         handle.response.headers.get("x-gateway-request-ref") !== request.requestId ||
         handle.response.headers.get("content-type")?.split(";")[0] !== "text/event-stream" ||
         !handle.response.body
-      )
+      ) {
         throw handle.failure("invalid_response");
+      }
       const reader = handle.response.body.getReader();
       let size = 0;
       const body = new ReadableStream<Uint8Array>(
@@ -316,8 +353,9 @@ function transport(
               if (
                 value.byteLength > settings.bufferBytes ||
                 size > request.admission.limits.outputBytes
-              )
+              ) {
                 throw handle.failure("invalid_response");
+              }
               controller.enqueue(value);
             } catch (error) {
               const failure =
@@ -408,8 +446,11 @@ function accountClient(
       profiles: (options?: CallOptions) =>
         json("/v1/profiles", c.profiles, "GET", undefined, options),
       list: (input: c.ListQuery = {}, options?: CallOptions) => {
+        const entries: [string, c.ListQuery[keyof c.ListQuery]][] = Object.entries(
+          valid(c.listQuery, input),
+        );
         const query = new URLSearchParams(
-          Object.entries(valid(c.listQuery, input))
+          entries
             .filter(([, value]) => value !== undefined)
             .map(([key, value]) => [key, String(value)]),
         );
@@ -570,8 +611,9 @@ export function createLifecycleClient(settings: LifecycleConfig) {
       result.intent.accountRef !== accountRef ||
       result.intent.action !== action ||
       result.intent.expectedMetadataRevision !== parsed.expectedMetadataRevision
-    )
+    ) {
       throw new GatewayError("invalid_response", "effect_unknown", parsed.operationId);
+    }
     return result;
   };
   return Object.freeze({
@@ -586,8 +628,11 @@ export function createLifecycleClient(settings: LifecycleConfig) {
         headers,
       ),
     list: (input: c.ListQuery = {}, options?: CallOptions) => {
+      const entries: [string, c.ListQuery[keyof c.ListQuery]][] = Object.entries(
+        valid(c.listQuery, input),
+      );
       const query = new URLSearchParams(
-        Object.entries(valid(c.listQuery, input))
+        entries
           .filter(([, value]) => value !== undefined)
           .map(([key, value]) => [key, String(value)]),
       );
@@ -611,8 +656,9 @@ export function createLifecycleClient(settings: LifecycleConfig) {
         {},
         headers,
       );
-      if (result.accountRef !== accountRef)
+      if (result.accountRef !== accountRef) {
         throw new GatewayError("invalid_response", "effect_unknown");
+      }
       return result;
     },
     suspend: (accountRef: string, input: c.LifecycleTransition, options?: CallOptions) =>
@@ -665,9 +711,15 @@ export function createConsumerControlClient(settings: ConsumerControlConfig) {
     listUsage: (input: c.UsageQuery = {}, options?: CallOptions): Promise<c.UsagePage> => {
       const query = valid(c.usageQuery, input);
       const params = new URLSearchParams();
-      if (query.afterCursor) params.set("afterCursor", query.afterCursor);
-      if (query.highWaterCursor) params.set("highWaterCursor", query.highWaterCursor);
-      if (query.limit) params.set("limit", String(query.limit));
+      if (query.afterCursor !== undefined && query.afterCursor !== "") {
+        params.set("afterCursor", query.afterCursor);
+      }
+      if (query.highWaterCursor !== undefined && query.highWaterCursor !== "") {
+        params.set("highWaterCursor", query.highWaterCursor);
+      }
+      if (query.limit !== undefined && query.limit !== 0) {
+        params.set("limit", String(query.limit));
+      }
       return json(
         "/v1/usage" + (params.size ? "?" + params : ""),
         c.usagePage,

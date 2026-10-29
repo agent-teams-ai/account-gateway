@@ -266,8 +266,9 @@ export const codexOAuthAuthorizationURL = z
         /[^\u0021-\u007e]/.test(value) ||
         value.includes("\\") ||
         !value.startsWith("https://auth.openai.com/oauth/authorize?")
-      )
+      ) {
         return false;
+      }
       const url = new URL(value);
       if (
         url.origin !== "https://auth.openai.com" ||
@@ -276,8 +277,9 @@ export const codexOAuthAuthorizationURL = z
         url.password ||
         url.hash ||
         value.includes("#")
-      )
+      ) {
         return false;
+      }
       const fixed: Readonly<Record<string, string>> = {
         client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
         response_type: "code",
@@ -295,7 +297,9 @@ export const codexOAuthAuthorizationURL = z
       // empty query members and duplicates before URLSearchParams normalization.
       for (const part of url.search.slice(1).split("&")) {
         const equal = part.indexOf("=");
-        if (equal < 1 || /%(?![0-9a-fA-F]{2})/.test(part)) return false;
+        if (equal < 1 || /%(?![0-9a-fA-F]{2})/.test(part)) {
+          return false;
+        }
         const key = part.slice(0, equal);
         if (
           !/^[a-z_]+$/.test(key) ||
@@ -306,14 +310,21 @@ export const codexOAuthAuthorizationURL = z
             key === "state" ||
             key === "code_challenge"
           )
-        )
+        ) {
           return false;
+        }
         seen.add(key);
       }
-      for (const [key, expected] of Object.entries(fixed))
-        if (url.searchParams.get(key) !== expected) return false;
-      for (const [key, expected] of Object.entries(optional))
-        if (seen.has(key) && url.searchParams.get(key) !== expected) return false;
+      for (const [key, expected] of Object.entries(fixed)) {
+        if (url.searchParams.get(key) !== expected) {
+          return false;
+        }
+      }
+      for (const [key, expected] of Object.entries(optional)) {
+        if (seen.has(key) && url.searchParams.get(key) !== expected) {
+          return false;
+        }
+      }
       return (
         /^[A-Za-z0-9_-]{43}$/.test(url.searchParams.get("code_challenge") ?? "") &&
         /^[A-Za-z0-9_-]{16,512}$/.test(url.searchParams.get("state") ?? "")
@@ -334,8 +345,9 @@ export const claudeOAuthAuthorizationURL = z
         /[^\u0021-\u007e]/.test(value) ||
         value.includes("\\") ||
         !value.startsWith("https://claude.com/cai/oauth/authorize?")
-      )
+      ) {
         return false;
+      }
       const url = new URL(value);
       if (
         url.origin !== "https://claude.com" ||
@@ -344,8 +356,9 @@ export const claudeOAuthAuthorizationURL = z
         url.password ||
         url.hash ||
         value.includes("#")
-      )
+      ) {
         return false;
+      }
       const fixed: Readonly<Record<string, string>> = {
         code: "true",
         client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
@@ -358,19 +371,25 @@ export const claudeOAuthAuthorizationURL = z
       const seen = new Set<string>();
       for (const part of url.search.slice(1).split("&")) {
         const equal = part.indexOf("=");
-        if (equal < 1 || /%(?![0-9a-fA-F]{2})/.test(part)) return false;
+        if (equal < 1 || /%(?![0-9a-fA-F]{2})/.test(part)) {
+          return false;
+        }
         const key = part.slice(0, equal);
         if (
           !/^[a-z_]+$/.test(key) ||
           seen.has(key) ||
           !(Object.hasOwn(fixed, key) || key === "state" || key === "code_challenge")
-        )
+        ) {
           return false;
+        }
         seen.add(key);
         decodeURIComponent(part.slice(equal + 1).replace(/\+/g, " "));
       }
-      for (const [key, expected] of Object.entries(fixed))
-        if (url.searchParams.get(key) !== expected) return false;
+      for (const [key, expected] of Object.entries(fixed)) {
+        if (url.searchParams.get(key) !== expected) {
+          return false;
+        }
+      }
       return (
         /^[A-Za-z0-9_-]{43}$/.test(url.searchParams.get("code_challenge") ?? "") &&
         /^[0-9a-f]{64}$/.test(url.searchParams.get("state") ?? "")
@@ -390,8 +409,9 @@ export const grokOAuthAuthorizationURL = z
         /[^\u0021-\u007e]/.test(value) ||
         value.includes("\\") ||
         !value.startsWith("https://auth.x.ai/oauth2/authorize?")
-      )
+      ) {
         return false;
+      }
       const url = new URL(value);
       if (
         url.origin !== "https://auth.x.ai" ||
@@ -400,8 +420,9 @@ export const grokOAuthAuthorizationURL = z
         url.password ||
         url.hash ||
         value.includes("#")
-      )
+      ) {
         return false;
+      }
       const fixed: Readonly<Record<string, string>> = {
         response_type: "code",
         redirect_uri: "http://127.0.0.1:56121/callback",
@@ -411,7 +432,9 @@ export const grokOAuthAuthorizationURL = z
       const seen = new Set<string>();
       for (const part of url.search.slice(1).split("&")) {
         const equal = part.indexOf("=");
-        if (equal < 1 || /%(?![0-9a-fA-F]{2})/.test(part)) return false;
+        if (equal < 1 || /%(?![0-9a-fA-F]{2})/.test(part)) {
+          return false;
+        }
         const key = part.slice(0, equal);
         if (
           !/^[a-z_]+$/.test(key) ||
@@ -423,12 +446,16 @@ export const grokOAuthAuthorizationURL = z
             key === "code_challenge" ||
             key === "nonce"
           )
-        )
+        ) {
           return false;
+        }
         seen.add(key);
       }
-      for (const [key, expected] of Object.entries(fixed))
-        if (url.searchParams.get(key) !== expected) return false;
+      for (const [key, expected] of Object.entries(fixed)) {
+        if (url.searchParams.get(key) !== expected) {
+          return false;
+        }
+      }
       return (
         /^[A-Za-z0-9_-]{43}$/.test(url.searchParams.get("nonce") ?? "") &&
         /^[A-Za-z0-9._:-]{1,256}$/.test(url.searchParams.get("client_id") ?? "") &&
@@ -602,13 +629,13 @@ export const lifecycleOperation = z
     }),
   ])
   .refine((v) => {
-    const account = v.state === "applied" ? v.result.account : v.account;
+    const projectedAccount = v.state === "applied" ? v.result.account : v.account;
     return (
-      v.intent.accountRef === account.accountRef &&
-      v.intent.profileId === account.profileId &&
+      v.intent.accountRef === projectedAccount.accountRef &&
+      v.intent.profileId === projectedAccount.profileId &&
       (v.state !== "applied" ||
-        (account.metadataRevision === v.intent.expectedMetadataRevision + 1 &&
-          account.state === (v.intent.action === "suspend" ? "suspended" : "active")))
+        (projectedAccount.metadataRevision === v.intent.expectedMetadataRevision + 1 &&
+          projectedAccount.state === (v.intent.action === "suspend" ? "suspended" : "active")))
     );
   });
 export const close = z.strictObject({
@@ -714,8 +741,8 @@ const accountLimitsWindow = z
   .strictObject({
     id: reference,
     family: z.enum(["codex", "claude"]),
-    durationSeconds: z.number().finite().positive().max(Number.MAX_SAFE_INTEGER).nullable(),
-    usedPercent: z.number().finite().nonnegative().nullable(),
+    durationSeconds: z.number().positive().max(Number.MAX_SAFE_INTEGER).nullable(),
+    usedPercent: z.number().nonnegative().nullable(),
     observedAt: limitsInstant.nullable(),
     resetAt: limitsInstant.nullable(),
     basis: z.enum(["duration", "legacy_alias", "unknown"]),
@@ -792,7 +819,15 @@ export const qualifiedModelCapability = z.strictObject({
     .min(1)
     .max(128)
     .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/),
-  reasoning: modelSetting(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const).nullable(),
+  reasoning: modelSetting([
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+  ] as const).nullable(),
   fast: modelSetting(["balanced", "fast"] as const).nullable(),
   tools: modelSetting(["none", "function", "function_and_custom"] as const),
 });
@@ -845,23 +880,79 @@ export const providerConnectionCapabilities = z.strictObject({
 export type ProviderConnectionCapability = z.infer<typeof providerConnectionCapability>;
 export type ProviderConnectionCapabilities = z.infer<typeof providerConnectionCapabilities>;
 
-/** Authoritative, account-scoped Codex model selection. Enrollment keeps its anchor. */
-export const accountModelsRequest = accountLimitsRequest.extend({ forceRefresh: z.boolean().optional() });
-export const accountModelCapability = qualifiedModelCapability.extend({
+/** One qualified profile identity authority for discovery triggers and full guards. */
+const accountModelDiscoveryProfiles = Object.freeze([
+  Object.freeze({
+    profileId: "openai-codex-oauth-responses-v1",
+    protocol: "openai-responses",
+    authKind: "oauth",
+    source: "codex",
+  } as const),
+  Object.freeze({
+    profileId: "openrouter-openai-responses-apikey-v1",
+    protocol: "openai-responses",
+    authKind: "api_key",
+    source: "openrouter",
+  } as const),
+]);
+export function accountModelDiscoveryProfile(profileId: string) {
+  return accountModelDiscoveryProfiles.find((candidate) => candidate.profileId === profileId);
+}
+/** A lookup may trigger a strict read; admission also verifies protocol and auth. */
+export function accountModelDiscoverySource(candidate: {
+  readonly profileId: string;
+  readonly protocol: string;
+  readonly authKind: string;
+}): "codex" | "openrouter" | undefined {
+  const qualified = accountModelDiscoveryProfile(candidate.profileId);
+  return qualified &&
+    candidate.protocol === qualified.protocol &&
+    candidate.authKind === qualified.authKind
+    ? qualified.source
+    : undefined;
+}
+
+/** Authoritative account models share discovery and fences; enrollment retains its anchor. */
+export const accountModelsRequest = accountLimitsRequest.extend({
+  forceRefresh: z.boolean().optional(),
+});
+// Retain Codex's existing capability restrictions independently of other sources.
+const codexAccountModelCapability = qualifiedModelCapability.extend({
   fast: modelSetting(["balanced"] as const),
   tools: modelSetting(["function"] as const),
 });
-export const accountModels = z.discriminatedUnion("status", [
-  z.strictObject({
-    status: z.literal("snapshot"),
-    physicalGeneration: reference,
-    principalVersion: reference,
-    source: z.literal("codex"),
-    fetchedAt: limitsInstant,
-    expiresAt: limitsInstant,
-    models: z.array(accountModelCapability).max(128)
-      .refine((models) => new Set(models.map((model) => model.modelId)).size === models.length),
-  }).refine((snapshot) => Date.parse(snapshot.fetchedAt) < Date.parse(snapshot.expiresAt)),
+const openRouterAccountModelCapability = qualifiedModelCapability.extend({
+  fast: z.null(),
+  tools: modelSetting(["none", "function"] as const),
+});
+export const accountModelCapability = z.union([
+  codexAccountModelCapability,
+  openRouterAccountModelCapability,
+]);
+const accountModelSnapshot = z.strictObject({
+  status: z.literal("snapshot"),
+  physicalGeneration: reference,
+  principalVersion: reference,
+  fetchedAt: limitsInstant,
+  expiresAt: limitsInstant,
+});
+const distinctModels = (models: readonly { modelId: string }[]) =>
+  new Set(models.map((model) => model.modelId)).size === models.length;
+const validSnapshotPeriod = (snapshot: { fetchedAt: string; expiresAt: string }) =>
+  Date.parse(snapshot.fetchedAt) < Date.parse(snapshot.expiresAt);
+export const accountModels = z.union([
+  accountModelSnapshot
+    .extend({
+      source: z.literal("codex"),
+      models: z.array(codexAccountModelCapability).max(128).refine(distinctModels),
+    })
+    .refine(validSnapshotPeriod),
+  accountModelSnapshot
+    .extend({
+      source: z.literal("openrouter"),
+      models: z.array(openRouterAccountModelCapability).max(2048).refine(distinctModels),
+    })
+    .refine(validSnapshotPeriod),
   z.strictObject({ status: z.literal("unknown") }),
   z.strictObject({ status: z.literal("unsupported") }),
   z.strictObject({ status: z.literal("unavailable") }),
@@ -895,13 +986,13 @@ const accountLimitsV2Window = z
     period: z.discriminatedUnion("kind", [
       z.strictObject({
         kind: z.literal("duration"),
-        durationSeconds: z.number().finite().positive().max(Number.MAX_SAFE_INTEGER),
+        durationSeconds: z.number().positive().max(Number.MAX_SAFE_INTEGER),
       }),
       z.strictObject({ kind: z.literal("monthly_billing_cycle") }),
       z.strictObject({ kind: z.literal("unknown") }),
     ]),
     label: z.enum(["5h", "Week", "Month"]).nullable(),
-    usedPercent: z.number().finite().nonnegative().nullable(),
+    usedPercent: z.number().nonnegative().nullable(),
     observedAt: limitsInstant.nullable(),
     resetAt: limitsInstant.nullable(),
   })

@@ -19,7 +19,7 @@ import {
   GatewayError,
 } from "../packages/account-gateway/dist/http/index.js";
 
-test("provider connection projection is versioned, closed and additive to the old strict profile DTO", async (t) => {
+void test("provider connection projection is versioned, closed and additive to the old strict profile DTO", async (t) => {
   const legacy = {
     profileId: "mimo",
     protocol: "openai-chat",
@@ -72,7 +72,7 @@ test("provider connection projection is versioned, closed and additive to the ol
     server.close();
   });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   const client = createManagementClient({
     role: "management",
     origin: `http://127.0.0.1:${address.port}`,
@@ -92,7 +92,7 @@ test("provider connection projection is versioned, closed and additive to the ol
   assert.equal(JSON.stringify(result).includes("cli-chat-proxy.grok.com"), false);
 });
 
-test("capability client never converts 401, 403 or unsupported-contract into legacy discovery", async (t) => {
+void test("capability client never converts 401, 403 or unsupported-contract into legacy discovery", async (t) => {
   for (const status of [401, 403, 404]) {
     let requests = 0;
     const server = createServer((request, response) => {
@@ -115,7 +115,7 @@ test("capability client never converts 401, 403 or unsupported-contract into leg
       server.close();
     });
     const address = server.address();
-    assert.ok(address && typeof address === "object");
+    assert.ok(address !== null && typeof address === "object");
     const client = createManagementClient({
       role: "management",
       origin: `http://127.0.0.1:${address.port}`,
@@ -130,7 +130,7 @@ test("capability client never converts 401, 403 or unsupported-contract into leg
   }
 });
 
-test("account-limits/v2 keeps closed units and periods in the validated wire contract", async (t) => {
+void test("account-limits/v2 keeps closed units and periods in the validated wire contract", async (t) => {
   const input = {
     ownerRef: "owner-a",
     accountRef: "account-a",
@@ -194,7 +194,7 @@ test("account-limits/v2 keeps closed units and periods in the validated wire con
     server.close();
   });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   const origin = `http://127.0.0.1:${address.port}`;
   const client = createAccountLimitsV2Client({
     role: "management",
@@ -212,9 +212,7 @@ test("account-limits/v2 keeps closed units and periods in the validated wire con
   const consumer = await client.readAccountLimits(input);
   assert.equal(consumer.status, "snapshot");
   assert.deepEqual(
-    consumer.status === "snapshot"
-      ? consumer.windows.map((window) => [window.unit, window.period.kind])
-      : [],
+    consumer.windows.map((window) => [window.unit, window.period.kind]),
     [
       ["credits", "duration"],
       ["tokens", "monthly_billing_cycle"],
@@ -238,7 +236,7 @@ test("account-limits/v2 keeps closed units and periods in the validated wire con
   assert.equal(requests, 4);
 });
 
-test("Grok handoff accepts only the qualified OIDC browser grammar", () => {
+void test("Grok handoff accepts only the qualified OIDC browser grammar", () => {
   const params = new URLSearchParams({
     client_id: "qualified-client",
     response_type: "code",
@@ -257,11 +255,12 @@ test("Grok handoff accepts only the qualified OIDC browser grammar", () => {
     url.replace("nonce=", "secret="),
     url.replace("S256", "plain"),
     url + "#fragment",
-  ])
+  ]) {
     assert.equal(grokOAuthAuthorizationURL.safeParse(invalid).success, false);
+  }
 });
 
-test("Grok callback rejects decoded delimiters before the secret HTTP submission", () => {
+void test("Grok callback rejects decoded delimiters before the secret HTTP submission", () => {
   const state = "a".repeat(64);
   for (const code of ["fixture%23fragment", "fixture%3Fquery", "fixture%26field"]) {
     const callbackURL = "http://127.0.0.1:56121/callback?code=" + code + "&state=" + state;
@@ -277,7 +276,7 @@ test("Grok callback rejects decoded delimiters before the secret HTTP submission
   }
 });
 
-test("legacy Codex and Claude handoffs retain independent official authorization scopes and device contract", () => {
+void test("legacy Codex and Claude handoffs retain independent official authorization scopes and device contract", () => {
   const state = "a".repeat(64),
     challenge = "b".repeat(43);
   const codexParams = new URLSearchParams({
@@ -328,7 +327,7 @@ test("legacy Codex and Claude handoffs retain independent official authorization
   );
 });
 
-test("Grok plain code shares callback lexical bounds and strict completion ingress", () => {
+void test("Grok plain code shares callback lexical bounds and strict completion ingress", () => {
   for (const code of ["displayed-code", "a".repeat(4096), "valid+code=part"]) {
     assert.equal(secretSubmission.grokOAuthAuthorizationCode.safeParse(code).success, true);
     assert.equal(
@@ -351,8 +350,9 @@ test("Grok plain code shares callback lexical bounds and strict completion ingre
     "code&x",
     "\ncode",
     "\ud800",
-  ])
+  ]) {
     assert.equal(secretSubmission.grokOAuthAuthorizationCode.safeParse(code).success, false);
+  }
   assert.equal(
     secretSubmission.oauthComplete.safeParse({
       operationId: "operation-a",

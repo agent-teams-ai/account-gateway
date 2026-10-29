@@ -1,5 +1,13 @@
 {
   "extends": "./tsconfig.tests.json",
-  "compilerOptions": { "allowImportingTsExtensions": true },
-  "include": ["scripts/check-consumer-pin.ts", "tests/consumer-module-pin.test.ts"]
+  "compilerOptions": {
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "scripts/check-consumer-pin.ts",
+    "scripts/check-toolchain-config.ts",
+    "tests/consumer-module-pin.test.ts",
+    "scripts/qualify-whole-consumer.ts",
+    "scripts/consumer-limits-check.mts"
+  ]
 }

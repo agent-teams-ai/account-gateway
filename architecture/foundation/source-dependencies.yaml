@@ -107,7 +107,7 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/test/native-transport-postgres.test.ts, services/account-gateway/test/native-wire.test.ts, services/account-gateway/test/native-control-admission.test.ts, services/account-gateway/test/native-response-diagnostics.test.ts]
     entrypoints: [services/account-gateway/test/native-transport-postgres.test.ts, services/account-gateway/test/native-wire.test.ts, services/account-gateway/test/native-control-admission.test.ts, services/account-gateway/test/native-response-diagnostics.test.ts]
-    allow: {boundaries: [service-admission, native-transport-http, kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http, private-facade], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:http', 'node:net', 'node:events', 'node:fs/promises', 'node:timers/promises'], runtimeReferences: []}
+    allow: {boundaries: [service-admission, native-transport-http, kernel-domain, kernel-postgres, native-management, native-management-postgres, native-management-http, private-facade, usage-journal], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:http', 'node:net', 'node:events', 'node:fs/promises', 'node:timers/promises'], runtimeReferences: []}
   - id: native-runtime-assembly-tests
     dependencyMode: runtime
     roots: [services/account-gateway/test/native-runtime-assembly.test.ts]
@@ -143,7 +143,7 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/test/usage.test.ts, services/account-gateway/test/usage-postgres.test.ts, services/account-gateway/test/usage-checkout.test.ts]
     entrypoints: [services/account-gateway/test/usage.test.ts, services/account-gateway/test/usage-postgres.test.ts, services/account-gateway/test/usage-checkout.test.ts]
-    allow: {boundaries: [usage-journal, contracts, native-transport-http], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:fs/promises', 'node:events'], runtimeReferences: []}
+    allow: {boundaries: [usage-journal, kernel-domain, contracts, native-transport-http], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:test', 'node:assert/strict', 'node:fs/promises', 'node:events'], runtimeReferences: []}
 
   - id: usage-capacity-tests
     dependencyMode: runtime

@@ -23,7 +23,7 @@ steps. It does not establish Codex/Claude OAuth or thousand-stream capacity.
 Implementation is staged in [account-gateway PR 71](https://github.com/agent-teams-ai/account-gateway/pull/71)
 and [sub2api PR 64](https://github.com/agent-teams-ai/sub2api/pull/64). PR 71 depends
 on the preceding cloud-load/control-progress branch, PR 69. The expanded fixture
-pins native `a04f63eeb2bd5adf0e7193beb696afaa1e516b30`; each CI receipt records the
+pins native `a6bc1e36a1cd0d542af2806f3f8ae1e098e7cc76`; each CI receipt records the
 exact gateway/native commits, binary hashes, dependency manifests and runtimes.
 
 ## Contract
@@ -112,10 +112,11 @@ revision has passed.
 
 The native pre-claim queue/active budget repair is implemented in
 `5a8b8a6f0d2e495891897097ec1770bff5b7cc6b`. The required public-ingress allowlist
-has 22 names, including three regressions for separate queue/active budgets,
+has 23 names, including three regressions for separate queue/active budgets,
 cancellation before POST and ambiguous active attempts, plus exact requested-model
-metadata bound to the original reservation. Current-source qualification must
-require all 22 public tests and all three bootstrap tests, including the public
+metadata bound to the original reservation and alternate OpenRouter catalog
+selection with exact settlement. Current-source qualification must
+require all 23 public tests and all three bootstrap tests, including the public
 connection policy; earlier 18/21-public and two-bootstrap receipts qualify only
 the source revisions they record.
 
@@ -320,7 +321,8 @@ no-entry settlement and exact closure acknowledgment.
 ### Exact requested-model attribution
 
 The canonical account descriptor identifies its qualified provider profile.
-For dynamic Codex catalog selection, its model anchor can differ from the model
+For qualified dynamic Codex and OpenRouter catalog selection, its model anchor
+can differ from the model
 selected for a particular request. Public claim and settlement metadata therefore
 carry a bounded `requestedModel` scalar captured from the qualified payload on
 the first native reservation. Duplicate requests cannot replace it, and neither
