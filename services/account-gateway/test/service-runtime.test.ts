@@ -2188,12 +2188,17 @@ void test("runtime failure diagnostic exposes only the fixed callsite and safe c
 
 void test("closed stderr cannot interrupt runtime failure reporting", async () => {
   const at = process.execArgv.indexOf("--import");
-  assert.ok(at >= 0 && process.execArgv[at + 1]);
+  const loaderArguments: string[] = [];
+  if (at >= 0) {
+    const loader = process.execArgv.at(at + 1);
+    assert.ok(loader !== undefined && loader.length > 0);
+    loaderArguments.push("--import", loader);
+  }
   const serviceURL = new URL("../src/service.ts", import.meta.url).href;
   const script = `import {closeSync} from 'node:fs'; import {writeRuntimeFailureDiagnostic} from ${JSON.stringify(serviceURL)}; closeSync(2); writeRuntimeFailureDiagnostic('maintenance_failed', new Error('PRIVATE_SENTINEL')); process.stdout.write('AFTER_DIAGNOSTIC');`;
   const result = await promisify(execFile)(
     process.execPath,
-    ["--import", process.execArgv[at + 1], "--input-type=module", "-e", script],
+    [...loaderArguments, "--input-type=module", "-e", script],
     { timeout: 10000, maxBuffer: 4096 },
   );
   assert.equal(result.stdout, "AFTER_DIAGNOSTIC");
