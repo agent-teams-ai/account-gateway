@@ -5,7 +5,6 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-  actions: read
 jobs:
   actual_native:
     runs-on: ubuntu-latest
@@ -17,8 +16,8 @@ jobs:
     env:
       NPM_CONFIG_ENGINE_STRICT: 'true'
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
-      NATIVE_COMMIT: 32cd6f50e76c29b578ee013900484c56013814bc
-      GATEWAY_COMMIT: 5a1ad4a00a8941f1263d927ab23297bafa640661
+      NATIVE_COMMIT: b3f012af5a54f1ffcccc1d34987a48120d1c39aa
+      GATEWAY_COMMIT: 599d2f6b21b50a1e7ff698c15ebf24e37e1b619e
     steps:
       # The TEST overlay ref must contain only reviewed operator packet files.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -27,7 +26,7 @@ jobs:
           path: overlay
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 5a1ad4a00a8941f1263d927ab23297bafa640661
+          ref: 599d2f6b21b50a1e7ff698c15ebf24e37e1b619e
           persist-credentials: false
           path: gateway
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -64,6 +63,8 @@ jobs:
           cat /etc/machine-id
           df -B1 "$root"
           free -b
+          git clone --no-checkout https://github.com/agent-teams-ai/sub2api.git "$root/native"
+          git -C "$root/native" checkout --detach "$NATIVE_COMMIT"
       - name: Frozen normal Gateway graph and SDK build
         working-directory: gateway
         run: |
@@ -84,27 +85,22 @@ jobs:
           NODE
           node "$GITHUB_WORKSPACE/gateway/node_modules/typescript/bin/tsc" -p "$packet/tsconfig.cloud.json"
           node --test "$packet/tap.test.ts" "$packet/toolchain.test.ts" "$packet/failure.test.ts" "$packet/stage-receipts.test.ts" "$packet/reuse-build.test.ts" "$packet/node-diagnostics.test.ts"
-      - name: Authenticate immutable native artifacts without rebuilding Go
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Build exact native main and separately hashed TEST fixtures
         run: |
-          set -euo pipefail
-          packet="$GITHUB_WORKSPACE/overlay/test-native4"
-          artifact_id="$(node "$packet/reuse-build.ts" --artifact-id "${{ matrix.node }}")"
-          gh api "repos/agent-teams-ai/account-gateway/actions/artifacts/$artifact_id" \
-            --jq '{id,name,size_in_bytes,digest,expired,workflow_run}' > "$NATIVE4_ROOT/native-build-meta.json"
-          gh api "repos/agent-teams-ai/account-gateway/actions/artifacts/$artifact_id/zip" > "$NATIVE4_ROOT/native-build.zip"
-          node "$packet/reuse-build.ts" "${{ matrix.node }}" "$NATIVE4_ROOT/native-build-meta.json" \
-            "$NATIVE4_ROOT/native-build.zip" "$GITHUB_WORKSPACE/gateway" "$NATIVE4_GO" "$NATIVE4_ROOT/build"
-          docker build --pull --build-arg "PG_IMAGE=$PG_IMAGE" -t "test-native4:${{ matrix.node }}" "$packet"
-      - name: Retain authenticated reuse provenance before runtime
+          node "$GITHUB_WORKSPACE/overlay/test-native4/operator.ts" --phase build --gateway "$GITHUB_WORKSPACE/gateway" --native "$NATIVE4_ROOT/native" --output "$NATIVE4_ROOT/build" --go "$NATIVE4_GO"
+          docker build --pull --build-arg "PG_IMAGE=$PG_IMAGE" -t "test-native4:${{ matrix.node }}" "$GITHUB_WORKSPACE/overlay/test-native4"
+      - name: Retain exact completed native build before runtime
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: TEST-native4-reuse-${{ matrix.node }}
+          name: TEST-native4-build-${{ matrix.node }}
           path: |
-            ${{ env.NATIVE4_ROOT }}/build-reuse.json
-            ${{ env.NATIVE4_ROOT }}/native-build-meta.json
+            ${{ env.NATIVE4_ROOT }}/build/build.json
+            ${{ env.NATIVE4_ROOT }}/build/gateway-source.tar
+            ${{ env.NATIVE4_ROOT }}/build/account-gateway
+            ${{ env.NATIVE4_ROOT }}/build/gateway-assembly-fixture
+            ${{ env.NATIVE4_ROOT }}/build/native-provider-joined
+            ${{ env.NATIVE4_ROOT }}/build/native-migrate
           if-no-files-found: warn
           retention-days: 14
       - name: Entire four suites with no external network
