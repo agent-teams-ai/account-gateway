@@ -133,6 +133,7 @@ async function runtime():Promise<void>{
     json('/opt/account-gateway-service-entry/fixture.json',{serviceConfig:root+'/service.json',nativeDSN:dsn(sn),gatewaySourceRef:gatewayCommit,nativeSourceRef:nativeCommit,normHash,retirementReadbackSources:{gatewayBaseRef:'bc36b9ad16a90d1e45f7b6e30e16e0070b7905e5',nativeBaseRef:'b7d746411cb590af5156fe16436d3182c209b379',serviceSha256:b.sourceHashes['services/account-gateway/src/service.ts'],testSha256:b.sourceHashes[files[3]!],nativeExecutableSha256:b.binaries['account-gateway']!.sha256}});
     await suite(files[3]!,{AG_SERVICE_ENTRY_ALLOW:'new_disposable_root_pg17_10'});reports.service={passed:true};
     await create('ag_usage_service_20261022');await create('native_bootstrap_usage_20261022');
+    await run(join(build,'native-migrate'),[],gateway,{GATEWAY_NATIVE4_MIGRATE_DSN:dsn('native_bootstrap_usage_20261022')});
     await suite(files[4]!,{AG_SERVICE_USAGE_ALLOW:'new_disposable_root_pg17_10',AG_SERVICE_USAGE_KERNEL_DSN:'postgres://postgres@127.0.0.1:5432/ag_usage_service_20261022',AG_SERVICE_USAGE_NATIVE_DSN:'postgres://postgres@127.0.0.1:5432/native_bootstrap_usage_20261022',AG_SERVICE_USAGE_NATIVE_SHA256:b.binaries['account-gateway']!.sha256});reports.usage={passed:true};
     // Same fresh cluster, distinct listener port; no PG schemas/databases reused.
     await run('gosu',['postgres',join(pg,'pg_ctl'),'-D',pgdata,'-m','fast','-w','stop']);

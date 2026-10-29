@@ -88,6 +88,19 @@ jobs:
       - name: Build exact native main and separately hashed TEST fixtures
         run: |
           node "$GITHUB_WORKSPACE/overlay/test-native4/operator.ts" --phase build --gateway "$GITHUB_WORKSPACE/gateway" --native "$NATIVE4_ROOT/native" --output "$NATIVE4_ROOT/build" --go "$NATIVE4_GO"
+          # Actual compiled helper must reject every near-miss before any DB use.
+          deny_index=0
+          for denied in \
+            'postgres://postgres@127.0.0.1:5432/native_bootstrap_usage_20261022_extra?sslmode=disable' \
+            'postgres://postgres@127.0.0.1:5432/native_bootstrap_usage_20261023?sslmode=disable' \
+            'postgres://postgres@127.0.0.1:5433/native_bootstrap_usage_20261022?sslmode=disable' \
+            'postgres://postgres:denied@127.0.0.1:5432/native_bootstrap_usage_20261022?sslmode=disable' \
+            'postgres://postgres@127.0.0.1:5432/native_bootstrap_usage_20261022?sslmode=require'; do
+            if GATEWAY_NATIVE4_MIGRATE_DSN="$denied" "$NATIVE4_ROOT/build/native-migrate" >/dev/null 2>&1; then result=0; else result=$?; fi
+            deny_index=$((deny_index + 1))
+            printf 'native-migrate deny case %s exit %s\n' "$deny_index" "$result"
+            test "$result" -eq 71
+          done
           docker build --pull --build-arg "PG_IMAGE=$PG_IMAGE" -t "test-native4:${{ matrix.node }}" "$GITHUB_WORKSPACE/overlay/test-native4"
       - name: Retain exact completed native build before runtime
         if: ${{ always() }}
