@@ -607,11 +607,7 @@ void test("native admission diagnostics retain phases and reject extra or unknow
       f.feed(Buffer.from(JSON.stringify({ ...record, ...extra }) + "\n"));
     }
   }
-  for (const phase of [
-    "admission_unknown",
-    "admission_input:SECRET_SENTINEL",
-    "SECRET_SENTINEL",
-  ]) {
+  for (const phase of ["admission_unknown", "admission_input:SECRET_SENTINEL", "SECRET_SENTINEL"]) {
     f.feed(Buffer.from(JSON.stringify({ event: "gateway_native_response_failure", phase }) + "\n"));
   }
   f.feed(Buffer.from(valid + "\n"));
