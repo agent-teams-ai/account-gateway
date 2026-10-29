@@ -528,3 +528,44 @@ test("native private Codex request shape reaches operator sink with scalar facts
   f.feed(Buffer.from(valid + "\n"));
   assert.deepEqual(f.records, [record + "\n", valid + "\n"]);
 });
+
+// Native can refuse before entering upstream. Keep the finite boundary visible
+// without accepting request identity, provider text or payload fields.
+test("native admission diagnostics retain phases and reject extra or unknown data", () => {
+  const f = sink();
+  const phases = [
+    "admission_payload",
+    "admission_input",
+    "admission_tools",
+    "admission_mapping",
+    "admission_descriptor",
+    "admission_credential",
+    "admission_lifetime",
+    "admission_catalog_unavailable",
+    "admission_catalog_expired",
+    "admission_catalog_policy",
+    "admission_dispatch_target",
+    "admission_account_lock",
+    "admission_account_changed",
+    "admission_replay",
+    "admission_runtime",
+  ];
+  const expected: string[] = [];
+  for (const phase of phases) {
+    const record = { event: "gateway_native_response_failure", phase };
+    const line = JSON.stringify(record) + "\n";
+    for (const byte of Buffer.from(line)) f.feed(Buffer.from([byte]));
+    expected.push(line);
+    for (const extra of [
+      { message: "SECRET_SENTINEL" }, { input: "SECRET_SENTINEL" },
+      { account_ref: "SECRET_SENTINEL" }, { request_ref: "SECRET_SENTINEL" },
+      { http_status: 400 }, { provider_error_category: "invalid_request" },
+    ]) f.feed(Buffer.from(JSON.stringify({ ...record, ...extra }) + "\n"));
+  }
+  for (const phase of ["admission_unknown", "admission_input:SECRET_SENTINEL", "SECRET_SENTINEL"])
+    f.feed(Buffer.from(JSON.stringify({ event: "gateway_native_response_failure", phase }) + "\n"));
+  f.feed(Buffer.from(valid + "\n"));
+  expected.push(valid + "\n");
+  assert.deepEqual(f.records, expected);
+  assert.equal(f.records.join("").includes("SECRET_SENTINEL"), false);
+});
