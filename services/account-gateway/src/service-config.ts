@@ -22,6 +22,9 @@ export interface ServiceConfig {
   readonly kernelDSN: string;
   // Required operator input; implementation defaults are not qualified caps.
   readonly durableFacts: Readonly<DurableFactBounds>;
+  // Opt-in request/usage readback horizon; captured on each new execution.
+  // Legacy requests and unresolved native effects are never reclaimed.
+  readonly requestReadbackRetentionMs?: number;
   readonly facadeOrigin: string;
   readonly callbackOrigin: string;
   readonly native: Readonly<{
@@ -335,7 +338,7 @@ function captureProfile(value: unknown): ServiceProfile {
         "outputBytes",
         "tokens",
       ]) as unknown as ApprovedLimits,
-      defaults,
+      { ...defaults, maxConcurrent: 64 },
     ),
     providerTokenUpperBound: p.providerTokenUpperBound as number,
   };
@@ -584,6 +587,14 @@ export function captureServiceBearers(
     return deny();
   }
 }
+export function captureRequestReadbackRetention(value: unknown): number {
+  try {
+    integer(value, 31_536_000_000);
+    return value;
+  } catch {
+    return deny();
+  }
+}
 // Sole entry: synchronous capture/validation before the first startup await.
 // No provider credential or native custody bytes are read here.
 export function loadServiceConfig(file: string): ServiceConfig {
@@ -631,8 +642,12 @@ export function loadServiceConfig(file: string): ServiceConfig {
         "secondProfile",
         "providerProfiles",
         "accountLifecycle",
+        "requestReadbackRetentionMs",
       ],
     );
+    const requestReadbackRetentionMs = Object.hasOwn(r, "requestReadbackRetentionMs")
+      ? captureRequestReadbackRetention(r.requestReadbackRetentionMs)
+      : undefined;
     const accountLifecycle =
       r.accountLifecycle === undefined ? undefined : captureAccountLifecycle(r.accountLifecycle);
     const oauthEnrollment = Object.hasOwn(r, "oauthEnrollment")
@@ -758,6 +773,7 @@ export function loadServiceConfig(file: string): ServiceConfig {
       profile,
       bearers,
       keys,
+      ...(requestReadbackRetentionMs === undefined ? {} : { requestReadbackRetentionMs }),
       ...(secondProfile === undefined ? {} : { secondProfile }),
       ...(providerProfiles === undefined ? {} : { providerProfiles }),
       ...(accountLifecycle === undefined ? {} : { accountLifecycle }),

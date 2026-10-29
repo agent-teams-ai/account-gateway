@@ -298,15 +298,22 @@ export class PostgresManagementStore implements ManagementStore {
     this.maxIntents = maxIntents;
     this.batch = batch;
   }
-  private async tx<T>(consumer: string, action: (db: PoolClient) => Promise<T>): Promise<T> {
+  private async session<T>(
+    consumer: string,
+    readOnly: boolean,
+    action: (db: PoolClient) => Promise<T>,
+  ): Promise<T> {
     identifier(consumer);
     let db: PoolClient | undefined;
     try {
       db = await this.checkout();
-      await db.query("BEGIN");
-      // Reuse the kernel consumer serialization lock; no management permit/authority.
+      await db.query(readOnly ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY" : "BEGIN");
+      // Writes retain kernel consumer serialization. Immutable mapping reads
+      // observe one committed snapshot and grant no dispatch authority.
       const existing = await db.query(
-        "SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE",
+        readOnly
+          ? "SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1"
+          : "SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE",
         [consumer],
       );
       if (existing.rowCount === null || existing.rowCount === 0) {
@@ -327,6 +334,12 @@ export class PostgresManagementStore implements ManagementStore {
     } finally {
       db?.release();
     }
+  }
+  private tx<T>(consumer: string, action: (db: PoolClient) => Promise<T>): Promise<T> {
+    return this.session(consumer, false, action);
+  }
+  private read<T>(consumer: string, action: (db: PoolClient) => Promise<T>): Promise<T> {
+    return this.session(consumer, true, action);
   }
   async stage(scope: CandidateScope, apiKey: string): Promise<boolean> {
     const s = scopeCopy(scope),
@@ -546,7 +559,7 @@ export class PostgresManagementStore implements ManagementStore {
   ): Promise<CandidateMapping | undefined> {
     const ctx = captureContext(context);
     uuid(generation);
-    return this.tx(ctx.consumerId, async (db) => {
+    return this.read(ctx.consumerId, async (db) => {
       const r = (
         await db.query<
           JournalRow & {

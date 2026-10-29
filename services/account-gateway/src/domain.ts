@@ -216,7 +216,22 @@ export interface SavedExecution {
   readonly state: ExecutionStatus["state"];
   readonly dispatchAllowed: boolean;
 }
+// A single committed SQL observation for the native boundary. This is read
+// authority only: a claim still grants the sole first-dispatch permission.
+export interface DispatchSnapshot {
+  readonly saved: SavedExecution;
+  readonly issuerEpoch: string;
+  readonly workerLeaseExpiresAt: string;
+  readonly proof?: NativeDispatchProof;
+  readonly status?: RequestStatus;
+}
 export interface ExecutionRead {
+  dispatchSnapshot?(
+    context: TrustedContext,
+    executionRef: string,
+    worker: string,
+    requestId?: string,
+  ): Promise<DispatchSnapshot>;
   savedExecution(context: TrustedContext, executionRef: string): Promise<SavedExecution>;
   currentWorkerLease(context: TrustedContext, worker: string): Promise<string>;
   // Read an already claimed execution cleanup lease, without renewal/creation.
@@ -305,8 +320,10 @@ export interface Bounds {
 }
 // Aggregate facts include prepaid, single-use closure/fence/disable slots and
 // bounded worker/issuer recovery slots. These are conservative implementation
-// defaults, not measured D-final capacity qualifications. Accepted authority and
-// effect facts are never evicted or refunded. Expired workers without any durable
+// defaults, not measured D-final capacity qualifications. Replay namespaces,
+// unknown effects and occupied proofs are never evicted. Explicitly opted-in,
+// positively settled v2 request details may expire behind an irreversible closed
+// execution namespace, refunding exactly their request units. Expired workers without any durable
 // work reference may release a prepaid slot and later enroll again; the incoming
 // expired UUID cannot renew itself. Referenced workers and issuer history persist.
 export interface DurableFactBounds {

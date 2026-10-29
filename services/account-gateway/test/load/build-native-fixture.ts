@@ -7,7 +7,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isNonemptyString } from "./model.ts";
 
-export const nativeSourceCommit = "b813197871c3d7a2ae07fa9cabe97b9862856653";
+export const nativeSourceCommit = "a6bc1e36a1cd0d542af2806f3f8ae1e098e7cc76";
 export const migrationAdapterSource =
   [
     "// Disposable local fixture provisioning only. Production migration authority is",
@@ -52,7 +52,7 @@ export const migrationAdapterSource =
     "  normalized:=sha256.Sum256([]byte(strings.TrimSpace(string(data))))",
     '  var applied string;if db.QueryRowContext(ctx,"SELECT checksum FROM schema_migrations WHERE filename=$1",name).Scan(&applied)!=nil || applied!=hex.EncodeToString(normalized[:]) { return fmt.Errorf("applied migration checksum mismatch") }',
     " }",
-    ' return json.NewEncoder(os.Stdout).Encode(map[string]any{"kind":"production-native-migration-receipt-v1","sourceCommit":"b813197871c3d7a2ae07fa9cabe97b9862856653","postgresVersion":version,"accounts":count,"migrationCount":len(entries),"migrationsSha256":hex.EncodeToString(sum.Sum(nil)),"migrations":entries})',
+    ' return json.NewEncoder(os.Stdout).Encode(map[string]any{"kind":"production-native-migration-receipt-v1","sourceCommit":"a6bc1e36a1cd0d542af2806f3f8ae1e098e7cc76","postgresVersion":version,"accounts":count,"migrationCount":len(entries),"migrationsSha256":hex.EncodeToString(sum.Sum(nil)),"migrations":entries})',
     "}",
     "func main(){if err:=run();err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}}",
   ].join("\n") + "\n";

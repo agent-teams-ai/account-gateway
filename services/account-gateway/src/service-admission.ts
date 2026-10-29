@@ -41,6 +41,21 @@ export const nativeCallbackCapacity = Object.freeze({
     6,
 });
 
+// Accepted dispatch/closure callbacks keep their own finite share of the
+// existing four general owners. New inference offers cannot consume it.
+export function nativeCallbackPurpose(
+  path: string | undefined,
+): "preclaim" | "critical" | "settlement" {
+  if (path === "/private/native/v1/execution-settle") {
+    return "settlement";
+  }
+  return path === "/private/native/v1/execution-authority" ||
+    path === "/private/native/v1/public-admit" ||
+    path === "/private/native/v1/admit"
+    ? "preclaim"
+    : "critical";
+}
+
 function signalAborted(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true;
 }
@@ -164,6 +179,7 @@ export function admitNativeCallback(
   req: IncomingMessage,
   res: ServerResponse,
   work: () => Promise<void>,
+  refusedBeforeWork?: () => void,
 ): void {
   const abort = new AbortController();
   const cancel = () => {
@@ -173,16 +189,30 @@ export function admitNativeCallback(
   res.once("close", cancel);
   void admission
     .acquire(Date.now() + serviceCapacity.timeoutMs, abort.signal)
-    .then(async (release) => {
-      try {
-        if (!res.destroyed && !res.writableEnded) {
-          await inServiceLane("control", work);
+    .then(
+      async (release) => {
+        try {
+          if (!res.destroyed && !res.writableEnded) {
+            await inServiceLane("control", work);
+          }
+          return;
+        } finally {
+          release();
         }
-        return;
-      } finally {
-        release();
-      }
-    })
+      },
+      () => {
+        // This branch alone proves that callback work never started. A rejection
+        // thrown by work may follow a committed claim and must stay ambiguous.
+        if (refusedBeforeWork && !res.destroyed && !res.writableEnded) {
+          refusedBeforeWork();
+          return;
+        }
+        if (!res.destroyed && !res.writableEnded) {
+          res.writeHead(503, { connection: "close" });
+          res.end();
+        }
+      },
+    )
     .catch(() => {
       if (!res.destroyed && !res.writableEnded) {
         if (res.headersSent) {

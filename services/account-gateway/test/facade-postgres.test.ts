@@ -1767,7 +1767,7 @@ void test("consumer-control SDK admits a new opaque owner and fences profiles, c
     const saved = await f.kernel.savedExecution(f.context, access.operation.result.executionRef);
     const { executionRef: _ref, issuerEpoch: _epoch, ...admission } = saved.admission;
     assert.deepEqual(access.admission, admission);
-    assert.deepEqual(f.bearers.resolve(access.bearer), {
+    assert.deepEqual(await f.bearers.resolveExecution(access.bearer, f.kernel), {
       role: "execution",
       consumerId: f.context.consumerId,
       saved,
@@ -1906,9 +1906,13 @@ void test("consumer-control replacement during real SQL waits denies readback an
       const retired = f.bearers.resolve(control.token);
       assert.ok(retired);
       await lock.query("BEGIN");
-      await lock.query("SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE", [
-        f.context.consumerId,
-      ]);
+      if (mode === "readback") {
+        await lock.query("LOCK TABLE ag_kernel.operations IN ACCESS EXCLUSIVE MODE");
+      } else {
+        await lock.query("SELECT 1 FROM ag_kernel.consumers WHERE consumer=$1 FOR UPDATE", [
+          f.context.consumerId,
+        ]);
+      }
       const pid: number = (await lock.query<{ pid: number }>("SELECT pg_backend_pid() AS pid"))
         .rows[0].pid;
       const input = {
@@ -1947,7 +1951,7 @@ void test("consumer-control replacement during real SQL waits denies readback an
         );
       }
       assert.equal(f.bearers.current(retired), false);
-      assert.equal(f.bearers.resolve(access.bearer), undefined);
+      assert.equal(await f.bearers.resolveExecution(access.bearer, f.kernel), undefined);
       assert.equal(
         (await f.raw("/v1/executions/" + f.executionRef, "GET", undefined, access.bearer)).status,
         401,

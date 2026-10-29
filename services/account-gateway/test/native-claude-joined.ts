@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
 import { spawn, execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, readlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -22,7 +22,18 @@ import { IntentSecrets, PostgresManagementStore } from "../src/management-store.
 import { claudeOAuthProfile } from "../src/management.ts";
 import { composeServiceControl, composeServiceNative } from "../src/service.ts";
 import { createFacade } from "../src/facade.ts";
+import { PostgresUsageJournal } from "../src/usage.ts";
+import type { UsageJournal } from "../src/usage.ts";
+import { physicallyClosed, receipt as nativeReceipt } from "../src/native-wire.ts";
 import type { ServiceConfig } from "../src/service-config.ts";
+
+type RequestObservationRow = {
+  id: string;
+  effect: string;
+  transport_occupied: boolean;
+  closure_acked_at: unknown;
+  usage_revision: number;
+};
 
 const report = (value: object): void => {
   process.stdout.write(JSON.stringify(value) + "\n");
@@ -33,6 +44,8 @@ let pool: Pool | undefined;
 let child: ReturnType<typeof spawn> | undefined;
 let stopped = false;
 let childExit: Promise<number | null> | undefined;
+let cliProcess: ReturnType<typeof spawn> | undefined;
+let releaseTerminalUsage: (() => void) | undefined;
 async function listen(server: Server): Promise<string> {
   servers.push(server);
   await new Promise<void>((resolve, reject) => {
@@ -84,8 +97,45 @@ function isNonemptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
+function isFrameRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
 async function run(): Promise<void> {
   assert.equal(process.env.AG_NATIVE_CLAUDE_JOINED_ALLOW, "disposable_pg17_10");
+  const cliBinary = process.env.AG_NATIVE_CLAUDE_JOINED_CLI_BINARY;
+  let clientPin: { version: string; binarySHA256: string } | undefined;
+  let networkNamespace: string | undefined;
+  if (cliBinary !== undefined) {
+    phase = "pinned-client-and-network";
+    assert.ok(isAbsolute(cliBinary));
+    const pins = JSON.parse(
+      await readFile(new URL("./fixtures/native-cli/pins.json", import.meta.url), "utf8"),
+    ) as { clients: { id: string; version: string; binarySHA256: string }[] };
+    clientPin = pins.clients.find((p) => p.id === "claude");
+    assert.ok(clientPin);
+    assert.equal(clientPin.version, "2.1.309");
+    assert.equal(
+      createHash("sha256")
+        .update(await readFile(cliBinary))
+        .digest("hex"),
+      clientPin.binarySHA256,
+    );
+    const evidencePath = process.env.AG_LOAD_NETWORK_EVIDENCE;
+    assert.ok(evidencePath !== undefined && evidencePath !== "" && isAbsolute(evidencePath));
+    const evidence = JSON.parse(await readFile(evidencePath, "utf8")) as {
+      networkNamespace?: string;
+    };
+    networkNamespace = await readlink("/proc/self/ns/net");
+    assert.equal(evidence.networkNamespace, networkNamespace);
+    const interfaces = (await readFile("/proc/net/dev", "utf8"))
+      .trim()
+      .split("\n")
+      .slice(2)
+      .map((line) => line.split(":")[0].trim());
+    assert.deepEqual(interfaces, ["lo"]);
+    assert.equal((await readFile("/proc/net/route", "utf8")).trim().split("\n").length, 1);
+  }
   const nativeDSN = disposable("AG_NATIVE_CLAUDE_JOINED_NATIVE_DSN", "native_claude_joined_");
   const kernelDSN = disposable(
     "AG_NATIVE_CLAUDE_JOINED_KERNEL_DSN",
@@ -110,15 +160,22 @@ async function run(): Promise<void> {
   );
   const nativeHead = /vcs\.revision=([a-f0-9]{40})/.exec(buildInfo)?.[1];
   assert.ok(nativeHead !== undefined && nativeHead !== "");
+  if (cliBinary !== undefined) {
+    assert.match(process.env.AG_NATIVE_CLAUDE_JOINED_NATIVE_COMMIT ?? "", /^[a-f0-9]{40}$/);
+    assert.equal(nativeHead, process.env.AG_NATIVE_CLAUDE_JOINED_NATIVE_COMMIT);
+  }
   phase = "native-clean-build-provenance";
   assert.match(buildInfo, /vcs\.modified=false/);
   phase = "gateway-source-provenance";
   const gatewayRoot = fileURLToPath(new URL("../../../", import.meta.url));
-  const gatewayHead = execFileSync("git", ["rev-parse", "HEAD"], {
-    cwd: gatewayRoot,
-    encoding: "utf8",
-    timeout: 5000,
-  }).trim();
+  const gatewayHead =
+    cliBinary !== undefined
+      ? (process.env.AG_NATIVE_CLAUDE_JOINED_GATEWAY_COMMIT ?? "")
+      : execFileSync("git", ["rev-parse", "HEAD"], {
+          cwd: gatewayRoot,
+          encoding: "utf8",
+          timeout: 5000,
+        }).trim();
   assert.match(gatewayHead, /^[a-f0-9]{40}$/);
   const sourceHashes = {
     harness: await sha256(new URL(import.meta.url)),
@@ -132,7 +189,17 @@ async function run(): Promise<void> {
   const managementCredential = randomBytes(32).toString("base64url"),
     callbackCredential = randomBytes(32).toString("base64url");
   phase = "gateway-scratch";
-  const scratchRoot = resolvePath(dirname(fileURLToPath(import.meta.url)), "../../../tmp");
+  const scratchRoot =
+    process.env.AG_NATIVE_CLAUDE_JOINED_SCRATCH_ROOT ??
+    resolvePath(dirname(fileURLToPath(import.meta.url)), "../../../tmp");
+  assert.ok(isAbsolute(scratchRoot));
+  if (cliBinary !== undefined) {
+    assert.ok(
+      process.env.AG_NATIVE_CLAUDE_JOINED_SCRATCH_ROOT !== undefined &&
+        process.env.AG_NATIVE_CLAUDE_JOINED_SCRATCH_ROOT !== "",
+      "CLI mode requires task-owned scratch",
+    );
+  }
   await mkdir(scratchRoot, { recursive: true });
   const scratch = await mkdtemp(join(scratchRoot, "native-claude-joined-"));
   const configFile = join(scratch, "native-config.json");
@@ -147,6 +214,7 @@ async function run(): Promise<void> {
       Callback: callbackCredential,
       Execution: nativeExecution,
       Cleanup: nativeCleanup,
+      CLI: cliBinary !== undefined,
     }),
     { mode: 0o600 },
   );
@@ -229,9 +297,9 @@ async function run(): Promise<void> {
   const limits = {
     requests: 4,
     concurrency: 1,
-    requestBytes: 4096,
-    outputBytes: 4096,
-    tokens: 100,
+    requestBytes: cliBinary !== undefined ? 1 << 20 : 4096,
+    outputBytes: cliBinary !== undefined ? 1 << 20 : 4096,
+    tokens: cliBinary !== undefined ? 65536 : 100,
   };
   const limitsToken = randomBytes(32).toString("base64url");
   const publicToken = randomBytes(32).toString("base64url"),
@@ -276,7 +344,7 @@ async function run(): Promise<void> {
       model: "fixture-unused",
       qualificationRef: "joined-claude-unused-apikey",
       limits,
-      providerTokenUpperBound: 100,
+      providerTokenUpperBound: limits.tokens,
     },
     claudeOAuthEnrollment: {
       enabled: true,
@@ -284,7 +352,7 @@ async function run(): Promise<void> {
       modelScope: ["claude-sonnet-4-6"],
       qualificationRef: "controlled-source-v1",
       limits,
-      providerTokenUpperBound: 100,
+      providerTokenUpperBound: limits.tokens,
     },
     bearers: [
       bearer(publicToken, ownerRef),
@@ -304,7 +372,33 @@ async function run(): Promise<void> {
   >;
   const control = composeServiceControl(cfg, kernel, store, secrets, worker);
   const enrollment = { originRef: cfg.native.originRef, engineIncarnation: randomUUID(), worker };
-  const { authority, transport } = composeServiceNative(cfg, control, kernel, store, enrollment);
+  const usage = new PostgresUsageJournal(pool, randomBytes(32));
+  const terminalUsage = Promise.withResolvers<void>(),
+    allowTerminalUsage = Promise.withResolvers<void>();
+  releaseTerminalUsage = () => {
+    allowTerminalUsage.resolve();
+  };
+  let terminalUsageWrites = 0;
+  const gatedUsage: UsageJournal = {
+    observe: (...args) => usage.observe(...args),
+    list: (...args) => usage.list(...args),
+    async append(ctx, fact) {
+      if (fact.completeness === "complete") {
+        terminalUsageWrites++;
+        terminalUsage.resolve();
+        await allowTerminalUsage.promise;
+      }
+      await usage.append(ctx, fact);
+    },
+  };
+  const { authority, transport } = composeServiceNative(
+    cfg,
+    control,
+    kernel,
+    store,
+    enrollment,
+    cliBinary !== undefined ? gatedUsage : undefined,
+  );
   const callbackOrigin = await listen(authority.createServer());
   const origin = await listen(
     createFacade({
@@ -317,6 +411,7 @@ async function run(): Promise<void> {
       transport,
       accountLimits: control.accountLimits,
       intentHmacKey: randomBytes(32),
+      ...(cliBinary !== undefined ? { usage: gatedUsage } : {}),
     }),
   );
   child.stdin!.write(
@@ -327,7 +422,14 @@ async function run(): Promise<void> {
       qualificationRef: control.profiles[0].qualificationRef,
     }) + "\n",
   );
-  await next("configured");
+  const configured = await next("configured");
+  if (cliBinary !== undefined) {
+    assert.equal(typeof configured.inferenceOrigin, "string");
+    const url = new URL(configured.inferenceOrigin as string);
+    assert.equal(url.protocol, "http:");
+    assert.equal(url.hostname, "127.0.0.1");
+    assert.ok(url.port);
+  }
   const client = createManagementClient({ role: "management", origin, token: publicToken });
   const foreign = createManagementClient({ role: "management", origin, token: foreignToken });
   const command = {
@@ -461,39 +563,288 @@ async function run(): Promise<void> {
     deadline: new Date(Date.now() + 30_000).toISOString(),
   });
   const execution = createExecutionClient({ role: "execution", origin, token: access.bearer });
-  const requestRef = randomUUID();
   if (access.operation.state !== "applied" || access.operation.result?.kind !== "execution") {
     throw new Error("missing execution authority");
   }
-  const result = await execution.request(access.operation.result.executionRef, {
-    requestId: requestRef,
-    admission: access.admission,
-    body: Buffer.from(
-      JSON.stringify({
+  const executionRef = access.operation.result.executionRef;
+  let cliProof:
+    | {
+        terminalWaitedForDurability: boolean;
+        nativeClosureVerified: boolean;
+        executionCleanupCompleted: boolean;
+      }
+    | undefined;
+  if (cliBinary !== undefined) {
+    phase = "real-cli-public-authority";
+    const inferenceOrigin = configured.inferenceOrigin as string;
+    const wrongRole = await fetch(inferenceOrigin + "/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": publicToken, "content-type": "application/json" },
+      body: JSON.stringify({
         model: "claude-sonnet-4-6",
         stream: true,
-        store: false,
-        service_tier: "default",
-        max_output_tokens: 100,
-        instructions: "Controlled fixture system instructions stay at system priority.",
-        input: "Controlled disposable fixture",
+        max_tokens: 1,
+        messages: [{ role: "user", content: "Controlled wrong-role refusal" }],
       }),
-    ),
-  });
-  assert.equal(result.kind, "stream");
-  if (!Object.is(result.kind, "stream")) {
-    throw new Error("missing controlled stream");
-  }
-  const reader = result.body.getReader();
-  let stream = "";
-  for (;;) {
-    const part = await reader.read();
-    if (part.done) {
-      break;
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(wrongRole.status, 403);
+    await wrongRole.arrayBuffer();
+    assert.deepEqual(await stats(), beforeInference);
+    const project = join(scratch, "empty-project");
+    await mkdir(project, { mode: 0o700 });
+    cliProcess = spawn(
+      cliBinary,
+      [
+        "--bare",
+        "-p",
+        "--model",
+        "claude-sonnet-4-6",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--max-turns",
+        "1",
+        "--tools",
+        "",
+        "--no-session-persistence",
+        "--system-prompt",
+        "Controlled local protocol fixture.",
+        "Return the local fixture answer.",
+      ],
+      {
+        cwd: project,
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: {
+          PATH: "/usr/bin:/bin",
+          LANG: "C.UTF-8",
+          ANTHROPIC_BASE_URL: inferenceOrigin,
+          ANTHROPIC_API_KEY: access.bearer,
+          CLAUDE_CONFIG_DIR: join(scratch, "claude-config"),
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+          DISABLE_AUTOUPDATER: "1",
+          CLAUDE_CODE_SKIP_PROMPT_HISTORY: "1",
+        },
+      },
+    );
+    const stdout: Buffer[] = [];
+    let stdoutBytes = 0,
+      stderrBytes = 0,
+      overflow = false,
+      exited = false;
+    const killClient = () => {
+      if (!exited && cliProcess?.pid !== undefined && cliProcess.pid > 0) {
+        try {
+          process.kill(-cliProcess.pid, "SIGKILL");
+        } catch {}
+      }
+    };
+    cliProcess.stdout!.on("data", (chunk: Buffer) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > 1 << 20) {
+        overflow = true;
+        killClient();
+      } else {
+        stdout.push(chunk);
+      }
+    });
+    cliProcess.stderr!.on("data", (chunk: Buffer) => {
+      stderrBytes += chunk.length;
+      if (stderrBytes > 1 << 20) {
+        overflow = true;
+        killClient();
+      }
+    });
+    const clientExit = new Promise<number | null>((resolve) => {
+      cliProcess!.once("error", () => {
+        resolve(-1);
+      });
+      cliProcess!.once("close", (code) => {
+        exited = true;
+        resolve(code);
+      });
+    });
+    const timer = setTimeout(killClient, 70_000);
+    const clientResults = (): Record<string, unknown>[] =>
+      Buffer.concat(stdout)
+        .toString("utf8")
+        .split("\n")
+        .flatMap((line) => {
+          try {
+            const frame: unknown = JSON.parse(line);
+            return isFrameRecord(frame) ? [frame] : [];
+          } catch {
+            return [];
+          }
+        });
+    try {
+      await bounded(
+        Promise.race([
+          terminalUsage.promise,
+          clientExit.then(() => {
+            throw new Error("client-ended-before-terminal-usage");
+          }),
+        ]),
+        25_000,
+      );
+      phase = "terminal-withheld-before-real-usage-and-ack";
+      const pending = (
+        await pool.query<RequestObservationRow>(
+          `SELECT id,effect,transport_occupied,closure_acked_at FROM ag_kernel.requests
+        WHERE consumer=$1 AND execution_ref=$2`,
+          [consumerId, executionRef],
+        )
+      ).rows;
+      assert.equal(pending.length, 1);
+      assert.equal(pending[0].effect, "completed");
+      assert.equal(pending[0].transport_occupied, true);
+      assert.equal(pending[0].closure_acked_at, null);
+      const requestRef = pending[0].id,
+        originalProof = await kernel.requestProof(context, executionRef, requestRef);
+      assert.ok(originalProof);
+      assert.equal(originalProof.worker, worker);
+      assert.equal(originalProof.native.generation, journal.generation);
+      assert.equal(
+        (await usage.observe(context, executionRef, requestRef))?.completeness === "complete",
+        false,
+      );
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 150);
+      });
+      assert.equal(exited, false);
+      assert.equal(
+        clientResults().some((frame) => frame.type === "result"),
+        false,
+      );
+      releaseTerminalUsage();
+      assert.equal(await bounded(clientExit, 20_000), 0);
+      assert.equal(overflow, false);
+      const completedResults = clientResults().filter((frame) => frame.type === "result");
+      assert.equal(completedResults.length, 1);
+      assert.equal(completedResults[0].subtype, "success");
+      assert.equal(completedResults[0].is_error, false);
+      assert.equal(
+        typeof completedResults[0].result === "string" &&
+          completedResults[0].result.includes("joined Claude answer"),
+        true,
+      );
+      phase = "real-durable-terminal-usage-and-physical-closure";
+      const finalRequest = (
+        await pool.query<RequestObservationRow>(
+          `SELECT effect,transport_occupied,closure_acked_at FROM ag_kernel.requests
+        WHERE consumer=$1 AND execution_ref=$2 AND id=$3`,
+          [consumerId, executionRef, requestRef],
+        )
+      ).rows[0];
+      assert.equal(finalRequest.effect, "completed");
+      assert.equal(finalRequest.transport_occupied, false);
+      assert.ok(Boolean(finalRequest.closure_acked_at));
+      assert.deepEqual(await kernel.requestProof(context, executionRef, requestRef), originalProof);
+      const fact = await usage.observe(context, executionRef, requestRef);
+      assert.ok(fact);
+      assert.equal(fact.completeness, "complete");
+      assert.equal(fact.effect, "completed");
+      assert.equal(fact.revision, 2);
+      assert.equal(fact.inputTokens, 7);
+      assert.equal(fact.outputTokens, 3);
+      assert.equal(terminalUsageWrites, 1);
+      const response = await fetch(
+        ready.nativeOrigin + "/private/native/v1/transports/read-owner",
+        {
+          method: "POST",
+          headers: {
+            authorization: "Bearer " + nativeExecution,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ proof: originalProof }),
+          signal: AbortSignal.timeout(5000),
+        },
+      );
+      assert.equal(response.status, 202);
+      const closed = nativeReceipt(await response.json(), consumerId, originalProof);
+      assert.equal(
+        physicallyClosed(closed) &&
+          closed.acknowledged &&
+          closed.lifetime.completed &&
+          closed.lifetime.entered,
+        true,
+      );
+      phase = "real-execution-cleanup";
+      const close = { operationId: randomUUID(), reason: "completed" as const };
+      await execution.close(executionRef, close);
+      const cleanup = await kernel.claimCleanup(context, worker);
+      assert.ok(cleanup && cleanup.scope.kind === "execution");
+      assert.equal(cleanup.scope.executionRef, executionRef);
+      assert.equal(cleanup.scope.transports.length, 0);
+      await kernel.settleCleanup(context, cleanup.cleanupRef, worker, cleanup.token, true);
+      assert.equal((await execution.close(executionRef, close)).state, "applied");
+      assert.equal((await kernel.savedExecution(context, executionRef)).state, "closed");
+      assert.equal(
+        (
+          await pool.query<{ n: number }>(
+            `SELECT count(*)::int AS n FROM ag_kernel.cleanup WHERE consumer=$1 AND execution_ref=$2 AND state<>'done'`,
+            [consumerId, executionRef],
+          )
+        ).rows[0].n,
+        0,
+      );
+      const afterClose = await fetch(inferenceOrigin + "/v1/messages", {
+        method: "POST",
+        headers: { "x-api-key": access.bearer, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          stream: true,
+          max_tokens: 1,
+          messages: [{ role: "user", content: "Controlled closed execution refusal" }],
+        }),
+        signal: AbortSignal.timeout(5000),
+      });
+      assert.equal(afterClose.status, 403);
+      await afterClose.arrayBuffer();
+      cliProof = {
+        terminalWaitedForDurability: true,
+        nativeClosureVerified: true,
+        executionCleanupCompleted: true,
+      };
+    } finally {
+      clearTimeout(timer);
+      releaseTerminalUsage();
+      killClient();
+      cliProcess = undefined;
     }
-    stream += new TextDecoder().decode(part.value);
+  } else {
+    const requestRef = randomUUID();
+    const result = await execution.request(executionRef, {
+      requestId: requestRef,
+      admission: access.admission,
+      body: Buffer.from(
+        JSON.stringify({
+          model: "claude-sonnet-4-6",
+          stream: true,
+          store: false,
+          service_tier: "default",
+          max_output_tokens: 100,
+          instructions: "Controlled fixture system instructions stay at system priority.",
+          input: "Controlled disposable fixture",
+        }),
+      ),
+    });
+    assert.equal(result.kind, "stream");
+    if (!Object.is(result.kind, "stream")) {
+      throw new Error("missing controlled stream");
+    }
+    const reader = result.body.getReader();
+    let stream = "";
+    for (;;) {
+      const part = await reader.read();
+      if (part.done) {
+        break;
+      }
+      stream += new TextDecoder().decode(part.value);
+    }
+    assert.match(stream, /response.completed/);
   }
-  assert.match(stream, /response.completed/);
   const final = await stats();
   assert.deepEqual(final, { exchanges: 1, refreshes: 0, messages: 1, unexpected: 0 });
   phase = "passive-cached-limits";
@@ -591,6 +942,28 @@ async function run(): Promise<void> {
     deviceDenied: true,
     account: "active",
     descriptor: "verified",
+    ...(cliBinary !== undefined
+      ? {
+          actualCLI: {
+            id: "claude",
+            version: clientPin!.version,
+            binarySHA256: clientPin!.binarySHA256,
+            exitCode: 0,
+            providerEntries: final.messages,
+            sqlEffect: "completed",
+            nativeClosed: true,
+            nativeAcknowledged: true,
+            transportOccupied: false,
+            usageRecorded: true,
+            executionClosed: true,
+            protocol: "Anthropic Messages HTTP/SSE",
+            authority: "real TypeScript kernel and native authority",
+            usage: "real PostgreSQL usage journal",
+            networkNamespace,
+            ...cliProof,
+          },
+        }
+      : {}),
     rrAcceptance,
     nativeDiagnosticBytes,
     accountLimits: {
@@ -630,6 +1003,17 @@ try {
   });
   process.exitCode = 1;
 } finally {
+  releaseTerminalUsage?.();
+  if (
+    cliProcess?.pid !== undefined &&
+    cliProcess.pid > 0 &&
+    cliProcess.exitCode === null &&
+    cliProcess.signalCode === null
+  ) {
+    try {
+      process.kill(-cliProcess.pid, "SIGKILL");
+    } catch {}
+  }
   if (child && !Object.is(stopped, true)) {
     child.stdin!.end("stop\n");
   }

@@ -12,6 +12,7 @@ import { createServer } from "node:http";
 import { connect } from "node:net";
 import type { Socket } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { Pool } from "pg";
 import {
   createManagementClient,
@@ -27,6 +28,7 @@ import type { ServiceConfig } from "../../src/service-config.ts";
 import {
   bounds,
   scenarios,
+  baselineScenarios,
   check,
   bounded,
   identifier,
@@ -34,6 +36,8 @@ import {
   reconcile,
   closureProjection,
   safeError,
+  arrivalObservation,
+  capacityRefusal,
   isNonemptyString,
 } from "./model.ts";
 import type { Attempt, LedgerEvent, Proof, Scenario, Outcome } from "./model.ts";
@@ -85,13 +89,6 @@ const profileId = "openai-responses-apikey-v1",
   model = "mimo-test",
   consumerId = "fullstack-load-fixture",
   ownerRef = "load-fixture-owner";
-const limits = Object.freeze({
-  requests: 256,
-  concurrency: 1,
-  requestBytes: 4096,
-  outputBytes: bounds.streamBytes,
-  tokens: 32,
-});
 const token = () => randomBytes(32).toString("base64url");
 function sdkArtifactManifest() {
   const entrypoints = {
@@ -250,14 +247,24 @@ function provider(f: Fixture, credential: string) {
     },
   };
 }
-function body(runId: string, requestId: string) {
+function body(runId: string, requestId: string, paddingBytes = 0) {
   return Buffer.from(
     JSON.stringify({
       model,
       stream: true,
       store: false,
       service_tier: "default",
-      input: [{ role: "user", content: "load-fixture:" + runId + ":" + requestId }],
+      input: [
+        {
+          role: "user",
+          content:
+            "load-fixture:" +
+            runId +
+            ":" +
+            requestId +
+            (paddingBytes ? "\n" + "x".repeat(paddingBytes) : ""),
+        },
+      ],
     }),
   );
 }
@@ -309,12 +316,7 @@ function requireCompletions(group: readonly Attempt[], expected?: number) {
     "expected-completions",
   );
   check(
-    group.every(
-      (a) =>
-        a.effect === "completed" ||
-        a.effect === "not_dispatched" ||
-        (Boolean(a.preclaimRefused) && !isNonemptyString(a.effect)),
-    ),
+    group.every((a) => a.effect === "completed" || capacityRefusal(a)),
     "unexpected-load-effect",
   );
 }
@@ -329,6 +331,8 @@ void test(
       source = sourceManifest(workspace),
       sdkArtifact = sdkArtifactManifest(),
       startedAt = Date.now();
+    const eventLoop = monitorEventLoopDelay({ resolution: 20 });
+    eventLoop.enable();
     const selector = process.env.AG_LOAD_SCENARIOS;
     check(
       !isNonemptyString(selector) || scenarios.includes(selector as Scenario),
@@ -336,11 +340,22 @@ void test(
     );
     const selected: readonly Scenario[] = isNonemptyString(selector)
       ? [selector as Scenario]
-      : scenarios;
+      : baselineScenarios;
+    const scaled = selected.some((s) =>
+      ["scale-streams", "scale-arrivals", "sustained-arrivals", "large-context"].includes(s),
+    );
+    const publicMaxActive = scaled ? 1024 : 16;
+    const limits = Object.freeze({
+      requests: 256,
+      concurrency: scaled ? 64 : 1,
+      requestBytes: selected.includes("large-context") ? 1_048_576 : 4096,
+      outputBytes: bounds.streamBytes,
+      tokens: 32,
+    });
     let sequence = 0,
       totalBytes = 0,
       executionCount = 0,
-      capPreparations = 0;
+      churnPreparations = 0;
     const next = () => identifier(f.runId, f.seed, ++sequence);
     const attempts: Attempt[] = [],
       results: ScenarioResult[] = [],
@@ -387,7 +402,8 @@ void test(
     };
     let facadeOrigin = "",
       callbackOrigin = "",
-      nativeOrigin = "";
+      nativeOrigin = "",
+      inferenceOrigin = "";
     let management: ReturnType<typeof createManagementClient>,
       control: ReturnType<typeof createConsumerControlClient>;
     async function sample() {
@@ -408,6 +424,13 @@ void test(
           nodeCPUUserMicros: cpu.user,
           nodeCPUSystemMicros: cpu.system,
         };
+        if (eventLoop.count) {
+          Object.assign(observation, {
+            eventLoopP99Ms: eventLoop.percentile(99) / 1e6,
+            eventLoopMaxMs: eventLoop.max / 1e6,
+          });
+        }
+        eventLoop.reset();
         if (service) {
           try {
             const binding = service.binding,
@@ -578,11 +601,12 @@ void test(
       } while (Date.now() < deadline);
       throw new Error("load:exact-closure-drain");
     }
-    async function prepare(accountRef: string, cap = false): Promise<Execution> {
-      if (cap) {
+    async function prepare(accountRef: string, churn = false): Promise<Execution> {
+      if (churn) {
         check(
-          ++capPreparations <= bounds.capPreparations && executionCount < 130,
-          "cap-preparation-bound",
+          ++churnPreparations <= bounds.churnPreparations &&
+            executionCount < bounds.executions + bounds.churnPreparations,
+          "churn-preparation-bound",
         );
       } else {
         check(executionCount < bounds.executions, "execution-bound");
@@ -769,18 +793,21 @@ void test(
       const client = createExecutionClient({
         role: "execution",
         origin: facadeOrigin,
+        inferenceOrigin,
         token: execution.bearer,
-        timeoutMs: 25_000,
+        timeoutMs: scenario === "scale-streams" ? 300_000 : scaled ? 180_000 : 25_000,
       });
       const work = (async () => {
         try {
+          const payload = body(
+            f.runId,
+            a.requestId,
+            Object.is(scenario, "large-context") ? 1_000_000 : 0,
+          );
+          a.startedAt = Date.now(); // Actual SDK entry, after provider arming and body construction.
           const response = await client.request(
             execution.executionRef,
-            {
-              requestId: a.requestId,
-              admission: execution.admission,
-              body: body(f.runId, a.requestId),
-            },
+            { requestId: a.requestId, admission: execution.admission, body: payload },
             { signal },
           );
           a.response = response.kind;
@@ -804,10 +831,14 @@ void test(
         } catch (error) {
           a.response = "error";
           a.error = safeError(error);
+          if (error instanceof GatewayError) {
+            a.safeCode = error.diagnostic?.code;
+          }
           a.preclaimRefused =
             error instanceof GatewayError &&
             error.code === "safe_error" &&
-            error.effect === "not_dispatched";
+            error.effect === "not_dispatched" &&
+            error.diagnostic?.code === "admission_limited";
         }
         a.finishedAt = Date.now();
         return a;
@@ -818,7 +849,7 @@ void test(
     }
     async function raw(execution: Execution, scenario: Scenario, mode: "held" | "flood") {
       const a = await newAttempt(execution, scenario, "raw-tcp", mode, 0),
-        endpoint = new URL(facadeOrigin);
+        endpoint = new URL(inferenceOrigin);
       const socket = connect({ host: "127.0.0.1", port: Number(endpoint.port) });
       rawSockets.add(socket);
       let first = true,
@@ -869,6 +900,7 @@ void test(
       });
       socket.once("connect", () => {
         const payload = body(f.runId, a.requestId);
+        a.startedAt = Date.now();
         socket.write(
           "POST /v1/executions/" +
             execution.executionRef +
@@ -937,6 +969,7 @@ void test(
       facadeOrigin = await freeOrigin();
       callbackOrigin = await freeOrigin();
       nativeOrigin = await freeOrigin();
+      inferenceOrigin = await freeOrigin();
       mkdirSync(join(f.root, "authority"), { mode: 0o700 });
       const profile = {
         profile: profileId,
@@ -1004,6 +1037,8 @@ void test(
       nativeConnection.searchParams.set("sslmode", "disable");
       const bootstrap = {
         listenAddress: new URL(nativeOrigin).host,
+        publicListenAddress: new URL(inferenceOrigin).host,
+        publicMaxActive,
         postgresDSN: nativeConnection.href,
         authority: { origin: callbackOrigin, credential: consumer.callbackCredential },
         custody: {
@@ -1053,6 +1088,9 @@ void test(
         node: process.version,
         network: f.network,
         bounds,
+        publicMaxActive,
+        profileLimits: limits,
+        dataRoute: "public-native-go",
         history: "fresh-reimplementation-no-inherited-receipts",
       });
       service = await startService(join(f.root, "service.json"));
@@ -1103,7 +1141,12 @@ void test(
         let outcome: Outcome = "pass";
         await t.test(
           scenario,
-          { timeout: Math.min(180_000, bounds.wallMs - (Date.now() - startedAt) - 10_000) },
+          {
+            timeout: Math.min(
+              scenario === "scale-streams" ? 600_000 : 180_000,
+              bounds.wallMs - (Date.now() - startedAt) - 10_000,
+            ),
+          },
           async () => {
             try {
               if (scenario === "smoke") {
@@ -1145,10 +1188,7 @@ void test(
                   groups.push({
                     offered: level,
                     completed: runs.filter((r) => r.attempt.effect === "completed").length,
-                    safeRefusals: runs.filter(
-                      (r) =>
-                        r.attempt.effect === "not_dispatched" || r.attempt.preclaimRefused === true,
-                    ).length,
+                    safeRefusals: runs.filter((r) => capacityRefusal(r.attempt)).length,
                   });
                   details.achieved = groups;
                 }
@@ -1253,7 +1293,7 @@ void test(
                   "cancel-provider-entry",
                 );
                 const original = await row(run.attempt.requestId);
-                check(Boolean(original?.transport_occupied), "cancel-original-occupied");
+                check(original?.transport_occupied === true, "cancel-original-occupied");
                 run.socket.destroy();
                 await until(() => run.ended, 3000, "raw-disconnect-close");
                 await drain([run.attempt]);
@@ -1264,6 +1304,7 @@ void test(
                 const client = createExecutionClient({
                   role: "execution",
                   origin: facadeOrigin,
+                  inferenceOrigin,
                   token: execution.bearer,
                 });
                 try {
@@ -1293,7 +1334,8 @@ void test(
                 sdk.attempt.intentionalCancel = "sdk-abort";
                 await until(
                   () =>
-                    Boolean(sdk.attempt.firstByteAt) &&
+                    sdk.attempt.firstByteAt !== undefined &&
+                    sdk.attempt.firstByteAt !== 0 &&
                     entries(upstream.events, sdk.attempt.requestId) === 1,
                   10_000,
                   "sdk-cancel-first-byte",
@@ -1396,35 +1438,20 @@ void test(
                 await drain([recovered.attempt]);
                 check(recovered.attempt.effect === "completed", "overload-fresh-request-recovers");
                 details.freshRecovery = true;
-              } else if (Object.is(scenario, "bearer-cap")) {
+              } else if (scenario === "bearer-churn") {
                 const beforeEntries = upstream.events.filter((e) => e.event === "entry").length,
                   issued: Execution[] = [];
-                let denied = 0;
-                for (let i = 0; i < bounds.capPreparations; i++) {
-                  try {
-                    issued.push(await prepare(accounts[i % accounts.length], true));
-                  } catch (error) {
-                    check(
-                      error instanceof GatewayError && error.code === "safe_error",
-                      "cap-explicit-safe-refusal",
-                    );
-                    denied++;
-                    if (denied === 4) {
-                      break;
-                    }
-                  }
+                for (let i = 0; i < bounds.churnPreparations; i++) {
+                  issued.push(await prepare(accounts[i % accounts.length], true));
                 }
-                check(denied === 4 && executionCount === 126, "finite-live-bearer-cap");
+                check(issued.length === 130 && executionCount > 128, "stateless-bearer-churn");
                 const durableExecutions = (
                   await kernel.query<{ n: number }>(
                     "SELECT count(*)::int AS n FROM ag_kernel.executions WHERE consumer=$1",
                     [consumerId],
                   )
                 ).rows[0].n;
-                check(
-                  durableExecutions <= 130 && durableExecutions === executionCount + denied,
-                  "cap-bounded-durable-executions",
-                );
+                check(durableExecutions === executionCount, "churn-exact-durable-executions");
                 const original = executions[31],
                   readback = await control.runAccess(original.prepare);
                 check(
@@ -1432,25 +1459,11 @@ void test(
                     readback.operation.state === "applied" &&
                     readback.operation.result?.kind === "execution" &&
                     readback.operation.result.executionRef === original.executionRef,
-                  "cap-preserves-original-bearer",
+                  "churn-preserves-original-bearer",
                 );
                 check(
                   upstream.events.filter((e) => e.event === "entry").length === beforeEntries,
-                  "cap-does-not-dispatch",
-                );
-                const deniedRefs = prepared
-                  .filter((p) => p.refused === true)
-                  .map((p) => p.executionRef);
-                check(
-                  deniedRefs.length === 4 &&
-                    deniedRefs.every(Boolean) &&
-                    (
-                      await kernel.query<{ n: number }>(
-                        "SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=ANY($2::uuid[])",
-                        [consumerId, deniedRefs],
-                      )
-                    ).rows[0].n === 0,
-                  "cap-refusals-have-no-request-effects",
+                  "churn-preparation-does-not-dispatch",
                 );
                 for (let index = 0; index < issued.length; index += 8) {
                   const runs = await Promise.all(
@@ -1464,13 +1477,218 @@ void test(
                   );
                 }
                 details.configuredBearers = 2;
-                details.liveExecutionBearers = executionCount;
-                details.capPreparations = capPreparations;
-                details.explicitRefusals = denied;
+                details.issuedExecutionBearers = executionCount;
+                details.churnPreparations = churnPreparations;
+                details.explicitRefusals = 0;
                 details.originalBearerPreserved = true;
                 details.durableExecutions = durableExecutions;
                 details.newBearersExecuted = issued.length;
-                details.refusedExecutionsRemainNoEffect = true;
+              } else if (scenario === "scale-streams") {
+                const achieved: Record<string, number>[] = [];
+                for (const level of [64, 256, 512, 1024]) {
+                  const held: Awaited<ReturnType<typeof launch>>[] = [],
+                    beganLevel = Date.now();
+                  try {
+                    // Deliberate admission pacing isolates live-stream capacity.
+                    // No rejected paid request is replayed or hidden from the receipt.
+                    for (let index = 0; index < level; index += 4) {
+                      const batch = await Promise.all(
+                        Array.from({ length: Math.min(4, level - index) }, (_, j) =>
+                          launch(executions[(index + j) % executions.length], scenario, "held"),
+                        ),
+                      );
+                      held.push(...batch);
+                      await until(
+                        () =>
+                          batch.every(
+                            (r) =>
+                              r.attempt.firstByteAt !== undefined && r.attempt.firstByteAt !== 0,
+                          ),
+                        10_000,
+                        "scale-stream-admission",
+                      );
+                    }
+                    const occupied = (
+                      await kernel.query<{ n: number }>(
+                        "SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1 AND transport_occupied",
+                        [consumerId],
+                      )
+                    ).rows[0].n;
+                    check(
+                      occupied === level &&
+                        held.every((r) => entries(upstream.events, r.attempt.requestId) === 1),
+                      "scale-exact-held-streams",
+                    );
+                    const controlAt = Date.now();
+                    check(
+                      (await control.get(accounts[0])).accountRef === accounts[0],
+                      "scale-control-progress",
+                    );
+                    const controlMs = Date.now() - controlAt,
+                      holdMs = level === 1024 ? 60_000 : 3000;
+                    let maximumControlMs = controlMs;
+                    const heldAt = Date.now();
+                    do {
+                      await delay(Math.min(10_000, Math.max(0, holdMs - (Date.now() - heldAt))));
+                      const progressAt = Date.now();
+                      check(
+                        (await control.get(accounts[0])).accountRef === accounts[0],
+                        "scale-held-control-progress",
+                      );
+                      maximumControlMs = Math.max(maximumControlMs, Date.now() - progressAt);
+                      check(
+                        (
+                          await kernel.query<{ n: number }>(
+                            "SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1 AND transport_occupied",
+                            [consumerId],
+                          )
+                        ).rows[0].n === level,
+                        "scale-held-occupancy",
+                      );
+                      await sample();
+                    } while (Date.now() - heldAt < holdMs);
+                    check(
+                      held.every(
+                        (r) => r.attempt.finishedAt === undefined || r.attempt.finishedAt === 0,
+                      ),
+                      "scale-streams-remain-open",
+                    );
+                    const releaseAt = Date.now();
+                    // Simultaneous completion exercises bounded settlement queuing.
+                    for (const run of held) {
+                      upstream.release(run.attempt.requestId);
+                    }
+                    await Promise.all(held.map((r) => r.work));
+                    await drain(held.map((r) => r.attempt));
+                    requireCompletions(
+                      held.map((r) => r.attempt),
+                      level,
+                    );
+                    achieved.push({
+                      streams: level,
+                      admissionMs: heldAt - beganLevel,
+                      holdMs: releaseAt - heldAt,
+                      controlMs,
+                      maximumControlMs,
+                      completionBurstMs: Date.now() - releaseAt,
+                      completed: held.filter((r) => r.attempt.effect === "completed").length,
+                    });
+                  } finally {
+                    for (const run of held) {
+                      upstream.release(run.attempt.requestId);
+                    }
+                    await Promise.all(held.map((r) => r.work));
+                  }
+                }
+                details.achieved = achieved;
+                details.publicMaxActive = publicMaxActive;
+                details.accountConcurrency = limits.concurrency;
+              } else if (scenario === "scale-arrivals" || scenario === "sustained-arrivals") {
+                const achieved: Record<string, number>[] = [];
+                const sustained = scenario === "sustained-arrivals",
+                  controlSamples: number[] = [];
+                const steps = sustained
+                  ? [{ rate: 50, durationMs: 60_000 }]
+                  : [50, 100, 250, 500, 1000].map((rate) => ({ rate, durationMs: 2000 }));
+                for (const { rate, durationMs } of steps) {
+                  const runs: Promise<Awaited<ReturnType<typeof launch>>>[] = [],
+                    start = Date.now();
+                  for (let i = 0; i < (rate * durationMs) / 1000; i++) {
+                    const offeredAt = start + Math.floor((i * 1000) / rate);
+                    await delay(Math.max(0, offeredAt - Date.now()));
+                    if (sustained && i > 0 && i % (rate * 10) === 0) {
+                      const controlAt = Date.now();
+                      check(
+                        (await control.get(accounts[0])).accountRef === accounts[0],
+                        "sustained-control-progress",
+                      );
+                      controlSamples.push(Date.now() - controlAt);
+                    }
+                    runs.push(
+                      launch(
+                        executions[i % executions.length],
+                        scenario,
+                        "complete",
+                        250,
+                        offeredAt,
+                      ),
+                    );
+                  }
+                  const started = await Promise.all(runs);
+                  await Promise.all(started.map((r) => r.work));
+                  await drain(started.map((r) => r.attempt));
+                  requireCompletions(started.map((r) => r.attempt));
+                  achieved.push(
+                    arrivalObservation(
+                      started.map((r) => r.attempt),
+                      rate,
+                      start,
+                      Date.now(),
+                    ),
+                  );
+                  if (sustained) {
+                    const windows: Record<string, number>[] = [];
+                    for (let offset = 0; offset < durationMs; offset += 10_000) {
+                      const group = started
+                        .slice((rate * offset) / 1000, (rate * (offset + 10_000)) / 1000)
+                        .map((r) => r.attempt);
+                      requireCompletions(group);
+                      // Eventual cohort completion cannot prove continuity: count
+                      // successful terminal delivery inside the actual wall interval.
+                      const completedDuringWindow = started.filter(
+                        ({ attempt: a }) =>
+                          a.effect === "completed" &&
+                          a.validatedStream === true &&
+                          a.finishedAt !== undefined &&
+                          a.finishedAt >= start + offset &&
+                          a.finishedAt < start + offset + 10_000,
+                      ).length;
+                      check(completedDuringWindow > 0, "sustained-window-durable-progress");
+                      windows.push({
+                        windowStartMs: offset,
+                        completedDuringWindow,
+                        ...arrivalObservation(
+                          group,
+                          rate,
+                          start + offset,
+                          Math.max(
+                            start + offset + 10_000,
+                            ...group.map((a) => a.finishedAt ?? Date.now()),
+                          ),
+                        ),
+                      });
+                    }
+                    details.windows = windows;
+                    details.maximumControlMs = Math.max(0, ...controlSamples);
+                    details.controlChecks = controlSamples.length;
+                  }
+                }
+                details.achieved = achieved;
+                details.interpretation = sustained
+                  ? "one-minute-continuity-with-measured-completions-and-safe-refusals"
+                  : "arrival-overload-characterization-not-1000-rps-capacity-claim";
+              } else if (Object.is(scenario, "large-context")) {
+                const achieved: Record<string, number>[] = [];
+                for (const level of [1, 8, 32, 64]) {
+                  const start = Date.now(),
+                    runs = await Promise.all(
+                      Array.from({ length: level }, (_, i) =>
+                        launch(executions[i % executions.length], scenario, "complete", 250),
+                      ),
+                    );
+                  await Promise.all(runs.map((r) => r.work));
+                  await drain(runs.map((r) => r.attempt));
+                  requireCompletions(runs.map((r) => r.attempt));
+                  achieved.push({
+                    concurrentOffers: level,
+                    requestBodyBytes: body(f.runId, runs[0].attempt.requestId, 1_000_000).length,
+                    completed: runs.filter((r) => r.attempt.effect === "completed").length,
+                    safeRefusals: runs.filter((r) => capacityRefusal(r.attempt)).length,
+                    elapsedMs: Date.now() - start,
+                  });
+                }
+                details.achieved = achieved;
+                details.interpretation = "large-context-synchronized-offer-characterization";
               }
               const group = attempts.slice(before);
               await drain(group);
@@ -1579,6 +1797,7 @@ void test(
       }
       clearInterval(sampleTimer);
       await samplingWork;
+      eventLoop.disable();
       await upstream.stop().catch(() => {
         setupFailure ??= "provider-stop";
       });
@@ -1654,7 +1873,10 @@ void test(
         expectedScenarios: selected,
         attempts: attempts.length,
         executionBearers: executionCount,
-        capPreparations,
+        churnPreparations,
+        publicMaxActive,
+        profileLimits: limits,
+        dataRoute: "public-native-go",
         accounts: accounts.length,
         totalConsumerBytes: totalBytes,
         artifactBytes,

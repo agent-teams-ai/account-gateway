@@ -21,6 +21,8 @@ import type {
   AccountIntent,
   AccountStatus,
   OperationStatus,
+  SavedExecution,
+  DispatchSnapshot,
   ResumeCustodyAuthority,
   AccountCustodyIdentity,
   AccountLimitsIdentity,
@@ -43,9 +45,20 @@ import type {
   NativeBinding,
 } from "./domain.ts";
 import { compactSafePayloads } from "./retention.ts";
+import { requestBoundNonce } from "./native-reservation.ts";
 import { sharedCheckout } from "./service-admission.ts";
 import type { Checkout } from "./service-admission.ts";
 
+type ReadTx = { db: PoolClient; consumer: string };
+export interface PostgresKernelOptions {
+  // Captured on new executions. Absence keeps permanent legacy readback.
+  readonly requestReadbackRetentionMs?: number;
+  // Trusted qualified profile caps; execution callers cannot supply this map.
+  readonly accountConcurrencyByProfile?: readonly {
+    readonly profile: string;
+    readonly concurrency: number;
+  }[];
+}
 // Scalar shapes follow SQL001/002/003/005/007 and pg's default parsers:
 // UUID/text -> string, int8 -> string, timestamptz -> Date. JSON stays unknown.
 type AccountRow = {
@@ -103,6 +116,7 @@ type ExecutionRow = {
   max_tokens: number;
   request_count: number;
   state: ExecutionStatus["state"];
+  request_details_retired_at: Date | null;
 };
 type RequestRow = {
   execution_ref: string;
@@ -132,7 +146,7 @@ type NativeRow = Pick<
 type TransportRow = NativeRow &
   Pick<RequestRow, "execution_ref" | "id" | "worker" | "closure_token">;
 type DescriptorRow = { generation: string; native_identity: string | null; profile: string | null };
-type Tx = { db: PoolClient; consumer: string; issuer: string };
+type Tx = ReadTx & { issuer: string };
 const object = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 const record = (value: unknown): value is Record<string, unknown> =>
@@ -370,19 +384,63 @@ const capturePermittedAccounts = (value: unknown): string[] => {
   return copy;
 };
 
-// One consumer row is the explicit serialization lock for policy fences,
-// account routes and execution claims. No native calls occur inside transactions.
-// This intentionally trades per-consumer throughput for a small auditable kernel.
+// Mutations serialize per consumer; snapshots never acquire mutation locks.
+// SQL009 orders advisory consumer identity, consumer row, account row, then the
+// service budget. Only actual charging/growth/tightening locks that final row.
+// No native calls occur inside transactions.
 export class PostgresKernel implements DurableKernel {
   private readonly checkout: Checkout;
   private readonly bounds: Readonly<Bounds>;
   private readonly facts: Readonly<DurableFactBounds>;
-  constructor(pool: Pool, bounds: Bounds = defaults, facts: DurableFactBounds = factDefaults) {
+  private readonly requestReadbackRetentionMs?: number;
+  private readonly accountConcurrencyByProfile?: ReadonlyMap<string, number>;
+  constructor(
+    pool: Pool,
+    bounds: Bounds = defaults,
+    facts: DurableFactBounds = factDefaults,
+    options: PostgresKernelOptions = {},
+  ) {
     this.checkout = sharedCheckout(pool);
     this.bounds = boundedConfig(bounds);
     this.facts = boundedFacts(facts);
+    const retention = options.requestReadbackRetentionMs;
+    if (retention !== undefined) {
+      integer(retention, 31_536_000_000);
+    }
+    this.requestReadbackRetentionMs = retention;
+    if (options.accountConcurrencyByProfile !== undefined) {
+      const source = options.accountConcurrencyByProfile;
+      if (!Array.isArray(source) || !source.length || source.length > 128) {
+        throw new KernelError("invalid");
+      }
+      const caps = new Map<string, number>();
+      for (const candidate of source) {
+        const entry: unknown = candidate;
+        if (
+          typeof entry !== "object" ||
+          entry === null ||
+          !("profile" in entry) ||
+          !("concurrency" in entry)
+        ) {
+          throw new KernelError("invalid");
+        }
+        const profile = entry.profile,
+          concurrency = entry.concurrency;
+        identifier(profile, 64);
+        integer(concurrency, Math.min(64, this.bounds.maxConcurrent));
+        if (caps.has(profile)) {
+          throw new KernelError("invalid");
+        }
+        caps.set(profile, concurrency);
+      }
+      this.accountConcurrencyByProfile = caps;
+    }
   }
-  private async transaction<T>(context: TrustedContext, body: (tx: Tx) => Promise<T>): Promise<T> {
+  private async session<T>(
+    context: TrustedContext,
+    readOnly: boolean,
+    body: (tx: Tx) => Promise<T>,
+  ): Promise<T> {
     const consumer = context.consumerId;
     identifier(consumer);
     let db: PoolClient | undefined;
@@ -396,60 +454,28 @@ export class PostgresKernel implements DurableKernel {
       // Pool error handlers cover idle clients; this transaction owns the
       // borrowed client's fatal error event until release installs that handler.
       db.on("error", onClientError);
-      await db.query("BEGIN");
+      await db.query(readOnly ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY" : "BEGIN");
       await db.query("SET LOCAL search_path = ag_kernel, pg_catalog");
-      // Global final-slot accounting has one explicit lock order: budget, then
-      // consumer. Limits may tighten, never silently reopen saturated history.
-      await db.query("SELECT singleton FROM fact_budget WHERE singleton FOR UPDATE");
-      await db.query("UPDATE fact_budget SET capacity=least(capacity,$1) WHERE singleton", [
-        this.facts.maxServiceFacts,
-      ]);
-      await db.query(
-        `INSERT INTO consumers(consumer,fact_limit,account_fact_limit,worker_slots,issuer_slots)
-        VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
-        [
-          consumer,
-          this.facts.maxConsumerFacts,
-          this.facts.maxAccountFacts,
-          this.facts.workerSlots,
-          this.facts.issuerSlots,
-        ],
-      );
-      const r = await db.query<{ issuer: string; worker_slots: number }>(
-        "SELECT issuer,worker_slots FROM consumers WHERE consumer=$1 FOR UPDATE",
-        [consumer],
-      );
-      const consumerRow = r.rows.at(0);
-      if (consumerRow === undefined) {
-        throw new KernelError("unavailable");
-      }
-      await db.query(
-        `UPDATE consumers SET fact_limit=least(fact_limit,$2),account_fact_limit=least(account_fact_limit,$3)
-        WHERE consumer=$1`,
-        [consumer, this.facts.maxConsumerFacts, this.facts.maxAccountFacts],
-      );
-      // Worker slots prepay durable identities, including expired owners retained
-      // by accepted history. Grow only after charging the same locked budget;
-      // retries and smaller configurations never refund or erase those facts.
-      const additionalWorkerSlots = this.facts.workerSlots - consumerRow.worker_slots;
-      if (additionalWorkerSlots > 0) {
-        const charged = await db.query<{ charged: boolean }>(
-          "SELECT charge_facts($1,NULL,$2) AS charged",
-          [consumer, additionalWorkerSlots],
+      let issuer = "";
+      if (!readOnly) {
+        const opened = await db.query<{ issuer: string }>(
+          "SELECT open_consumer($1,$2,$3,$4,$5,$6) AS issuer",
+          [
+            consumer,
+            this.facts.maxServiceFacts,
+            this.facts.maxConsumerFacts,
+            this.facts.maxAccountFacts,
+            this.facts.workerSlots,
+            this.facts.issuerSlots,
+          ],
         );
-        if (charged.rows.at(0)?.charged !== true) {
-          throw new KernelError("denied");
+        const observed = opened.rows.at(0);
+        if (observed === undefined) {
+          throw new KernelError("unavailable");
         }
-        await db.query("UPDATE consumers SET worker_slots=$2 WHERE consumer=$1", [
-          consumer,
-          this.facts.workerSlots,
-        ]);
+        issuer = observed.issuer;
       }
-      await db.query(
-        "INSERT INTO issuer_epochs(consumer,issuer) VALUES ($1,$2) ON CONFLICT DO NOTHING",
-        [consumer, consumerRow.issuer],
-      );
-      const result = await body({ db, consumer, issuer: consumerRow.issuer });
+      const result = await body({ db, consumer, issuer });
       if (clientFailed()) {
         throw new KernelError("unavailable");
       }
@@ -488,8 +514,14 @@ export class PostgresKernel implements DurableKernel {
       }
     }
   }
+  private transaction<T>(context: TrustedContext, body: (tx: Tx) => Promise<T>): Promise<T> {
+    return this.session(context, false, body);
+  }
+  private read<T>(context: TrustedContext, body: (tx: ReadTx) => Promise<T>): Promise<T> {
+    return this.session(context, true, body);
+  }
   private async one<R extends QueryResultRow>(
-    tx: Tx,
+    tx: ReadTx,
     sql: string,
     values: readonly unknown[],
   ): Promise<R> {
@@ -528,7 +560,7 @@ export class PostgresKernel implements DurableKernel {
       [tx.consumer, id, JSON.stringify(intent), account ?? null, execution ?? null],
     );
   }
-  private async op(tx: Tx, id: string): Promise<OperationStatus> {
+  private async op(tx: ReadTx, id: string): Promise<OperationStatus> {
     return operationStatus(
       await this.one<OperationRow>(tx, "SELECT * FROM operations WHERE consumer=$1 AND id=$2", [
         tx.consumer,
@@ -565,7 +597,7 @@ export class PostgresKernel implements DurableKernel {
   }
   async account(context: TrustedContext, ref: string): Promise<AccountStatus> {
     uuid(ref);
-    return this.transaction(context, async (tx) => {
+    return this.read(context, async (tx) => {
       const r = await this.one<AccountRow>(
         tx,
         "SELECT * FROM accounts WHERE consumer=$1 AND ref=$2",
@@ -580,7 +612,7 @@ export class PostgresKernel implements DurableKernel {
     ref: string,
   ): Promise<AccountLimitsIdentity> {
     uuid(ref);
-    return this.transaction(context, async (tx) => {
+    return this.read(context, async (tx) => {
       const r = await this.one<AccountRow & { active_generation: string; native_identity: string }>(
         tx,
         `SELECT a.*,c.native_identity FROM accounts a
@@ -599,7 +631,7 @@ export class PostgresKernel implements DurableKernel {
   }
   async accountCustody(context: TrustedContext, ref: string): Promise<AccountCustodyIdentity> {
     uuid(ref);
-    return this.transaction(context, async (tx) => {
+    return this.read(context, async (tx) => {
       const r = await this.one<{
         active_generation: string;
         revision: number;
@@ -634,7 +666,7 @@ export class PostgresKernel implements DurableKernel {
     // UUID keyset cursor is an ordering boundary, never a foreign-reference lookup.
     const owner = ownerRef ?? null,
       cursor = after ?? null;
-    return this.transaction(context, async (tx) => {
+    return this.read(context, async (tx) => {
       const page = await tx.db.query<AccountRow>(
         `SELECT * FROM accounts WHERE consumer=$1
         AND ($2::text IS NULL OR owner_ref=$2) AND ($3::uuid IS NULL OR ref>$3)
@@ -651,7 +683,7 @@ export class PostgresKernel implements DurableKernel {
   }
   async operation(context: TrustedContext, id: string): Promise<OperationStatus> {
     identifier(id);
-    return this.transaction(context, (tx) => this.op(tx, id));
+    return this.read(context, (tx) => this.op(tx, id));
   }
   // Fresh reauthorization may replace fully erased generations without undoing
   // disable's epoch fence. The current operation/candidate is excluded only
@@ -1234,9 +1266,9 @@ export class PostgresKernel implements DurableKernel {
           await tx.db.query<ExecutionRow>(
             `INSERT INTO executions(consumer,ref,invocation,attempt_ref,intent,account_ref,account_epoch,
           generation,policy_subject,policy_revision,issuer,policy_fence,deadline,max_requests,max_concurrent,
-          binding_revision,profile,max_request_bytes,max_output_bytes,max_tokens,state)
+          binding_revision,profile,max_request_bytes,max_output_bytes,max_tokens,state,request_readback_retention_ms)
           VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,
-            (SELECT fence FROM policy_fences WHERE consumer=$1 AND subject=$9),$12,$13,$14,$15,$16,$17,$18,$19,'open') RETURNING *`,
+            (SELECT fence FROM policy_fences WHERE consumer=$1 AND subject=$9),$12,$13,$14,$15,$16,$17,$18,$19,'open',$20) RETURNING *`,
             [
               tx.consumer,
               randomUUID(),
@@ -1257,6 +1289,7 @@ export class PostgresKernel implements DurableKernel {
               limits.requestBytes,
               limits.outputBytes,
               limits.tokens,
+              this.requestReadbackRetentionMs ?? null,
             ],
           )
         ).rows.at(0);
@@ -1274,7 +1307,7 @@ export class PostgresKernel implements DurableKernel {
   }
   async execution(context: TrustedContext, ref: string): Promise<ExecutionStatus> {
     uuid(ref);
-    return this.transaction(context, async (tx) => {
+    return this.read(context, async (tx) => {
       const e = await this.one<ExecutionRow>(
         tx,
         "SELECT * FROM executions WHERE consumer=$1 AND ref=$2",
@@ -1292,58 +1325,118 @@ export class PostgresKernel implements DurableKernel {
   async request(context: TrustedContext, ref: string, id: string): Promise<RequestStatus> {
     uuid(ref);
     identifier(id);
-    return this.transaction(context, async (tx) =>
+    return this.read(context, async (tx) =>
       requestStatus(
         await this.one<RequestRow>(
           tx,
-          "SELECT * FROM requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
+          `SELECT r.* FROM requests r JOIN executions e ON e.consumer=r.consumer AND e.ref=r.execution_ref
+        WHERE r.consumer=$1 AND r.execution_ref=$2 AND r.id=$3 AND e.request_details_retired_at IS NULL`,
           [tx.consumer, ref, id],
         ),
       ),
     );
   }
-  async savedExecution(
+  private saved(e: ExecutionRow & { allowed: boolean | null }): SavedExecution {
+    return {
+      generation: e.generation,
+      state: e.state,
+      dispatchAllowed: e.allowed === true,
+      admission: {
+        executionRef: e.ref,
+        issuerEpoch: e.issuer,
+        invocationRef: e.invocation,
+        attemptRef: e.attempt_ref,
+        accountRef: e.account_ref,
+        authorizationEpoch: e.account_epoch,
+        subjectRef: e.policy_subject,
+        policyRevision: Number(e.policy_revision),
+        bindingRevision: Number(e.binding_revision),
+        profileId: e.profile,
+        limits: executionLimits(e),
+        expiresAt: e.deadline.toISOString(),
+      },
+    };
+  }
+  private readonly executionSnapshotSql = `SELECT e.*, i.issuer AS current_issuer,
+      (e.state='open' AND e.issuer=i.issuer
+      AND e.deadline>clock_timestamp() AND a.state='active' AND a.epoch=e.account_epoch
+      AND a.active_generation=e.generation AND a.profile=e.profile AND c.state='ready' AND c.profile=e.profile
+      AND (f.revision<e.policy_revision OR (f.revision=e.policy_revision AND f.fence=e.policy_fence))) AS allowed
+      FROM executions e JOIN accounts a ON a.consumer=e.consumer AND a.ref=e.account_ref
+      JOIN candidates c ON c.consumer=e.consumer AND c.generation=e.generation
+      JOIN policy_fences f ON f.consumer=e.consumer AND f.subject=e.policy_subject
+      JOIN consumers i ON i.consumer=e.consumer`;
+  async savedExecution(context: TrustedContext, ref: string): Promise<SavedExecution> {
+    uuid(ref);
+    return this.read(context, async (tx) =>
+      this.saved(
+        await this.one<ExecutionRow & { allowed: boolean | null }>(
+          tx,
+          `${this.executionSnapshotSql} WHERE e.consumer=$1 AND e.ref=$2`,
+          [tx.consumer, ref],
+        ),
+      ),
+    );
+  }
+  async dispatchSnapshot(
     context: TrustedContext,
     ref: string,
-  ): Promise<import("./domain.ts").SavedExecution> {
+    worker: string,
+    id?: string,
+  ): Promise<DispatchSnapshot> {
     uuid(ref);
-    return this.transaction(context, async (tx) => {
-      const e = await this.one<ExecutionRow & { allowed: boolean | null }>(
+    uuid(worker);
+    if (id !== undefined) {
+      identifier(id);
+    }
+    return this.read(context, async (tx) => {
+      const e = await this.one<
+        ExecutionRow & {
+          allowed: boolean | null;
+          current_issuer: string;
+          worker_lease: Date;
+          request: RequestRow | null;
+        }
+      >(
         tx,
-        `SELECT e.*, (e.state='open' AND e.issuer=$3
-        AND e.deadline>clock_timestamp() AND a.state='active' AND a.epoch=e.account_epoch
-        AND a.active_generation=e.generation AND a.profile=e.profile AND c.state='ready' AND c.profile=e.profile
-        AND (f.revision<e.policy_revision OR (f.revision=e.policy_revision AND f.fence=e.policy_fence))) AS allowed
-        FROM executions e JOIN accounts a ON a.consumer=e.consumer AND a.ref=e.account_ref
-        JOIN candidates c ON c.consumer=e.consumer AND c.generation=e.generation
-        JOIN policy_fences f ON f.consumer=e.consumer AND f.subject=e.policy_subject
-        WHERE e.consumer=$1 AND e.ref=$2`,
-        [tx.consumer, ref, tx.issuer],
+        `SELECT snapshot.*,w.lease_until AS worker_lease,
+        to_jsonb(r) AS request FROM (${this.executionSnapshotSql}
+          WHERE e.consumer=$1 AND e.ref=$2) snapshot
+        JOIN workers w ON w.consumer=$1 AND w.worker=$3 AND w.lease_until>clock_timestamp()
+        LEFT JOIN requests r ON r.consumer=$1 AND r.execution_ref=$2 AND r.id=$4 AND snapshot.request_details_retired_at IS NULL`,
+        [tx.consumer, ref, worker, id ?? null],
       );
+      const request = e.request;
+      if (id !== undefined && !request) {
+        throw new KernelError("unknown");
+      }
       return {
-        generation: e.generation,
-        state: e.state,
-        dispatchAllowed: e.allowed === true,
-        admission: {
-          executionRef: e.ref,
-          issuerEpoch: e.issuer,
-          invocationRef: e.invocation,
-          attemptRef: e.attempt_ref,
-          accountRef: e.account_ref,
-          authorizationEpoch: e.account_epoch,
-          subjectRef: e.policy_subject,
-          policyRevision: Number(e.policy_revision),
-          bindingRevision: Number(e.binding_revision),
-          profileId: e.profile,
-          limits: executionLimits(e),
-          expiresAt: e.deadline.toISOString(),
-        },
+        saved: this.saved(e),
+        issuerEpoch: e.current_issuer,
+        workerLeaseExpiresAt: e.worker_lease.toISOString(),
+        ...(request
+          ? {
+              status: requestStatus(request),
+              ...(request.closure_token !== null &&
+              request.closure_token !== "" &&
+              request.native_origin_ref !== null &&
+              request.native_origin_ref !== "" &&
+              request.engine_incarnation !== null &&
+              request.engine_incarnation !== "" &&
+              request.request_nonce !== null &&
+              request.request_nonce !== "" &&
+              request.descriptor_generation !== null &&
+              request.descriptor_generation !== ""
+                ? { proof: dispatchProof(request) }
+                : {}),
+            }
+          : {}),
       };
     });
   }
   async currentWorkerLease(context: TrustedContext, worker: string): Promise<string> {
     uuid(worker);
-    return this.transaction(context, async (tx) => {
+    return this.read(context, async (tx) => {
       const r = await this.one<{ lease_until: Date }>(
         tx,
         `SELECT lease_until FROM workers WHERE consumer=$1 AND worker=$2
@@ -1360,12 +1453,13 @@ export class PostgresKernel implements DurableKernel {
   ): Promise<NativeDispatchProof | undefined> {
     uuid(ref);
     identifier(id);
-    return this.transaction(context, async (tx) => {
+    return this.read(context, async (tx) => {
       const r = await this.one<TransportRow>(
         tx,
-        `SELECT execution_ref,id,worker,closure_token,native_origin_ref,
-        engine_incarnation,request_nonce,descriptor_generation FROM requests
-        WHERE consumer=$1 AND execution_ref=$2 AND id=$3`,
+        `SELECT r.execution_ref,r.id,r.worker,r.closure_token,r.native_origin_ref,
+        r.engine_incarnation,r.request_nonce,r.descriptor_generation FROM requests r
+        JOIN executions e ON e.consumer=r.consumer AND e.ref=r.execution_ref
+        WHERE r.consumer=$1 AND r.execution_ref=$2 AND r.id=$3 AND e.request_details_retired_at IS NULL`,
         [tx.consumer, ref, id],
       );
       return r.closure_token !== null &&
@@ -1416,6 +1510,13 @@ export class PostgresKernel implements DurableKernel {
     identifier(id);
     uuid(worker);
     uuid(admission.issuerEpoch);
+    context = { consumerId: context.consumerId };
+    if (
+      reservation.requestNonce[14] === "8" &&
+      reservation.requestNonce !== requestBoundNonce(context, reservation, ref, id)
+    ) {
+      throw new KernelError("denied");
+    }
     uuid(admission.executionRef);
     uuid(admission.accountRef);
     identifier(admission.subjectRef);
@@ -1438,6 +1539,14 @@ export class PostgresKernel implements DurableKernel {
     const exactExpiry = !/[1-9]/.test(fraction.slice(3));
     admission = { ...admission, limits: approvedLimits(admission.limits, this.bounds) };
     return this.transaction(context, async (tx) => {
+      const e = await this.one<ExecutionRow>(
+        tx,
+        "SELECT * FROM executions WHERE consumer=$1 AND ref=$2",
+        [tx.consumer, ref],
+      );
+      if (e.request_details_retired_at !== null) {
+        throw new KernelError("denied");
+      }
       const previous = await tx.db.query<RequestRow>(
         "SELECT * FROM requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
         [tx.consumer, ref, id],
@@ -1446,11 +1555,6 @@ export class PostgresKernel implements DurableKernel {
       if (previousRequest !== undefined) {
         return { status: requestStatus(previousRequest) };
       }
-      const e = await this.one<ExecutionRow>(
-        tx,
-        "SELECT * FROM executions WHERE consumer=$1 AND ref=$2",
-        [tx.consumer, ref],
-      );
       // All generations/states of this consumer/account share occupancy. The
       // hard ceiling is 128; overfull legacy accounts remain conservatively denied.
       const ownerLost = await this.reconcileRequests(tx, ref, 128, e.account_ref);
@@ -1532,7 +1636,9 @@ export class PostgresKernel implements DurableKernel {
           code = "limit";
         } else if (
           occupied.execution_n >= e.max_concurrent ||
-          occupied.account_n >= this.bounds.maxConcurrent
+          occupied.account_n >=
+            (this.accountConcurrencyByProfile?.get(e.profile) ??
+              (this.accountConcurrencyByProfile ? 0 : this.bounds.maxConcurrent))
         ) {
           code = "concurrency_limit";
         }
@@ -2071,7 +2177,7 @@ export class PostgresKernel implements DurableKernel {
       return { cleanupRef: j.ref, token, scope };
     });
   }
-  private async transports(tx: Tx, ref: string): Promise<readonly TransportClosure[]> {
+  private async transports(tx: ReadTx, ref: string): Promise<readonly TransportClosure[]> {
     const r = await tx.db.query<TransportRow>(
       `SELECT execution_ref,id,worker,closure_token,native_origin_ref,engine_incarnation,request_nonce,descriptor_generation FROM requests
       WHERE consumer=$1 AND execution_ref=$2 AND transport_occupied ORDER BY (native_origin_ref IS NULL),(closure_token IS NULL),id LIMIT $3`,
@@ -2088,7 +2194,7 @@ export class PostgresKernel implements DurableKernel {
     uuid(ref);
     uuid(worker);
     uuid(token);
-    return this.transaction(context, async (tx) => {
+    return this.read(context, async (tx) => {
       const j = (
         await tx.db.query<{ execution_ref: string }>(
           `SELECT execution_ref FROM cleanup WHERE consumer=$1 AND ref=$2
@@ -2114,7 +2220,7 @@ export class PostgresKernel implements DurableKernel {
     uuid(ref);
     uuid(worker);
     uuid(token);
-    return this.transaction(context, async (tx) => {
+    return this.read(context, async (tx) => {
       const j = (
         await tx.db.query<{ expires: string }>(
           `SELECT to_char(lease_until AT TIME ZONE 'UTC',

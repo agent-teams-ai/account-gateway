@@ -33,6 +33,13 @@ import {
 import { KernelError } from "../src/domain.ts";
 import type { NativeDispatchProof, PrivateAdmission } from "../src/domain.ts";
 import type { Descriptor, Receipt } from "../src/native-wire.ts";
+import {
+  descriptor as nativeDescriptor,
+  object as nativeObject,
+  proof as nativeProof,
+} from "../src/native-wire.ts";
+import { PostgresUsageJournal } from "../src/usage.ts";
+import { requestBoundNonce } from "../src/native-reservation.ts";
 
 let pool: Pool;
 // Each synthetic creation has its own native identity, as the native DB sequence does.
@@ -1040,15 +1047,15 @@ void test(
         held.map((client) => client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")),
       );
       assert.equal(
-        new Set(backends.map((result) => result.rows[0].pid)).size,
+        new Set(backends.map((result) => result.rows.at(0)?.pid)).size,
         6,
         "six real physical data clients",
       );
       for (let n = 0; n < 8; n++) {
-        const pending = inServiceLane("data", checkout).then((client) => {
+        const pending = (async () => {
+          const client = await inServiceLane("data", checkout);
           client.release();
-          return;
-        });
+        })();
         void pending.catch(() => {});
         waiting.push(pending);
       }
@@ -2154,3 +2161,326 @@ void test(
     }
   },
 );
+
+async function publicExecutionFixture(
+  selectedProfile = {
+    profile: "openrouter-openai-responses-apikey-v1",
+    baseURL: "https://openrouter.ai/api/v1",
+    model: "openai/gpt-5.4-mini",
+    qualificationRef: "synthetic-public-metadata",
+  },
+) {
+  const context = { consumerId: "public-native-" + randomUUID() };
+  const worker = randomUUID(),
+    incarnation = randomUUID();
+  const kernel = new PostgresKernel(pool);
+  const store = new PostgresManagementStore(
+    pool,
+    new IntentSecrets(randomBytes(32), randomBytes(32)),
+  );
+  const usage = new PostgresUsageJournal(pool, randomBytes(32));
+  await kernel.heartbeat(context, worker);
+  const operationId = randomUUID();
+  const account = await kernel.beginAccount(context, {
+    operationId,
+    kind: "create",
+    intentDigest: "synthetic-public-account",
+    ownerRef: "synthetic-public-owner",
+    profile: selectedProfile.profile,
+    displayName: "Fixture",
+  });
+  assert.ok(isNonemptyString(account.accountRef));
+  const candidate = await kernel.startCandidate(context, operationId, worker);
+  assert.ok(candidate);
+  const journal = await store.journal(
+    {
+      consumerId: context.consumerId,
+      operationId,
+      accountRef: account.accountRef,
+      ownerRef: "synthetic-public-owner",
+      purpose: "create",
+    },
+    candidate.candidate,
+    worker,
+    selectedProfile,
+  );
+  const physical = {
+    generation: candidate.candidate,
+    nativePhysicalIdentity: candidate.candidate,
+    nativeId: nextNativeAccountId++,
+    createdAt: "2026-10-03T04:05:06.123456789Z",
+    profile: selectedProfile.profile,
+    baseURL: selectedProfile.baseURL,
+    model: selectedProfile.model,
+  };
+  await store.saveMapping({ ...journal, descriptor: physical });
+  await kernel.acknowledgeCandidate(context, operationId, worker, physical);
+  const prepared = await kernel.prepare(context, {
+    operationId: randomUUID(),
+    intentDigest: "synthetic-public-approval",
+    invocationRef: "public-invocation-" + randomUUID(),
+    attemptRef: "public-attempt",
+    permittedAccounts: [account.accountRef],
+    profile: selectedProfile.profile,
+    policySubject: "synthetic-public-policy",
+    policyRevision: 2,
+    bindingRevision: 3,
+    issuerEpoch: await kernel.issuer(context),
+    deadline: new Date(Date.now() + 45_000),
+    limits,
+  });
+  assert.ok(isNonemptyString(prepared.executionRef));
+  const saved = await kernel.savedExecution(context, prepared.executionRef);
+  const controlToken = "synthetic-public-control-" + randomUUID();
+  const bearers = new FacadeBearers([
+    {
+      token: controlToken,
+      role: "consumer-control",
+      consumerId: context.consumerId,
+      profileIds: [selectedProfile.profile],
+      limits,
+      maxRunMs: 60_000,
+    },
+  ]);
+  bearers.configureExecutionKey(randomBytes(32));
+  const control = bearers.resolve(controlToken);
+  assert.ok(control);
+  assert.equal(control.role, "consumer-control");
+  const executionBearer = bearers.upsertExecution(control, saved);
+  const authority = new NativeAuthority({
+    kernel,
+    store,
+    usage,
+    executionBearers: bearers,
+    config: {
+      origin: "http://127.0.0.1:1",
+      enrollment: {
+        originRef: "synthetic-public-origin",
+        engineIncarnation: incarnation,
+        worker,
+        qualificationRef: selectedProfile.qualificationRef,
+      },
+      consumers: [{ consumerId: context.consumerId, ...credentials }],
+      profiles: [
+        {
+          ...selectedProfile,
+          requestBytes: limits.requestBytes,
+          outputBytes: limits.outputBytes,
+          tokens: limits.tokens,
+          providerTokenUpperBound: 1000,
+        },
+      ],
+    },
+  });
+  const server = authority.createServer();
+  const origin = await listen(server);
+  const requestRef = randomUUID();
+  const native = {
+    originRef: authority.configuration.enrollment.originRef,
+    engineIncarnation: incarnation,
+    requestNonce: requestBoundNonce(
+      context,
+      authority.configuration.enrollment,
+      saved.admission.executionRef,
+      requestRef,
+    ),
+    generation: saved.generation,
+  };
+  const tuple = {
+    consumerId: context.consumerId,
+    requestRef,
+    worker,
+    admission: saved.admission,
+    descriptor: nativeDescriptor(physical),
+    native,
+    executionBearer,
+  };
+  const call = (route: string, body: unknown) =>
+    fetch(origin + "/private/native/v1/" + route, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer " + credentials.callbackCredential,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  return {
+    context,
+    kernel,
+    usage,
+    bearers,
+    saved,
+    tuple,
+    physical,
+    call,
+    stop: () => stop(server),
+  };
+}
+
+// This controlled native peer qualifies metadata callbacks against real SQL.
+// Actual public payload/catalogue/provider admission is qualified in the pinned Go suite.
+void test("public native callbacks retain alternate OpenRouter attribution and exact closure after revoke", async () => {
+  const f = await publicExecutionFixture();
+  const requestedModel = "future-vendor/review:model";
+  try {
+    const admitted = await f.call("public-admit", { ...f.tuple, requestedModel });
+    assert.equal(admitted.status, 200);
+    const reply = nativeObject(await admitted.json(), [
+      "consumerId",
+      "admission",
+      "status",
+      "dispatch",
+      "nativeDescriptor",
+      "leaseExpiresAt",
+    ]);
+    const dispatch = nativeObject(reply.dispatch, [
+      "descriptor",
+      "executionRef",
+      "requestRef",
+      "limits",
+      "deadline",
+      "closure",
+    ]);
+    const originalProof = nativeProof(dispatch.closure);
+    assert.deepEqual(
+      reply.nativeDescriptor,
+      nativeDescriptor(f.physical),
+      "selected usage model never replaces the canonical physical descriptor",
+    );
+    const initial = await f.usage.observe(
+      f.context,
+      originalProof.executionRef,
+      originalProof.requestRef,
+    );
+    assert.ok(initial);
+    assert.equal(initial.model, requestedModel);
+    assert.equal(initial.effect, "dispatch_started");
+    const replay = await f.call("public-admit", { ...f.tuple, requestedModel });
+    assert.equal(replay.status, 200);
+    nativeObject(await replay.json(), ["consumerId", "admission", "status"]);
+    assert.deepEqual(
+      await f.kernel.requestProof(f.context, originalProof.executionRef, originalProof.requestRef),
+      originalProof,
+      "duplicate callback cannot grant another dispatch",
+    );
+    f.bearers.replace([]);
+    const receipt: Receipt = {
+      consumerId: f.context.consumerId,
+      executionRef: originalProof.executionRef,
+      requestRef: originalProof.requestRef,
+      native: originalProof.native,
+      proof: originalProof,
+      phase: "closed",
+      effect: "completed",
+      sealed: true,
+      acknowledged: false,
+      lifetime: {
+        entered: true,
+        contextDone: true,
+        forwardingReturned: true,
+        bodyKnown: true,
+        bodyClosed: true,
+        closeFailed: false,
+        completed: true,
+        sealed: true,
+      },
+      nativeUsage: {
+        source: "native_provider_response",
+        state: "complete",
+        inputTokens: 7,
+        outputTokens: 3,
+        costState: "unknown",
+        finalized: true,
+      },
+    };
+    const changedModel = await f.call("execution-settle", {
+      consumerId: f.context.consumerId,
+      proof: originalProof,
+      receipt,
+      requestedModel: f.physical.model,
+    });
+    assert.equal(changedModel.status, 403);
+    await changedModel.arrayBuffer();
+    assert.equal(
+      (await f.kernel.request(f.context, originalProof.executionRef, originalProof.requestRef))
+        .effect,
+      "completed",
+      "accepted completion survives rejected metadata",
+    );
+    const stillOccupied = await pool.query<{ transport_occupied: boolean }>(
+      "SELECT transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
+      [f.context.consumerId, originalProof.executionRef, originalProof.requestRef],
+    );
+    assert.equal(
+      stillOccupied.rows.at(0)?.transport_occupied,
+      true,
+      "inconsistent model metadata cannot acknowledge physical closure",
+    );
+    assert.deepEqual(
+      await f.usage.observe(f.context, originalProof.executionRef, originalProof.requestRef),
+      initial,
+      "rejected metadata cannot rewrite the initial usage fact",
+    );
+    const settled = await f.call("execution-settle", {
+      consumerId: f.context.consumerId,
+      proof: originalProof,
+      receipt,
+      requestedModel,
+    });
+    assert.equal(settled.status, 200);
+    await settled.arrayBuffer();
+    const observed = await f.usage.observe(
+      f.context,
+      originalProof.executionRef,
+      originalProof.requestRef,
+    );
+    assert.ok(observed);
+    assert.equal(observed.model, requestedModel);
+    assert.equal(observed.effect, "completed");
+    assert.equal(observed.completeness, "complete");
+    assert.equal(observed.inputTokens, 7);
+    assert.equal(observed.outputTokens, 3);
+    const occupied = await pool.query<{ transport_occupied: boolean }>(
+      "SELECT transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
+      [f.context.consumerId, originalProof.executionRef, originalProof.requestRef],
+    );
+    assert.equal(occupied.rows.at(0)?.transport_occupied, false);
+    const duplicate = await f.call("execution-settle", {
+      consumerId: f.context.consumerId,
+      proof: originalProof,
+      receipt,
+      requestedModel,
+    });
+    assert.equal(duplicate.status, 200);
+    await duplicate.arrayBuffer();
+    assert.deepEqual(
+      await f.usage.observe(f.context, originalProof.executionRef, originalProof.requestRef),
+      observed,
+      "identical settlement remains idempotent after revoke",
+    );
+  } finally {
+    await f.stop();
+  }
+});
+
+void test("public native model attribution rejects malformed labels and alternate static-profile models before claim", async () => {
+  for (const selectedProfile of [undefined, profile]) {
+    const f = await publicExecutionFixture(selectedProfile);
+    try {
+      const requestedModel = selectedProfile ? "another-static-model" : "vendor/model?untrusted";
+      const response = await f.call("public-admit", { ...f.tuple, requestedModel });
+      assert.equal(response.status, 403);
+      await response.arrayBuffer();
+      await assert.rejects(
+        f.kernel.request(f.context, f.saved.admission.executionRef, f.tuple.requestRef),
+        (error: unknown) => error instanceof KernelError && error.code === "unknown",
+      );
+      assert.equal(
+        await f.usage.observe(f.context, f.saved.admission.executionRef, f.tuple.requestRef),
+        null,
+      );
+    } finally {
+      await f.stop();
+    }
+  }
+});

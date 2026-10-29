@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   captureServiceBearers,
   captureServiceProfiles,
+  captureRequestReadbackRetention,
   glmProfile,
   kimiProfile,
   minimaxProfile,
@@ -93,6 +94,46 @@ void test("service profile admits production budgets up to the code ceiling and 
   const [ceiling] = captureServiceProfiles({ profile: serviceProfile(10_000) });
   assert.equal(ceiling.limits.requests, 10_000);
   denied(() => captureServiceProfiles({ profile: serviceProfile(10_001) }));
+});
+
+void test("explicit qualified concurrency stays within each selected profile and never changes the default", () => {
+  const base = serviceProfile(640);
+  assert.equal(captureServiceProfiles({ profile: base })[0].limits.concurrency, 1);
+  const qualified = captureServiceProfiles({
+    profile: { ...base, limits: { ...base.limits, concurrency: 64 } },
+  });
+  assert.equal(qualified[0].limits.concurrency, 64);
+  denied(() =>
+    captureServiceProfiles({ profile: { ...base, limits: { ...base.limits, concurrency: 65 } } }),
+  );
+  const grant = {
+    role: "consumer-control" as const,
+    token: "synthetic-concurrency-control",
+    consumerId: "fixture-consumer",
+    profileIds: [base.profile],
+    limits: { ...base.limits, concurrency: 32 },
+    maxRunMs: 60_000,
+  };
+  assert.equal(
+    captureServiceBearers([grant], grant.consumerId, qualified)[0].role,
+    "consumer-control",
+  );
+  denied(() => captureServiceBearers([grant], grant.consumerId, [base]));
+  denied(() =>
+    captureServiceBearers(
+      [{ ...grant, limits: { ...grant.limits, concurrency: 65 } }],
+      grant.consumerId,
+      qualified,
+    ),
+  );
+});
+
+void test("request readback retention requires an explicit positive bounded duration", () => {
+  assert.equal(captureRequestReadbackRetention(1), 1);
+  assert.equal(captureRequestReadbackRetention(31_536_000_000), 31_536_000_000);
+  for (const value of [undefined, null, 0, -1, 1.5, "60000", NaN, Infinity, 31_536_000_001]) {
+    denied(() => captureRequestReadbackRetention(value));
+  }
 });
 
 // Red if configuration intersects output across profiles instead of capturing

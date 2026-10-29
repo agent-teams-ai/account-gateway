@@ -7,7 +7,7 @@ import type {
   UsageQuery,
 } from "@agent-teams/account-gateway/contracts";
 import { KernelError } from "./domain.ts";
-import type { TrustedContext } from "./domain.ts";
+import type { PrivateAdmission, TrustedContext } from "./domain.ts";
 import { sharedCheckout } from "./service-admission.ts";
 import type { Checkout } from "./service-admission.ts";
 
@@ -15,6 +15,46 @@ const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const numeric = (value: unknown): number | null =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+
+/** Stable request identity shared by the proxy and native-public ingress adapters. */
+export function executionUsageBase(
+  admission: PrivateAdmission,
+  requestRef: string,
+  model: string,
+  occurredAt: string,
+) {
+  return {
+    schemaVersion: 1 as const,
+    eventId: createHash("sha256")
+      .update(admission.executionRef + ":" + requestRef)
+      .digest("hex"),
+    executionRef: admission.executionRef,
+    requestRef,
+    invocationRef: admission.invocationRef,
+    attemptRef: admission.attemptRef,
+    accountRef: admission.accountRef,
+    profileId: admission.profileId,
+    model,
+    occurredAt,
+    cost: null,
+  };
+}
+
+/** Native counters are observations; absent values remain unknown in both paths. */
+export function nativeUsageFields(
+  observed: NativeUsage | undefined,
+): Pick<
+  UsageObservation,
+  "completeness" | "inputTokens" | "outputTokens" | "cachedInputTokens" | "reasoningTokens"
+> {
+  return {
+    completeness: observed?.state === "complete" ? "complete" : "partial",
+    inputTokens: observed?.inputTokens ?? null,
+    outputTokens: observed?.outputTokens ?? null,
+    cachedInputTokens: observed?.cachedInputTokens ?? null,
+    reasoningTokens: observed?.reasoningOutputTokens ?? null,
+  };
+}
 
 export interface UsageJournal {
   observe(

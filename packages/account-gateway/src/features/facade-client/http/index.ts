@@ -7,6 +7,7 @@ export * as secretSubmission from "./ingress.js";
 const config = z.strictObject({
   role: z.enum(["management", "execution", "consumer-control"]),
   origin: z.string().check(z.url()),
+  inferenceOrigin: z.string().check(z.url()).optional(),
   token: z.string().min(1).max(16384),
   responseBytes: z.number().int().min(1024).max(2097152).default(65536),
   timeoutMs: z.number().int().min(1).max(3600000).default(30000),
@@ -110,6 +111,23 @@ function transport(
   ) {
     throw new GatewayError("invalid_input", "not_dispatched");
   }
+  const inferenceOrigin =
+    settings.inferenceOrigin === undefined ? origin : new URL(settings.inferenceOrigin);
+  if (
+    (settings.inferenceOrigin !== undefined && role !== "execution") ||
+    inferenceOrigin.username ||
+    inferenceOrigin.password ||
+    inferenceOrigin.search ||
+    inferenceOrigin.hash ||
+    inferenceOrigin.pathname !== "/" ||
+    (inferenceOrigin.protocol !== "https:" &&
+      !(
+        inferenceOrigin.protocol === "http:" &&
+        ["127.0.0.1", "[::1]", "localhost"].includes(inferenceOrigin.hostname)
+      ))
+  ) {
+    throw new GatewayError("invalid_input", "not_dispatched");
+  }
   async function enter(
     path: string,
     method: string,
@@ -117,6 +135,7 @@ function transport(
     headers: Record<string, string>,
     options: CallOptions,
     identity: Identity,
+    targetOrigin = origin,
   ) {
     if (options.signal?.aborted === true) {
       throw new GatewayError(
@@ -139,7 +158,7 @@ function transport(
     const failure = (code: "transport" | "invalid_response" | "cancelled") =>
       new GatewayError(code, "effect_unknown", identity.operationRef, identity.requestRef);
     try {
-      const response = await fetch(new URL(path, origin), {
+      const response = await fetch(new URL(path, targetOrigin), {
         method,
         redirect: "manual",
         signal: controller.signal,
@@ -274,6 +293,7 @@ function transport(
       },
       options,
       identity,
+      inferenceOrigin,
     );
     try {
       if (

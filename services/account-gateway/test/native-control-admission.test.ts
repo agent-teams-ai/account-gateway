@@ -13,6 +13,7 @@ import {
   admitNativeCallback,
   nativeControlCapacity,
   nativeCallbackCapacity,
+  nativeCallbackPurpose,
   serviceCapacity,
 } from "../src/service-admission.ts";
 
@@ -378,3 +379,95 @@ void test(
     }
   },
 );
+
+void test("callback work throwing after acquisition cannot emit a pre-work refusal", async () => {
+  const gate = new NativeControlAdmission(1, 0);
+  let work = 0,
+    refused = 0;
+  const server = createServer((req, res) => {
+    admitNativeCallback(
+      gate,
+      req,
+      res,
+      async () => {
+        work++;
+        throw new Error("controlled post-claim failure");
+      },
+      () => {
+        refused++;
+        res.writeHead(503);
+        res.end("must-not-be-issued");
+      },
+    );
+  });
+  const origin = await listen(server);
+  try {
+    const response = await fetch(origin);
+    assert.equal(response.status, 503);
+    assert.equal(await response.text(), "");
+    assert.equal(work, 1);
+    assert.equal(refused, 0);
+  } finally {
+    await stop(server);
+    await gate.stop();
+  }
+});
+
+void test("preclaim callback saturation leaves accepted dispatch, closure and settlement progress independent", async () => {
+  const preclaim = new NativeControlAdmission(2, 1),
+    critical = new NativeControlAdmission(2, 1),
+    settlement = new NativeControlAdmission(4, 1);
+  const release = Promise.withResolvers<void>(),
+    entered = Promise.withResolvers<void>();
+  let offers = 0;
+  const server = createServer((req, res) => {
+    const purpose = nativeCallbackPurpose(req.url),
+      gate = purpose === "preclaim" ? preclaim : purpose === "critical" ? critical : settlement;
+    admitNativeCallback(gate, req, res, async () => {
+      if (purpose === "preclaim") {
+        if (++offers === 2) {
+          entered.resolve();
+        }
+        await release.promise;
+      }
+      res.writeHead(200, { connection: "close" });
+      res.end("{}");
+    });
+  });
+  const origin = await listen(server);
+  const call = async (path: string) => {
+    const response = await fetch(origin + path, { signal: AbortSignal.timeout(2000) });
+    await response.text();
+    return response.status;
+  };
+  const held = [
+    call("/private/native/v1/execution-authority"),
+    call("/private/native/v1/public-admit"),
+  ];
+  try {
+    await entered.promise;
+    const queued = call("/private/native/v1/admit");
+    await delay(20);
+    assert.equal(await call("/private/native/v1/execution-authority"), 503);
+    for (const path of [
+      "/dispatch-proof",
+      "/owner-closure-authority",
+      "/oauth-custody-authority",
+      "/execution-settle",
+    ]) {
+      assert.equal(
+        await call("/private/native/v1" + path),
+        200,
+        "accepted work must progress while every preclaim owner is held",
+      );
+    }
+    assert.equal(offers, 2);
+    release.resolve();
+    assert.deepEqual(await Promise.all([...held, queued]), [200, 200, 200]);
+  } finally {
+    release.resolve();
+    await Promise.allSettled(held);
+    await stop(server);
+    await Promise.all([preclaim.stop(), critical.stop(), settlement.stop()]);
+  }
+});

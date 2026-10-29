@@ -706,6 +706,8 @@ async function fixture(options: FixtureOptions = {}) {
   });
   const callbackServer = authority.createServer();
   callbackOrigin = await listen(callbackServer);
+  // Restart reconstructs adapters while retaining the protected service key.
+  const intentHmacKey = randomBytes(32);
   async function startFacade(): Promise<string> {
     facade = createFacade({
       kernel: new PostgresKernel(pool),
@@ -732,7 +734,7 @@ async function fixture(options: FixtureOptions = {}) {
           maxOutputTokens: 1000,
         },
       ],
-      intentHmacKey: randomBytes(32),
+      intentHmacKey,
     });
     return listen(facade);
   }

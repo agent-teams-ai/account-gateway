@@ -1,6 +1,8 @@
 import { oauthProfileDefinition } from "./oauth-profiles.ts";
 import {
+  executionUsageBase,
   nativeUsage,
+  nativeUsageFields,
   ResponsesUsageCapture,
   type NativeUsage,
   type UsageJournal,
@@ -14,7 +16,7 @@ import {
 } from "./service-admission.ts";
 import type { ServiceAdmission } from "./service-admission.ts";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
-import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { once } from "node:events";
 import * as c from "@agent-teams/account-gateway/contracts";
 import { secretSubmission } from "@agent-teams/account-gateway/http";
@@ -169,11 +171,12 @@ function savedCopy(s: SavedExecution): SavedExecution {
   });
 }
 const tokenHash = (token: string) => createHash("sha256").update(token).digest();
-// One bounded server mapping. Explicit configuration replacement revokes old
-// captured authorities; run issuance only upserts its own execution entry.
+// Configured authorities are bounded. Issued execution locators retain no
+// registry entries; every use hydrates the original tuple from durable SQL.
 export class FacadeBearers {
-  #entries: readonly { hash: Buffer; grant: Grant; issuedBy?: RunControlGrant; token?: string }[] =
-    [];
+  #entries: readonly { hash: Buffer; grant: Grant }[] = [];
+  #executionKey?: Buffer;
+  readonly #executionIssuers = new WeakMap<Grant, RunControlGrant>();
   constructor(entries: readonly ConfiguredBearer[]) {
     this.replace(entries);
   }
@@ -341,7 +344,96 @@ export class FacadeBearers {
     return found;
   }
   current(grant: Grant): boolean {
-    return this.#entries.some((row) => row.grant === grant);
+    const issuer = this.#executionIssuers.get(grant);
+    return this.#entries.some((row) => row.grant === (issuer ?? grant));
+  }
+  // Stable server-owned key, purpose separated from prepare intent digests.
+  // The locator contains no native peer credential, private admission or body.
+  configureExecutionKey(key: Uint8Array): void {
+    if (key.byteLength !== 32) {
+      throw new KernelError("invalid");
+    }
+    const derived = createHmac("sha256", key)
+      .update("account-gateway/execution-locator/v1")
+      .digest();
+    if (this.#executionKey && !timingSafeEqual(this.#executionKey, derived)) {
+      throw new KernelError("conflict");
+    }
+    this.#executionKey = derived;
+  }
+  #issuerFingerprint(row: { hash: Buffer; grant: Grant }): string {
+    return createHash("sha256")
+      .update(row.hash)
+      .update(JSON.stringify(row.grant))
+      .digest("base64url");
+  }
+  #savedFingerprint(saved: SavedExecution): string {
+    return createHash("sha256")
+      .update(JSON.stringify([saved.generation, ...admissionTuple(saved.admission)]))
+      .digest("base64url");
+  }
+  async resolveExecution(token: string, kernel: ExecutionRead): Promise<Grant | undefined> {
+    const configured = this.resolve(token);
+    if (configured) {
+      return configured;
+    }
+    if (!this.#executionKey || token.length > 1024) {
+      return;
+    }
+    const parts = /^agx1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})$/.exec(token);
+    if (!parts) {
+      return;
+    }
+    const expected = createHmac("sha256", this.#executionKey).update(parts[1]).digest();
+    const signature = Buffer.from(parts[2], "base64url");
+    if (
+      signature.length !== expected.length ||
+      signature.toString("base64url") !== parts[2] ||
+      !timingSafeEqual(signature, expected)
+    ) {
+      return;
+    }
+    try {
+      const raw = Buffer.from(parts[1], "base64url");
+      if (raw.toString("base64url") !== parts[1]) {
+        return;
+      }
+      const value: unknown = JSON.parse(raw.toString("utf8"));
+      if (!Array.isArray(value) || value.length !== 5 || value.some((v) => typeof v !== "string")) {
+        return;
+      }
+      const [issuer, consumerId, executionRef, savedFingerprint, expiresAt] = value as string[];
+      identifier(consumerId);
+      uuid(executionRef);
+      if (!/^[A-Za-z0-9_-]{43}$/.test(issuer) || !/^[A-Za-z0-9_-]{43}$/.test(savedFingerprint)) {
+        return;
+      }
+      const row = this.#entries.find(
+        (entry) =>
+          (entry.grant.role === "run-control" || entry.grant.role === "consumer-control") &&
+          entry.grant.consumerId === consumerId &&
+          this.#issuerFingerprint(entry) === issuer,
+      );
+      if (!row || (row.grant.role !== "run-control" && row.grant.role !== "consumer-control")) {
+        return;
+      }
+      const saved = savedCopy(await kernel.savedExecution({ consumerId }, executionRef));
+      if (
+        saved.admission.expiresAt !== expiresAt ||
+        this.#savedFingerprint(saved) !== savedFingerprint ||
+        !this.current(row.grant)
+      ) {
+        return;
+      }
+      const grant = Object.freeze({ role: "execution" as const, consumerId, saved });
+      this.#executionIssuers.set(grant, row.grant);
+      return grant;
+    } catch (error) {
+      if (error instanceof KernelError && error.code === "unavailable") {
+        throw error;
+      }
+      return;
+    }
   }
   // Protected owner lookup uses current management policy, never a raw bearer
   // or a cached consumer-to-owner association. Replacement revokes immediately.
@@ -367,8 +459,8 @@ export class FacadeBearers {
             permitsProfile(grant, profileId)),
     );
   }
-  // Synchronous CAS after SQL read: identical issuance retains its token and
-  // original saved tuple. No neighboring grant is replaced or evicted.
+  // Deterministic issuance after SQL read binds the original immutable tuple.
+  // Config replacement revokes issued locators without an execution registry.
   upsertExecution(
     control: RunControlGrant,
     input: SavedExecution,
@@ -391,33 +483,27 @@ export class FacadeBearers {
     ) {
       throw new KernelError("denied");
     }
-    const old = this.#entries.find(
-      (row) =>
-        row.issuedBy === control &&
-        row.grant.role === "execution" &&
-        row.grant.consumerId === control.consumerId &&
-        row.grant.saved.admission.executionRef === saved.admission.executionRef,
-    );
-    if (old) {
-      if (
-        old.grant.role !== "execution" ||
-        !sameSaved(old.grant.saved, saved) ||
-        !nonempty(old.token)
-      ) {
-        throw new KernelError("conflict");
-      }
-      return old.token;
-    }
-    if (this.#entries.length >= 128) {
+    if (!this.#executionKey) {
       throw new KernelError("unavailable");
     }
-    const token = randomBytes(32).toString("base64url");
-    const grant = Object.freeze({
-      role: "execution" as const,
-      consumerId: control.consumerId,
-      saved,
-    });
-    this.#entries = [...this.#entries, { hash: tokenHash(token), grant, issuedBy: control, token }];
+    const row = this.#entries.find((entry) => entry.grant === control);
+    if (!row) {
+      throw new KernelError("denied");
+    }
+    const payload = Buffer.from(
+      JSON.stringify([
+        this.#issuerFingerprint(row),
+        control.consumerId,
+        saved.admission.executionRef,
+        this.#savedFingerprint(saved),
+        saved.admission.expiresAt,
+      ]),
+    ).toString("base64url");
+    const signature = createHmac("sha256", this.#executionKey).update(payload).digest("base64url");
+    const token = "agx1." + payload + "." + signature;
+    if (token.length > 1024) {
+      throw new KernelError("invalid");
+    }
     return token;
   }
 }
@@ -761,6 +847,7 @@ export function createFacade(options: FacadeOptions): Server {
   }
   const lifecycleWriteGate = options.lifecycle?.writeGate ?? "disabled";
   const hmac = Buffer.from(options.intentHmacKey);
+  bearers.configureExecutionKey(hmac);
   const profiles = new Map<
     string,
     { dto: c.Profile; maxOutputTokens: number; limits?: Readonly<ApprovedLimits> }
@@ -1176,7 +1263,7 @@ export function createFacade(options: FacadeOptions): Server {
             send(res, c.safeError, safe("unauthenticated", "not_dispatched"), 401);
             return;
           }
-          const grant = bearers.resolve(authorization.slice(7));
+          const grant = await bearers.resolveExecution(authorization.slice(7), kernel);
           if (!grant) {
             send(res, c.safeError, safe("unauthenticated", "not_dispatched"), 401);
             return;
@@ -1792,21 +1879,12 @@ export function createFacade(options: FacadeOptions): Server {
             clearTimeout(ingressTimer);
             const capture = new ResponsesUsageCapture(),
               occurredAt = new Date().toISOString();
-            const factBase = {
-              schemaVersion: 1 as const,
-              eventId: createHash("sha256")
-                .update(ref + ":" + identity.requestRef!)
-                .digest("hex"),
-              executionRef: ref,
-              requestRef: identity.requestRef!,
-              invocationRef: wireAdmission.invocationRef,
-              attemptRef: wireAdmission.attemptRef,
-              accountRef: wireAdmission.accountRef,
-              profileId: wireAdmission.profileId,
-              model: requestedModel,
+            const factBase = executionUsageBase(
+              saved.admission,
+              identity.requestRef!,
+              requestedModel,
               occurredAt,
-              cost: null,
-            };
+            );
             let recordedClaim = false,
               nativeObserved = false;
             const claimRecorded = (): boolean => recordedClaim;
@@ -1835,11 +1913,7 @@ export function createFacade(options: FacadeOptions): Server {
                     ...factBase,
                     revision: 2,
                     effect: status.effect,
-                    completeness: observed.state === "complete" ? "complete" : "partial",
-                    inputTokens: observed.inputTokens ?? null,
-                    outputTokens: observed.outputTokens ?? null,
-                    cachedInputTokens: observed.cachedInputTokens ?? null,
-                    reasoningTokens: observed.reasoningOutputTokens ?? null,
+                    ...nativeUsageFields(observed),
                   });
                   nativeObserved = true;
                 }

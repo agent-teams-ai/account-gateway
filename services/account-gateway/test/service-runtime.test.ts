@@ -783,6 +783,22 @@ void test("kernel composition derives a detached control duration while preservi
   consumer.maxRunMs = 1000;
   assert.deepEqual(derived, { ...defaults, maxRunMs: 21_600_000 });
   assert.ok(Object.isFrozen(derived));
+  const high = {
+    profile: "openai-responses-apikey-v1",
+    model: "synthetic-model",
+    baseURL: "https://fixture.invalid/v1",
+    qualificationRef: "synthetic-concurrency",
+    limits: { ...consumer.limits, requests: 64, concurrency: 32 },
+    providerTokenUpperBound: 100,
+  };
+  const qualified = serviceComposition.composeKernelBounds([], [high]);
+  high.limits.concurrency = 64;
+  assert.equal(
+    qualified.maxConcurrent,
+    32,
+    "captured profile capacity does not track later input mutations",
+  );
+  assert.equal(defaults.maxConcurrent, 1, "explicit qualified capacity never raises the default");
 });
 
 // Fixture-owned input projection. Actual startService validates production

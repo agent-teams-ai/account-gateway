@@ -82,6 +82,27 @@ const readErrorReasons = new Set([
   "compression_error",
   "other",
 ]);
+const transportErrorReasons = new Set([
+  "context_canceled",
+  "context_deadline",
+  "eof",
+  "unexpected_eof",
+  "connection_reset",
+  "connection_closed",
+  "broken_pipe",
+  "connection_refused",
+  "transport_timeout",
+  "other",
+]);
+const upstreamConnections = new Set(["not_obtained", "new", "reused"]);
+const transportRequiredFields = [
+  "transport_error_reason",
+  "upstream_connection",
+  "upstream_request_written",
+  "upstream_response_started",
+];
+const transportFields = [...transportRequiredFields, "native_entered"];
+
 const upstreamMediaCategories = new Set(["missing", "json", "html", "sse", "other"]);
 const upstreamBodyShapes = new Set(["empty", "json", "sse", "html", "other"]);
 const upstreamBodyPrefixes = new Set([
@@ -196,6 +217,7 @@ export function nativeResponseDiagnostics(
           "provider_error_shape",
           "provider_error_parameter",
           "read_error_reason",
+          ...transportFields,
           "upstream_media_category",
           "upstream_body_shape",
           "upstream_body_prefix",
@@ -252,6 +274,7 @@ export function nativeResponseDiagnostics(
             "provider_error_shape",
             "provider_error_parameter",
             "read_error_reason",
+            ...transportFields,
             "upstream_media_category",
             "upstream_body_shape",
             "upstream_body_prefix",
@@ -314,6 +337,7 @@ export function nativeResponseDiagnostics(
               "provider_error_shape",
               "provider_error_parameter",
               "read_error_reason",
+              ...transportFields,
               "upstream_media_category",
               "upstream_body_shape",
               "upstream_body_prefix",
@@ -366,6 +390,25 @@ export function nativeResponseDiagnostics(
           ) {
             return;
           }
+          const transportReason = row.transport_error_reason;
+          const connection = row.upstream_connection;
+          // Older native binaries emit the phase alone. New transport facts are
+          // one complete closed projection; partial or misplaced facts are dropped.
+          const hasTransportFacts = transportFields.some((key) => Object.hasOwn(row, key));
+          if (
+            hasTransportFacts &&
+            (row.phase !== "transport" ||
+              !transportRequiredFields.every((key) => Object.hasOwn(row, key)) ||
+              typeof transportReason !== "string" ||
+              !transportErrorReasons.has(transportReason) ||
+              typeof connection !== "string" ||
+              !upstreamConnections.has(connection) ||
+              typeof row.upstream_request_written !== "boolean" ||
+              typeof row.upstream_response_started !== "boolean" ||
+              (Object.hasOwn(row, "native_entered") && typeof row.native_entered !== "boolean"))
+          ) {
+            return;
+          }
           const mediaCategory = row.upstream_media_category;
           if (
             Object.hasOwn(row, "upstream_media_category") &&
@@ -404,6 +447,17 @@ export function nativeResponseDiagnostics(
               ...(shape === undefined ? {} : { provider_error_shape: shape }),
               ...(parameter === undefined ? {} : { provider_error_parameter: parameter }),
               ...(readReason === undefined ? {} : { read_error_reason: readReason }),
+              ...(hasTransportFacts
+                ? {
+                    transport_error_reason: transportReason,
+                    upstream_connection: connection,
+                    upstream_request_written: row.upstream_request_written,
+                    upstream_response_started: row.upstream_response_started,
+                    ...(Object.hasOwn(row, "native_entered")
+                      ? { native_entered: row.native_entered }
+                      : {}),
+                  }
+                : {}),
               ...(mediaCategory === undefined ? {} : { upstream_media_category: mediaCategory }),
               ...(bodyShape === undefined ? {} : { upstream_body_shape: bodyShape }),
               ...(bodyPrefix === undefined ? {} : { upstream_body_prefix: bodyPrefix }),

@@ -18,11 +18,12 @@ import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { connect, createServer } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
-import { bounds, check, scenarios, isNonemptyString } from "./model.ts";
+import { bounds, check, scenarios, baselineScenarios, isNonemptyString } from "./model.ts";
 import { sha256 } from "./fixture.ts";
 import type { Fixture } from "./fixture.ts";
 import { nativeSourceCommit, migrationAdapterSource } from "./build-native-fixture.ts";
 import { artifactNames, openArtifactExport } from "./artifact-export.ts";
+import { nativeResponseDiagnostics } from "../../src/native-response-diagnostics.ts";
 
 const captured = new Set<ChildProcess>();
 type Stage =
@@ -130,6 +131,20 @@ export function childFailureFacts(
   },
 ) {
   const text = privateOutput.slice(0, 1_048_576);
+  // Reuse the production fixed-field sanitizer before retaining any diagnostic.
+  // Node's TAP reporter prefixes child stderr lines with '# '; raw text stays
+  // private and is never attached to the immutable qualification artifact.
+  const nativeResponseFailures: Record<string, unknown>[] = [];
+  const collectNative = nativeResponseDiagnostics((record) => {
+    if (nativeResponseFailures.length >= 8) {
+      return;
+    }
+    const value = JSON.parse(record) as Record<string, unknown>;
+    if (value.event === "gateway_native_response_failure") {
+      nativeResponseFailures.push(value);
+    }
+  });
+  collectNative(Buffer.from(text.replace(/^[\t ]*# ?/gm, "")));
   const allowed = (pattern: RegExp, codes: ReadonlySet<string>) =>
     [
       ...new Set(
@@ -152,6 +167,7 @@ export function childFailureFacts(
     systemCodes: allowed(/\b([A-Z][A-Z0-9_]+)\b/g, systemCodes),
     timedOut: status.timedOut,
     outputOverflow: status.outputOverflow,
+    nativeResponseFailures,
   };
 }
 class CommandFailure extends Error {
@@ -703,7 +719,7 @@ async function main() {
           summary.sdkArtifactUnchanged === true &&
           summary.stopped === "retired" &&
           JSON.stringify(summary.expectedScenarios) ===
-            JSON.stringify(suite === "all" ? scenarios : [suite]),
+            JSON.stringify(suite === "all" ? baselineScenarios : [suite]),
         "operator-qualification-summary",
       );
       success = true;

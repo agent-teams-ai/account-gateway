@@ -52,7 +52,9 @@ async function initialize(configuration: Configuration) {
       maxHeaderSize: 16_384,
       headersTimeout: 5000,
       requestTimeout: 5000,
-      keepAliveTimeout: 1000,
+      // Completion loads keep healthy pooled connections for the bounded stand;
+      // stop() destroys every socket. Stale-connection faults have a separate gate.
+      keepAliveTimeout: bounds.wallMs,
     },
     (req, res) => {
       let requestId = "unidentified",
@@ -70,7 +72,7 @@ async function initialize(configuration: Configuration) {
         let received = 0;
         for await (const chunk of req as AsyncIterable<Buffer>) {
           received += Buffer.byteLength(chunk);
-          check(received <= 4096, "provider-input-bound");
+          check(received <= 1_048_576, "provider-input-bound");
           chunks.push(Buffer.from(chunk));
         }
         const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
@@ -84,7 +86,8 @@ async function initialize(configuration: Configuration) {
         );
         const prefix = "load-fixture:" + cfg!.runId + ":";
         check(input[0].content.startsWith(prefix), "provider-run-identity");
-        requestId = input[0].content.slice(prefix.length);
+        requestId = input[0].content.slice(prefix.length, prefix.length + 36);
+        check(/^(?:\nx*)?$/.test(input[0].content.slice(prefix.length + 36)), "provider-padding");
         check(/^[a-f0-9-]{36}$/.test(requestId), "provider-request-identity");
         record("entry", requestId, 0);
         const plan = plans.get(requestId);
@@ -105,16 +108,10 @@ async function initialize(configuration: Configuration) {
         res.flushHeaders();
         record("headers", requestId, bytes);
         let eventSequence = 0;
-        const frame = async (type: string, fields: object) => {
+        const writeWire = async (wire: string) => {
           if (isClosed()) {
             return false;
           }
-          const wire =
-            "event: " +
-            type +
-            "\ndata: " +
-            JSON.stringify({ type, sequence_number: eventSequence++, ...fields }) +
-            "\n\n";
           const size = Buffer.byteLength(wire);
           bytes += size;
           total += size;
@@ -149,6 +146,14 @@ async function initialize(configuration: Configuration) {
           }
           return !isClosed();
         };
+        const frame = (type: string, fields: object) =>
+          writeWire(
+            "event: " +
+              type +
+              "\ndata: " +
+              JSON.stringify({ type, sequence_number: eventSequence++, ...fields }) +
+              "\n\n",
+          );
         const text = "controlled fixture completion",
           itemId = "msg_" + requestId.replaceAll("-", "");
         const part = { type: "output_text", text, annotations: [], logprobs: [] };
@@ -223,9 +228,20 @@ async function initialize(configuration: Configuration) {
           logprobs: [],
         });
         if (plan.mode === "held" && !isClosed()) {
-          await new Promise<void>((resolve) => {
-            release.set(requestId, resolve);
+          let released = false;
+          const isReleased = () => released;
+          const done = new Promise<void>((resolve) => {
+            release.set(requestId, () => {
+              released = true;
+              resolve();
+            });
           });
+          while (!isClosed() && !isReleased()) {
+            await Promise.race([done, delay(1000)]);
+            if (!isClosed() && !isReleased() && !(await writeWire(": keepalive\n\n"))) {
+              return;
+            }
+          }
         } else if (plan.delayMs) {
           await delay(plan.delayMs);
         }

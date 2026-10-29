@@ -10,6 +10,7 @@ import {
   NativeControlAdmission,
   admitNativeCallback,
   nativeCallbackCapacity,
+  nativeCallbackPurpose,
   facadeControlRoute,
   facadeBoundedReadRoute,
   inServiceLane,
@@ -63,7 +64,7 @@ import {
   keyBytes,
   ServiceError,
 } from "./service-config.ts";
-import type { ServiceConfig } from "./service-config.ts";
+import type { ServiceConfig, ServiceProfile } from "./service-config.ts";
 
 type RunDurationBearer = Extract<
   ConfiguredBearer,
@@ -72,13 +73,20 @@ type RunDurationBearer = Extract<
 function isRunDurationBearer(bearer: ConfiguredBearer): bearer is RunDurationBearer {
   return bearer.role === "consumer-control" || bearer.role === "run-control";
 }
-export function composeKernelBounds(bearers: readonly ConfiguredBearer[]): Bounds {
+export function composeKernelBounds(
+  bearers: readonly ConfiguredBearer[],
+  profiles: readonly ServiceProfile[] = [],
+): Bounds {
   const runDurationBearers = bearers.filter(isRunDurationBearer);
   const maxRunMs = runDurationBearers.reduce(
     (max, bearer) => Math.max(max, bearer.maxRunMs),
     defaults.maxRunMs,
   );
-  return Object.freeze({ ...defaults, maxRunMs });
+  const maxConcurrent = profiles.reduce(
+    (max, profile) => Math.max(max, profile.limits.concurrency),
+    defaults.maxConcurrent,
+  );
+  return Object.freeze({ ...defaults, maxRunMs, maxConcurrent });
 }
 
 // Retire a bounded batch of successful claims without sleeping between already
@@ -93,7 +101,7 @@ export function composeServiceCleanupTurn(
   signal?: AbortSignal,
 ) {
   let refreshTurn = false;
-  const cleanupAborted = () => signal?.aborted === true;
+  const aborted = (): boolean => signal?.aborted === true;
   return async () => {
     if (refreshTurn) {
       refreshTurn = false;
@@ -101,10 +109,7 @@ export function composeServiceCleanupTurn(
     }
     const started = performance.now();
     let acquired = false;
-    for (let count = 0; count < 8; count++) {
-      if (cleanupAborted()) {
-        break;
-      }
+    for (let count = 0; count < 8 && !aborted(); count++) {
       if (count && performance.now() - started >= 1000) {
         break;
       }
@@ -113,7 +118,7 @@ export function composeServiceCleanupTurn(
         break;
       }
       acquired = refreshTurn = true;
-      if (cleanupAborted() || !(await settle(claim))) {
+      if (aborted() || !(await settle(claim))) {
         break;
       }
     }
@@ -321,10 +326,13 @@ export function composeServiceNative(
   kernel: DurableKernel & ExecutionRead,
   store: ManagementStore,
   enrollment: NonNullable<FacadeOptions["enrollment"]>,
+  usage?: FacadeOptions["usage"],
 ) {
   const authority = new NativeAuthority({
     kernel,
     store,
+    executionBearers: control.bearers,
+    usage,
     accountLimitsOwners: { bearers: control.bearers },
     accountModels: control.accountModels,
     ...(cfg.oauthEnrollment || cfg.claudeOAuthEnrollment || cfg.grokOAuthEnrollment
@@ -711,10 +719,15 @@ function nonempty(value: string | undefined): value is string {
 export async function startService(configFile: string, signal?: AbortSignal): Promise<Service> {
   const admission = new ServiceAdmission();
   const nativeControls = new NativeControlAdmission();
-  const nativeCallbacks = new NativeControlAdmission(
-    nativeCallbackCapacity.active,
-    nativeCallbackCapacity.waiting,
+  const nativePreclaims = new NativeControlAdmission(
+    2,
+    Math.floor(nativeCallbackCapacity.waiting / 2),
   );
+  const nativeCritical = new NativeControlAdmission(
+    2,
+    Math.ceil(nativeCallbackCapacity.waiting / 2),
+  );
+  const nativeSettlements = new NativeControlAdmission(4, 4);
   const cfg = loadServiceConfig(configFile); // Fully frozen before any await.
   const pool = new Pool({
     connectionString: cfg.kernelDSN,
@@ -727,13 +740,27 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   pool.on("error", (error) => {
     fail(error, "pool_error");
   });
-  const kernel = new PostgresKernel(pool, composeKernelBounds(cfg.bearers), cfg.durableFacts),
+  const qualifiedProfiles = captureServiceProfiles(cfg);
+  const kernel = new PostgresKernel(
+      pool,
+      composeKernelBounds(cfg.bearers, qualifiedProfiles),
+      cfg.durableFacts,
+      {
+        requestReadbackRetentionMs: cfg.requestReadbackRetentionMs,
+        accountConcurrencyByProfile: qualifiedProfiles.map((p) => ({
+          profile: p.profile,
+          concurrency: p.limits.concurrency,
+        })),
+      },
+    ),
     worker = randomUUID(),
     ctx = Object.freeze({ consumerId: cfg.consumer.consumerId });
   const custody = new IntentSecrets(keyBytes(cfg.keys.intentAEAD), keyBytes(cfg.keys.intentHMAC));
   const store = new PostgresManagementStore(pool, custody);
   const control = composeServiceControl(cfg, kernel, store, custody, worker, nativeControls);
   const { profiles, bearers, management, catalog } = control;
+  bearers.configureExecutionKey(keyBytes(cfg.keys.facadeHMAC));
+  const usage = new PostgresUsageJournal(pool, keyBytes(cfg.keys.facadeHMAC));
   const readRetirement = composeServiceRetirementReadback(cfg.native),
     readbackAbort = new AbortController();
   let handler: Server | undefined, facade: Server | undefined, controlFacade: Server | undefined;
@@ -846,7 +873,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
       }
       if (
         req.method !== "POST" ||
-        !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-custody-authority|oauth-refresh-authority|oauth-cleanup-authority|account-limits-authority)$/.test(
+        !/^\/private\/native\/v1\/(enrollment|admit|execution-authority|public-admit|execution-settle|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-custody-authority|oauth-refresh-authority|oauth-cleanup-authority|account-limits-authority)$/.test(
           req.url ?? "",
         )
       ) {
@@ -907,7 +934,9 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     const handlersSettled = Promise.all([
       admission.stop(),
       nativeControls.stop(),
-      nativeCallbacks.stop(),
+      nativePreclaims.stop(),
+      nativeCritical.stop(),
+      nativeSettlements.stop(),
     ]);
     readbackAbort.abort();
     denyAdmission();
@@ -1124,9 +1153,26 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
       engineIncarnation: binding.incarnation,
       worker,
     });
-    const { authority, transport } = composeServiceNative(cfg, control, kernel, store, enrollment);
-    handler = authority.createServer((req, res, work) => {
-      admitNativeCallback(nativeCallbacks, req, res, work);
+    const { authority, transport } = composeServiceNative(
+      cfg,
+      control,
+      kernel,
+      store,
+      enrollment,
+      usage,
+    );
+    handler = authority.createServer((req, res, work, refusedBeforeWork) => {
+      admitNativeCallback(
+        nativeCallbackPurpose(req.url) === "settlement"
+          ? nativeSettlements
+          : nativeCallbackPurpose(req.url) === "preclaim"
+            ? nativePreclaims
+            : nativeCritical,
+        req,
+        res,
+        work,
+        refusedBeforeWork,
+      );
     });
     install();
     startupStage = "ready";
@@ -1144,7 +1190,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
       enrollment,
       transport,
       ...composeServiceCachedLimits(control),
-      usage: new PostgresUsageJournal(pool, keyBytes(cfg.keys.facadeHMAC)),
+      usage,
       profiles: catalog,
       intentHmacKey: keyBytes(cfg.keys.facadeHMAC),
       ingressBytes: Math.max(1024, ...profiles.map((p) => p.limits.requestBytes)),

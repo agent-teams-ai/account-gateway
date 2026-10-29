@@ -3,6 +3,7 @@ import * as lifecycleWire from "@agent-teams/account-gateway/contracts";
 import assert from "node:assert/strict";
 import { createManagementClient, secretSubmission } from "@agent-teams/account-gateway/http";
 import { strictJSON, validateResponses } from "../src/facade-ingress.ts";
+import type { UsageJournal } from "../src/usage.ts";
 import { KernelError } from "../src/domain.ts";
 import type {
   AccountStatus,
@@ -16,7 +17,12 @@ import type {
 import { randomBytes, randomUUID } from "node:crypto";
 import { createServer, request } from "node:http";
 import type { Server } from "node:http";
-import { facadeControlRoute, facadeBoundedReadRoute } from "../src/service-admission.ts";
+import {
+  facadeControlRoute,
+  facadeBoundedReadRoute,
+  NativeControlAdmission,
+  admitNativeCallback,
+} from "../src/service-admission.ts";
 import { createFacade, FacadeBearers } from "../src/facade.ts";
 import type { ManagementBearer } from "../src/facade.ts";
 import { IntentSecrets } from "../src/management-store.ts";
@@ -29,6 +35,7 @@ import type {
   PhysicalCandidate,
 } from "../src/management.ts";
 import { NativeFailure, NativeOAuthEnrollmentClient } from "../src/native-client.ts";
+import type { NativeAuthority } from "../src/native-authority.ts";
 import {
   composeServiceControl,
   composeServiceNative,
@@ -339,10 +346,20 @@ void test("SDK control numeric tokens cannot round into an accepted integer auth
       bytes('{"policyRevision":0,"bindingRevision":9007199254740991,"limits":{"tokens":100}}'),
       true,
     ),
-    { policyRevision: 0, bindingRevision: 9007199254740991, limits: { tokens: 100 } },
+    {
+      policyRevision: 0,
+      bindingRevision: 9007199254740991,
+      limits: { tokens: 100 },
+    },
   );
   // Opaque native request values retain ordinary JSON numeric semantics.
-  const raw = bytes(JSON.stringify({ ...valid, temperature: 0.25, input: [{ user_value: 1.5 }] }));
+  const raw = bytes(
+    JSON.stringify({
+      ...valid,
+      temperature: 0.25,
+      input: [{ user_value: 1.5 }],
+    }),
+  );
   validateResponses(raw, ["fixture-model"], 100);
   assert.equal((strictJSON(raw) as { temperature: number }).temperature, 0.25);
 });
@@ -459,6 +476,8 @@ const journalLookup = (j: CandidateJournal) => ({
 async function sourceHTTP(
   oauth: boolean | "claude" | "grok",
   outputEnvelope = false,
+  usage?: UsageJournal,
+  callbackAdmission?: Parameters<NativeAuthority["createServer"]>[0],
   limitsRead?: { contract: "v1" | "v2"; enter(): Promise<void> },
   omitModelSource = false,
 ) {
@@ -475,7 +494,11 @@ async function sourceHTTP(
     worker = randomUUID();
   let issuer: string = randomUUID();
   const context = { consumerId },
-    enrollment = { originRef: "source-origin", engineIncarnation: randomUUID(), worker };
+    enrollment = {
+      originRef: "source-origin",
+      engineIncarnation: randomUUID(),
+      worker,
+    };
   const limits = outputEnvelope
     ? {
         requests: 640,
@@ -484,7 +507,13 @@ async function sourceHTTP(
         outputBytes: 1_048_576,
         tokens: 32_768,
       }
-    : { requests: 4, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 100 };
+    : {
+        requests: 4,
+        concurrency: 1,
+        requestBytes: 4096,
+        outputBytes: 8192,
+        tokens: 100,
+      };
   const profile = {
     profile: "openai-responses-apikey-v1",
     baseURL: "https://api.xiaomimimo.com/v1",
@@ -499,7 +528,13 @@ async function sourceHTTP(
     providerTokenUpperBound: outputEnvelope ? 32_768 : 2000,
     limits: outputEnvelope
       ? limits
-      : { requests: 2, concurrency: 1, requestBytes: 2048, outputBytes: 4096, tokens: 50 },
+      : {
+          requests: 2,
+          concurrency: 1,
+          requestBytes: 2048,
+          outputBytes: 4096,
+          tokens: 50,
+        },
   };
   const consumer = {
     consumerId,
@@ -610,7 +645,11 @@ async function sourceHTTP(
     async startCandidate(c, id) {
       const op = await kernel.operation(c, id),
         account = await kernel.account(c, op.accountRef!);
-      return { operationRef: id, candidate: randomUUID(), profile: account.profile };
+      return {
+        operationRef: id,
+        candidate: randomUUID(),
+        profile: account.profile,
+      };
     },
     async acknowledgeCandidate(c, id) {
       const op = await kernel.operation(c, id),
@@ -695,7 +734,10 @@ async function sourceHTTP(
       }
       const saved = await kernel.savedExecution(c, ref),
         mapping = mappings.get(scopeKey(c, saved.generation))!;
-      const status: RequestStatus = { requestRef: id, effect: "dispatch_started" };
+      const status: RequestStatus = {
+        requestRef: id,
+        effect: "dispatch_started",
+      };
       const closure = {
         executionRef: ref,
         requestRef: id,
@@ -764,7 +806,11 @@ async function sourceHTTP(
       // Restore fences every execution, including closed rows, without repinning.
       for (const [key, saved] of executions) {
         if (key === scopeKey(c, saved.admission.executionRef)) {
-          executions.set(key, { ...saved, state: "fenced", dispatchAllowed: false });
+          executions.set(key, {
+            ...saved,
+            state: "fenced",
+            dispatchAllowed: false,
+          });
           executionCleanup.add(key);
         }
       }
@@ -791,7 +837,12 @@ async function sourceHTTP(
       return true;
     },
     async journal(s, generation, w, p) {
-      const j = Object.freeze({ ...s, generation, worker: w, profile: Object.freeze({ ...p }) });
+      const j = Object.freeze({
+        ...s,
+        generation,
+        worker: w,
+        profile: Object.freeze({ ...p }),
+      });
       // This method resolves only after this fixture's committed publication.
       journals.set(scopeKey(s, s.operationId), j);
       return j;
@@ -858,7 +909,10 @@ async function sourceHTTP(
   const callback = async (route: string, body: unknown, token = consumer.callbackCredential) =>
     fetch(callbackOrigin + "/private/native/v1/" + route, {
       method: "POST",
-      headers: { authorization: "Bearer " + token, "content-type": "application/json" },
+      headers: {
+        authorization: "Bearer " + token,
+        "content-type": "application/json",
+      },
       body: JSON.stringify(body),
       redirect: "manual",
     });
@@ -889,7 +943,11 @@ async function sourceHTTP(
         return;
       }
       if (req.method === "GET" && path === "/private/native/v1/account-limits/capabilities") {
-        reply({ contract: "account-limits/v1", cachedRead: true, quotaOnlyRefresh: false });
+        reply({
+          contract: "account-limits/v1",
+          cachedRead: true,
+          quotaOnlyRefresh: false,
+        });
         return;
       }
       if (
@@ -898,14 +956,21 @@ async function sourceHTTP(
         limitsRead
       ) {
         await limitsRead.enter();
-        const grant = await callback("account-limits-authority", { consumerId, ...tuple });
+        const grant = await callback("account-limits-authority", {
+          consumerId,
+          ...tuple,
+        });
         assert.equal(grant.status, 200);
         reply({ status: "unknown" });
         return;
       }
       if (req.method === "GET" && path === "/private/native/v2/account-limits/capabilities") {
         assert.equal(req.headers.authorization, "Bearer " + consumer.managementCredential);
-        reply({ contract: "account-limits/v2", cachedRead: true, quotaOnlyRefresh: false });
+        reply({
+          contract: "account-limits/v2",
+          cachedRead: true,
+          quotaOnlyRefresh: false,
+        });
         return;
       }
       if (path === oauthPath + "/refresh") {
@@ -921,7 +986,11 @@ async function sourceHTTP(
           reply({ code: "denied" }, 403);
           return;
         }
-        reply({ operation: tuple.operation, account_ref: tuple.account_ref, state: "idle" });
+        reply({
+          operation: tuple.operation,
+          account_ref: tuple.account_ref,
+          state: "idle",
+        });
         return;
       }
       if (path.startsWith(oauthPath + "/connect")) {
@@ -996,7 +1065,11 @@ async function sourceHTTP(
           }
           connectState = "completed";
         }
-        reply({ operation: tuple.operation, account_ref: tuple.account_ref, state: connectState });
+        reply({
+          operation: tuple.operation,
+          account_ref: tuple.account_ref,
+          state: connectState,
+        });
         return;
       }
       if (path === "/private/native/v1/candidates" && req.method === "POST") {
@@ -1044,14 +1117,22 @@ async function sourceHTTP(
         )!;
         assert.equal(d.base_url, p.baseURL);
         assert.equal(d.model, p.model);
-        const native = { ...enrollment, requestNonce: randomUUID(), generation };
+        const native = {
+          ...enrollment,
+          requestNonce: randomUUID(),
+          generation,
+        };
         const nativeBinding = {
           originRef: native.originRef,
           engineIncarnation: native.engineIncarnation,
           requestNonce: native.requestNonce,
           generation,
         };
-        const result = await callback("admit", { ...admit, consumerId, native: nativeBinding });
+        const result = await callback("admit", {
+          ...admit,
+          consumerId,
+          native: nativeBinding,
+        });
         assert.equal(result.status, 200);
         const permit: unknown = await result.json();
         closedRecord(permit, [
@@ -1158,7 +1239,11 @@ async function sourceHTTP(
           r = receipts.get(proof.requestRef);
         assert.ok(r);
         if (path.endsWith("/ack-owner")) {
-          const ack = await callback("closure-ack", { consumerId, proof, receipt: r });
+          const ack = await callback("closure-ack", {
+            consumerId,
+            proof,
+            receipt: r,
+          });
           assert.equal(ack.status, 200);
           assert.deepEqual(await ack.json(), { ok: true });
           r.acknowledged = true;
@@ -1288,10 +1373,18 @@ async function sourceHTTP(
   };
   try {
     const control = composeServiceControl(cfg, kernel, store, custody, worker);
-    const { authority, transport } = composeServiceNative(cfg, control, kernel, store, enrollment);
-    const callbacks = authority.createServer();
+    const { authority, transport } = composeServiceNative(
+      cfg,
+      control,
+      kernel,
+      store,
+      enrollment,
+      usage,
+    );
+    const callbacks = authority.createServer(callbackAdmission);
     servers.push(callbacks);
     callbackOrigin = await listen(callbacks);
+    const intentHmacKey = randomBytes(32);
     const facade = createFacade({
       kernel,
       store,
@@ -1302,7 +1395,7 @@ async function sourceHTTP(
       transport,
       ...composeServiceCachedLimits(control),
       ...(omitModelSource ? { accountModels: undefined } : {}),
-      intentHmacKey: randomBytes(32),
+      intentHmacKey,
       ingressBytes: outputEnvelope ? 1_048_576 : 4096,
     });
     servers.push(facade);
@@ -1372,6 +1465,7 @@ async function sourceHTTP(
       facadeOrigin,
       nativeRows,
       scopeKey,
+      intentHmacKey,
       callbackOriginTo: (nextOrigin: string) => {
         callbackOrigin = nextOrigin;
       },
@@ -1492,7 +1586,11 @@ void test("source HTTP: consumer-scoped management isolates explicit owner lists
     });
     assert.equal(prepare.status, 403);
     assert.equal(prepares, 0);
-    const narrowed = { ...base, ownerScope: "consumer" as const, profileIds: [f.profile.profile] };
+    const narrowed = {
+      ...base,
+      ownerScope: "consumer" as const,
+      profileIds: [f.profile.profile],
+    };
     f.control.bearers.replace([narrowed]);
     let operationReads = 0;
     const originalOperation = f.control.management.operation.bind(f.control.management);
@@ -1612,10 +1710,17 @@ void test("source HTTP: current management fences monotonically for its exact su
       prepares++;
       throw new KernelError("denied");
     };
-    const input = { operationId: randomUUID(), subjectRef: gx.preparation.subjectRef, revision: 3 };
+    const input = {
+      operationId: randomUUID(),
+      subjectRef: gx.preparation.subjectRef,
+      revision: 3,
+    };
     const applied = await f.publicCall("/v1/policy-fences", input, gx.token);
     assert.deepEqual({ status: applied.status, calls: calls.length }, { status: 200, calls: 1 });
-    assert.deepEqual(await applied.json(), { operationRef: input.operationId, state: "applied" });
+    assert.deepEqual(await applied.json(), {
+      operationRef: input.operationId,
+      state: "applied",
+    });
     assert.deepEqual(calls, [[f.context, input.operationId, gx.preparation.subjectRef, 3]]);
     const denied = async (body: typeof input, token = gx.token) => {
       const response = await f.publicCall("/v1/policy-fences", body, token);
@@ -1625,7 +1730,11 @@ void test("source HTTP: current management fences monotonically for its exact su
       assert.equal(error.effect, "not_dispatched");
       assert.equal(calls.length, 1);
     };
-    await denied({ ...input, operationId: randomUUID(), subjectRef: gy.preparation.subjectRef });
+    await denied({
+      ...input,
+      operationId: randomUUID(),
+      subjectRef: gy.preparation.subjectRef,
+    });
     await denied({ ...input, operationId: randomUUID(), revision: 1 });
     await denied({ ...input, operationId: randomUUID() }, gy.token);
     await denied({ ...input, operationId: randomUUID() }, "source-public-run");
@@ -2034,7 +2143,10 @@ void test("source HTTP: strict fixed POST descriptor readback keeps custody pend
       { ...reply, native: { ...native, profile: f.secondProfile.profile } },
       { ...reply, native: { ...native, base_url: f.secondProfile.baseURL } },
       { ...reply, native: { ...native, model: f.secondProfile.model } },
-      { ...reply, native: { ...native, account_id: Number.MAX_SAFE_INTEGER + 1 } },
+      {
+        ...reply,
+        native: { ...native, account_id: Number.MAX_SAFE_INTEGER + 1 },
+      },
     ]) {
       f.descriptor(value);
       await assert.rejects(
@@ -2105,7 +2217,11 @@ void test("source HTTP: strict fixed POST descriptor readback keeps custody pend
       202,
     );
     const second = f.journals.get(f.scopeKey(f.context, secondId))!;
-    const secondNative = { ...native, account_id: 2, generation: second.generation };
+    const secondNative = {
+      ...native,
+      account_id: 2,
+      generation: second.generation,
+    };
     f.descriptor({
       ...reply,
       operation: secondId,
@@ -2150,7 +2266,10 @@ void test("source HTTP: same fenced original remints only scoped readback and cl
     const first = await mint();
     assert.equal(first.status, 200);
     type Access = {
-      operation: { operationRef: string; result: { executionRef: string; state: string } };
+      operation: {
+        operationRef: string;
+        result: { executionRef: string; state: string };
+      };
       bearer: string;
       admission: Record<string, unknown>;
     };
@@ -2162,8 +2281,15 @@ void test("source HTTP: same fenced original remints only scoped readback and cl
       requestKey = f.scopeKey(f.context, ref + ":" + requestId);
     // Committed accepted effect after fencing/occupancy closure; SQL closure is
     // independently qualified elsewhere. This source fixture makes no native call.
-    f.requests.set(requestKey, { requestRef: requestId, effect: "effect_unknown" });
-    const fenced: SavedExecution = { ...original, state: "fenced", dispatchAllowed: false };
+    f.requests.set(requestKey, {
+      requestRef: requestId,
+      effect: "effect_unknown",
+    });
+    const fenced: SavedExecution = {
+      ...original,
+      state: "fenced",
+      dispatchAllowed: false,
+    };
     f.executions.set(executionKey, fenced);
     const nativeCalls = f.seen.length,
       forwarded = f.forwarded.length;
@@ -2179,7 +2305,10 @@ void test("source HTTP: same fenced original remints only scoped readback and cl
             input: "fixture",
           },
           bearer,
-          { "x-gateway-admission": JSON.stringify(admission), "x-gateway-request-id": id },
+          {
+            "x-gateway-admission": JSON.stringify(admission),
+            "x-gateway-request-id": id,
+          },
         );
         assert.equal(response.status, 403);
         assert.equal(((await response.json()) as { effect: string }).effect, "not_dispatched");
@@ -2211,8 +2340,8 @@ void test("source HTTP: same fenced original remints only scoped readback and cl
       state: "fenced",
     });
     assert.deepEqual(scoped.admission, run.admission);
-    assert.notEqual(scoped.bearer, run.bearer);
-    const grant = f.control.bearers.resolve(scoped.bearer);
+    assert.equal(scoped.bearer, run.bearer);
+    const grant = await f.control.bearers.resolveExecution(scoped.bearer, f.kernel);
     assert.ok(grant && grant.role === "execution");
     assert.equal(grant.saved.generation, original.generation);
     assert.deepEqual(grant.saved.admission, original.admission);
@@ -2222,7 +2351,10 @@ void test("source HTTP: same fenced original remints only scoped readback and cl
     for (const path of ["/v1/executions/" + ref, "/v1/operations/" + input.operationId]) {
       const read = await f.publicCall(path, undefined, scoped.bearer);
       assert.equal(read.status, 200);
-      const dto = (await read.json()) as { state: string; result?: { state: string } };
+      const dto = (await read.json()) as {
+        state: string;
+        result?: { state: string };
+      };
       assert.equal(dto.result?.state ?? dto.state, "fenced");
     }
     const status = await f.publicCall(
@@ -2252,7 +2384,10 @@ void test("source HTTP: same fenced original remints only scoped readback and cl
     // Simulate inconsistent persisted readback across the two server reads.
     for (const conflicting of [
       { ...fenced, generation: randomUUID() },
-      { ...fenced, admission: { ...fenced.admission, issuerEpoch: randomUUID() } },
+      {
+        ...fenced,
+        admission: { ...fenced.admission, issuerEpoch: randomUUID() },
+      },
       {
         ...fenced,
         admission: {
@@ -2321,12 +2456,18 @@ void test("source HTTP: same fenced original remints only scoped readback and cl
         final.bearer,
       );
     assert.equal(close.status, 200);
-    assert.deepEqual(await close.json(), { operationRef: closeId, state: "applied" });
+    assert.deepEqual(await close.json(), {
+      operationRef: closeId,
+      state: "applied",
+    });
     assert.deepEqual(await f.kernel.savedExecution(f.context, ref), fenced);
     assert.ok(f.executionCleanup.has(executionKey));
     const closeRead = await f.publicCall("/v1/operations/" + closeId, undefined, final.bearer);
     assert.equal(closeRead.status, 200);
-    assert.deepEqual(await closeRead.json(), { operationRef: closeId, state: "applied" });
+    assert.deepEqual(await closeRead.json(), {
+      operationRef: closeId,
+      state: "applied",
+    });
     const afterClose = await mint();
     assert.equal(afterClose.status, 200, "close of fenced original retains scoped readback");
     const retainedAfterClose = (await afterClose.json()) as Access;
@@ -2463,7 +2604,10 @@ void test("source HTTP: explicit management profile capability denies same-owner
     assert.equal(mutations, 0);
     const allowed = await connect(f.secondProfile.profile);
     assert.equal(allowed.status, 200);
-    const op = (await allowed.json()) as { operationRef: string; result: { accountRef: string } };
+    const op = (await allowed.json()) as {
+      operationRef: string;
+      result: { accountRef: string };
+    };
     assert.equal(creates, 1);
     assert.equal(mutations, 1);
     assert.equal(f.seen.filter((r) => r.path === "POST /private/native/v1/candidates").length, 1);
@@ -2497,7 +2641,10 @@ void test("source HTTP: explicit management profile capability denies same-owner
     );
     const list = await f.publicCall("/v1/accounts?limit=1");
     assert.equal(list.status, 200);
-    assert.deepEqual(await list.json(), { accounts: [], nextCursor: foreignProfile });
+    assert.deepEqual(await list.json(), {
+      accounts: [],
+      nextCursor: foreignProfile,
+    });
     const next = await f.publicCall("/v1/accounts?limit=1&cursor=" + foreignProfile);
     assert.equal(next.status, 200);
     assert.deepEqual(
@@ -2525,7 +2672,12 @@ void test("source HTTP: explicit management profile capability denies same-owner
           ...(kind === "rename"
             ? { displayName: "Renamed" }
             : kind === "reconnect"
-              ? { credential: { kind: "api_key", value: "fixture-write-only" } }
+              ? {
+                  credential: {
+                    kind: "api_key",
+                    value: "fixture-write-only",
+                  },
+                }
               : {}),
         }),
       });
@@ -2672,7 +2824,10 @@ void test("source HTTP: consumer output envelope preserves physical and historic
       const before = f.executions.size;
       const denied = await f.publicCall(
         "/internal/v1/run-access",
-        { ...input, limits: { ...input.limits, outputBytes: p.limits.outputBytes + 1 } },
+        {
+          ...input,
+          limits: { ...input.limits, outputBytes: p.limits.outputBytes + 1 },
+        },
         token,
       );
       assert.ok([400, 403].includes(denied.status));
@@ -2680,7 +2835,10 @@ void test("source HTTP: consumer output envelope preserves physical and historic
       for (const field of ["requests", "concurrency", "requestBytes", "tokens"] as const) {
         const rejected = await f.publicCall(
           "/internal/v1/run-access",
-          { ...input, limits: { ...input.limits, [field]: input.limits[field] + 1 } },
+          {
+            ...input,
+            limits: { ...input.limits, [field]: input.limits[field] + 1 },
+          },
           token,
         );
         assert.equal(rejected.status, 403);
@@ -2713,7 +2871,12 @@ void test("source HTTP: consumer output envelope preserves physical and historic
     f.control.bearers.replace([
       ...captured,
       management,
-      { role: "execution", consumerId: f.context.consumerId, token: historic.bearer, saved },
+      {
+        role: "execution",
+        consumerId: f.context.consumerId,
+        token: historic.bearer,
+        saved,
+      },
     ]);
     const count = f.executions.size;
     const direct = await f.publicCall(
@@ -2767,7 +2930,12 @@ void test("source HTTP: consumer output envelope preserves physical and historic
     assert.equal(f.forwarded.length, 0);
     f.executions.set(f.scopeKey(f.context, ref), saved);
     f.control.bearers.replace([
-      { role: "execution", consumerId: f.context.consumerId, token: historic.bearer, saved },
+      {
+        role: "execution",
+        consumerId: f.context.consumerId,
+        token: historic.bearer,
+        saved,
+      },
     ]);
     f.responseBytes(1_048_576);
     const exact = await requestWithAdmission(historic.admission);
@@ -2869,10 +3037,16 @@ void test("source HTTP: simultaneous finite tuples create/read/admit/forward ind
           },
         },
         {
-          descriptor: { ...mapping.descriptor, model: i ? f.profile.model : f.secondProfile.model },
+          descriptor: {
+            ...mapping.descriptor,
+            model: i ? f.profile.model : f.secondProfile.model,
+          },
         },
       ]) {
-        f.mappings.set(f.scopeKey(f.context, j.generation), { ...mapping, ...patch });
+        f.mappings.set(f.scopeKey(f.context, j.generation), {
+          ...mapping,
+          ...patch,
+        });
         const deny = await f.publicCall(
           "/v1/executions/" + executionRef + "/requests",
           body,
@@ -2892,7 +3066,11 @@ void test("source HTTP: simultaneous finite tuples create/read/admit/forward ind
       assert.equal(completed.status, 200);
       assert.match(await completed.text(), /tools-and-final/);
       assert.equal(f.forwarded.length, before + 1);
-      assert.deepEqual(f.forwarded.at(-1), { profile: p.profile, baseURL: p.baseURL, body });
+      assert.deepEqual(f.forwarded.at(-1), {
+        profile: p.profile,
+        baseURL: p.baseURL,
+        body,
+      });
       assert.equal(
         (await f.kernel.request(f.context, executionRef, headers["x-gateway-request-id"])).effect,
         "completed",
@@ -2953,7 +3131,10 @@ void test("source HTTP: suspended OAuth custody purpose excludes enrollment and 
       createdAt: "2026-10-06T01:02:03.123456789Z",
       ...codexOAuthProfile,
     };
-    f.mappings.set(f.scopeKey(f.context, j.generation), { ...j, descriptor: physical });
+    f.mappings.set(f.scopeKey(f.context, j.generation), {
+      ...j,
+      descriptor: physical,
+    });
     const op = f.operations.get(f.scopeKey(f.context, operationId))!;
     op.state = "applied";
     const account = f.accounts.get(f.scopeKey(f.context, j.accountRef))!;
@@ -3000,8 +3181,11 @@ void test("v2 lifecycle readback never recovers foreign or same-owner enrollment
     management: f.control.management,
     bearers: f.control.bearers,
     profiles: f.control.catalog,
-    intentHmacKey: randomBytes(32),
-    lifecycle: { contract: lifecycleWire.LIFECYCLE_CAPABILITY_CONTRACT, writeGate: "enabled" },
+    intentHmacKey: f.intentHmacKey,
+    lifecycle: {
+      contract: lifecycleWire.LIFECYCLE_CAPABILITY_CONTRACT,
+      writeGate: "enabled",
+    },
   });
   try {
     const pending: CandidateJournal[] = [];
@@ -3064,7 +3248,12 @@ void test("v2 lifecycle readback never recovers foreign or same-owner enrollment
 void test("usage request selection preserves the second allowed model", async () => {
   const requested = validateResponses(
     Buffer.from(
-      JSON.stringify({ model: "second", stream: true, store: false, service_tier: "default" }),
+      JSON.stringify({
+        model: "second",
+        stream: true,
+        store: false,
+        service_tier: "default",
+      }),
     ),
     ["first", "second"],
     100,
@@ -3132,8 +3321,12 @@ void test("source HTTP: Claude browser completion follows saved profile and qual
       403,
     );
     assert.equal(
-      (await f.publicCall("/v1/accounts/oauth/poll", { operationId, ownerRef: "owner-one" }))
-        .status,
+      (
+        await f.publicCall("/v1/accounts/oauth/poll", {
+          operationId,
+          ownerRef: "owner-one",
+        })
+      ).status,
       403,
     );
     const wrongFamily = {
@@ -3147,10 +3340,18 @@ void test("source HTTP: Claude browser completion follows saved profile and qual
       before,
       "wrong family and method reject before protected native request",
     );
-    const input = { operationId, ownerRef: "owner-one", authorizationCode: code + "#" + state };
+    const input = {
+      operationId,
+      ownerRef: "owner-one",
+      authorizationCode: code + "#" + state,
+    };
     assert.equal(
-      (await f.publicCall("/v1/accounts/oauth/complete", { ...input, ownerRef: "owner-two" }))
-        .status,
+      (
+        await f.publicCall("/v1/accounts/oauth/complete", {
+          ...input,
+          ownerRef: "owner-two",
+        })
+      ).status,
       403,
     );
     const d: PhysicalCandidate = {
@@ -3195,6 +3396,347 @@ void test("source HTTP: Claude browser completion follows saved profile and qual
     f.control.bearers.replace([]);
     assert.equal((await f.callback("oauth-owner-authority", lookup)).status, 403);
   } finally {
+    await f.close();
+  }
+});
+
+// Independent HTTP callback contract: public Go requests never need a volatile
+// TS body/stream association. SQL claim/proof and positive closure remain sole
+// effect authority, including after the execution capability is revoked.
+void test("source HTTP: public execution callbacks hydrate authority, claim once and settle after revoke without pending routing state", async () => {
+  let usageFault = true,
+    recorded: lifecycleWire.UsageObservation | null = null;
+  const currentRecorded = (): lifecycleWire.UsageObservation | null => recorded;
+  const callbackGate = new NativeControlAdmission(1, 0);
+  const usage: UsageJournal = {
+    observe: async () => recorded,
+    append: async (_ctx, fact) => {
+      if (usageFault) {
+        throw new KernelError("unavailable");
+      }
+      recorded = fact;
+    },
+    list: async () => {
+      throw new Error("not used");
+    },
+  };
+  const f = await sourceHTTP(false, false, usage, (req, res, work, refused) => {
+    admitNativeCallback(callbackGate, req, res, work, refused);
+  });
+  try {
+    const creationId = randomUUID();
+    const creation = await f.publicCall("/v1/accounts", {
+      operationId: creationId,
+      ownerRef: "owner-one",
+      profileId: f.secondProfile.profile,
+      displayName: "Public callback fixture",
+      credential: { kind: "api_key", value: "fixture-write-only" },
+    });
+    assert.equal(creation.status, 200);
+    const accountRef = f.journals.get(f.scopeKey(f.context, creationId))!.accountRef;
+    const access = await f.publicCall(
+      "/internal/v1/run-access",
+      {
+        operationId: randomUUID(),
+        invocationRef: "public-callback",
+        attemptRef: "attempt",
+        accountRefs: [accountRef],
+        subjectRef: "source-subject",
+        policyRevision: 1,
+        bindingRevision: 1,
+        profileId: f.secondProfile.profile,
+        limits: f.secondProfile.limits,
+        deadline: new Date(Date.now() + 10000).toISOString(),
+      },
+      "source-public-run",
+    );
+    assert.equal(access.status, 200);
+    const run = (await access.json()) as {
+      bearer: string;
+      admission: Record<string, unknown>;
+    };
+    const requestRef = randomUUID(),
+      lookup = { executionBearer: run.bearer, requestRef };
+    const savedRead = f.kernel.savedExecution;
+    f.kernel.savedExecution = async () => {
+      throw new KernelError("unavailable");
+    };
+    assert.equal(
+      (await f.callback("execution-authority", lookup)).status,
+      503,
+      "preclaim SQL outage is unavailable rather than credential rejection",
+    );
+    assert.equal(f.requests.size, 0);
+    assert.equal(f.forwarded.length, 0);
+    f.kernel.savedExecution = savedRead;
+    const metadata = await f.callback("execution-authority", lookup);
+    assert.equal(metadata.status, 200);
+    const approved = (await metadata.json()) as {
+      consumerId: string;
+      requestRef: string;
+      worker: string;
+      admission: { executionRef: string };
+      descriptor: unknown;
+    };
+    assert.equal(approved.consumerId, f.context.consumerId);
+    assert.equal(approved.requestRef, requestRef);
+    assert.equal(f.forwarded.length, 0);
+    const bad = await f.callback("execution-authority", {
+      ...lookup,
+      admission: { ...run.admission, bindingRevision: 999 },
+    });
+    assert.equal(bad.status, 403);
+    assert.equal(
+      (
+        await f.callback("execution-authority", {
+          ...lookup,
+          payload: "must-not-enter-control-plane",
+        })
+      ).status,
+      403,
+    );
+    const enrollment = f.authority.configuration.enrollment;
+    const original = await f.kernel.savedExecution(f.context, approved.admission.executionRef);
+    const native = {
+      originRef: enrollment.originRef,
+      engineIncarnation: enrollment.engineIncarnation,
+      requestNonce: randomUUID(),
+      generation: original.generation,
+    };
+    const input = {
+      ...approved,
+      native,
+      executionBearer: run.bearer,
+      requestedModel: f.secondProfile.model,
+    };
+    assert.equal(
+      (
+        await f.callback("public-admit", {
+          ...input,
+          native: { ...native, generation: randomUUID() },
+        })
+      ).status,
+      403,
+    );
+    const boundCall = (value: unknown, nonce: string) =>
+      fetch(f.callbackOrigin + "/private/native/v1/public-admit", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer " + f.consumer.callbackCredential,
+          "content-type": "application/json",
+          "x-gateway-reservation-nonce": nonce,
+        },
+        body: JSON.stringify(value),
+      });
+    assert.equal(
+      (await boundCall(input, randomUUID())).status,
+      403,
+      "nonce header must match the admitted body before claim",
+    );
+    assert.equal(f.requests.size, 0);
+    const admitted = await boundCall(input, native.requestNonce);
+    assert.equal(admitted.status, 200);
+    const permit = (await admitted.json()) as {
+      dispatch: { closure: NativeDispatchProof };
+    };
+    assert.ok(Boolean(permit.dispatch));
+    // A later local invocation may be refused before inspecting an existing
+    // accepted request. Its receipt cannot overwrite or settle that old effect.
+    const releaseGate = await callbackGate.acquire(Date.now() + 5000),
+      laterNonce = randomUUID();
+    try {
+      const refused = await boundCall(
+        { ...input, native: { ...native, requestNonce: laterNonce } },
+        laterNonce,
+      );
+      assert.equal(refused.status, 503);
+      assert.deepEqual(await refused.json(), {
+        kind: "account-gateway/public-admit-capacity/v1",
+        claim: "not_started",
+        requestNonce: laterNonce,
+      });
+      assert.equal(
+        (await f.kernel.request(f.context, approved.admission.executionRef, requestRef)).effect,
+        "dispatch_started",
+      );
+      assert.deepEqual(
+        await f.kernel.requestProof(f.context, approved.admission.executionRef, requestRef),
+        permit.dispatch.closure,
+      );
+      assert.equal(f.requests.size, 1);
+    } finally {
+      releaseGate();
+    }
+    const replay = await f.callback("public-admit", {
+      ...input,
+      native: { ...native, requestNonce: randomUUID() },
+    });
+    assert.equal(replay.status, 200);
+    assert.equal("dispatch" in ((await replay.json()) as object), false);
+    assert.equal(f.requests.size, 1);
+    assert.equal(f.forwarded.length, 0);
+    let closures = 0;
+    f.kernel.acknowledgeTransportClosed = async () => {
+      closures++;
+    };
+    const proof = permit.dispatch.closure;
+    const receipt = {
+      consumerId: f.context.consumerId,
+      executionRef: proof.executionRef,
+      requestRef: proof.requestRef,
+      native: proof.native,
+      proof,
+      phase: "closed",
+      effect: "completed",
+      sealed: true,
+      acknowledged: false,
+      lifetime: {
+        entered: true,
+        contextDone: true,
+        forwardingReturned: true,
+        bodyKnown: true,
+        bodyClosed: true,
+        closeFailed: false,
+        completed: true,
+        sealed: true,
+      },
+    };
+    f.control.bearers.replace([]);
+    assert.equal((await f.callback("execution-authority", lookup)).status, 403);
+    assert.equal(
+      (await f.callback("public-admit", { ...input, requestRef: randomUUID() })).status,
+      403,
+    );
+    assert.equal(
+      (
+        await f.callback("execution-settle", {
+          consumerId: f.context.consumerId,
+          requestedModel: input.requestedModel,
+          proof,
+          receipt: {
+            ...receipt,
+            lifetime: { ...receipt.lifetime, bodyClosed: false },
+          },
+        })
+      ).status,
+      403,
+    );
+    assert.equal(closures, 0);
+    assert.equal(
+      (
+        await f.callback("execution-settle", {
+          consumerId: f.context.consumerId,
+          requestedModel: input.requestedModel,
+          proof,
+          receipt,
+        })
+      ).status,
+      403,
+      "configured usage failure must retain physical closure authority",
+    );
+    assert.equal(closures, 0);
+    assert.equal(recorded, null);
+    usageFault = false;
+    assert.equal(
+      (
+        await f.callback("execution-settle", {
+          consumerId: f.context.consumerId,
+          requestedModel: input.requestedModel,
+          proof,
+          receipt,
+        })
+      ).status,
+      200,
+    );
+    const completedUsage = currentRecorded();
+    assert.ok(completedUsage !== null);
+    assert.equal(completedUsage.revision, 2);
+    assert.equal(
+      (await f.kernel.request(f.context, proof.executionRef, proof.requestRef)).effect,
+      "completed",
+    );
+    assert.equal(closures, 1);
+    assert.equal(
+      (
+        await f.callback("execution-settle", {
+          consumerId: f.context.consumerId,
+          requestedModel: input.requestedModel,
+          proof: { ...proof, token: randomUUID() },
+          receipt,
+        })
+      ).status,
+      403,
+    );
+    assert.equal(closures, 1);
+    assert.equal(f.forwarded.length, 0);
+  } finally {
+    await callbackGate.stop();
+    await f.close();
+  }
+});
+
+void test("source HTTP: only authenticated public-admit gate refusal proves this reservation never started claim work", async () => {
+  const gate = new NativeControlAdmission(1, 0),
+    release = await gate.acquire(Date.now() + 10_000);
+  let scheduled = 0;
+  const f = await sourceHTTP(false, false, undefined, (req, res, work, refused) => {
+    scheduled++;
+    admitNativeCallback(gate, req, res, work, refused);
+  });
+  const nonce = randomUUID(),
+    path = "/private/native/v1/public-admit";
+  const call = (
+    route = path,
+    token = f.consumer.callbackCredential,
+    value: string | null = nonce,
+  ) =>
+    fetch(f.callbackOrigin + route, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer " + token,
+        "content-type": "application/json",
+        ...(value === null ? {} : { "x-gateway-reservation-nonce": value }),
+      },
+      body: "{}",
+    });
+  try {
+    const unauthorized = await call(path, "untrusted-callback-credential");
+    assert.equal(unauthorized.status, 403);
+    assert.deepEqual(await unauthorized.json(), { code: "denied" });
+    assert.equal(scheduled, 0, "untrusted callers cannot reach the gate or receive its marker");
+    assert.equal((await call(path, f.consumer.callbackCredential, "invalid-nonce")).status, 403);
+    assert.equal(
+      (await call(path, f.consumer.callbackCredential, nonce + ", " + nonce)).status,
+      403,
+    );
+    assert.equal(scheduled, 0);
+    const refused = await call();
+    assert.equal(refused.status, 503);
+    assert.deepEqual(await refused.json(), {
+      kind: "account-gateway/public-admit-capacity/v1",
+      claim: "not_started",
+      requestNonce: nonce,
+    });
+    assert.equal(f.requests.size, 0);
+    assert.equal(f.forwarded.length, 0);
+    const legacy = await call(path, f.consumer.callbackCredential, null);
+    assert.equal(legacy.status, 503);
+    assert.equal(await legacy.text(), "");
+    const other = await call("/private/native/v1/execution-settle");
+    assert.equal(other.status, 503);
+    assert.equal(await other.text(), "", "marker is scoped to public-admit only");
+    release();
+    const started = await call();
+    assert.equal(started.status, 403);
+    assert.deepEqual(
+      await started.json(),
+      { code: "denied" },
+      "started invalid work cannot become a pre-claim refusal",
+    );
+    assert.equal(f.requests.size, 0);
+  } finally {
+    release();
+    await gate.stop();
     await f.close();
   }
 });
@@ -3244,7 +3786,7 @@ for (const contract of ["v1", "v2"] as const) {
           resolve("entered");
         };
       });
-      const f = await sourceHTTP(true, false, {
+      const f = await sourceHTTP(true, false, undefined, undefined, {
         contract,
         enter: async () => {
           entered++;
@@ -3462,7 +4004,11 @@ void test("source HTTP: Grok displayed code uses saved profile and never project
         model: grokOAuthProfile.model,
       },
     });
-    const input = { operationId, ownerRef: "owner-one", authorizationCode: "displayed-code" };
+    const input = {
+      operationId,
+      ownerRef: "owner-one",
+      authorizationCode: "displayed-code",
+    };
     const applied = await sdk.completeOAuth(input);
     assert.equal(applied.state, "applied");
     assert.equal(f.completions(), 1);
@@ -4014,7 +4560,7 @@ void test("dynamic OpenRouter membership reaches transport without rewriting the
 
 // Missing composition is not an observed outage and cannot grant fallback membership.
 void test("qualified OpenRouter execution with a missing discovery source denies its anchor before transport", async () => {
-  const f = await sourceHTTP(true, false, undefined, true);
+  const f = await sourceHTTP(true, false, undefined, undefined, undefined, true);
   try {
     const { account, profile, generation, input } = modelAccount(f, "openrouter");
     const sdk = createManagementClient({

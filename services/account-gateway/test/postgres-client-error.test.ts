@@ -26,7 +26,7 @@ await test(
             const result = sql.startsWith('SELECT issuer') ? { rows: [{ issuer, worker_slots: 16 }] }
               : sql.startsWith('SELECT lease_until') ? { rows: [{ lease_until: lease }] }
               : { rows: [] };
-            if (mode === 'query-reject' && sql.startsWith('INSERT INTO issuer_epochs') ||
+            if (mode === 'query-reject' && sql.startsWith('SELECT lease_until') ||
                 mode === 'body-resolve' && sql.startsWith('SELECT lease_until') ||
                 mode === 'commit-resolve' && sql === 'COMMIT') {
               return new Promise((resolve, reject) => setImmediate(() => {

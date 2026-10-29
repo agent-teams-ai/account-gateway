@@ -283,7 +283,7 @@ async function fixture(runControlMaxRunMs = 60_000) {
     assert.ok(json !== null && typeof json === "object" && !Array.isArray(json));
     assert.deepEqual(Object.keys(json).toSorted(), ["admission", "bearer", "operation"]);
     assert.ok("bearer" in json && typeof json.bearer === "string");
-    assert.match(json.bearer, /^[A-Za-z0-9_-]{43}$/);
+    assert.match(json.bearer, /^agx1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/);
     assert.ok("operation" in json && "admission" in json);
     const op = c.preparationOperation.parse(json.operation);
     assert.ok(op.state === "applied" && op.result?.kind === "execution");
@@ -339,7 +339,7 @@ async function fixture(runControlMaxRunMs = 60_000) {
   }
   async function restart() {
     await stop();
-    // Normal restart keeps SQL/issuer/HMAC, loses all memory access grants.
+    // Stable signing configuration keeps durable execution locators across restart.
     server = createFacade({
       ...options,
       bearers: new FacadeBearers([
@@ -418,7 +418,7 @@ void test("HTTP control requires distinct configured consumer authority before a
     await denied(await f.raw(f.input(), granted.bearer));
     // Red if an untyped service composer can promote a resolved execution grant
     // through the registry's exported issuer despite the HTTP role fence.
-    const captured = f.options.bearers.resolve(granted.bearer);
+    const captured = await f.options.bearers.resolveExecution(granted.bearer, f.kernel);
     assert.ok(captured);
     const saved = await f.kernel.savedExecution(f.context, f.execution(granted).ref);
     assert.throws(
@@ -531,7 +531,7 @@ void test("parallel run issuance and same-run retry preserve independent HTTP ex
 });
 
 // Red if a lost prepare response repins after settings/metadata change, modified
-// intent silently mints, restart rearms old credentials, or scoped fenced
+// intent silently mints, restart changes original capability scope, or fenced
 // recovery bypasses SQL dispatch, close, deadline or restore issuer denial.
 void test("original prepare recovery survives settings drift and preserves scoped fenced authority", async (t) => {
   for (const terminal of ["close", "fence", "reconnect", "expiry", "restore"] as const) {
@@ -606,9 +606,13 @@ void test("original prepare recovery survives settings drift and preserves scope
         assert.equal((await active.client.status(active.ref, requestId)).effect, "completed");
         if (terminal === "close") {
           await f.restart();
-          await assert.rejects(f.request(recovered), forbidden);
+          const restarted = f.execution(recovered);
+          assert.equal(
+            (await restarted.client.status(restarted.ref, requestId)).effect,
+            "completed",
+          );
           const reinstalled = await f.mint(value);
-          assert.notEqual(reinstalled.bearer, recovered.bearer);
+          assert.equal(reinstalled.bearer, recovered.bearer);
           assert.deepEqual(reinstalled.admission, recovered.admission);
           recovered = reinstalled;
           const e = f.execution(recovered);
@@ -641,7 +645,7 @@ void test("original prepare recovery survives settings drift and preserves scope
           const previous = recovered;
           await f.restart();
           recovered = await f.mint(value);
-          assert.notEqual(recovered.bearer, previous.bearer);
+          assert.equal(recovered.bearer, previous.bearer);
           assert.deepEqual(recovered.admission, projection);
           assert.deepEqual(await f.mint(value), recovered);
           const e = f.execution(recovered),
