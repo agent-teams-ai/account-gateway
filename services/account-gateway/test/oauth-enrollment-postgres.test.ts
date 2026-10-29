@@ -1576,9 +1576,11 @@ void test("F maintenance: retained pending cleanup cannot starve another active 
     // committed selection/HTTP, not an absent adapter import.
     const source = serviceComposition as Partial<typeof serviceComposition>;
     let cleanupTicks = 0;
-    const settle = async (claim: NonNullable<Awaited<ReturnType<typeof f.kernel.claimCleanup>>>) => {
-      assert.equal(claim.scope.kind, 'generation');
-      assert.equal(await manager.cleanupClaim(f.context, claim), 'quarantined');
+    const settle = async (
+      claim: NonNullable<Awaited<ReturnType<typeof f.kernel.claimCleanup>>>,
+    ) => {
+      assert.equal(claim.scope.kind, "generation");
+      assert.equal(await manager.cleanupClaim(f.context, claim), "quarantined");
       cleanupTicks++;
       return false;
     };
@@ -1586,7 +1588,10 @@ void test("F maintenance: retained pending cleanup cannot starve another active 
       source.composeServiceCleanupTurn?.(f.kernel, f.context, f.worker, settle) ??
       (async () => {
         const claim = await f.kernel.claimCleanup(f.context, f.worker);
-        if (claim) await settle(claim); return claim !== undefined;
+        if (claim) {
+          await settle(claim);
+        }
+        return claim !== undefined;
       });
     for (let tick = 0; tick < 4; tick++) {
       await f.kernel.heartbeat(f.context, f.worker);

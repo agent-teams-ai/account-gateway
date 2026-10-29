@@ -99,7 +99,9 @@ jobs:
           test "$(pnpm --version)" = 11.28.2
           test "$(pnpm --config.engine-strict=true config get engine-strict)" = true
           pnpm --config.engine-strict=true install --frozen-lockfile --store-dir "$GATEWAY_LOAD_ROOT/store" --virtual-store-dir "$GATEWAY_LOAD_ROOT/virtual"
-          node node_modules/typescript/bin/tsc --project tsconfig.json --outDir "$GATEWAY_LOAD_ROOT/sdk-dist"
+          node node_modules/typescript/bin/tsc --project tsconfig.build.json --outDir "$GATEWAY_LOAD_ROOT/sdk-dist"
+          test -f "$GATEWAY_LOAD_ROOT/sdk-dist/index.js"
+          test -f "$GATEWAY_LOAD_ROOT/sdk-dist/index.d.ts"
           ln -s "$GITHUB_WORKSPACE/packages/account-gateway/node_modules" "$GATEWAY_LOAD_ROOT/sdk-dist/node_modules"
           ln -s "$GATEWAY_LOAD_ROOT/sdk-dist" packages/account-gateway/dist
           pnpm --dir services/account-gateway run typecheck

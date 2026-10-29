@@ -11,7 +11,7 @@ import type {
 } from "@agent-teams/account-gateway/contracts";
 import type { RetainedCustodyProof } from "./domain.ts";
 import { KernelError, identifier, uuid } from "./domain.ts";
-import type { NativeControlAdmission } from './service-admission.ts';
+import type { NativeControlAdmission } from "./service-admission.ts";
 import { secretSubmission } from "@agent-teams/account-gateway/http";
 import {
   accountModelsRequest,
@@ -411,9 +411,15 @@ class NativeControlHTTP {
       throw new NativeFailure("bounded");
     }
     let release: (() => void) | undefined;
-    try { release = await this.#admission?.acquire(deadline); }
-    catch { throw new NativeFailure('unavailable'); }
-    if (Date.now() >= deadline) { release?.(); throw new NativeFailure('deadline'); }
+    try {
+      release = await this.#admission?.acquire(deadline);
+    } catch {
+      throw new NativeFailure("unavailable");
+    }
+    if (Date.now() >= deadline) {
+      release?.();
+      throw new NativeFailure("deadline");
+    }
     return new Promise<Buffer>((resolve, reject) => {
       let finished = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -435,28 +441,38 @@ class NativeControlHTTP {
       try {
         req = send(this.#origin, {
           method,
-        path,
-        agent: false,
-        maxHeaderSize: this.#headerBytes,
-        headers: {
-          authorization: "Bearer " + this.#control,
-          accept: "application/json",
-          connection: "close",
-          ...(body
-            ? { "content-type": "application/json", "content-length": String(body.length) }
-            : {}),
+          path,
+          agent: false,
+          maxHeaderSize: this.#headerBytes,
+          headers: {
+            authorization: "Bearer " + this.#control,
+            accept: "application/json",
+            connection: "close",
+            ...(body
+              ? { "content-type": "application/json", "content-length": String(body.length) }
+              : {}),
           },
         });
-      } catch { release?.(); reject(new NativeFailure('unavailable')); return; }
+      } catch {
+        release?.();
+        reject(new NativeFailure("unavailable"));
+        return;
+      }
       let physical = false;
-      req.once('socket', socket => {
+      req.once("socket", (socket) => {
         physical = true;
-        socket.once('close', () => release?.());
+        socket.once("close", () => release?.());
       });
-      req.once('close', () => { if (!physical) release?.(); });
-      req.maxHeadersCount = 65; timer = setTimeout(
-        () =>
-          finish(new NativeFailure("deadline")),
+      req.once("close", () => {
+        if (!physical) {
+          release?.();
+        }
+      });
+      req.maxHeadersCount = 65;
+      timer = setTimeout(
+        () => {
+          finish(new NativeFailure("deadline"));
+        },
         Math.max(1, deadline - Date.now()),
       );
       req.on("error", () => {

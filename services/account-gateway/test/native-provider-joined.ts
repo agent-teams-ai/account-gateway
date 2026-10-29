@@ -967,11 +967,15 @@ async function run(): Promise<void> {
     const acquired = await cleanupTurn();
     // The production selector yields the next turn to refresh after each batch.
     if (!acquired) {
-      if (++idleCleanupTurns === 2) break;
+      if (++idleCleanupTurns === 2) {
+        break;
+      }
       continue;
     }
     idleCleanupTurns = 0;
-    if (count === 63) throw new Error("cleanup did not drain");
+    if (count === 63) {
+      throw new Error("cleanup did not drain");
+    }
   }
   const rrAcceptance =
     typeof Reflect.get(globalThis, Symbol.for("provider-joined-e2e.acceptProvider")) === "function";

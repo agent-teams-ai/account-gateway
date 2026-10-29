@@ -1861,7 +1861,11 @@ export function createFacade(options: FacadeOptions): Server {
                 send(
                   res,
                   c.requestStatus,
-                  requestDTO(await inServiceLane('control', () => kernel.request(context, ref, identity.requestRef!))),
+                  requestDTO(
+                    await inServiceLane("control", () =>
+                      kernel.request(context, ref, identity.requestRef!),
+                    ),
+                  ),
                   202,
                 );
                 return;
@@ -1877,7 +1881,9 @@ export function createFacade(options: FacadeOptions): Server {
               try {
                 // Streaming data requires actual persisted callback claim, never an
                 // injected response substituting for the kernel's authority.
-                const status = await inServiceLane('control', () => kernel.request(context, ref, identity.requestRef!));
+                const status = await inServiceLane("control", () =>
+                  kernel.request(context, ref, identity.requestRef!),
+                );
                 if (
                   !["dispatch_started", "response_started", "completed"].includes(status.effect) ||
                   signalAborted(controller.signal)
@@ -1907,7 +1913,9 @@ export function createFacade(options: FacadeOptions): Server {
                   }
                 }
                 // New data admission cannot take EOF away from an accepted effect.
-                const terminal = await inServiceLane('control', () => kernel.request(context, ref, identity.requestRef!));
+                const terminal = await inServiceLane("control", () =>
+                  kernel.request(context, ref, identity.requestRef!),
+                );
                 if (terminal.effect !== "completed" || signalAborted(controller.signal)) {
                   throw new KernelError("unknown");
                 }

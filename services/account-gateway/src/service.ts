@@ -6,7 +6,10 @@ import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
 import { Pool } from "pg";
 import {
-  ServiceAdmission, NativeControlAdmission, admitNativeCallback, nativeCallbackCapacity,
+  ServiceAdmission,
+  NativeControlAdmission,
+  admitNativeCallback,
+  nativeCallbackCapacity,
   facadeControlRoute,
   facadeBoundedReadRoute,
   inServiceLane,
@@ -90,6 +93,7 @@ export function composeServiceCleanupTurn(
   signal?: AbortSignal,
 ) {
   let refreshTurn = false;
+  const cleanupAborted = () => signal?.aborted === true;
   return async () => {
     if (refreshTurn) {
       refreshTurn = false;
@@ -97,12 +101,21 @@ export function composeServiceCleanupTurn(
     }
     const started = performance.now();
     let acquired = false;
-    for (let count = 0; count < 8 && !signal?.aborted; count++) {
-      if (count && performance.now() - started >= 1000) break;
+    for (let count = 0; count < 8; count++) {
+      if (cleanupAborted()) {
+        break;
+      }
+      if (count && performance.now() - started >= 1000) {
+        break;
+      }
       const claim = await kernel.claimCleanup(ctx, worker);
-      if (!claim) break;
+      if (!claim) {
+        break;
+      }
       acquired = refreshTurn = true;
-      if (signal?.aborted || !await settle(claim)) break;
+      if (cleanupAborted() || !(await settle(claim))) {
+        break;
+      }
     }
     return acquired;
   };
@@ -337,7 +350,10 @@ export function composeServiceNative(
       maxPending: 128,
     },
   });
-  return Object.freeze({ authority, transport: new NativeHTTPTransport(authority, control.nativeControls) });
+  return Object.freeze({
+    authority,
+    transport: new NativeHTTPTransport(authority, control.nativeControls),
+  });
 }
 
 export interface ProcessBinding {
@@ -695,7 +711,10 @@ function nonempty(value: string | undefined): value is string {
 export async function startService(configFile: string, signal?: AbortSignal): Promise<Service> {
   const admission = new ServiceAdmission();
   const nativeControls = new NativeControlAdmission();
-  const nativeCallbacks = new NativeControlAdmission(nativeCallbackCapacity.active, nativeCallbackCapacity.waiting);
+  const nativeCallbacks = new NativeControlAdmission(
+    nativeCallbackCapacity.active,
+    nativeCallbackCapacity.waiting,
+  );
   const cfg = loadServiceConfig(configFile); // Fully frozen before any await.
   const pool = new Pool({
     connectionString: cfg.kernelDSN,
@@ -885,7 +904,11 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
       return stopped;
     }
     stopping = true;
-    const handlersSettled = Promise.all([admission.stop(), nativeControls.stop(), nativeCallbacks.stop()]);
+    const handlersSettled = Promise.all([
+      admission.stop(),
+      nativeControls.stop(),
+      nativeCallbacks.stop(),
+    ]);
     readbackAbort.abort();
     denyAdmission();
     install();
@@ -1102,8 +1125,9 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
       worker,
     });
     const { authority, transport } = composeServiceNative(cfg, control, kernel, store, enrollment);
-    handler = authority.createServer((req, res, work) => admitNativeCallback(nativeCallbacks, req,
-      res, work));
+    handler = authority.createServer((req, res, work) => {
+      admitNativeCallback(nativeCallbacks, req, res, work);
+    });
     install();
     startupStage = "ready";
     await waitFor(() => ready, 10_000);
@@ -1138,20 +1162,26 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     });
     await listen(facade, cfg.facadeOrigin);
     startupActive();
-    const cleanupTurn = composeServiceCleanupTurn({
-      claimCleanup(context, owner) {
-        maintenancePhase = 'cleanup_claim';
-        return kernel.claimCleanup(context, owner);
-      }
-    }, ctx, worker, async claim => {
-      if (isStopping()) return false; // An acquired lease remains outstanding until expiry.
-      if (claim.scope.kind === "generation") {
-        maintenancePhase = "cleanup_generation";
-        return await management.cleanupClaim(ctx, claim) === 'erased';
-      }
-      maintenancePhase = "cleanup_transport";
-      let closed = claim.scope.transports.length <= 2;
-      for (const t of claim.scope.transports.slice(0, 2)) {
+    const cleanupTurn = composeServiceCleanupTurn(
+      {
+        claimCleanup(context, owner) {
+          maintenancePhase = "cleanup_claim";
+          return kernel.claimCleanup(context, owner);
+        },
+      },
+      ctx,
+      worker,
+      async (claim) => {
+        if (isStopping()) {
+          return false;
+        } // An acquired lease remains outstanding until expiry.
+        if (claim.scope.kind === "generation") {
+          maintenancePhase = "cleanup_generation";
+          return (await management.cleanupClaim(ctx, claim)) === "erased";
+        }
+        maintenancePhase = "cleanup_transport";
+        let closed = claim.scope.transports.length <= 2;
+        for (const t of claim.scope.transports.slice(0, 2)) {
           if (isStopping()) {
             closed = false;
             break;
@@ -1182,22 +1212,32 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
           } catch {
             closed = false;
           }
-      }
-      if (isStopping()) return false;
-      maintenancePhase = "cleanup_settlement";
-      await kernel.settleCleanup(ctx, claim.cleanupRef, worker, claim.token, closed);
-      return closed;
-    }, readbackAbort.signal);
+        }
+        if (isStopping()) {
+          return false;
+        }
+        maintenancePhase = "cleanup_settlement";
+        await kernel.settleCleanup(ctx, claim.cleanupRef, worker, claim.token, closed);
+        return closed;
+      },
+      readbackAbort.signal,
+    );
     async function tick(): Promise<void> {
-      maintenancePhase = 'heartbeat';
+      maintenancePhase = "heartbeat";
       await kernel.heartbeat(ctx, worker);
-      if (isStopping()) return;
-      maintenancePhase = 'reconcile';
+      if (isStopping()) {
+        return;
+      }
+      maintenancePhase = "reconcile";
       await management.reconcile(ctx);
-      if (isStopping()) return;
-      maintenancePhase = 'cleanup_claim';
+      if (isStopping()) {
+        return;
+      }
+      maintenancePhase = "cleanup_claim";
       const claimed = await cleanupTurn();
-      if (isStopping()) return;
+      if (isStopping()) {
+        return;
+      }
       maintenancePhase = "oauth_refresh";
       await management.refreshOAuth(ctx, claimed, readbackAbort.signal);
     }
