@@ -19,7 +19,11 @@ import type { FacadeBearers, NativeCallback, NativeTransport } from "./facade.ts
 import type { ManagementStore, CandidateJournal } from "./management.ts";
 import { accountLimitsTarget, exactCandidate, physicalCandidate } from "./management.ts";
 import { validateResponses } from "./facade-ingress.ts";
-import { readAccountModels, accountModelAdmission } from "./models-port.ts";
+import {
+  configuredAccountModelSource,
+  readAccountModels,
+  accountModelAdmission,
+} from "./models-port.ts";
 import type { AccountModelsSource } from "./models-port.ts";
 import {
   admission,
@@ -88,6 +92,12 @@ export interface AuthorityOptions {
     readonly store: Pick<ManagementStore, "readJournal" | "oauthCleanup">;
   };
 }
+function nonempty(value: string | undefined): value is string {
+  return Boolean(value);
+}
+function signalAborted(signal: AbortSignal): boolean {
+  return signal.aborted;
+}
 const hash = (s: string) => createHash("sha256").update(s).digest();
 const key = (ctx: TrustedContext, ref: string, id: string) =>
   JSON.stringify([ctx.consumerId, ref, id]);
@@ -111,7 +121,9 @@ export class NativeAuthority {
     // profile. Validate each tuple with its own receipt, retaining the original
     // enrollment ACK receipt and all shared transport/control bounds.
     const base = config({ ...options.config, profiles: options.config.profiles.slice(0, 1) });
-    if (options.config.profiles.length > providerConnectionRegistry.length) denied();
+    if (options.config.profiles.length > providerConnectionRegistry.length) {
+      denied();
+    }
     const profiles = options.config.profiles.map(
       (p) =>
         config({
@@ -120,12 +132,16 @@ export class NativeAuthority {
           profiles: [p],
         }).profiles[0],
     );
-    if (new Set(profiles.map((p) => p.profile)).size !== profiles.length) denied();
+    if (new Set(profiles.map((p) => p.profile)).size !== profiles.length) {
+      denied();
+    }
     this.configuration = Object.freeze({ ...base, profiles: Object.freeze(profiles) });
     if (options.profileLimits) {
-      if (options.profileLimits.length !== profiles.length) denied();
+      if (options.profileLimits.length !== profiles.length) {
+        denied();
+      }
       for (const entry of options.profileLimits) {
-        const p = profiles.find((p) => p.profile === entry.profile);
+        const p = profiles.find((profile) => profile.profile === entry.profile);
         const limits = Object.freeze(approvedLimits(entry.limits, defaults));
         if (
           !p ||
@@ -133,8 +149,9 @@ export class NativeAuthority {
           limits.requestBytes !== p.requestBytes ||
           limits.outputBytes !== p.outputBytes ||
           limits.tokens !== p.tokens
-        )
+        ) {
           denied();
+        }
         this.#limits.set(entry.profile, limits);
       }
     }
@@ -151,8 +168,12 @@ export class NativeAuthority {
     }));
   }
   consumer(ctx: TrustedContext) {
-    const c = this.configuration.consumers.find((c) => c.consumerId === ctx.consumerId);
-    if (!c) return denied();
+    const c = this.configuration.consumers.find(
+      (consumer) => consumer.consumerId === ctx.consumerId,
+    );
+    if (!c) {
+      return denied();
+    }
     return c;
   }
   begin(input: Input, bytes: Uint8Array): { association: Association; first: boolean } {
@@ -169,19 +190,23 @@ export class NativeAuthority {
         !sameAdmission(previous.saved.admission, snapshot.admission) ||
         previous.saved.generation !== snapshot.generation ||
         previous.digest !== digest
-      )
+      ) {
         return denied();
+      }
       return { association: previous, first: false };
     }
     if (this.#pending.size >= this.configuration.maxPending) {
       // Retained claims are evicted only after protected durable closure ACK.
-      for (const [k, a] of this.#pending)
+      for (const [k, a] of this.#pending) {
         if (a.acknowledged) {
           this.#pending.delete(k);
           break;
         }
+      }
     }
-    if (this.#pending.size >= this.configuration.maxPending) return denied();
+    if (this.#pending.size >= this.configuration.maxPending) {
+      return denied();
+    }
     // Capture callable methods rather than a mutable callback container.
     const callback = Object.freeze({
       ...(input.callback.usage ? { usage: input.callback.usage.bind(input.callback) } : {}),
@@ -207,22 +232,29 @@ export class NativeAuthority {
   }
   #forget(a: Association): void {
     const index = key(a.context, a.saved.admission.executionRef, a.requestId);
-    if (this.#pending.get(index) === a) this.#pending.delete(index);
+    if (this.#pending.get(index) === a) {
+      this.#pending.delete(index);
+    }
   }
   reclaimUnstarted(a: Association): void {
     // Only the synchronous pre-POST path can establish this positive fact.
-    if (!a.outboundStarted && !a.admitStarted) this.#forget(a);
+    if (!a.outboundStarted && !a.admitStarted) {
+      this.#forget(a);
+    }
   }
   async reclaimDenied(a: Association): Promise<void> {
-    if (!a.admitStarted || a.proof) return denied();
+    if (!a.admitStarted || a.proof) {
+      return denied();
+    }
     const ref = a.saved.admission.executionRef;
     const status = await this.kernel.request(a.context, ref, a.requestId);
     if (
       status.effect !== "not_dispatched" ||
       status.requestRef !== a.requestId ||
       (await this.kernel.requestProof(a.context, ref, a.requestId))
-    )
+    ) {
       return denied();
+    }
     // SQL retains the denial/replay tombstone; this map only routes callbacks.
     this.#forget(a);
   }
@@ -237,16 +269,18 @@ export class NativeAuthority {
       fresh.state !== "open" ||
       a.signal.aborted ||
       instant(fresh.admission.expiresAt) <= now()
-    )
+    ) {
       return denied();
+    }
     const mapping = await this.#store.mapping(a.context, fresh.generation);
     if (
       !mapping ||
       mapping.consumerId !== a.context.consumerId ||
       mapping.accountRef !== fresh.admission.accountRef ||
       mapping.generation !== fresh.generation
-    )
+    ) {
       return denied();
+    }
     const physical = physicalCandidate(mapping.descriptor),
       d = descriptor(physical);
     const profile = this.configuration.profiles.find(
@@ -272,11 +306,16 @@ export class NativeAuthority {
         (Object.keys(limits) as (keyof ApprovedLimits)[]).some(
           (k) => fresh.admission.limits[k] > limits[k],
         ))
-    )
+    ) {
       return denied();
+    }
     instant(d.created_at);
-    let models: ReturnType<typeof accountModelAdmission> = { modelIds: [profile.model], models: undefined, enforceCapabilities: false };
-    if (this.#accountModels && providerConnectionDefinition(profile.profile)?.oauth?.family === "codex") {
+    let models: ReturnType<typeof accountModelAdmission> = {
+      modelIds: [profile.model],
+      models: undefined,
+      enforceCapabilities: false,
+    };
+    if (configuredAccountModelSource(profile.profile)) {
       const selector = {
         ownerRef: mapping.ownerRef,
         accountRef: fresh.admission.accountRef,
@@ -285,25 +324,47 @@ export class NativeAuthority {
       };
       const catalogue = await readAccountModels(this.#accountModels, selector, async () => {
         const current = await accountLimitsTarget(this.kernel, this.#store, a.context, selector);
-        if (current.nativePhysicalIdentity !== fresh.generation) return denied();
+        if (current.nativePhysicalIdentity !== fresh.generation) {
+          return denied();
+        }
         return current;
       });
-      const after = saved(await this.kernel.savedExecution(a.context, fresh.admission.executionRef));
-      if (!sameAdmission(fresh.admission, after.admission) || after.generation !== fresh.generation ||
-        !after.dispatchAllowed || after.state !== "open" || a.signal.aborted ||
-        instant(after.admission.expiresAt) <= now()) return denied();
+      const after = saved(
+        await this.kernel.savedExecution(a.context, fresh.admission.executionRef),
+      );
+      if (
+        !sameAdmission(fresh.admission, after.admission) ||
+        after.generation !== fresh.generation ||
+        !after.dispatchAllowed ||
+        after.state !== "open" ||
+        signalAborted(a.signal) ||
+        instant(after.admission.expiresAt) <= now()
+      ) {
+        return denied();
+      }
       models = accountModelAdmission(catalogue, profile.model);
     }
-    validateResponses(bytes, models.modelIds, profile.providerTokenUpperBound, models.models, models.enforceCapabilities);
+    validateResponses(
+      bytes,
+      models.modelIds,
+      profile.providerTokenUpperBound,
+      models.models,
+      models.enforceCapabilities,
+      configuredAccountModelSource(profile.profile),
+    );
     await this.kernel.currentWorkerLease(a.context, this.configuration.enrollment.worker);
-    if (a.signal.aborted) return denied();
+    if (signalAborted(a.signal)) {
+      return denied();
+    }
     a.descriptor = d;
     a.ready = true;
   }
   // Resolve the original source-owned tuple from durable custody, never from
   // caller-selected provider fields or the ordering of configured profiles.
   #oauthProfile(journal: CandidateJournal | undefined, cleanupOnly = false) {
-    if (!journal) return undefined;
+    if (!journal) {
+      return;
+    }
     const definition = oauthProfileDefinition(journal.profile.profile);
     const profile = this.configuration.profiles.find((p) => p.profile === journal.profile.profile);
     if (
@@ -316,11 +377,12 @@ export class NativeAuthority {
       (cleanupOnly
         ? !definition.cleanupModels.includes(journal.profile.model)
         : journal.profile.model !== profile.model)
-    )
-      return undefined;
+    ) {
+      return;
+    }
     return profile;
   }
-  // Cached reads have separate consumer authority and permit suspended custody.
+  // Cached quota and model reads share owner authority and permit suspended custody.
   async #accountLimitsOwner(ctx: TrustedContext, value: unknown): Promise<unknown> {
     const r = object(value, [
       "consumerId",
@@ -334,14 +396,16 @@ export class NativeAuthority {
       !this.#accountLimitsOwners ||
       typeof r.profileId !== "string" ||
       !providerConnectionDefinition(r.profileId) ||
-      providerConnectionDefinition(r.profileId)?.limitsContract === "none" ||
+      (providerConnectionDefinition(r.profileId)?.limitsContract === "none" &&
+        !configuredAccountModelSource(r.profileId)) ||
       !this.#accountLimitsOwners.bearers.authorizesAccountLimits(
         ctx,
         r.ownerRef as string,
         r.profileId,
       )
-    )
+    ) {
       return denied();
+    }
     const target = await accountLimitsTarget(this.kernel, this.#store, ctx, {
       ownerRef: r.ownerRef as string,
       accountRef: r.accountRef as string,
@@ -354,8 +418,9 @@ export class NativeAuthority {
         r.ownerRef as string,
         r.profileId,
       )
-    )
+    ) {
       return denied();
+    }
     return { ok: true, native: descriptor(target) };
   }
   // Enrollment and refresh keep their existing authority and reject suspended.
@@ -364,8 +429,9 @@ export class NativeAuthority {
     value: unknown,
   ): Promise<{ ok: true; ownerRef: string }> {
     const r = object(value, ["consumerId", "operationId", "accountRef", "generation"]);
-    if (!this.#owners || !this.kernel.accountCustody || r.consumerId !== ctx.consumerId)
+    if (!this.#owners || !this.kernel.accountCustody || r.consumerId !== ctx.consumerId) {
       return denied();
+    }
     identifier(r.operationId);
     uuid(r.accountRef);
     uuid(r.generation);
@@ -383,8 +449,9 @@ export class NativeAuthority {
       j.profile.baseURL !== p.baseURL ||
       j.profile.model !== p.model ||
       j.profile.qualificationRef !== p.qualificationRef
-    )
+    ) {
       return denied();
+    }
     const op = await this.kernel.operation(ctx, j.operationId);
     const account = await this.kernel.account(ctx, j.accountRef);
     const mapping = await this.#store.mapping(ctx, j.generation);
@@ -403,20 +470,24 @@ export class NativeAuthority {
       mapping.profile.qualificationRef !== j.profile.qualificationRef ||
       mapping.generation !== j.generation ||
       !exactCandidate(j, physicalCandidate(mapping.descriptor))
-    )
+    ) {
       return denied();
+    }
     const current = await this.kernel.accountCustody(ctx, j.accountRef);
     if (
       current.generation !== j.generation ||
       current.nativePhysicalIdentity !== mapping.descriptor.nativePhysicalIdentity ||
       !this.#owners.bearers.authorizesOwner(ctx, j.ownerRef, j.profile.profile)
-    )
+    ) {
       return denied();
+    }
     return { ok: true, ownerRef: j.ownerRef };
   }
   async #owner(ctx: TrustedContext, value: unknown): Promise<{ ok: true; ownerRef: string }> {
     const r = object(value, ["consumerId", "operationId", "accountRef", "generation"]);
-    if (!this.#owners || r.consumerId !== ctx.consumerId) return denied();
+    if (!this.#owners || r.consumerId !== ctx.consumerId) {
+      return denied();
+    }
     identifier(r.operationId);
     uuid(r.accountRef);
     uuid(r.generation);
@@ -434,8 +505,9 @@ export class NativeAuthority {
       j.profile.baseURL !== p.baseURL ||
       j.profile.model !== p.model ||
       j.profile.qualificationRef !== p.qualificationRef
-    )
+    ) {
       return denied();
+    }
     identifier(j.ownerRef);
     const op = await this.kernel.operation(ctx, j.operationId);
     const account = await this.kernel.account(ctx, j.accountRef);
@@ -448,8 +520,9 @@ export class NativeAuthority {
       account.profile !== j.profile.profile ||
       (!["staging", "active", "quarantined"].includes(account.state) &&
         !(account.state === "disabled" && op.state === "pending" && j.purpose === "reconnect"))
-    )
+    ) {
       return denied();
+    }
     if (op.state === "pending") {
       // Disabled authorizes only the exact fresh candidate admitted by the
       // kernel; the SQL selector below rechecks its original epoch/revision.
@@ -469,8 +542,9 @@ export class NativeAuthority {
         pending.ownerRef !== j.ownerRef ||
         pending.worker !== j.worker ||
         pending.purpose !== j.purpose
-      )
+      ) {
         return denied();
+      }
     }
     const mapping = await this.#store.mapping(ctx, j.generation);
     if (
@@ -486,10 +560,13 @@ export class NativeAuthority {
         mapping.profile.baseURL !== j.profile.baseURL ||
         mapping.profile.model !== j.profile.model ||
         !exactCandidate(j, physicalCandidate(mapping.descriptor)))
-    )
+    ) {
       return denied();
+    }
     // No external await after inspecting the live replacement-sensitive grant.
-    if (!this.#owners.bearers.authorizesOwner(ctx, j.ownerRef, j.profile.profile)) return denied();
+    if (!this.#owners.bearers.authorizesOwner(ctx, j.ownerRef, j.profile.profile)) {
+      return denied();
+    }
     return { ok: true, ownerRef: j.ownerRef };
   }
   async #refreshOwner(
@@ -497,13 +574,17 @@ export class NativeAuthority {
     value: unknown,
   ): Promise<{ ok: true; ownerRef: string }> {
     const r = object(value, ["consumerId", "operationId", "accountRef", "generation"]);
-    if (!this.#refreshOwners || r.consumerId !== ctx.consumerId) return denied();
+    if (!this.#refreshOwners || r.consumerId !== ctx.consumerId) {
+      return denied();
+    }
     identifier(r.operationId);
     uuid(r.accountRef);
     uuid(r.generation);
     const original = await this.#refreshOwners.store.readJournal(ctx, r.operationId);
     const p = this.#oauthProfile(original);
-    if (!p) return denied();
+    if (!p) {
+      return denied();
+    }
     const selectors = {
       consumerId: ctx.consumerId,
       operationId: r.operationId,
@@ -535,19 +616,22 @@ export class NativeAuthority {
       j.profile.baseURL !== p.baseURL ||
       j.profile.model !== p.model ||
       j.profile.qualificationRef !== p.qualificationRef
-    )
+    ) {
       return denied();
+    }
     if (
       active
         ? !exactCandidate(active, physicalCandidate(active.descriptor))
         : !["create", "reconnect"].includes(j.purpose) ||
           j.worker !== this.configuration.enrollment.worker
-    )
+    ) {
       return denied();
+    }
     identifier(j.ownerRef);
     // Final synchronous lookup observes replacement during the SQL await.
-    if (!this.#refreshOwners.bearers.authorizesOwner(ctx, j.ownerRef, j.profile.profile))
+    if (!this.#refreshOwners.bearers.authorizesOwner(ctx, j.ownerRef, j.profile.profile)) {
       return denied();
+    }
     return { ok: true, ownerRef: j.ownerRef };
   }
   async #cleanupOwner(ctx: TrustedContext, value: unknown): Promise<unknown> {
@@ -564,8 +648,9 @@ export class NativeAuthority {
       !this.#cleanupOwners?.store.oauthCleanup ||
       r.consumerId !== ctx.consumerId ||
       (r.action !== "read" && r.action !== "erase")
-    )
+    ) {
       return denied();
+    }
     identifier(r.operationId);
     uuid(r.accountRef);
     uuid(r.generation);
@@ -573,7 +658,9 @@ export class NativeAuthority {
     uuid(r.cleanupToken);
     const original = await this.#cleanupOwners.store.readJournal(ctx, r.operationId);
     const p = this.#oauthProfile(original, true);
-    if (!p) return denied();
+    if (!p) {
+      return denied();
+    }
     const owned = await this.#cleanupOwners.store.oauthCleanup(
       ctx,
       this.configuration.enrollment.worker,
@@ -598,11 +685,14 @@ export class NativeAuthority {
       !oauthProfileDefinition(p.profile)!.cleanupModels.includes(owned.journal.profile.model) ||
       owned.journal.profile.qualificationRef !== p.qualificationRef ||
       instant(owned.leaseExpiresAt) <= now()
-    )
+    ) {
       return denied();
+    }
     identifier(owned.journal.ownerRef);
     const native = owned.native && physicalCandidate(owned.native);
-    if (native && !exactCandidate(owned.journal, native)) return denied();
+    if (native && !exactCandidate(owned.journal, native)) {
+      return denied();
+    }
     return {
       ok: true,
       ownerRef: owned.journal.ownerRef,
@@ -613,14 +703,19 @@ export class NativeAuthority {
   async persisted(ctx: TrustedContext, p: NativeDispatchProof): Promise<void> {
     this.consumer(ctx);
     const e = this.configuration.enrollment;
-    if (p.native.originRef !== e.originRef || p.native.engineIncarnation !== e.engineIncarnation)
+    if (p.native.originRef !== e.originRef || p.native.engineIncarnation !== e.engineIncarnation) {
       return denied();
+    }
     const actual = await this.kernel.requestProof(ctx, p.executionRef, p.requestRef);
-    if (!actual || !sameProof(proof(actual), p)) return denied();
+    if (!actual || !sameProof(proof(actual), p)) {
+      return denied();
+    }
     // Original proofs remain valid for closure after deadline/lease/fence loss.
   }
   async dispatch(ctx: TrustedContext, p: NativeDispatchProof, expires: unknown): Promise<void> {
-    if (p.worker !== this.configuration.enrollment.worker) return denied();
+    if (p.worker !== this.configuration.enrollment.worker) {
+      return denied();
+    }
     const requested = instant(expires);
     await this.persisted(ctx, p);
     const execution = saved(await this.kernel.savedExecution(ctx, p.executionRef));
@@ -634,8 +729,9 @@ export class NativeAuthority {
       requested <= now() ||
       requested > lease ||
       requested > instant(execution.admission.expiresAt)
-    )
+    ) {
       return denied();
+    }
   }
   async delegated(
     ctx: TrustedContext,
@@ -643,15 +739,23 @@ export class NativeAuthority {
     value: unknown,
   ): Promise<ReturnType<typeof cleanup>> {
     const c = cleanup(value);
-    if (c.worker !== this.configuration.enrollment.worker) return denied();
+    if (c.worker !== this.configuration.enrollment.worker) {
+      return denied();
+    }
     await this.persisted(ctx, p);
     const actual = instant(
       await this.kernel.currentCleanupLease(ctx, c.cleanupRef, c.worker, c.token),
     );
-    if (instant(c.leaseExpiresAt) !== actual || actual <= now()) return denied();
-    const scoped = await this.kernel.cleanupTransports(ctx, c.cleanupRef, c.worker, c.token);
-    if (actual <= now() || !scoped.some((s) => s.token && s.native && sameProof(proof(s), p)))
+    if (instant(c.leaseExpiresAt) !== actual || actual <= now()) {
       return denied();
+    }
+    const scoped = await this.kernel.cleanupTransports(ctx, c.cleanupRef, c.worker, c.token);
+    if (
+      actual <= now() ||
+      !scoped.some((s) => Boolean(s.token) && Boolean(s.native) && sameProof(proof(s), p))
+    ) {
+      return denied();
+    }
     return c;
   }
   async #admit(ctx: TrustedContext, value: unknown): Promise<unknown> {
@@ -697,8 +801,9 @@ export class NativeAuthority {
             native: a.native,
           },
         ))
-    )
+    ) {
       return denied();
+    }
     if (a.admitStarted) {
       const status = await this.kernel.request(ctx, admitted.executionRef, a.requestId);
       return { consumerId: ctx.consumerId, admission: a.saved.admission, status };
@@ -706,18 +811,19 @@ export class NativeAuthority {
     a.native = native;
     a.admitStarted = true; // Before the sole captured claim await.
     const permit = await a.callback.admit(native.requestNonce);
-    if (!permit.claim.dispatch)
+    if (!permit.claim.dispatch) {
       return {
         consumerId: ctx.consumerId,
         admission: a.saved.admission,
         status: permit.claim.status,
       };
+    }
     const d = permit.claim.dispatch,
       p = proof(d.closure);
     a.proof = p; // Keep the original proof even if subsequent ACK validation fails.
     if (
       !permit.physical ||
-      !permit.permitExpiresAt ||
+      !nonempty(permit.permitExpiresAt) ||
       permit.claim.status.effect !== "dispatch_started" ||
       permit.claim.status.requestRef !== a.requestId ||
       d.executionRef !== admitted.executionRef ||
@@ -731,8 +837,9 @@ export class NativeAuthority {
       p.executionRef !== admitted.executionRef ||
       p.worker !== e.worker ||
       !sameProof({ ...p, native }, p)
-    )
+    ) {
       return denied();
+    }
     await this.dispatch(ctx, p, permit.permitExpiresAt);
     return {
       consumerId: ctx.consumerId,
@@ -761,8 +868,12 @@ export class NativeAuthority {
             req.destroy();
             res.destroy();
           }, cfg.timeoutMs);
-          res.once("close", () => clearTimeout(timer));
-          res.once("finish", () => clearTimeout(timer));
+          res.once("close", () => {
+            clearTimeout(timer);
+          });
+          res.once("finish", () => {
+            clearTimeout(timer);
+          });
           const send = (status: number, body: unknown) => {
             if (!res.destroyed) {
               res.writeHead(status, { "content-type": "application/json", connection: "close" });
@@ -772,7 +883,7 @@ export class NativeAuthority {
           return (async () => {
             if (
               req.method !== "POST" ||
-              !req.url ||
+              !nonempty(req.url) ||
               !/^\/private\/native\/v1\/(enrollment|admit|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-custody-authority|oauth-refresh-authority|oauth-cleanup-authority|account-limits-authority)$/.test(
                 req.url,
               ) ||
@@ -783,18 +894,22 @@ export class NativeAuthority {
                   i % 2 === 0 &&
                   ["content-encoding", "transfer-encoding"].includes(h.toLowerCase()),
               )
-            )
+            ) {
               return denied();
+            }
             const authorization = singleton(req, "authorization");
             if (
-              !authorization ||
+              !nonempty(authorization) ||
               authorization.length > 1031 ||
               !/^Bearer [A-Za-z0-9._~+/-]{16,1024}=*$/.test(authorization)
-            )
+            ) {
               return denied();
+            }
             const h = hash(authorization.slice(7)),
               caller = this.#callers.find((c) => timingSafeEqual(c.hash, h));
-            if (!caller) return denied();
+            if (!caller) {
+              return denied();
+            }
             const limitsLookup = req.url.endsWith("/account-limits-authority");
             const ownerLookup = req.url.endsWith("/oauth-owner-authority");
             const custodyLookup = req.url.endsWith("/oauth-custody-authority");
@@ -834,8 +949,9 @@ export class NativeAuthority {
                 r.originRef !== e.originRef ||
                 r.engineIncarnation !== e.engineIncarnation ||
                 r.qualificationRef !== e.qualificationRef
-              )
+              ) {
                 return denied();
+              }
             } else if (req.url.endsWith("/admit")) {
               const r = object(body, [
                 "consumerId",
@@ -845,7 +961,9 @@ export class NativeAuthority {
                 "descriptor",
                 "native",
               ]);
-              if (r.consumerId !== ctx.consumerId) return denied();
+              if (r.consumerId !== ctx.consumerId) {
+                return denied();
+              }
               send(200, await this.#admit(ctx, r));
               return;
             } else {
@@ -865,17 +983,25 @@ export class NativeAuthority {
                 ],
                 route === "closure-ack" ? ["cleanup"] : [],
               );
-              if (r.consumerId !== ctx.consumerId) return denied();
+              if (r.consumerId !== ctx.consumerId) {
+                return denied();
+              }
               const p = proof(r.proof);
-              if (route === "dispatch-proof") await this.dispatch(ctx, p, r.leaseExpiresAt);
-              else if (route === "cleanup-authority") await this.delegated(ctx, p, r.cleanup);
-              else {
+              if (route === "dispatch-proof") {
+                await this.dispatch(ctx, p, r.leaseExpiresAt);
+              } else if (route === "cleanup-authority") {
+                await this.delegated(ctx, p, r.cleanup);
+              } else {
                 await this.persisted(ctx, p);
                 if (route === "closure-ack") {
                   const closed = receipt(r.receipt, ctx.consumerId, p);
-                  if (!physicallyClosed(closed)) return denied();
+                  if (!physicallyClosed(closed)) {
+                    return denied();
+                  }
                   const c = r.cleanup === undefined ? undefined : cleanup(r.cleanup);
-                  if (c && c.worker !== cfg.enrollment.worker) return denied();
+                  if (c && c.worker !== cfg.enrollment.worker) {
+                    return denied();
+                  }
                   // Closure authorization is atomic and durable, including an exact
                   // duplicate after owner closure. Dispatch still uses delegated().
                   await this.kernel.acknowledgeTransportClosed(
@@ -898,18 +1024,26 @@ export class NativeAuthority {
                     p.native.generation === a.saved.generation &&
                     sameProof({ ...p, native: a.native }, p) &&
                     (!a.proof || sameProof(a.proof, p))
-                  )
+                  ) {
                     a.acknowledged = true;
+                  }
                 }
               }
             }
             send(200, { ok: true });
           })()
-            .catch(() => send(403, { code: "denied" }))
-            .finally(() => clearTimeout(timer));
+            .catch(() => {
+              send(403, { code: "denied" });
+            })
+            .finally(() => {
+              clearTimeout(timer);
+            });
         };
-        if (admit) admit(req, res, work);
-        else void work();
+        if (admit) {
+          admit(req, res, work);
+        } else {
+          void work();
+        }
       },
     );
     // Trusted composition may choose a port, never a public bind address.
@@ -917,7 +1051,9 @@ export class NativeAuthority {
     server.maxRequestsPerSocket = 1;
     server.on("listening", () => {
       const a = server.address();
-      if (!a || typeof a === "string" || !["127.0.0.1", "::1"].includes(a.address)) server.close();
+      if (a === null || typeof a === "string" || !["127.0.0.1", "::1"].includes(a.address)) {
+        server.close();
+      }
     });
     server.on("clientError", (_error, socket) => {
       socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");

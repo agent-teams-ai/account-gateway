@@ -1,10 +1,10 @@
-import test, { before, after } from "node:test";
+import test, { before as beforeTests, after as afterTests } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { execFileSync } from "node:child_process";
-import pg from "pg";
+import { Pool, type PoolClient } from "pg";
 import { PostgresKernel } from "../src/postgres.ts";
 import * as serviceComposition from '../src/service.ts';
 import { KernelError, defaults, factDefaults } from "../src/domain.ts";
@@ -20,18 +20,40 @@ import type {
   NativeDispatchProof,
 } from "../src/domain.ts";
 
+const cliEnv = (url: URL): NodeJS.ProcessEnv => ({
+  ...process.env,
+  PGHOST: url.hostname,
+  PGPORT: url.port,
+  PGUSER: decodeURIComponent(url.username),
+  PGPASSWORD: decodeURIComponent(url.password),
+  PGDATABASE: decodeURIComponent(url.pathname.slice(1)),
+});
+
+// Setup errors cross a privacy boundary before the test runner can render them.
+function redactPostgresSetupFailure(error: unknown): Error {
+  if (error instanceof assert.AssertionError) {
+    return error;
+  }
+  return new Error(
+    "disposable PostgreSQL setup failed; inspect server locally without exporting vendor details",
+  );
+}
+
 // Only a new, explicitly designated disposable localhost PostgreSQL 17.10 DB.
 // Never print the DSN or a vendor error; no fallback DB or production fixtures.
 const dsn = process.env.AG_KERNEL_TEST_DSN;
 const database = process.env.AG_KERNEL_DISPOSABLE_DB;
 function safeTestDsn(): string {
   if (
-    !dsn ||
-    !database ||
+    dsn === undefined ||
+    dsn === "" ||
+    database === undefined ||
+    database === "" ||
     !/^ag_kernel_test_[a-z0-9_]+$/.test(database) ||
     process.env.AG_KERNEL_TEST_ALLOW !== "disposable_pg17_10"
-  )
+  ) {
     throw new Error("NOT_RUN: explicit disposable DB required");
+  }
   let url: URL;
   try {
     url = new URL(dsn);
@@ -42,13 +64,14 @@ function safeTestDsn(): string {
     !["postgres:", "postgresql:"].includes(url.protocol) ||
     !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) ||
     url.pathname !== "/" + database ||
-    url.search ||
-    url.hash
-  )
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
     throw new Error("refusing unspecified or remote DB");
+  }
   return dsn;
 }
-let admin: pg.Pool, poolA: pg.Pool, poolB: pg.Pool;
+let admin: Pool, poolA: Pool, poolB: Pool;
 let a: PostgresKernel, b: PostgresKernel, pids: number[];
 let migrated = false;
 const legacy = {
@@ -183,14 +206,14 @@ async function seedRecoveryHistory(): Promise<void> {
     [consumer, h.execution, h.workers[0], randomUUID()],
   );
 }
-before(async () => {
+beforeTests(async () => {
   const connectionString = safeTestDsn();
-  admin = new pg.Pool({ connectionString, max: 2 });
+  admin = new Pool({ connectionString, max: 2 });
   // Keep the two observed backend identities alive across the deadline barrier.
-  poolA = new pg.Pool({ connectionString, max: 1, idleTimeoutMillis: 0 });
-  poolB = new pg.Pool({ connectionString, max: 1, idleTimeoutMillis: 0 });
+  poolA = new Pool({ connectionString, max: 1, idleTimeoutMillis: 0 });
+  poolB = new Pool({ connectionString, max: 1, idleTimeoutMillis: 0 });
   try {
-    const v = await admin.query(
+    const v = await admin.query<{ db: string; version: string }>(
       "SELECT current_database() AS db,current_setting('server_version') AS version",
     );
     assert.equal(v.rows[0].db, database);
@@ -204,10 +227,12 @@ before(async () => {
     const directory = new URL("../migrations/", import.meta.url);
     const migrations = (await readdir(directory))
       .filter((name) => /^\d{3}_.*\.sql$/.test(name))
-      .sort();
+      .toSorted();
     for (const name of migrations) {
       await admin.query(await readFile(new URL(name, directory), "utf8"));
-      if (name.startsWith("001_")) await seedLegacyRequests();
+      if (name.startsWith("001_")) {
+        await seedLegacyRequests();
+      }
       // A real accepted SQL002 row may have a closure token but no native
       // authority. Seed before003, without inventing its future native tuple.
       if (name.startsWith("002_")) {
@@ -265,25 +290,25 @@ before(async () => {
           [c, nativeLegacy.execution, nativeLegacy.worker, nativeLegacy.token],
         );
       }
-      if (name.startsWith("004_")) await seedRecoveryHistory();
+      if (name.startsWith("004_")) {
+        await seedRecoveryHistory();
+      }
     }
     migrated = true;
     a = new PostgresKernel(poolA);
     b = new PostgresKernel(poolB);
     pids = await Promise.all(
       [poolA, poolB].map(
-        async (pool) => (await pool.query("SELECT pg_backend_pid() AS pid")).rows[0].pid,
+        async (pool) =>
+          (await pool.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid,
       ),
     );
     assert.notEqual(pids[0], pids[1], "race must use distinct real DB connections");
   } catch (error) {
-    if (error instanceof assert.AssertionError) throw error;
-    throw new Error(
-      "disposable PostgreSQL setup failed; inspect server locally without exporting vendor details",
-    );
+    throw redactPostgresSetupFailure(error);
   }
 });
-after(async () => {
+afterTests(async () => {
   // Leave the disposable DB schema for exact-candidate inspection; never DROP.
   await Promise.all([admin, poolA, poolB].filter(Boolean).map((pool) => pool.end()));
 });
@@ -346,7 +371,7 @@ async function approval(
   override: Partial<ApprovedPreparation> = {},
   kernel = a,
 ): Promise<ApprovedPreparation> {
-  const now = (await admin.query("SELECT clock_timestamp() AS now")).rows[0].now as Date;
+  const now = (await admin.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0].now;
   return {
     operationId: op(),
     intentDigest: digest(),
@@ -391,21 +416,23 @@ async function prepared(
 ) {
   const input = await approval(ctx, accountRef, override, kernel);
   const result = await kernel.prepare(ctx, input);
-  assert.ok(result.executionRef);
-  assert.ok(result.epoch);
+  assert.ok(Boolean(result.executionRef));
+  assert.ok(Boolean(result.epoch));
   return { input, result, admission: admissionFor(input, result, accountRef) };
 }
 // Bounded observation tolerates a busy runner without retrying any kernel action.
-async function waitForLocks(db: pg.PoolClient, expected: number[]): Promise<boolean> {
+async function waitForLocks(db: PoolClient, expected: number[]): Promise<boolean> {
   const until = process.hrtime.bigint() + 15_000_000_000n;
   while (process.hrtime.bigint() < until) {
     // The barrier transaction must not retain an earlier idle activity snapshot.
     await db.query("SELECT pg_stat_clear_snapshot()");
-    const seen = await db.query(
+    const seen = await db.query<{ n: number }>(
       "SELECT count(*)::integer AS n FROM pg_stat_activity WHERE pid=ANY($1::integer[]) AND wait_event_type='Lock'",
       [expected],
     );
-    if (seen.rows[0].n === expected.length) return true;
+    if (seen.rows[0].n === expected.length) {
+      return true;
+    }
     await delay(20);
   }
   return false;
@@ -445,11 +472,15 @@ async function mutateAtConsumerLock<T>(
     ]);
     const pending = Promise.allSettled([action()]);
     const blocked = await waitForLocks(gate, [pids[0]]);
-    if (blocked) mutate();
+    if (blocked) {
+      mutate();
+    }
     await gate.query("COMMIT");
     const [outcome] = await pending;
     assert.equal(blocked, true, "command session must reach the actual consumer-row barrier");
-    if (outcome.status === "rejected") throw outcome.reason;
+    if (outcome.status === "rejected") {
+      throw outcome.reason;
+    }
     return outcome.value;
   } finally {
     await gate.query("ROLLBACK");
@@ -457,13 +488,13 @@ async function mutateAtConsumerLock<T>(
   }
 }
 async function count(sql: string, values: unknown[]) {
-  const n = Number((await admin.query(sql, values)).rows[0].n);
+  const n = Number((await admin.query<{ n: string | number }>(sql, values)).rows[0].n);
   assert.ok(Number.isSafeInteger(n) && n >= 0);
   return n;
 }
 
 // Spare concurrency must not admit a fresh ID before maintenance observes owner loss.
-test("worker slot growth prepays retained identities without rewriting accepted history", async () => {
+void test("worker slot growth prepays retained identities without rewriting accepted history", async () => {
   const ctx = context();
   const facts = {
     ...factDefaults,
@@ -495,7 +526,7 @@ test("worker slot growth prepays retained identities without rewriting accepted 
     },
   );
   const requestWorker = await worker(ctx, small);
-  const now = (await admin.query("SELECT clock_timestamp() AS now")).rows[0].now as Date;
+  const now = (await admin.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0].now;
   const input: ApprovedPreparation = {
     operationId: op(),
     intentDigest: digest(),
@@ -534,7 +565,15 @@ test("worker slot growth prepays retained identities without rewriting accepted 
   );
   const snapshot = async () => {
     const rows = (
-      await admin.query(
+      await admin.query<{
+        worker_slots: number;
+        fact_used: string;
+        fact_limit: string;
+        account_fact_limit: string;
+        used: string;
+        capacity: string;
+        account_used: string | null;
+      }>(
         `SELECT c.worker_slots,c.fact_used,c.fact_limit,c.account_fact_limit,b.used,b.capacity,
       (SELECT fact_used FROM ag_kernel.accounts WHERE consumer=c.consumer AND ref=$2) AS account_used
       FROM ag_kernel.consumers c CROSS JOIN ag_kernel.fact_budget b WHERE c.consumer=$1`,
@@ -551,13 +590,13 @@ test("worker slot growth prepays retained identities without rewriting accepted 
       "cleanup",
     ]) {
       history[table] = (
-        await admin.query(
+        await admin.query<{ row: string }>(
           `SELECT row_to_json(t)::text AS row FROM ag_kernel.${table} t WHERE consumer=$1`,
           [ctx.consumerId],
         )
       ).rows
-        .map((row) => row.row as string)
-        .sort();
+        .map((row) => row.row)
+        .toSorted();
     }
     return { ...rows, history };
   };
@@ -597,7 +636,7 @@ test("worker slot growth prepays retained identities without rewriting accepted 
   );
 });
 
-test("F1 claim fences expired in-flight ownership before spare-concurrency admission", async () => {
+void test("F1 claim fences expired in-flight ownership before spare-concurrency admission", async () => {
   const bounds = { ...defaults, maxConcurrent: 2, maintenanceBatch: 1 };
   const kernel = new PostgresKernel(poolA, bounds);
   const ctx = context(),
@@ -719,7 +758,7 @@ test("F1 claim fences expired in-flight ownership before spare-concurrency admis
   );
 });
 
-test("F2 beginAccount snapshots caller primitives before the consumer-row await", async () => {
+void test("F2 beginAccount snapshots caller primitives before the consumer-row await", async () => {
   const ctx = context();
   const input: AccountIntent = {
     operationId: op(),
@@ -743,10 +782,10 @@ test("F2 beginAccount snapshots caller primitives before the consumer-row await"
   assert.deepEqual(await b.beginAccount(ctx, original), result);
   await assert.rejects(b.beginAccount(ctx, input), isCode("conflict"));
   const recorded = (
-    await admin.query("SELECT intent FROM ag_kernel.operations WHERE consumer=$1 AND id=$2", [
-      ctx.consumerId,
-      original.operationId,
-    ])
+    await admin.query<{ intent: unknown }>(
+      "SELECT intent FROM ag_kernel.operations WHERE consumer=$1 AND id=$2",
+      [ctx.consumerId, original.operationId],
+    )
   ).rows[0].intent;
   assert.deepEqual(recorded, {
     kind: "create",
@@ -771,14 +810,14 @@ test("F2 beginAccount snapshots caller primitives before the consumer-row await"
   );
 });
 
-test("F3 acknowledgeCandidate snapshots native proof before the consumer-row await", async () => {
+void test("F3 acknowledgeCandidate snapshots native proof before the consumer-row await", async () => {
   const ctx = context(),
     account = await staged(ctx),
     w = await worker(ctx);
   const candidate = await a.startCandidate(ctx, account.operationRef, w);
   assert.ok(candidate);
   const initial = (
-    await admin.query(
+    await admin.query<{ native_identity: string | null }>(
       "SELECT native_identity FROM ag_kernel.candidates WHERE consumer=$1 AND generation=$2",
       [ctx.consumerId, candidate.candidate],
     )
@@ -804,7 +843,11 @@ test("F3 acknowledgeCandidate snapshots native proof before the consumer-row awa
   );
   assert.equal(result.state, "applied");
   const recorded = (
-    await admin.query(
+    await admin.query<{
+      generation: string;
+      nativePhysicalIdentity: string | null;
+      profile: string;
+    }>(
       'SELECT generation,native_identity AS "nativePhysicalIdentity",profile FROM ag_kernel.candidates WHERE consumer=$1 AND generation=$2',
       [ctx.consumerId, candidate.candidate],
     )
@@ -828,7 +871,7 @@ test("F3 acknowledgeCandidate snapshots native proof before the consumer-row awa
   );
 });
 
-test("transaction snapshots trusted consumer before awaits despite structurally mutable context", async () => {
+void test("transaction snapshots trusted consumer before awaits despite structurally mutable context", async () => {
   const original = context(),
     foreign = context();
   await connected(foreign);
@@ -875,7 +918,7 @@ test("transaction snapshots trusted consumer before awaits despite structurally 
 
 // Red if concurrent id reuse creates two account rows/candidates, changes the
 // lost-ack reference, or a second native-create permit can escape.
-test("operation/candidate uniqueness and conflicting intent across connections", async () => {
+void test("operation/candidate uniqueness and conflicting intent across connections", async () => {
   assert.equal(migrated, true);
   const ctx = context();
   const input: AccountIntent = {
@@ -893,7 +936,10 @@ test("operation/candidate uniqueness and conflicting intent across connections",
   );
   assert.equal(results[0].status, "fulfilled");
   assert.equal(results[1].status, "fulfilled");
-  if (results[0].status !== "fulfilled" || results[1].status !== "fulfilled") return;
+  const observedStatuses: readonly string[] = results.map((result) => result.status);
+  if (observedStatuses[0] !== "fulfilled" || observedStatuses[1] !== "fulfilled") {
+    return;
+  }
   assert.deepEqual(results[0].value, results[1].value);
   assert.equal(results[0].value.operationRef, input.operationId);
   assert.equal(
@@ -944,7 +990,7 @@ test("operation/candidate uniqueness and conflicting intent across connections",
 
 // Red if two different intents both succeed for the same id after racing a
 // preflight check, even though sequential conflict tests would still pass.
-test("concurrent conflicting operation intent has exactly one winner", async () => {
+void test("concurrent conflicting operation intent has exactly one winner", async () => {
   const ctx = context(),
     id = op();
   const input: AccountIntent = {
@@ -962,13 +1008,14 @@ test("concurrent conflicting operation intent has exactly one winner", async () 
   );
   assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
   const rejected = results.find((r) => r.status === "rejected");
-  assert.ok(rejected && rejected.status === "rejected");
+  assert.ok(rejected);
+  assert.equal(rejected.status, "rejected");
   assert.equal(isCode("conflict")(rejected.reason), true);
 });
 
 // Red if staging is executable, rename rotates authority, stage switches the
 // active generation, or promotion loses a concurrent metadata revision.
-test("staging, rename and reconnect use separate revision and epoch CAS", async () => {
+void test("staging, rename and reconnect use separate revision and epoch CAS", async () => {
   const ctx = context(),
     s = await staged(ctx);
   await assert.rejects(a.prepare(ctx, await approval(ctx, s.accountRef!)), isCode("unknown"));
@@ -1068,7 +1115,7 @@ test("staging, rename and reconnect use separate revision and epoch CAS", async 
   assert.equal(retained.epoch, promoted.epoch);
   assert.equal(retained.state, "active");
   const route = (
-    await admin.query(
+    await admin.query<{ active_generation: string | null }>(
       "SELECT active_generation FROM ag_kernel.accounts WHERE consumer=$1 AND ref=$2",
       [ctx.consumerId, active.accountRef],
     )
@@ -1079,7 +1126,7 @@ test("staging, rename and reconnect use separate revision and epoch CAS", async 
     "stale reconnect cannot replace the old active generation",
   );
   const staleCandidate = (
-    await admin.query(
+    await admin.query<{ state: string; native_identity: string | null }>(
       "SELECT state,native_identity FROM ag_kernel.candidates WHERE consumer=$1 AND generation=$2",
       [ctx.consumerId, sc.candidate],
     )
@@ -1112,7 +1159,7 @@ test("staging, rename and reconnect use separate revision and epoch CAS", async 
 
 // Red if a stale admitted envelope dispatches after the acknowledged fence,
 // or fencing rewrites an already accepted effect.
-test("fence linearizes against claim and preserves already accepted effects", async () => {
+void test("fence linearizes against claim and preserves already accepted effects", async () => {
   const ctx = context(),
     account = await connected(ctx),
     e = await prepared(ctx, account.accountRef!);
@@ -1197,7 +1244,7 @@ test("fence linearizes against claim and preserves already accepted effects", as
 
 // Red if duplicate POST creates another dispatch permit, alternate preparation
 // switches accounts, or fresh ids escape uncertainty on an invocation/attempt.
-test("sticky preparation, duplicate requests and unknown invocation fencing", async () => {
+void test("sticky preparation, duplicate requests and unknown invocation fencing", async () => {
   const ctx = context(),
     one = await connected(ctx),
     two = await connected(ctx);
@@ -1230,8 +1277,11 @@ test("sticky preparation, duplicate requests and unknown invocation fencing", as
     claims.every((r) => r.status === "fulfilled"),
     true,
   );
-  assert.equal(claims.filter((r) => r.status === "fulfilled" && r.value.dispatch).length, 1);
-  const winner = claims[0].status === "fulfilled" && claims[0].value.dispatch ? w1 : w2;
+  assert.equal(
+    claims.filter((r) => r.status === "fulfilled" && Boolean(r.value.dispatch)).length,
+    1,
+  );
+  const winner = claims[0].status === "fulfilled" && Boolean(claims[0].value.dispatch) ? w1 : w2;
   const duplicate = await b.claim(
     ctx,
     e.executionRef!,
@@ -1273,7 +1323,7 @@ test("sticky preparation, duplicate requests and unknown invocation fencing", as
 
 // Red if concurrency/total limits are preflight-only, denial can later dispatch
 // using the same request id, or runtime numeric/deadline checks are only types.
-test("atomic request limits and runtime deadline/config enforcement", async () => {
+void test("atomic request limits and runtime deadline/config enforcement", async () => {
   const ctx = context(),
     account = await connected(ctx);
   const e = await prepared(ctx, account.accountRef!, {
@@ -1300,8 +1350,8 @@ test("atomic request limits and runtime deadline/config enforcement", async () =
     pair.every((r) => r.status === "fulfilled"),
     true,
   );
-  assert.equal(pair.filter((r) => r.status === "fulfilled" && r.value.dispatch).length, 1);
-  const first = pair[0].status === "fulfilled" && pair[0].value.dispatch ? "one" : "two";
+  assert.equal(pair.filter((r) => r.status === "fulfilled" && Boolean(r.value.dispatch)).length, 1);
+  const first = pair[0].status === "fulfilled" && Boolean(pair[0].value.dispatch) ? "one" : "two";
   const denied = first === "one" ? "two" : "one";
   const deniedClaim = pair.find((r) => r.status === "fulfilled" && !r.value.dispatch);
   assert.ok(deniedClaim && deniedClaim.status === "fulfilled");
@@ -1331,8 +1381,10 @@ test("atomic request limits and runtime deadline/config enforcement", async () =
   );
   await a.effect(ctx, e.result.executionRef!, first, w, "response_started");
   await a.effect(ctx, e.result.executionRef!, first, w, "completed");
-  const permit = pair.find((r) => r.status === "fulfilled" && r.value.dispatch);
-  assert.ok(permit && permit.status === "fulfilled" && permit.value.dispatch);
+  const permit = pair.find((r) => r.status === "fulfilled" && Boolean(r.value.dispatch));
+  assert.ok(permit);
+  assert.equal(permit.status, "fulfilled");
+  assert.ok(permit.value.dispatch);
   await a.acknowledgeTransportClosed(ctx, w, permit.value.dispatch.closure);
   assert.equal(
     (await b.claim(ctx, e.result.executionRef!, denied, w, e.admission, reservation())).dispatch,
@@ -1390,7 +1442,7 @@ test("atomic request limits and runtime deadline/config enforcement", async () =
     b.restore(ctx, e.admission.issuerEpoch, e.admission.issuerEpoch),
     isCode("invalid"),
   );
-  const now = (await admin.query("SELECT clock_timestamp() AS now")).rows[0].now as Date;
+  const now = (await admin.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0].now;
   await assert.rejects(
     a.prepare(
       ctx,
@@ -1405,7 +1457,8 @@ test("atomic request limits and runtime deadline/config enforcement", async () =
     ),
     isCode("denied"),
   );
-  const freshNow = (await admin.query("SELECT clock_timestamp() AS now")).rows[0].now as Date;
+  const freshNow = (await admin.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0]
+    .now;
   const short = await prepared(ctx, account.accountRef!, {
     deadline: new Date(freshNow.getTime() + 10_000),
   });
@@ -1432,8 +1485,12 @@ test("atomic request limits and runtime deadline/config enforcement", async () =
     assert.equal(await waitForLocks(gate, [pids[0]]), true);
     await gate.query("SELECT pg_stat_clear_snapshot()");
     const started = (
-      await gate.query("SELECT xact_start FROM pg_stat_activity WHERE pid=$1", [pids[0]])
-    ).rows[0].xact_start as Date;
+      await gate.query<{ xact_start: Date | null }>(
+        "SELECT xact_start FROM pg_stat_activity WHERE pid=$1",
+        [pids[0]],
+      )
+    ).rows[0].xact_start;
+    assert.ok(started instanceof Date);
     assert.ok(
       started.getTime() < short.input.deadline.getTime(),
       "claim transaction must start before expiry",
@@ -1446,9 +1503,10 @@ test("atomic request limits and runtime deadline/config enforcement", async () =
     );
     assert.equal(
       (
-        await gate.query("SELECT clock_timestamp()>=$1::timestamptz AS expired", [
-          short.input.deadline,
-        ])
+        await gate.query<{ expired: boolean }>(
+          "SELECT clock_timestamp()>=$1::timestamptz AS expired",
+          [short.input.deadline],
+        )
       ).rows[0].expired,
       true,
     );
@@ -1472,7 +1530,7 @@ test("atomic request limits and runtime deadline/config enforcement", async () =
 
 // Expire the exact owner before maintenance. Stale callbacks must commit
 // ambiguity/fencing, including same-state callbacks, and never allow replay.
-test("expired effect owner cannot complete or retain in-flight authority before maintenance", async () => {
+void test("expired effect owner cannot complete or retain in-flight authority before maintenance", async () => {
   const ctx = context(),
     account = await connected(ctx),
     live = await worker(ctx);
@@ -1492,8 +1550,9 @@ test("expired effect owner cannot complete or retain in-flight authority before 
       reservation(),
     );
     assert.ok(permit.dispatch);
-    if (state === "response_started")
+    if (state === "response_started") {
       await a.effect(ctx, e.result.executionRef!, "accepted", lost, state);
+    }
     const expired = await admin.query(
       "UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND worker=$2",
       [ctx.consumerId, lost],
@@ -1590,7 +1649,7 @@ test("expired effect owner cannot complete or retain in-flight authority before 
 
 // Restore must persist cleanup for active, creating, staged and already
 // quarantined generations, without inventing physical identity for unknowns.
-test("restore durably cleans every exact generation and repeated restores do not duplicate work", async () => {
+void test("restore durably cleans every exact generation and repeated restores do not duplicate work", async () => {
   const ctx = context(),
     account = await connected(ctx),
     w = await worker(ctx);
@@ -1615,13 +1674,23 @@ test("restore durably cleans every exact generation and repeated restores do not
   assert.ok(await a.startCandidate(ctx, uncertain.operationRef, w));
   await a.unknownCandidate(ctx, uncertain.operationRef, w);
   const rows = (
-    await admin.query(
+    await admin.query<{
+      generation: string;
+      native_identity: string | null;
+      profile: string;
+      state: string;
+    }>(
       "SELECT generation,native_identity,profile,state FROM ag_kernel.candidates WHERE consumer=$1",
       [ctx.consumerId],
     )
   ).rows;
-  assert.deepEqual(rows.map((r) => r.state).sort(), ["creating", "quarantined", "ready", "staged"]);
-  const expected = new Map(rows.map((r) => [r.generation as string, r]));
+  assert.deepEqual(rows.map((r) => r.state).toSorted(), [
+    "creating",
+    "quarantined",
+    "ready",
+    "staged",
+  ]);
+  const expected = new Map(rows.map((r) => [r.generation, r]));
   const original = await a.issuer(ctx),
     first = randomUUID(),
     second = randomUUID();
@@ -1649,14 +1718,16 @@ test("restore durably cleans every exact generation and repeated restores do not
       assert.equal(seen.has(scope.generation), false);
       seen.add(scope.generation);
       assert.equal(scope.profile, row.profile);
-      if (row.native_identity)
+      const hasNativeIdentity = Boolean(row.native_identity);
+      if (hasNativeIdentity) {
         assert.deepEqual(scope.descriptor, {
           generation: row.generation,
           nativePhysicalIdentity: row.native_identity,
           profile: row.profile,
         });
-      else
+      } else {
         assert.equal(scope.descriptor, undefined, "unknown physical identity must remain absent");
+      }
       if (row.state === "ready") {
         await assert.rejects(
           b.settleCleanup(ctx, job.cleanupRef, w, job.token, true),
@@ -1672,7 +1743,9 @@ test("restore durably cleans every exact generation and repeated restores do not
   // UUID claim order cannot permit credential retirement ahead of a completed
   // request's still-held transport. Close the complete execution page first.
   assert.equal(await occupancy(ctx, account.accountRef!), 1);
-  for (const job of jobs) await acknowledgeCleanupPage(ctx, b, job, w);
+  for (const job of jobs) {
+    await acknowledgeCleanupPage(ctx, b, job, w);
+  }
   assert.equal(await occupancy(ctx, account.accountRef!), 0);
   for (const job of jobs) {
     await b.settleCleanup(ctx, job.cleanupRef, w, job.token, true);
@@ -1706,7 +1779,7 @@ test("restore durably cleans every exact generation and repeated restores do not
 // incomplete candidates become active, or restore is treated like restart.
 // Restore retires the recovered authority, including suspended sources. Leaving
 // suspended while quarantining its candidate makes both resume and cleanup fail.
-test("restore quarantines suspended account and permits cleanup plus fresh recovery", async () => {
+void test("restore quarantines suspended account and permits cleanup plus fresh recovery", async () => {
   const ctx = context(),
     source = await connected(ctx),
     w = await worker(ctx);
@@ -1772,7 +1845,7 @@ test("restore quarantines suspended account and permits cleanup plus fresh recov
   assert.equal((await a.account(ctx, before.accountRef)).state, "active");
   assert.equal(
     (
-      await admin.query(
+      await admin.query<{ state: string }>(
         "SELECT state FROM ag_kernel.candidates WHERE consumer=$1 AND generation=$2",
         [ctx.consumerId, original.generation],
       )
@@ -1781,7 +1854,7 @@ test("restore quarantines suspended account and permits cleanup plus fresh recov
   );
 });
 
-test("restart reconciles only lost claims; explicit restore rotates and quarantines", async () => {
+void test("restart reconciles only lost claims; explicit restore rotates and quarantines", async () => {
   const ctx = context(),
     account = await connected(ctx);
   const separate = await connected(ctx);
@@ -1821,9 +1894,9 @@ test("restart reconciles only lost claims; explicit restore rotates and quaranti
     [ctx.consumerId, deadWorker],
   );
   await poolA.end();
-  poolA = new pg.Pool({ connectionString: safeTestDsn(), max: 1, idleTimeoutMillis: 0 });
+  poolA = new Pool({ connectionString: safeTestDsn(), max: 1, idleTimeoutMillis: 0 });
   a = new PostgresKernel(poolA); // Real connection/pool replacement, no process-start revoke.
-  pids[0] = (await poolA.query("SELECT pg_backend_pid() pid")).rows[0].pid;
+  pids[0] = (await poolA.query<{ pid: number }>("SELECT pg_backend_pid() pid")).rows[0].pid;
   const originalIssuer = await a.issuer(ctx);
   await a.reconcile(ctx);
   assert.equal(
@@ -1863,11 +1936,13 @@ test("restart reconciles only lost claims; explicit restore rotates and quaranti
   );
   // Historical applied operation acknowledgement survives restore and cannot reactivate a route.
   const proof = (
-    await admin.query(
+    await admin.query<{ generation: string; native_identity: string | null; profile: string }>(
       "SELECT generation,native_identity,profile FROM ag_kernel.candidates WHERE consumer=$1 AND operation_id=$2",
       [ctx.consumerId, account.operationRef],
     )
   ).rows[0];
+  assert.equal(typeof proof.native_identity, "string");
+  assert.ok(proof.native_identity !== null);
   assert.equal(
     (
       await a.acknowledgeCandidate(ctx, account.operationRef, liveWorker, {
@@ -2026,9 +2101,13 @@ test("disable and idempotent close persist bounded scoped cleanup across worker 
     );
   }
   // Generation cleanup cannot erase ahead of its execution's exact closure.
-  for (const job of remaining) await acknowledgeCleanupPage(ctx, b, job, w2);
+  for (const job of remaining) {
+    await acknowledgeCleanupPage(ctx, b, job, w2);
+  }
   assert.equal(await occupancy(ctx, account.accountRef!), 0);
-  for (const job of remaining) await b.settleCleanup(ctx, job.cleanupRef, w2, job.token, true);
+  for (const job of remaining) {
+    await b.settleCleanup(ctx, job.cleanupRef, w2, job.token, true);
+  }
   await b.settleCleanup(ctx, j2.cleanupRef, w2, j2.token, true);
   assert.equal((await a.account(ctx, account.accountRef!)).state, "disabled");
   assert.equal(await a.claimCleanup(ctx, w2), undefined);
@@ -2037,7 +2116,7 @@ test("disable and idempotent close persist bounded scoped cleanup across worker 
 
 // Red if any consumer-less lookup leaks a reference/proof or owner can mutate.
 // Positive public field checks are independent allowlists, not copied helpers.
-test("consumer isolation, immutable owner and positive safe readback shapes", async () => {
+void test("consumer isolation, immutable owner and positive safe readback shapes", async () => {
   const ctx = context(),
     foreign = context(),
     account = await connected(ctx),
@@ -2075,23 +2154,25 @@ test("consumer isolation, immutable owner and positive safe readback shapes", as
   }
   assert.equal(rejected, true);
   assert.deepEqual(
-    Object.keys(await a.account(ctx, account.accountRef!)).sort(),
-    ["accountRef", "displayName", "epoch", "ownerRef", "profile", "revision", "state"].sort(),
+    Object.keys(await a.account(ctx, account.accountRef!)).toSorted(),
+    ["accountRef", "displayName", "epoch", "ownerRef", "profile", "revision", "state"].toSorted(),
   );
   assert.deepEqual(
-    Object.keys(await a.operation(ctx, account.operationRef)).sort(),
-    ["operationRef", "state", "accountRef", "revision", "epoch"].sort(),
+    Object.keys(await a.operation(ctx, account.operationRef)).toSorted(),
+    ["operationRef", "state", "accountRef", "revision", "epoch"].toSorted(),
   );
   assert.deepEqual(
-    Object.keys(await b.request(ctx, e.result.executionRef!, "request")).sort(),
-    ["requestRef", "effect"].sort(),
+    Object.keys(await b.request(ctx, e.result.executionRef!, "request")).toSorted(),
+    ["requestRef", "effect"].toSorted(),
   );
   const native = (
-    await admin.query(
+    await admin.query<{ generation: string; native_identity: string | null; profile: string }>(
       "SELECT generation,native_identity,profile FROM ag_kernel.candidates WHERE consumer=$1 AND operation_id=$2",
       [ctx.consumerId, account.operationRef],
     )
   ).rows[0];
+  assert.equal(typeof native.native_identity, "string");
+  assert.ok(native.native_identity !== null);
   await assert.rejects(
     a.acknowledgeCandidate(ctx, account.operationRef, w, {
       generation: native.generation,
@@ -2112,15 +2193,20 @@ test("consumer isolation, immutable owner and positive safe readback shapes", as
 
 // One persisted permission, every independently meaningful envelope field. A
 // validly shaped but stale approval must not acquire a native transport permit.
-test("complete private admission matches persisted preparation, with zero revisions and instant expiry", async () => {
+void test("complete private admission matches persisted preparation, with zero revisions and instant expiry", async () => {
   // Permit both 1 and 2 only in this case so a different valid concurrency
   // reaches persisted-envelope matching instead of numeric validation.
   const bounds = { ...defaults, maxConcurrent: 2 };
-  const a = new PostgresKernel(poolA, bounds),
-    b = new PostgresKernel(poolB, bounds);
+  const boundedA = new PostgresKernel(poolA, bounds),
+    boundedB = new PostgresKernel(poolB, bounds);
   const ctx = context(),
     account = await connected(ctx);
-  const e = await prepared(ctx, account.accountRef!, { policyRevision: 0, bindingRevision: 0 }, a);
+  const e = await prepared(
+    ctx,
+    account.accountRef!,
+    { policyRevision: 0, bindingRevision: 0 },
+    boundedA,
+  );
   const w = await worker(ctx);
   const mutations: [string, Partial<PrivateAdmission>][] = [
     ["execution", { executionRef: randomUUID() }],
@@ -2143,7 +2229,7 @@ test("complete private admission matches persisted preparation, with zero revisi
     ["tokens", { limits: { ...e.input.limits, tokens: 5001 } }],
   ];
   for (const [name, mutation] of mutations) {
-    const denied = await b.claim(
+    const denied = await boundedB.claim(
       ctx,
       e.result.executionRef!,
       "stale-" + name,
@@ -2154,7 +2240,10 @@ test("complete private admission matches persisted preparation, with zero revisi
     assert.equal(denied.dispatch, undefined, name);
     assert.equal(denied.status.effect, "not_dispatched", name);
     assert.equal(denied.status.code, "fenced", name);
-    assert.deepEqual(await a.request(ctx, e.result.executionRef!, "stale-" + name), denied.status);
+    assert.deepEqual(
+      await boundedA.request(ctx, e.result.executionRef!, "stale-" + name),
+      denied.status,
+    );
   }
   assert.equal(
     await count(
@@ -2168,7 +2257,7 @@ test("complete private admission matches persisted preparation, with zero revisi
   const offset = new Date(e.input.deadline.getTime() + 3_600_000)
     .toISOString()
     .replace("Z", "000+01:00");
-  const accepted = await a.claim(
+  const accepted = await boundedA.claim(
     ctx,
     e.result.executionRef!,
     "offset-expiry",
@@ -2187,14 +2276,22 @@ test("complete private admission matches persisted preparation, with zero revisi
   assert.equal(accepted.dispatch.deadline, e.input.deadline.toISOString());
   // A denied identity cannot later become a dispatch when its envelope is fixed.
   assert.equal(
-    (await a.claim(ctx, e.result.executionRef!, "stale-binding", w, e.admission, reservation()))
-      .dispatch,
+    (
+      await boundedA.claim(
+        ctx,
+        e.result.executionRef!,
+        "stale-binding",
+        w,
+        e.admission,
+        reservation(),
+      )
+    ).dispatch,
     undefined,
   );
-  await b.fence(ctx, "zero-revision-fence", e.input.policySubject, 0);
-  await a.effect(ctx, e.result.executionRef!, "offset-expiry", w, "response_started");
-  await a.effect(ctx, e.result.executionRef!, "offset-expiry", w, "completed");
-  const repeat = await b.claim(
+  await boundedB.fence(ctx, "zero-revision-fence", e.input.policySubject, 0);
+  await boundedA.effect(ctx, e.result.executionRef!, "offset-expiry", w, "response_started");
+  await boundedA.effect(ctx, e.result.executionRef!, "offset-expiry", w, "completed");
+  const repeat = await boundedB.claim(
     ctx,
     e.result.executionRef!,
     "offset-expiry",
@@ -2205,27 +2302,35 @@ test("complete private admission matches persisted preparation, with zero revisi
   assert.equal(repeat.dispatch, undefined);
   assert.equal(repeat.status.effect, "completed");
   assert.equal(
-    (await a.claim(ctx, e.result.executionRef!, "after-zero-fence", w, e.admission, reservation()))
-      .dispatch,
+    (
+      await boundedA.claim(
+        ctx,
+        e.result.executionRef!,
+        "after-zero-fence",
+        w,
+        e.admission,
+        reservation(),
+      )
+    ).dispatch,
     undefined,
   );
 });
 
 // Protect operation intent and sticky invocation identity independently. Each
 // changed limit/revision must conflict even under a new operation reference.
-test("preparation intent protects every approved limit and independent binding revision", async () => {
+void test("preparation intent protects every approved limit and independent binding revision", async () => {
   // Both concurrency values must be in range to exercise operation and sticky
   // intent conflicts. Other cases retain the production default bound of 1.
   const bounds = { ...defaults, maxConcurrent: 2 };
-  const a = new PostgresKernel(poolA, bounds),
-    b = new PostgresKernel(poolB, bounds);
+  const boundedA = new PostgresKernel(poolA, bounds),
+    boundedB = new PostgresKernel(poolB, bounds);
   const ctx = context(),
     account = await connected(ctx);
   const e = await prepared(
     ctx,
     account.accountRef!,
     { policyRevision: Number.MAX_SAFE_INTEGER, bindingRevision: Number.MAX_SAFE_INTEGER },
-    a,
+    boundedA,
   );
   const changes: Partial<ApprovedPreparation>[] = [
     { bindingRevision: Number.MAX_SAFE_INTEGER - 1 },
@@ -2241,19 +2346,22 @@ test("preparation intent protects every approved limit and independent binding r
     { limits: { ...e.input.limits, tokens: 5001 } },
   ];
   for (const change of changes) {
-    await assert.rejects(a.prepare(ctx, { ...e.input, ...change }), isCode("conflict"));
+    await assert.rejects(boundedA.prepare(ctx, { ...e.input, ...change }), isCode("conflict"));
     await assert.rejects(
-      b.prepare(ctx, { ...e.input, ...change, operationId: op() }),
+      boundedB.prepare(ctx, { ...e.input, ...change, operationId: op() }),
       isCode("conflict"),
     );
   }
-  await assert.rejects(a.prepare(ctx, { ...e.input, attemptRef: "attempt-b" }), isCode("conflict"));
   await assert.rejects(
-    a.prepare(ctx, { ...e.input, invocationRef: "other-invocation" }),
+    boundedA.prepare(ctx, { ...e.input, attemptRef: "attempt-b" }),
+    isCode("conflict"),
+  );
+  await assert.rejects(
+    boundedA.prepare(ctx, { ...e.input, invocationRef: "other-invocation" }),
     isCode("conflict"),
   );
   const w = await worker(ctx);
-  const accepted = await b.claim(
+  const accepted = await boundedB.claim(
     ctx,
     e.result.executionRef!,
     "full-range-binding",
@@ -2270,7 +2378,7 @@ test("preparation intent protects every approved limit and independent binding r
   );
   // New fields retain the asynchronous invalid-input contract.
   await assert.rejects(
-    a.prepare(ctx, {
+    boundedA.prepare(ctx, {
       ...e.input,
       operationId: op(),
       limits: { ...e.input.limits, concurrency: 3 },
@@ -2278,7 +2386,7 @@ test("preparation intent protects every approved limit and independent binding r
     isCode("invalid"),
   );
   await assert.rejects(
-    b.claim(
+    boundedB.claim(
       ctx,
       e.result.executionRef!,
       "invalid-concurrency",
@@ -2297,17 +2405,24 @@ test("preparation intent protects every approved limit and independent binding r
   );
   for (const field of ["requestBytes", "outputBytes", "tokens"] as const) {
     await assert.rejects(
-      a.prepare(ctx, { ...e.input, operationId: op(), limits: { ...e.input.limits, [field]: 0 } }),
+      boundedA.prepare(ctx, {
+        ...e.input,
+        operationId: op(),
+        limits: { ...e.input.limits, [field]: 0 },
+      }),
       isCode("invalid"),
     );
   }
   await assert.rejects(
-    b.prepare(ctx, { ...e.input, attemptRef: 1 } as unknown as ApprovedPreparation),
+    boundedB.prepare(ctx, { ...e.input, attemptRef: 1 } as unknown as ApprovedPreparation),
     isCode("invalid"),
   );
-  await assert.rejects(a.prepare(ctx, { ...e.input, bindingRevision: -1 }), isCode("invalid"));
   await assert.rejects(
-    b.claim(
+    boundedA.prepare(ctx, { ...e.input, bindingRevision: -1 }),
+    isCode("invalid"),
+  );
+  await assert.rejects(
+    boundedB.claim(
       ctx,
       e.result.executionRef!,
       "invalid-limits",
@@ -2321,7 +2436,7 @@ test("preparation intent protects every approved limit and independent binding r
 
 // Distinct opaque strings cannot alias through integer coercion. Conflicting
 // approvals raced on one string must produce one durable sticky winner.
-test("opaque attempt identity, conflicting approval race and per-consumer readback", async () => {
+void test("opaque attempt identity, conflicting approval race and per-consumer readback", async () => {
   const ctx = context(),
     account = await connected(ctx),
     input = await approval(ctx, account.accountRef!);
@@ -2338,11 +2453,12 @@ test("opaque attempt identity, conflicting approval race and per-consumer readba
   );
   assert.equal(pair.filter((r) => r.status === "fulfilled").length, 1);
   const loser = pair.find((r) => r.status === "rejected");
-  assert.ok(loser && loser.status === "rejected");
+  assert.ok(loser);
+  assert.equal(loser.status, "rejected");
   assert.equal(isCode("conflict")(loser.reason), true);
   const approved = pair[0].status === "fulfilled" ? input : competing;
   const won = await a.operation(ctx, approved.operationId);
-  assert.ok(won.executionRef);
+  assert.ok(typeof won.executionRef === "string" && won.executionRef !== "");
   assert.equal(
     (await b.prepare(ctx, { ...approved, operationId: op() })).executionRef,
     won.executionRef,
@@ -2392,7 +2508,7 @@ test("opaque attempt identity, conflicting approval race and per-consumer readba
 
 // Actual persisted summaries, >100 rows, keyset traversal and owner filtering.
 // The cursor is a bound, so foreign/nonexistent cursor existence is undisclosed.
-test("account listing is consumer-bound, owner-filtered and bounded in stable UUID order", async () => {
+void test("account listing is consumer-bound, owner-filtered and bounded in stable UUID order", async () => {
   const ctx = context(),
     foreign = context();
   await a.issuer(ctx);
@@ -2423,12 +2539,14 @@ test("account listing is consumer-bound, owner-filtered and bounded in stable UU
   assert.equal(tail.nextCursor, undefined);
   const seen: string[] = [];
   let cursor: string | undefined;
+  let hasNextPage: boolean;
   do {
     const filtered = await b.accounts(ctx, { ownerRef: "owner-one", cursor, limit: 7 });
     assert.ok(filtered.accounts.every((row) => row.ownerRef === "owner-one"));
     seen.push(...filtered.accounts.map((row) => row.accountRef));
     cursor = filtered.nextCursor;
-  } while (cursor);
+    hasNextPage = Boolean(cursor);
+  } while (hasNextPage);
   assert.deepEqual(
     seen,
     expected.filter((_, i) => i % 2 === 0),
@@ -2454,11 +2572,12 @@ test("account listing is consumer-bound, owner-filtered and bounded in stable UU
   assert.equal((await b.accounts(foreign)).accounts.length, 1);
   assert.deepEqual(await a.accounts(ctx, { ownerRef: "nonexistent-owner" }), { accounts: [] });
   assert.deepEqual(
-    Object.keys(page.accounts[0]).sort(),
-    ["accountRef", "displayName", "epoch", "ownerRef", "profile", "revision", "state"].sort(),
+    Object.keys(page.accounts[0]).toSorted(),
+    ["accountRef", "displayName", "epoch", "ownerRef", "profile", "revision", "state"].toSorted(),
   );
-  for (const limit of [0, 101, 1.5, Infinity])
+  for (const limit of [0, 101, 1.5, Infinity]) {
     await assert.rejects(a.accounts(ctx, { limit }), isCode("invalid"));
+  }
   await assert.rejects(b.accounts(ctx, { cursor: "invalid-uuid" }), isCode("invalid"));
 });
 
@@ -2470,12 +2589,16 @@ async function acknowledgeCleanupPage(
   job: CleanupClaim,
   w: string,
 ) {
-  if (job.scope.kind !== "execution") return;
+  if (job.scope.kind !== "execution") {
+    return;
+  }
   for (;;) {
     const page = await kernel.cleanupTransports(ctx, job.cleanupRef, w, job.token);
-    if (!page.length) return;
+    if (!page.length) {
+      return;
+    }
     for (const proof of page) {
-      assert.ok(proof.token);
+      assert.ok(Boolean(proof.token));
       await kernel.acknowledgeTransportClosed(ctx, w, proof, {
         cleanupRef: job.cleanupRef,
         token: job.token,
@@ -2497,7 +2620,7 @@ async function expire(ctx: TrustedContext, w: string) {
   );
 }
 
-test("B2 distinct executions contend for one account slot, unrelated accounts and consumers admit", async () => {
+void test("B2 distinct executions contend for one account slot, unrelated accounts and consumers admit", async () => {
   const ctx = context(),
     account = await connected(ctx),
     unrelated = await connected(ctx);
@@ -2515,7 +2638,7 @@ test("B2 distinct executions contend for one account slot, unrelated accounts an
     true,
   );
   // This fails behaviorally on old production before any new column/API is read.
-  assert.equal(pair.filter((r) => r.status === "fulfilled" && r.value.dispatch).length, 1);
+  assert.equal(pair.filter((r) => r.status === "fulfilled" && Boolean(r.value.dispatch)).length, 1);
   assert.equal(
     pair.filter((r) => r.status === "fulfilled" && r.value.status.code === "concurrency_limit")
       .length,
@@ -2553,7 +2676,7 @@ test("B2 distinct executions contend for one account slot, unrelated accounts an
   );
 });
 
-test("B2 execution keeps its narrower approval while sharing the configured account ceiling", async () => {
+void test("B2 execution keeps its narrower approval while sharing the configured account ceiling", async () => {
   const bounds = { ...defaults, maxConcurrent: 2 };
   const x = new PostgresKernel(poolA, bounds),
     y = new PostgresKernel(poolB, bounds);
@@ -2592,7 +2715,7 @@ test("B2 execution keeps its narrower approval while sharing the configured acco
   assert.equal(await occupancy(ctx, account.accountRef!), 2);
 });
 
-test("B2 lost owner retains occupancy; exact late closure frees one without refund, unfence or replay", async () => {
+void test("B2 lost owner retains occupancy; exact late closure frees one without refund, unfence or replay", async () => {
   const ctx = context(),
     account = await connected(ctx),
     owner = await worker(ctx),
@@ -2640,13 +2763,25 @@ test("B2 lost owner retains occupancy; exact late closure frees one without refu
         [ctx.consumerId, first.result.executionRef, "old", value],
       );
     } catch (error) {
-      if (error && typeof error === "object" && "code" in error && typeof error.code === "string")
+      if (
+        error !== null &&
+        typeof error === "object" &&
+        "code" in error &&
+        typeof error.code === "string"
+      ) {
         code = error.code;
+      }
     }
     assert.equal(code, "23514", column);
   }
   const binding = (
-    await admin.query(
+    await admin.query<{
+      executionRef: string;
+      requestRef: string;
+      worker: string | null;
+      token: string | null;
+      native: unknown;
+    }>(
       `SELECT execution_ref AS "executionRef",id AS "requestRef",worker,closure_token AS token,
     json_build_object('originRef',native_origin_ref,'engineIncarnation',engine_incarnation,
       'requestNonce',request_nonce,'generation',descriptor_generation) AS native
@@ -2676,8 +2811,14 @@ test("B2 lost owner retains occupancy; exact late closure frees one without refu
       [ctx.consumerId, first.result.executionRef, "old"],
     );
   } catch (error) {
-    if (error && typeof error === "object" && "code" in error && typeof error.code === "string")
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      typeof error.code === "string"
+    ) {
       reopenCode = error.code;
+    }
   }
   assert.equal(reopenCode, "23514", "a confirmed one-request closure is permanent");
   assert.equal(await occupancy(ctx, account.accountRef!), 0);
@@ -2691,7 +2832,7 @@ test("B2 lost owner retains occupancy; exact late closure frees one without refu
   );
   assert.equal((await b.execution(ctx, first.result.executionRef!)).state, "fenced");
   const allowance = (
-    await admin.query(
+    await admin.query<{ max_requests: number; max_tokens: number }>(
       "SELECT max_requests,max_tokens FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
       [ctx.consumerId, first.result.executionRef],
     )
@@ -2744,11 +2885,10 @@ test("B2 lost owner retains occupancy; exact late closure frees one without refu
       .dispatch,
     undefined,
   );
-  assert.deepEqual(Object.keys(await b.request(ctx, first.result.executionRef!, "old")).sort(), [
-    "code",
-    "effect",
-    "requestRef",
-  ]);
+  assert.deepEqual(
+    Object.keys(await b.request(ctx, first.result.executionRef!, "old")).toSorted(),
+    ["code", "effect", "requestRef"],
+  );
   // Exact late ack itself must classify ownership if neither maintenance nor a
   // callback has observed expiry; otherwise a fresh ID could escape the fence.
   await expire(ctx, live);
@@ -2776,7 +2916,7 @@ test("B2 lost owner retains occupancy; exact late closure frees one without refu
   );
 });
 
-test("B2 completed effect and failed callback retain transport until explicit owner closure", async () => {
+void test("B2 completed effect and failed callback retain transport until explicit owner closure", async () => {
   const ctx = context(),
     account = await connected(ctx),
     w = await worker(ctx);
@@ -2882,7 +3022,7 @@ test("B2 completed effect and failed callback retain transport until explicit ow
   );
 });
 
-test("B2 cleanup recovers bounded durable exact proofs; premature and stale cleanup cannot release", async () => {
+void test("B2 cleanup recovers bounded durable exact proofs; premature and stale cleanup cannot release", async () => {
   const bounds = { ...defaults, maxConcurrent: 2, maintenanceBatch: 1 };
   const x = new PostgresKernel(poolA, bounds);
   const ctx = context(),
@@ -2897,11 +3037,12 @@ test("B2 cleanup recovers bounded durable exact proofs; premature and stale clea
     },
     x,
   );
-  for (const id of ["body-a", "body-b"])
+  for (const id of ["body-a", "body-b"]) {
     assert.ok(
       (await x.claim(ctx, first.result.executionRef!, id, owner, first.admission, reservation()))
         .dispatch,
     );
+  }
   await x.close(ctx, op(), first.result.executionRef!);
   await expire(ctx, owner);
   const restarted = new PostgresKernel(poolB, bounds);
@@ -2919,7 +3060,7 @@ test("B2 cleanup recovers bounded durable exact proofs; premature and stale clea
     "bounded page even when execution has multiple occupied transports",
   );
   assert.equal(job.scope.transports[0].requestRef, "body-a");
-  assert.ok(job.scope.transports[0].token, "proof survives discarded dispatch permits");
+  assert.ok(Boolean(job.scope.transports[0].token), "proof survives discarded dispatch permits");
   const authority = { cleanupRef: job.cleanupRef, token: job.token },
     proof = job.scope.transports[0];
   await assert.rejects(
@@ -3010,8 +3151,9 @@ test("B2 cleanup recovers bounded durable exact proofs; premature and stale clea
   await restarted.settleCleanup(ctx, reclaimed.cleanupRef, delegate, reclaimed.token, true);
   await restarted.acknowledgeTransportClosed(ctx, delegate, page[0], freshAuthority);
   assert.equal(await occupancy(ctx, account.accountRef!), 1);
-  for (const id of ["body-a", "body-b"])
+  for (const id of ["body-a", "body-b"]) {
     assert.equal((await x.request(ctx, first.result.executionRef!, id)).effect, "effect_unknown");
+  }
   assert.equal(
     await count(
       "SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
@@ -3021,7 +3163,7 @@ test("B2 cleanup recovers bounded durable exact proofs; premature and stale clea
   );
 });
 
-test("B2 old generation, credential cleanup and restore keep occupied account capacity", async () => {
+void test("B2 old generation, credential cleanup and restore keep occupied account capacity", async () => {
   const ctx = context(),
     account = await connected(ctx),
     w = await worker(ctx);
@@ -3145,7 +3287,7 @@ test("B2 old generation, credential cleanup and restore keep occupied account ca
   );
 });
 
-test("B2 closure and cleanup authority capture whitelisted primitives before consumer lock await", async () => {
+void test("B2 closure and cleanup authority capture whitelisted primitives before consumer lock await", async () => {
   const bounds = { ...defaults, maxConcurrent: 2 };
   const x = new PostgresKernel(poolA, bounds);
   const ctx = context(),
@@ -3191,10 +3333,10 @@ test("B2 closure and cleanup authority capture whitelisted primitives before con
   await mutateAtConsumerLock(
     ctx,
     () => x.acknowledgeTransportClosed(ctx, owner, mutable),
-    () => Object.assign(mutable, two.dispatch!.closure),
+    () => Object.assign(mutable, two.dispatch.closure),
   );
   const held = (
-    await admin.query(
+    await admin.query<{ execution_ref: string; id: string }>(
       `SELECT execution_ref,id FROM ag_kernel.requests WHERE consumer=$1 AND transport_occupied`,
       [ctx.consumerId],
     )
@@ -3207,7 +3349,7 @@ test("B2 closure and cleanup authority capture whitelisted primitives before con
     original = { ...cleanup };
   await mutateAtConsumerLock(
     ctx,
-    () => x.acknowledgeTransportClosed(ctx, delegate, two.dispatch!.closure, cleanup),
+    () => x.acknowledgeTransportClosed(ctx, delegate, two.dispatch.closure, cleanup),
     () => {
       cleanup.cleanupRef = randomUUID();
       cleanup.token = randomUUID();
@@ -3217,7 +3359,7 @@ test("B2 closure and cleanup authority capture whitelisted primitives before con
   await x.settleCleanup(ctx, original.cleanupRef, delegate, original.token, true);
 });
 
-test("B2 accepted insert omitting occupancy conservatively holds the account slot", async () => {
+void test("B2 accepted insert omitting occupancy conservatively holds the account slot", async () => {
   const ctx = context(),
     account = await connected(ctx),
     w = await worker(ctx);
@@ -3244,7 +3386,7 @@ test("B2 accepted insert omitting occupancy conservatively holds the account slo
     code: "concurrency_limit",
   });
   const row = (
-    await admin.query(
+    await admin.query<{ closure_token: string | null }>(
       `SELECT closure_token FROM ag_kernel.requests
     WHERE consumer=$1 AND execution_ref=$2 AND id='accepted-without-new-fields'`,
       [ctx.consumerId, first.result.executionRef],
@@ -3257,9 +3399,9 @@ test("B2 accepted insert omitting occupancy conservatively holds the account slo
   );
 });
 
-test("B2 numbered upgrade retains legacy active, completed and unknown occupancy without fabricating closure authority", async () => {
+void test("B2 numbered upgrade retains legacy active, completed and unknown occupancy without fabricating closure authority", async () => {
   const active = (
-    await admin.query(
+    await admin.query<{ id: string; effect: string }>(
       `SELECT id,effect FROM ag_kernel.requests
     WHERE consumer=$1 AND execution_ref=$2 AND id IN ('legacy-dispatch','legacy-response') ORDER BY id`,
       [legacy.ctx.consumerId, legacy.execution],
@@ -3290,7 +3432,12 @@ test("B2 numbered upgrade retains legacy active, completed and unknown occupancy
   );
   assert.equal(await occupancy(legacy.ctx, legacy.account), 4);
   const rows = (
-    await admin.query(
+    await admin.query<{
+      id: string;
+      effect: string;
+      transport_occupied: boolean;
+      closure_token: string | null;
+    }>(
       `SELECT id,effect,transport_occupied,closure_token FROM ag_kernel.requests
     WHERE consumer=$1 AND execution_ref=$2 ORDER BY id`,
       [legacy.ctx.consumerId, legacy.execution],
@@ -3352,7 +3499,7 @@ test("B2 numbered upgrade retains legacy active, completed and unknown occupancy
 
 // Regression: non-entry must spend a permanent request/cap while holding the
 // account slot; only exact separate closure permits the next bounded request.
-test("B2a exact positive rejection retains occupancy and spent budget until closure", async () => {
+void test("B2a exact positive rejection retains occupancy and spent budget until closure", async () => {
   const ctx = context(),
     account = await connected(ctx),
     w = await worker(ctx);
@@ -3386,7 +3533,13 @@ test("B2a exact positive rejection retains occupancy and spent budget until clos
   });
   const budget = async () =>
     (
-      await admin.query(
+      await admin.query<{
+        request_count: number;
+        max_requests: number;
+        max_tokens: number;
+        deadline: Date;
+        state: string;
+      }>(
         "SELECT request_count,max_requests,max_tokens,deadline,state FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
         [ctx.consumerId, e.result.executionRef],
       )
@@ -3423,7 +3576,7 @@ test("B2a exact positive rejection retains occupancy and spent budget until clos
 
 // Regression: a wrong native tuple, worker or closure token must neither reject
 // nor release a request; generic effect and entered:true cannot bypass evidence.
-test("B2a rejection and closure require exact native dispatch identity", async () => {
+void test("B2a rejection and closure require exact native dispatch identity", async () => {
   const ctx = context(),
     account = await connected(ctx),
     w = await worker(ctx);
@@ -3492,7 +3645,7 @@ test("B2a rejection and closure require exact native dispatch identity", async (
 
 // Regression: duplicate callbacks with either original or substituted
 // reservations must never obtain another dispatch permit or rearm rejection.
-test("B2a duplicate claim races and terminal readback never grant another permit", async () => {
+void test("B2a duplicate claim races and terminal readback never grant another permit", async () => {
   const ctx = context(),
     account = await connected(ctx),
     w = await worker(ctx);
@@ -3505,7 +3658,7 @@ test("B2a duplicate claim races and terminal readback never grant another permit
   );
   const claims = pair.map((value) => {
     assert.equal(value.status, "fulfilled");
-    return (value as PromiseFulfilledResult<Awaited<ReturnType<PostgresKernel["claim"]>>>).value;
+    return value.value;
   });
   assert.equal(claims.filter((value) => value.dispatch).length, 1);
   const accepted = claims.find((value) => value.dispatch)!;
@@ -3546,7 +3699,7 @@ test("B2a duplicate claim races and terminal readback never grant another permit
 
 // Regression: a late positive non-entry report must never turn response,
 // completion or unknown into rejection, even when it has the original proof.
-test("B2a post-response completed and unknown settlements are denied", async () => {
+void test("B2a post-response completed and unknown settlements are denied", async () => {
   for (const terminal of ["response_started", "completed", "effect_unknown"] as const) {
     const ctx = context(),
       account = await connected(ctx),
@@ -3561,8 +3714,9 @@ test("B2a post-response completed and unknown settlements are denied", async () 
       reservation(),
     );
     assert.ok(claim.dispatch);
-    if (terminal === "completed")
+    if (terminal === "completed") {
       await a.effect(ctx, e.result.executionRef!, "already-entered", w, "response_started");
+    }
     await a.effect(ctx, e.result.executionRef!, "already-entered", w, terminal);
     await assert.rejects(
       b.rejectBeforeDispatch(ctx, w, claim.dispatch.closure, false),
@@ -3583,7 +3737,7 @@ test("B2a post-response completed and unknown settlements are denied", async () 
 
 // Regression: throwing on lost lease would roll back unknown/fence and let a
 // late entered:false rehabilitate an ambiguous dispatch after closure.
-test("B2a expired original lease commits unknown and keeps the execution fenced", async () => {
+void test("B2a expired original lease commits unknown and keeps the execution fenced", async () => {
   const ctx = context(),
     account = await connected(ctx),
     w = await worker(ctx);
@@ -3638,7 +3792,7 @@ test("B2a expired original lease commits unknown and keeps the execution fenced"
 
 // Regression: missing native settlement is ambiguity, not proof of non-entry;
 // reconciliation must preserve unknown despite a late positive callback.
-test("B2a lost rejection settlement remains unknown after reconciliation and closure", async () => {
+void test("B2a lost rejection settlement remains unknown after reconciliation and closure", async () => {
   const ctx = context(),
     account = await connected(ctx),
     w = await worker(ctx);
@@ -3677,7 +3831,7 @@ test("B2a lost rejection settlement remains unknown after reconciliation and clo
 
 // Regression: mutable callback/proof objects must not change authority across
 // an actual DB consumer-row lock wait; only captured primitive fields are bound.
-test("B2a reservation and non-entry proof capture before actual transaction await", async () => {
+void test("B2a reservation and non-entry proof capture before actual transaction await", async () => {
   const ctx = context(),
     account = await connected(ctx),
     w = await worker(ctx);
@@ -3685,11 +3839,11 @@ test("B2a reservation and non-entry proof capture before actual transaction awai
   const mutable = { ...reservation(), ignored: { diagnostic: "discarded-fixture" } },
     original = { ...mutable };
   const generation = (
-    await admin.query("SELECT generation FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2", [
-      ctx.consumerId,
-      e.result.executionRef,
-    ])
-  ).rows[0].generation as string;
+    await admin.query<{ generation: string }>(
+      "SELECT generation FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
+      [ctx.consumerId, e.result.executionRef],
+    )
+  ).rows[0].generation;
   const claim = await mutateAtConsumerLock(
     ctx,
     () => a.claim(ctx, e.result.executionRef!, "mutation", w, e.admission, mutable),
@@ -3704,7 +3858,12 @@ test("B2a reservation and non-entry proof capture before actual transaction awai
   };
   assert.deepEqual(claim.dispatch.closure.native, expected);
   const stored = (
-    await admin.query(
+    await admin.query<{
+      native_origin_ref: string | null;
+      engine_incarnation: string | null;
+      request_nonce: string | null;
+      descriptor_generation: string | null;
+    }>(
       "SELECT native_origin_ref,engine_incarnation,request_nonce,descriptor_generation FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
       [ctx.consumerId, e.result.executionRef, "mutation"],
     )
@@ -3734,7 +3893,7 @@ test("B2a reservation and non-entry proof capture before actual transaction awai
 
 // Regression: storage must prevent rebinding/NULL upgrade authority, and
 // trusted cleanup must recover exact original native identity without a permit.
-test("B2a immutable stored binding survives cleanup restart and restore", async () => {
+void test("B2a immutable stored binding survives cleanup restart and restore", async () => {
   const ctx = context(),
     account = await connected(ctx),
     owner = await worker(ctx),
@@ -3762,7 +3921,14 @@ test("B2a immutable stored binding survives cleanup restart and restore", async 
         [ctx.consumerId, e.result.executionRef, "cleanup-native", value],
       );
     } catch (error) {
-      code = (error as { code?: string }).code;
+      if (
+        error !== null &&
+        typeof error === "object" &&
+        "code" in error &&
+        typeof error.code === "string"
+      ) {
+        code = error.code;
+      }
     }
     assert.equal(code, "23514", "database must refuse immutable native rebinding");
   }
@@ -3796,7 +3962,13 @@ test("B2a immutable stored binding survives cleanup restart and restore", async 
     rejected,
   );
   const row = (
-    await admin.query(
+    await admin.query<{
+      native_origin_ref: string | null;
+      engine_incarnation: string | null;
+      request_nonce: string | null;
+      descriptor_generation: string | null;
+      transport_occupied: boolean;
+    }>(
       "SELECT native_origin_ref,engine_incarnation,request_nonce,descriptor_generation,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
       [ctx.consumerId, e.result.executionRef, "cleanup-native"],
     )
@@ -3815,19 +3987,34 @@ test("B2a immutable stored binding survives cleanup restart and restore", async 
       [ctx.consumerId, e.result.executionRef, "cleanup-native"],
     );
   } catch (error) {
-    code = (error as { code?: string }).code;
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      typeof error.code === "string"
+    ) {
+      code = error.code;
+    }
   }
   assert.equal(code, "23514", "a positive rejection is a permanent terminal fact");
 });
 
 // Regression: an accepted SQL002 row with a token but NULL native binding must
 // not acquire proof authority or free capacity during003, cleanup or restore.
-test("B2a SQL003 legacy NULL native binding conservatively retains occupancy", async () => {
+void test("B2a SQL003 legacy NULL native binding conservatively retains occupancy", async () => {
   const ctx = nativeLegacy.ctx,
     fresh = await worker(ctx);
   const fields = async () =>
     (
-      await admin.query(
+      await admin.query<{
+        effect: string;
+        closure_token: string | null;
+        native_origin_ref: string | null;
+        engine_incarnation: string | null;
+        request_nonce: string | null;
+        descriptor_generation: string | null;
+        transport_occupied: boolean;
+      }>(
         "SELECT effect,closure_token,native_origin_ref,engine_incarnation,request_nonce,descriptor_generation,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
         [ctx.consumerId, nativeLegacy.execution, "pre003"],
       )
@@ -3871,7 +4058,14 @@ test("B2a SQL003 legacy NULL native binding conservatively retains occupancy", a
       [ctx.consumerId, nativeLegacy.execution, randomUUID(), randomUUID(), nativeLegacy.generation],
     );
   } catch (error) {
-    code = (error as { code?: string }).code;
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      typeof error.code === "string"
+    ) {
+      code = error.code;
+    }
   }
   assert.equal(code, "23514");
   await a.close(ctx, op(), nativeLegacy.execution);
@@ -3910,7 +4104,7 @@ test("B2a SQL003 legacy NULL native binding conservatively retains occupancy", a
 
 // Red on005 when all historical worker/issuer slots are consumed: both fresh
 // recovery identities deny, stranding cleanup and fresh-epoch restore at capacity.
-test("D-final populated SQL003/004 upgrade prepays fresh recovery authority at fact saturation", async () => {
+void test("D-final populated SQL003/004 upgrade prepays fresh recovery authority at fact saturation", async () => {
   const h = recoveryHistory,
     ctx = h.ctx;
   const used = await count("SELECT fact_used AS n FROM ag_kernel.consumers WHERE consumer=$1", [
@@ -4027,18 +4221,25 @@ test("D-final populated SQL003/004 upgrade prepays fresh recovery authority at f
   const nextWorker = await worker(ctx, kernel);
   await assert.rejects(kernel.restore(ctx, freshIssuer, randomUUID()), isCode("denied"));
   const workers = (
-    await admin.query("SELECT worker FROM ag_kernel.workers WHERE consumer=$1", [ctx.consumerId])
+    await admin.query<{ worker: string }>(
+      "SELECT worker FROM ag_kernel.workers WHERE consumer=$1",
+      [ctx.consumerId],
+    )
   ).rows;
   assert.deepEqual(
-    workers.map((row) => row.worker).sort(),
-    [h.workers[0], freshWorker, nextWorker].sort(),
+    workers.map((row) => row.worker).toSorted(),
+    [h.workers[0], freshWorker, nextWorker].toSorted(),
   );
   const issuers = (
-    await admin.query("SELECT issuer FROM ag_kernel.issuer_epochs WHERE consumer=$1", [
-      ctx.consumerId,
-    ])
+    await admin.query<{ issuer: string }>(
+      "SELECT issuer FROM ag_kernel.issuer_epochs WHERE consumer=$1",
+      [ctx.consumerId],
+    )
   ).rows;
-  assert.deepEqual(issuers.map((row) => row.issuer).sort(), [...h.issuers, freshIssuer].sort());
+  assert.deepEqual(
+    issuers.map((row) => row.issuer).toSorted(),
+    [...h.issuers, freshIssuer].toSorted(),
+  );
   assert.equal(accountUsed, 12); // Account, candidate, execution, operation and request prepayments.
   assert.equal(used, 1 + 17 + 33 + accountUsed + 2); // Prepaid recovery slots remain charged after orphan reclaim.
   assert.equal(
@@ -4063,7 +4264,7 @@ test("D-final populated SQL003/004 upgrade prepays fresh recovery authority at f
 
 // Red when expired enrollment permanently exhausts prepaid worker slots, or
 // reclaim forgets any reference, revives this expired UUID or refunds facts.
-test("D-final heartbeat reclaims only expired orphan workers across repeated finite-slot reuse", async () => {
+void test("D-final heartbeat reclaims only expired orphan workers across repeated finite-slot reuse", async () => {
   const ctx = context(),
     foreign = context();
   const facts = { ...factDefaults, workerSlots: 8, issuerSlots: 4 };
@@ -4071,12 +4272,12 @@ test("D-final heartbeat reclaims only expired orphan workers across repeated fin
   await kernel.issuer(ctx);
   const account = await connected(ctx, kernel);
   const candidateWorker = (
-    await admin.query(
+    await admin.query<{ worker: string }>(
       `SELECT worker FROM ag_kernel.candidates
     WHERE consumer=$1 AND account_ref=$2`,
       [ctx.consumerId, account.accountRef],
     )
-  ).rows[0].worker as string;
+  ).rows[0].worker;
   const requestWorker = await worker(ctx, kernel),
     cleanupWorker = await worker(ctx, kernel);
   const journalWorker = await worker(ctx, kernel),
@@ -4143,15 +4344,21 @@ test("D-final heartbeat reclaims only expired orphan workers across repeated fin
       ].map(
         async ([table, order]) =>
           (
-            await admin.query(`SELECT * FROM ${table} WHERE consumer=$1 ORDER BY ${order}`, [
-              ctx.consumerId,
-            ])
+            await admin.query<Record<string, unknown>>(
+              `SELECT * FROM ${table} WHERE consumer=$1 ORDER BY ${order}`,
+              [ctx.consumerId],
+            )
           ).rows,
       ),
     );
   const counters = async () =>
     (
-      await admin.query(
+      await admin.query<{
+        fact_used: string;
+        worker_slots: number;
+        issuer_slots: number;
+        service_used: string;
+      }>(
         `SELECT c.fact_used,c.worker_slots,c.issuer_slots,b.used AS service_used
     FROM ag_kernel.consumers c CROSS JOIN ag_kernel.fact_budget b WHERE c.consumer=$1`,
         [ctx.consumerId],
@@ -4160,10 +4367,10 @@ test("D-final heartbeat reclaims only expired orphan workers across repeated fin
   const beforeRows = await rows(),
     beforeCounters = await counters();
   const incomingLease = (
-    await admin.query("SELECT lease_until FROM ag_kernel.workers WHERE consumer=$1 AND worker=$2", [
-      ctx.consumerId,
-      incoming,
-    ])
+    await admin.query<{ lease_until: Date }>(
+      "SELECT lease_until FROM ag_kernel.workers WHERE consumer=$1 AND worker=$2",
+      [ctx.consumerId, incoming],
+    )
   ).rows[0].lease_until;
   await assert.rejects(kernel.heartbeat(ctx, incoming), isCode("denied"));
   assert.equal(
@@ -4172,7 +4379,7 @@ test("D-final heartbeat reclaims only expired orphan workers across repeated fin
   );
   assert.deepEqual(
     (
-      await admin.query(
+      await admin.query<{ lease_until: Date }>(
         "SELECT lease_until FROM ag_kernel.workers WHERE consumer=$1 AND worker=$2",
         [ctx.consumerId, incoming],
       )
@@ -4187,9 +4394,15 @@ test("D-final heartbeat reclaims only expired orphan workers across repeated fin
     await kernel.heartbeat(ctx, fresh); // Old code denies here at its full eight slots.
     await kernel.heartbeat(ctx, live);
     const actual = (
-      await admin.query("SELECT worker FROM ag_kernel.workers WHERE consumer=$1", [ctx.consumerId])
+      await admin.query<{ worker: string }>(
+        "SELECT worker FROM ag_kernel.workers WHERE consumer=$1",
+        [ctx.consumerId],
+      )
     ).rows;
-    assert.deepEqual(actual.map((row) => row.worker).sort(), [...referenced, live, fresh].sort());
+    assert.deepEqual(
+      actual.map((row) => row.worker).toSorted(),
+      [...referenced, live, fresh].toSorted(),
+    );
     assert.deepEqual(
       await rows(),
       beforeRows,
@@ -4208,12 +4421,13 @@ test("D-final heartbeat reclaims only expired orphan workers across repeated fin
       1,
       "reclaim is consumer-scoped",
     );
-    if (n + 1 < facts.workerSlots * 2)
+    if (n + 1 < facts.workerSlots * 2) {
       await admin.query(
         `UPDATE ag_kernel.workers
       SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND worker=$2`,
         [ctx.consumerId, fresh],
       );
+    }
   }
   await admin.query(
     `UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second'
@@ -4238,22 +4452,27 @@ test("D-final heartbeat reclaims only expired orphan workers across repeated fin
   assert.equal(raced.filter((r) => r.status === "fulfilled").length, available);
   const denied = raced.filter((r) => r.status === "rejected");
   assert.equal(denied.length, 1);
-  assert.ok(denied[0]?.status === "rejected" && isCode("denied")(denied[0].reason));
+  assert.equal(denied[0]?.status, "rejected");
+  assert.ok(isCode("denied")(denied[0].reason));
   const finalWorkers = (
-    await admin.query("SELECT worker FROM ag_kernel.workers WHERE consumer=$1", [ctx.consumerId])
+    await admin.query<{ worker: string }>(
+      "SELECT worker FROM ag_kernel.workers WHERE consumer=$1",
+      [ctx.consumerId],
+    )
   ).rows;
   assert.equal(finalWorkers.length, facts.workerSlots);
   assert.deepEqual(
     finalWorkers
       .filter((row) => [...referenced, live].includes(row.worker))
       .map((row) => row.worker)
-      .sort(),
-    [...referenced, live].sort(),
+      .toSorted(),
+    [...referenced, live].toSorted(),
   );
   assert.deepEqual(await counters(), beforeCounters);
   assert.deepEqual(await rows(), beforeRows);
-  for (const expired of referenced)
+  for (const expired of referenced) {
     await assert.rejects(kernel.heartbeat(ctx, expired), isCode("denied"));
+  }
   assert.deepEqual(
     await kernel.requestProof(ctx, execution.result.executionRef!, "held-unknown"),
     claimed.dispatch.closure,
@@ -4266,7 +4485,7 @@ test("D-final heartbeat reclaims only expired orphan workers across repeated fin
 
 // Regression: replaying one spent native nonce on a different request/execution
 // ID after closure must not convert its original reservation into another permit.
-test("B2a a spent native reservation cannot move onto fresh request identities", async () => {
+void test("B2a a spent native reservation cannot move onto fresh request identities", async () => {
   const ctx = context(),
     account = await connected(ctx),
     w = await worker(ctx);
@@ -4316,7 +4535,7 @@ test("B2a a spent native reservation cannot move onto fresh request identities",
 
 // Regression: a legacy SQL002 token without native authority must not occupy
 // every bounded cleanup page ahead of newer requests with provable closure.
-test("B2a bounded cleanup prioritizes complete native proofs over legacy tokens", async () => {
+void test("B2a bounded cleanup prioritizes complete native proofs over legacy tokens", async () => {
   const bounds = { ...defaults, maxConcurrent: 2, maintenanceBatch: 1 };
   const x = new PostgresKernel(poolA, bounds);
   const ctx = context(),
@@ -4379,7 +4598,7 @@ test("B2a bounded cleanup prioritizes complete native proofs over legacy tokens"
 
 // Red when concurrent new IDs overrun an aggregate final slot, or saturation
 // stores attacker denial rows / prevents an existing run's exact closure.
-test("D-final final consumer fact slot is atomic and safety headroom is bounded", async () => {
+void test("D-final final consumer fact slot is atomic and safety headroom is bounded", async () => {
   const ctx = context();
   const facts = {
     ...factDefaults,
@@ -4416,9 +4635,10 @@ test("D-final final consumer fact slot is atomic and safety headroom is bounded"
   assert.ok(denied?.status === "rejected" && isCode("denied")(denied.reason));
   const budget = async () =>
     (
-      await admin.query(`SELECT fact_used FROM ag_kernel.consumers WHERE consumer=$1`, [
-        ctx.consumerId,
-      ])
+      await admin.query<{ fact_used: string }>(
+        `SELECT fact_used FROM ag_kernel.consumers WHERE consumer=$1`,
+        [ctx.consumerId],
+      )
     ).rows[0].fact_used;
   assert.equal(Number(await budget()), 28);
   const rows = await count("SELECT count(*) AS n FROM ag_kernel.operations WHERE consumer=$1", [
@@ -4482,8 +4702,9 @@ test("D-final final consumer fact slot is atomic and safety headroom is bounded"
     fenced = await x.fence(ctx, fenceId, "binding-fixture", 2);
   assert.equal(fenced.state, "applied");
   assert.deepEqual(await y.fence(ctx, fenceId, "binding-fixture", 2), fenced);
-  for (let n = 0; n < 3; n++)
+  for (let n = 0; n < 3; n++) {
     await assert.rejects(y.fence(ctx, op(), "binding-fixture", 3 + n), isCode("denied"));
+  }
   const disabled = await x.beginAccount(ctx, {
     operationId: op(),
     kind: "disable",
@@ -4518,8 +4739,9 @@ test("D-final final consumer fact slot is atomic and safety headroom is bounded"
   }
   assert.ok(found);
   assert.equal(await occupancy(ctx, account.accountRef!), 0);
-  for (const job of cleanupJobs)
+  for (const job of cleanupJobs) {
     await y.settleCleanup(ctx, job.cleanupRef, delegate, job.token, true);
+  }
   assert.deepEqual(await x.request(ctx, original.result.executionRef!, "spent-at-cap"), rejected);
   assert.equal(Number(await budget()), 28, "prepaid safety mutations cannot increase the budget");
 });
@@ -4535,11 +4757,11 @@ type RetentionFixture = {
 let retentionFixture: RetentionFixture;
 // Red when expiry alone compacts unresolved authority, or positively closed,
 // expired runs never compact their redundant intents while readback stays full.
-test("D-final only expired positively safe payloads compact; held evidence survives", async () => {
+void test("D-final only expired positively safe payloads compact; held evidence survives", async () => {
   const ctx = context(),
     owner = await worker(ctx);
   const cases = ["safe", "unknown", "occupied", "cleanup-pending"] as const;
-  const now = (await admin.query("SELECT clock_timestamp() AS now")).rows[0].now as Date;
+  const now = (await admin.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0].now;
   const deadline = new Date(now.getTime() + 2_000);
   const executions = new Map<string, Awaited<ReturnType<typeof prepared>>>();
   const proofs = new Map<string, NativeDispatchProof>();
@@ -4557,25 +4779,27 @@ test("D-final only expired positively safe payloads compact; held evidence survi
     assert.ok(claimed.dispatch);
     executions.set(kind, e);
     proofs.set(kind, claimed.dispatch.closure);
-    if (kind === "unknown")
+    if (kind === "unknown") {
       await a.effect(ctx, e.result.executionRef!, kind, owner, "effect_unknown");
-    else {
+    } else {
       await a.effect(ctx, e.result.executionRef!, kind, owner, "response_started");
       await a.effect(ctx, e.result.executionRef!, kind, owner, "completed");
     }
     await a.close(ctx, op(), e.result.executionRef!);
-    if (kind === "safe" || kind === "cleanup-pending")
+    if (kind === "safe" || kind === "cleanup-pending") {
       await a.acknowledgeTransportClosed(ctx, owner, claimed.dispatch.closure);
+    }
   }
   for (let n = 0; n < cases.length; n++) {
     const job = await b.claimCleanup(ctx, owner);
     assert.ok(job?.scope.kind === "execution");
-    if (job.scope.executionRef === executions.get("safe")!.result.executionRef)
+    if (job.scope.executionRef === executions.get("safe")!.result.executionRef) {
       await b.settleCleanup(ctx, job.cleanupRef, owner, job.token, true);
+    }
   }
   const payloads = async () =>
     (
-      await admin.query(
+      await admin.query<{ ref: string; intent: unknown; intent_hash: Buffer }>(
         `SELECT ref,intent,intent_hash FROM ag_kernel.executions
     WHERE consumer=$1 ORDER BY ref`,
         [ctx.consumerId],
@@ -4594,16 +4818,18 @@ test("D-final only expired positively safe payloads compact; held evidence survi
   for (const row of after) {
     const old = before.find((r) => r.ref === row.ref)!;
     assert.deepEqual(row.intent_hash, old.intent_hash);
-    if (row.ref === safe.result.executionRef) assert.equal(row.intent, null);
-    else
+    if (row.ref === safe.result.executionRef) {
+      assert.equal(row.intent, null);
+    } else {
       assert.deepEqual(
         row.intent,
         old.intent,
         "equally old unresolved rows must retain their metadata",
       );
+    }
   }
   const operationPayload = (
-    await admin.query(
+    await admin.query<{ intent: unknown; intent_hash: Buffer }>(
       "SELECT intent,intent_hash FROM ag_kernel.operations WHERE consumer=$1 AND id=$2",
       [ctx.consumerId, safe.input.operationId],
     )
@@ -4648,8 +4874,8 @@ test("D-final only expired positively safe payloads compact; held evidence survi
 
 // Red when restart/restore forgets replay tombstones, unknown invocation/native
 // nonce bindings or old issuer epochs, or service/account caps ignore real rows.
-test("D-final tombstones and spent proofs survive restart/restore and all aggregate caps", async () => {
-  assert.ok(retentionFixture);
+void test("D-final tombstones and spent proofs survive restart/restore and all aggregate caps", async () => {
+  assert.ok(Boolean(retentionFixture));
   const { ctx, owner, safe, unknown, safeProof, unknownProof } = retentionFixture;
   const used = await count("SELECT fact_used AS n FROM ag_kernel.consumers WHERE consumer=$1", [
     ctx.consumerId,
@@ -4679,14 +4905,7 @@ test("D-final tombstones and spent proofs survive restart/restore and all aggreg
   await admin.query(`CREATE DATABASE "${restoredDatabase}"`);
   const restoredURL = new URL(safeTestDsn());
   restoredURL.pathname = "/" + restoredDatabase;
-  const cliEnv = (url: URL): NodeJS.ProcessEnv => ({
-    ...process.env,
-    PGHOST: url.hostname,
-    PGPORT: url.port,
-    PGUSER: decodeURIComponent(url.username),
-    PGPASSWORD: decodeURIComponent(url.password),
-    PGDATABASE: decodeURIComponent(url.pathname.slice(1)),
-  });
+
   let stage = "dump";
   try {
     const dump = execFileSync(
@@ -4710,7 +4929,7 @@ test("D-final tombstones and spent proofs survive restart/restore and all aggreg
   } catch {
     throw new Error(`disposable ${stage} failed; vendor diagnostics withheld`);
   }
-  const restoredPool = new pg.Pool({ connectionString: restoredURL.toString(), max: 1 });
+  const restoredPool = new Pool({ connectionString: restoredURL.toString(), max: 1 });
   try {
     const restored = new PostgresKernel(restoredPool);
     assert.equal(await restored.issuer(ctx), beforeIssuer);
@@ -4838,8 +5057,9 @@ test("D-final tombstones and spent proofs survive restart/restore and all aggreg
     isCode("conflict"),
   );
   // The finite prepaid recovery slots bound new boot/restore identities as well.
-  for (let n = 0; n < factDefaults.issuerSlots - 2; n++)
+  for (let n = 0; n < factDefaults.issuerSlots - 2; n++) {
     await restarted.restore(ctx, await restarted.issuer(ctx), randomUUID());
+  }
   await assert.rejects(
     restarted.restore(ctx, await restarted.issuer(ctx), randomUUID()),
     isCode("denied"),
@@ -4847,7 +5067,9 @@ test("D-final tombstones and spent proofs survive restart/restore and all aggreg
   let workers = await count("SELECT count(*) AS n FROM ag_kernel.workers WHERE consumer=$1", [
     ctx.consumerId,
   ]);
-  while (workers++ < factDefaults.workerSlots) await worker(ctx, restarted);
+  while (workers++ < factDefaults.workerSlots) {
+    await worker(ctx, restarted);
+  }
   await assert.rejects(worker(ctx, restarted), isCode("denied"));
   await restarted.heartbeat(ctx, owner);
   assert.equal(

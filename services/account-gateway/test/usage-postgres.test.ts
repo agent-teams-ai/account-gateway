@@ -1,28 +1,31 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import pg from "pg";
+import { Pool } from "pg";
 import { PostgresUsageJournal } from "../src/usage.ts";
 import type { UsageObservation } from "@agent-teams/account-gateway/contracts";
 
-test("real PostgreSQL journal deduplicates concurrent writes and freezes bounded pages across late corrections", async () => {
+void test("real PostgreSQL journal deduplicates concurrent writes and freezes bounded pages across late corrections", async () => {
   const database = process.env.AG_USAGE_DISPOSABLE_DB;
-  if (!database || !/^ag_usage_test_[a-z0-9_]+$/.test(database))
+  if (database === undefined || database === "" || !/^ag_usage_test_[a-z0-9_]+$/.test(database)) {
     throw new Error("NOT_RUN: explicit new disposable local DB required");
+  }
   const dsn = process.env.AG_USAGE_TEST_DSN;
-  if (dsn) {
+  const hasDsn = dsn !== undefined && dsn !== "";
+  if (hasDsn) {
     const url = new URL(dsn);
     if (
       !["postgres:", "postgresql:"].includes(url.protocol) ||
       !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) ||
       url.pathname !== "/" + database ||
-      url.search ||
-      url.hash
-    )
+      url.search !== "" ||
+      url.hash !== ""
+    ) {
       throw new Error("refusing remote or unspecified journal fixture DB");
+    }
   }
-  const pool = new pg.Pool(
-    dsn ? { connectionString: dsn, max: 4 } : { host: "/tmp", database, max: 4 },
+  const pool = new Pool(
+    hasDsn ? { connectionString: dsn, max: 4 } : { host: "/tmp", database, max: 4 },
   );
   try {
     assert.equal(
@@ -65,7 +68,11 @@ test("real PostgreSQL journal deduplicates concurrent writes and freezes bounded
       journal.append({ consumerId: "one" }, fact),
     ]);
     assert.equal(
-      (await pool.query("SELECT COUNT(*)::int AS n FROM ag_kernel.usage_observations")).rows[0].n,
+      (
+        await pool.query<{ n: number }>(
+          "SELECT COUNT(*)::int AS n FROM ag_kernel.usage_observations",
+        )
+      ).rows[0].n,
       1,
     );
     const first = await journal.list({ consumerId: "one" }, { limit: 1 });

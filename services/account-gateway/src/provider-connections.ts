@@ -112,18 +112,8 @@ export const providerConnectionRegistry: readonly ProviderConnectionDefinition[]
     region: { identity: "global", label: "Global" },
     protocol: "openai-responses",
     baseURL: "https://openrouter.ai/api/v1",
-    models: [
-      {
-        modelId: "openai/gpt-5.4-mini",
-        ...standard,
-        fast: { allowed: ["balanced", "fast"], default: "balanced" },
-      },
-      {
-        modelId: "openai/gpt-5.4-nano",
-        ...standard,
-        fast: { allowed: ["balanced", "fast"], default: "fast" },
-      },
-    ],
+    // Model membership and controls come from the account-scoped Native snapshot.
+    models: [],
     authMethods: ["api_key"],
     completionInputKind: "none",
     oauthCallbackMode: null,

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
-import pg from "pg";
+import { Pool, type PoolClient } from "pg";
 import { createFacade, FacadeBearers } from "../src/facade.ts";
 import { PostgresKernel } from "../src/postgres.ts";
 import { PostgresUsageJournal } from "../src/usage.ts";
@@ -12,38 +12,42 @@ import { AccountManagement } from "../src/management.ts";
 import { IntentSecrets, PostgresManagementStore } from "../src/management-store.ts";
 import { NativeManagementClient } from "../src/native-client.ts";
 
-test(
+void test(
   "protected control facade usage keeps real PostgreSQL capacity for heartbeat and cleanup",
   { timeout: 20_000 },
   async () => {
     const database = process.env.AG_USAGE_CAPACITY_DISPOSABLE_DB,
       dsn = process.env.AG_USAGE_CAPACITY_TEST_DSN;
     if (
-      !database ||
+      database === undefined ||
+      database === "" ||
       !/^ag_usage_capacity_test_[a-z0-9_]+$/.test(database) ||
-      !dsn ||
+      dsn === undefined ||
+      dsn === "" ||
       process.env.AG_KERNEL_TEST_ALLOW !== "disposable_pg17_10"
-    )
+    ) {
       throw new Error("NOT_RUN: explicit new disposable PG17.10 DB required");
+    }
     const url = new URL(dsn);
     if (
       !["postgres:", "postgresql:"].includes(url.protocol) ||
       !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) ||
       url.pathname !== "/" + database ||
-      url.search ||
-      url.hash
-    )
+      url.search !== "" ||
+      url.hash !== ""
+    ) {
       throw new Error("refusing remote or unspecified fixture DB");
-    const pool = new pg.Pool({
+    }
+    const pool = new Pool({
       connectionString: dsn,
       max: 8,
       connectionTimeoutMillis: 2000,
       statement_timeout: 8000,
       application_name: "usage_capacity_data",
     });
-    const admin = new pg.Pool({ connectionString: dsn, max: 2, statement_timeout: 8000 });
-    pool.on("error", () => undefined);
-    admin.on("error", () => undefined);
+    const admin = new Pool({ connectionString: dsn, max: 2, statement_timeout: 8000 });
+    pool.on("error", () => {});
+    admin.on("error", () => {});
     const kernel = new PostgresKernel(pool),
       usage = new PostgresUsageJournal(pool, randomBytes(32));
     const context = { consumerId: "capacity-consumer" },
@@ -132,23 +136,28 @@ test(
       intentHmacKey: randomBytes(32),
       timeoutMs: 5000,
     });
-    let blocker: pg.PoolClient | undefined;
+    let blocker: PoolClient | undefined;
     const requests: Promise<Response>[] = [];
     try {
       const state = (
-        await admin.query(
+        await admin.query<{ version: string; empty: boolean }>(
           "SELECT current_setting('server_version') AS version, NOT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname IN ('ag_kernel','ag_management')) AS empty",
         )
       ).rows[0];
       assert.match(state.version, /^17\.10(?:$| )/);
       assert.equal(state.empty, true);
       const directory = new URL("../migrations/", import.meta.url);
-      for (const file of (await readdir(directory)).filter((f) => /^\d{3}_.*\.sql$/.test(f)).sort())
+      for (const file of (await readdir(directory))
+        .filter((f) => /^\d{3}_.*\.sql$/.test(f))
+        .toSorted()) {
         await admin.query(await readFile(new URL(file, directory), "utf8"));
+      }
       await kernel.heartbeat(context, worker);
-      await new Promise<void>((resolve) => facade.listen(0, "127.0.0.1", resolve));
+      await new Promise<void>((resolve) => {
+        facade.listen(0, "127.0.0.1", resolve);
+      });
       const address = facade.address();
-      assert.ok(address && typeof address === "object");
+      assert.ok(address !== null && typeof address === "object");
       const origin = "http://127.0.0.1:" + address.port;
       const get = (path: string, credential = token) =>
         fetch(origin + path, {
@@ -192,17 +201,21 @@ test(
       blocker = await admin.connect();
       await blocker.query("BEGIN");
       await blocker.query("LOCK ag_kernel.usage_observations IN ACCESS EXCLUSIVE MODE");
-      for (let i = 0; i < 8; i++) requests.push(get("/v1/usage?limit=1"));
+      for (let i = 0; i < 8; i++) {
+        requests.push(get("/v1/usage?limit=1"));
+      }
       let blocked = 0;
       for (let i = 0; i < 60; i++) {
         blocked = Number(
           (
-            await admin.query(
+            await admin.query<{ n: string }>(
               "SELECT count(*) AS n FROM pg_stat_activity WHERE application_name='usage_capacity_data' AND wait_event_type='Lock' AND query LIKE 'SELECT position,fact%'",
             )
           ).rows[0].n,
         );
-        if (blocked === 6) break;
+        if (blocked === 6) {
+          break;
+        }
         await delay(20);
       }
       assert.equal(blocked, 6, "analytics may occupy only six actual SQL clients");
@@ -212,11 +225,10 @@ test(
           inServiceLane("control", () =>
             Promise.all([kernel.heartbeat(context, worker), kernel.claimCleanup(context, worker)]),
           ),
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(
-              () => reject(new Error("reserved heartbeat/cleanup capacity unavailable")),
-              1500,
-            );
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => {
+              reject(new Error("reserved heartbeat/cleanup capacity unavailable"));
+            }, 1500);
           }),
         ]);
       } finally {
@@ -234,7 +246,9 @@ test(
         message: "invalid",
       });
       const clients = await Promise.all(Array.from({ length: 6 }, () => sharedCheckout(pool)()));
-      clients.forEach((client) => client.release());
+      clients.forEach((client) => {
+        client.release();
+      });
       assert.equal(
         pool.waitingCount,
         0,
@@ -242,12 +256,16 @@ test(
       );
     } finally {
       if (blocker) {
-        await blocker.query("ROLLBACK").catch(() => undefined);
+        await blocker.query("ROLLBACK").catch(() => {});
         blocker.release();
       }
       await Promise.allSettled(requests);
       facade.closeAllConnections();
-      await new Promise<void>((resolve) => facade.close(() => resolve()));
+      await new Promise<void>((resolve) => {
+        facade.close(() => {
+          resolve();
+        });
+      });
       await Promise.all([pool.end(), admin.end()]);
     }
   },

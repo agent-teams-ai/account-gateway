@@ -117,17 +117,25 @@ export function facadeUsageReadRoute(
   method: string | undefined,
   path: string | undefined,
 ): boolean {
-  if (method !== "GET" || !path) return false;
+  if (method !== "GET" || path === undefined || path === "") {
+    return false;
+  }
   const query = path.indexOf("?");
-  if (query < 0) return /^\/v1\/usage(?:\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+)?$/.test(path);
-  if (path.slice(0, query) !== "/v1/usage" || path.length - query > 1600) return false;
+  if (query < 0) {
+    return /^\/v1\/usage(?:\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+)?$/.test(path);
+  }
+  if (path.slice(0, query) !== "/v1/usage" || path.length - query > 1600) {
+    return false;
+  }
   const seen = new Set<string>();
   return path
     .slice(query + 1)
     .split("&")
     .every((pair) => {
       const match = /^(limit|afterCursor|highWaterCursor)=([A-Za-z0-9_-]+)$/.exec(pair);
-      if (!match || seen.has(match[1])) return false;
+      if (!match || seen.has(match[1])) {
+        return false;
+      }
       seen.add(match[1]);
       return match[1] === "limit" ? /^[1-9][0-9]{0,2}$/.test(match[2]) : match[2].length <= 512;
     });
@@ -139,21 +147,30 @@ export function facadeBoundedReadRoute(
   return (
     facadeUsageReadRoute(method, path) ||
     (method === "POST" &&
-      (path === "/v1/account-limits/read" || path === "/v2/account-limits/read" || path === "/v1/account-models/read"))
+      (path === "/v1/account-limits/read" ||
+        path === "/v2/account-limits/read" ||
+        path === "/v1/account-models/read"))
   );
 }
 export function facadeControlRoute(method: string | undefined, path: string | undefined): boolean {
-  if (facadeUsageReadRoute(method, path)) return true;
+  if (facadeUsageReadRoute(method, path)) {
+    return true;
+  }
   if (
     (method === "GET" &&
       (path === "/v1/capabilities/account-limits" ||
         path === "/v2/capabilities/account-limits" ||
         path === "/v1/provider-connection-capabilities")) ||
     (method === "POST" &&
-      (path === "/v1/account-limits/read" || path === "/v2/account-limits/read" || path === "/v1/account-models/read"))
-  )
+      (path === "/v1/account-limits/read" ||
+        path === "/v2/account-limits/read" ||
+        path === "/v1/account-models/read"))
+  ) {
     return true;
-  if (!path || /[?#%\r\n]/.test(path)) return false;
+  }
+  if (path === undefined || path === "" || /[?#%\r\n]/.test(path)) {
+    return false;
+  }
   return (
     (method === "POST" &&
       (/^\/v1\/executions\/[A-Za-z0-9_-]+\/close$/.test(path) ||
@@ -172,30 +189,38 @@ export function facadeControlRoute(method: string | undefined, path: string | un
 }
 
 export class ServiceAdmission {
-  private active = { data: 0, control: 0 };
+  private readonly active = { data: 0, control: 0 };
   private stopped = false;
-  private idle: (() => void)[] = [];
+  private readonly idle: (() => void)[] = [];
   reserve(selected: ServiceLane): (() => void) | undefined {
     if (
       this.stopped ||
       this.active[selected] >= serviceCapacity[selected === "data" ? "dataActive" : "controlActive"]
-    )
+    ) {
       return;
+    }
     this.active[selected]++;
     let released = false;
     return () => {
-      if (released) return;
+      if (released) {
+        return;
+      }
       released = true;
       this.active[selected]--;
-      if (!this.active.data && !this.active.control)
-        this.idle.splice(0).forEach((resolve) => resolve());
+      if (!this.active.data && !this.active.control) {
+        this.idle.splice(0).forEach((resolve) => {
+          resolve();
+        });
+      }
     };
   }
   stop(): Promise<void> {
     this.stopped = true;
     return !this.active.data && !this.active.control
       ? Promise.resolve()
-      : new Promise((resolve) => this.idle.push(resolve));
+      : new Promise((resolve) => {
+          this.idle.push(resolve);
+        });
   }
 }
 
@@ -203,7 +228,9 @@ export class ServiceAdmission {
 const owners = new WeakMap<Pool, Checkout>();
 export function sharedCheckout(pool: Pool): Checkout {
   const existing = owners.get(pool);
-  if (existing) return existing;
+  if (existing) {
+    return existing;
+  }
   let occupied = 0,
     dataOccupied = 0;
   type Waiter = { start(): void };
@@ -213,8 +240,11 @@ export function sharedCheckout(pool: Pool): Checkout {
     (selected === "control" ||
       dataOccupied < serviceCapacity.poolClients - serviceCapacity.controlReserved);
   const pump = () => {
-    for (const selected of ["control", "data"] as const)
-      while (waiting[selected].length && available(selected)) waiting[selected].shift()!.start();
+    for (const selected of ["control", "data"] as const) {
+      while (waiting[selected].length && available(selected)) {
+        waiting[selected].shift()!.start();
+      }
+    }
   };
   const checkout: Checkout = () => {
     const selected = lane.getStore() ?? "data";
@@ -229,25 +259,42 @@ export function sharedCheckout(pool: Pool): Checkout {
         }
       };
       const dispose = () => {
-        if (disposed) return;
+        if (disposed) {
+          return;
+        }
         disposed = true;
         occupied--;
-        if (selected === "data") dataOccupied--;
+        if (selected === "data") {
+          dataOccupied--;
+        }
         pump();
       };
       const timer = setTimeout(() => {
         deny();
         if (!started) {
           const index = waiting[selected].indexOf(waiter);
-          if (index >= 0) waiting[selected].splice(index, 1);
+          if (index >= 0) {
+            waiting[selected].splice(index, 1);
+          }
         }
         // In-flight connect still owns its physical slot until it settles.
       }, serviceCapacity.timeoutMs);
+      // Late acquisition still owns its slot through the actual release.
+      const releaseLate = (client: PoolClient): null => {
+        try {
+          client.release();
+        } finally {
+          dispose();
+        }
+        return null;
+      };
       const waiter: Waiter = {
         start() {
           started = true;
           occupied++;
-          if (selected === "data") dataOccupied++;
+          if (selected === "data") {
+            dataOccupied++;
+          }
           let acquisition: Promise<PoolClient>;
           try {
             acquisition = pool.connect();
@@ -262,17 +309,14 @@ export function sharedCheckout(pool: Pool): Checkout {
               (client) => {
                 clearTimeout(timer);
                 if (settled) {
-                  try {
-                    client.release();
-                  } finally {
-                    dispose();
-                  }
-                  return;
+                  return releaseLate(client);
                 }
                 const release = client.release.bind(client);
                 let released = false;
                 client.release = (error?: Error | boolean) => {
-                  if (released) return;
+                  if (released) {
+                    return;
+                  }
                   released = true;
                   try {
                     release(error);
@@ -282,6 +326,7 @@ export function sharedCheckout(pool: Pool): Checkout {
                 };
                 settled = true;
                 resolve(client);
+                return null;
               },
               () => {
                 clearTimeout(timer);
@@ -289,16 +334,17 @@ export function sharedCheckout(pool: Pool): Checkout {
                 dispose();
               },
             )
-            .catch(() => undefined);
+            .catch(() => {});
         },
       };
-      if (available(selected)) waiter.start();
-      else if (
+      if (available(selected)) {
+        waiter.start();
+      } else if (
         waiting[selected].length <
         serviceCapacity[selected === "data" ? "dataWaiting" : "controlWaiting"]
-      )
+      ) {
         waiting[selected].push(waiter);
-      else {
+      } else {
         clearTimeout(timer);
         deny();
       }

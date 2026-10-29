@@ -1,29 +1,32 @@
 {
-  "reviewedOn": "2026-10-23",
+  "reviewedOn": "2026-10-25",
   "owner": "gateway-maintainers",
   "from": {
-    "commit": "4b56072ec6ca269fb16e3fdf131d31423af804bd",
-    "sha256": "33b41d5babf0a431c97e8e596a56e6ec1557ba1a0b26d39bf23e13d9a19e1fbd"
+    "commit": "b70ba39304ac71964175c42a77309406a7c30ca2",
+    "sha256": "11a389b223506dc303fa986a7a37350b847013d85beb2de9d74cb8c97363e824"
   },
   "standard": {
     "repository": "agent-teams-ai/get-modular",
     "path": "docs/architecture/common-assembly.md",
     "anchor": "consumer-module-standard",
-    "commit": "b70ba39304ac71964175c42a77309406a7c30ca2",
-    "sha256": "11a389b223506dc303fa986a7a37350b847013d85beb2de9d74cb8c97363e824",
-    "gitBlob": "bf6c64f5057c18cb3439c6b0e1a97b60428b0c53"
+    "commit": "8305ea6409757da8e60dca074dce163d95c85e88",
+    "sha256": "3c5814ebf1ab1bd17688e49955aa0baa2ee91dd3a369adcea4d38aaccd53ba86",
+    "gitBlob": "df4eff7235ac781ec574903c6b2aec13bcd7bfaa"
   },
-  "retrieval": "Independently verified GitHub commits/main at b70ba39304ac71964175c42a77309406a7c30ca2 on 2026-10-23, then retrieved the exact-commit contents API bytes. Complete decoded bytes match the retained SHA-256 and Git blob identity; the merged document is byte-identical to the reviewed checkpoint.",
-  "fullDocumentDiffSha256": "ecf7838c63a654617a51502cd6704be42954d2b5adf3ae36317ba0b490d18cdb",
+  "retrieval": "Fresh read-only GitHub main8305ea6409757da8e60dca074dce163d95c85e88, then exact-commit full source retrieval. Raw full-document SHA256 and Git blob match retained bytes. Compared the complete priorb70 retained document with current source.",
+  "fullDocumentDiffSha256": "5b31db7cba1bac8c6fd8736f8e7b3231fa3b373c947089ed25d7821900a202b7",
   "reviewedDelta": [
-    "FMS v1.1 is available, while consumers continue to follow their own pinned version; Gateway remains on FMS v1.",
-    "Contract descriptors, module entries and groups replace handwritten compatibility and handle authoring in the current recipe; these require a separately qualified Gateway package migration.",
-    "Resources, scoped adapters, run inputs, observation ownership and dynamic-instance rules add lifecycle contracts; optional dynamic lifecycle remains irrelevant to this passive SDK construction scope.",
-    "Current feature layout, groups, namespace rules, conformance smoke/isolate tests and independent provider/root wiring oracles exceed Gateway's existing partial topology/source checks.",
-    "Profile completion, module/input/group limits and typed entry invariance extend preparation and execution guidance without certifying existing consumers.",
-    "ADR-0041 replaces direct concrete feature-map inheritance with complete exported descriptor unions and separate CapabilitiesOf bases. Both lists retain every transitive and unused contract; source conflict checks remain checked, identical overlap is valid and incompatible unused overlaps fail early.",
-    "Custom manual maps remain supported. Gateway's four-key ClientCapabilities uses installed Assembly 0.2.0 and remains unchanged; no descriptor-union, runtime or public API migration is needed for this guidance correction.",
-    "Current reciprocal consumer evidence does not establish Gateway CMS adoption; activation still requires its own accepted scope and meaningful rejecting commands."
+    "Only producer example invocations change from pnpm to bun run for assembly:test, resources:check, conformance:check, assembly:build and observation:check. No Consumer Module Standard contract, API, layout or qualification rule changes.",
+    "These are Get Modular producer commands. Gateway keeps its own pinned pnpm11.28.2 workspace/CI, Core/Assembly0.2.0, FMSv1 scope and existing native/SDK qualification commands.",
+    "The complete previous policy review remains in repository history at6db416b and is bound by previousReview; accepted decisions, normative FMS bytes and historical receipts are unchanged.",
+    "CMS adoption remains pending. This migration qualifies exact current document identity/retained-byte integrity only; all existing activation work and rejecting gates remain."
   ],
-  "result": "Pin-integrity qualification only. CMS adoption stays pending with exact remaining work in architecture/consumer-module-adoption.json; the retained document is non-authoritative evidence."
+  "result": "Reviewed producer-command-only guidance migration; pin integrity only. CMS adoption remains pending, not promoted.",
+  "previousReview": {
+    "repositoryCommit": "6db416b773837d796bcf99e7f76c44f82ffb2e8f",
+    "path": "architecture/evidence/cms-pin-review.json",
+    "sha256": "ca7992e49bc9859945d23986a5ca74cb4e196b41c024aec839a7a094f2990ed9",
+    "retainedDocumentPath": "architecture/evidence/common-assembly.md",
+    "retainedDocumentSha256": "11a389b223506dc303fa986a7a37350b847013d85beb2de9d74cb8c97363e824"
+  }
 }
