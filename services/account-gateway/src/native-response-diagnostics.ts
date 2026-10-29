@@ -21,6 +21,28 @@ const phases = new Set([
   "downstream_flush",
 ]);
 
+// Pre-dispatch refusals carry only a closed phase; no request or account data.
+const admissionPhases = new Set([
+  "admission_payload",
+  "admission_input",
+  "admission_tools",
+  "admission_mapping",
+  "admission_descriptor",
+  "admission_credential",
+  "admission_lifetime",
+  "admission_catalog_unavailable",
+  "admission_catalog_expired",
+  "admission_catalog_policy",
+  "admission_dispatch_target",
+  "admission_account_lock",
+  "admission_account_changed",
+  "admission_replay",
+  "admission_runtime",
+]);
+for (const phase of admissionPhases) {
+  phases.add(phase);
+}
+
 const oauthPhases = new Set([
   "exchange_transport",
   "exchange_http_status",
@@ -303,6 +325,9 @@ export function nativeResponseDiagnostics(
             !phases.has(row.phase)
           ) {
             return;
+          }
+          if (admissionPhases.has(row.phase)) {
+            object(row, ["event", "phase"]);
           }
           const status = row.http_status;
           if (
