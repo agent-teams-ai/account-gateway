@@ -1,0 +1,10 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {qualifyJoined} from './joined-receipt.ts';
+const binding={nativeHead:'a'.repeat(40),gatewayBaseHead:'b'.repeat(40),gatewaySourceArchiveSHA256:'c'.repeat(64),nativeBinarySHA256:'d'.repeat(64)};
+const stats={dispatches:0,quotaGets:0,functionCalls:0,functionOutputs:0,customCalls:0,customOutputs:0};
+const progress={phase:'enrollment-safe-counters',kimi:stats,glm:stats,minimax:stats,grok:{...stats,exchanges:1,refreshes:1},openrouter:stats,unexpected:0,openrouterModelGets:1};
+const receipt={phase:'completed',contract:'gateway-native-provider-joined/v1',...binding,liveProviderAccount:false,inertReadProviderCalls:0,nativeHTTP:true,gatewayFacadeAndSDK:true,actualPostgreSQL:true,providerShapedFixture:true,controlledTextAndFunctionToolRoundTrip:true,dynamicOpenRouterDiscoveryAndDispatch:true,dynamicOpenRouterAuthoritativeRemoval:true,dynamicOpenRouterQualifiedReasoning:true,dynamicOpenRouterImmutableAnchor:true,minimaxReasoningContentRoundTrip:true,reconnectRetainsAccount:true,canonicalErasure:true,grokRefresh:true,wrongOwnerDenied:true};
+const stream=(...rows:unknown[])=>rows.map(r=>JSON.stringify(r)).join('\n')+'\n';
+test('exact two-row joined success binds all actual source and binary identities',()=>{assert.doesNotThrow(()=>qualifyJoined(stream(progress,receipt),binding));for(const key of Object.keys(binding))assert.throws(()=>qualifyJoined(stream(progress,{...receipt,[key]:'wrong'}),binding),/^Error: joined-receipt$/);});
+test('joined decoder rejects failed, unknown, reordered, duplicate, trailing and malformed rows without raw diagnostics',()=>{for(const output of [stream(receipt),stream(receipt,progress),stream(progress,receipt,receipt),stream(progress,{phase:'failed'}),stream({phase:'unknown'},receipt),stream([],receipt),stream(progress,receipt)+'PRIVATE_SENTINEL',stream(progress,receipt).slice(0,-3),stream({...progress,unexpected:1},receipt),stream(progress,{...receipt,liveProviderAccount:true}),stream(progress,{...receipt,nativeHTTP:false})])assert.throws(()=>qualifyJoined(output,binding),/^Error: joined-receipt$/);});

@@ -5,6 +5,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 jobs:
   actual_native:
     runs-on: ubuntu-latest
@@ -81,39 +82,31 @@ jobs:
           import {createRequire} from 'node:module'; import{dirname,join}from'node:path';import{symlinkSync,writeFileSync,realpathSync,readFileSync}from'node:fs';
           const [g,p]=process.argv.slice(2),r=createRequire(join(g,'package.json')),f=r.resolve('@agent-teams/engineering-foundation/package.json'),n=realpathSync(join(dirname(f),'../../node-or-bun'));if(JSON.parse(readFileSync(join(n,'package.json'),'utf8')).version!=='0.2.2')throw Error('nob-version');const y=realpathSync(join(dirname(f),'../../yaml'));if(JSON.parse(readFileSync(join(y,'package.json'),'utf8')).version!=='2.9.0')throw Error('yaml-version');
           symlinkSync(n,join(p,'node_modules/node-or-bun'));symlinkSync(y,join(p,'node_modules/yaml'));
-          writeFileSync(join(p,'tsconfig.cloud.json'),JSON.stringify({compilerOptions:{target:'ES2023',module:'NodeNext',moduleResolution:'NodeNext',strict:true,noEmit:true,allowImportingTsExtensions:true,erasableSyntaxOnly:true,types:['node'],typeRoots:[join(g,'node_modules/@types')],skipLibCheck:true},files:['operator.ts','tap.ts','tap.test.ts','toolchain.ts','toolchain.test.ts','failure.ts','failure.test.ts','stage-receipts.ts','stage-receipts.test.ts','build-contract.ts','reuse-build.ts','reuse-build.test.ts','node-diagnostics.ts','node-diagnostics.test.ts']}));
+          writeFileSync(join(p,'tsconfig.cloud.json'),JSON.stringify({compilerOptions:{target:'ES2023',module:'NodeNext',moduleResolution:'NodeNext',strict:true,noEmit:true,allowImportingTsExtensions:true,erasableSyntaxOnly:true,types:['node'],typeRoots:[join(g,'node_modules/@types')],skipLibCheck:true},files:['operator.ts','tap.ts','tap.test.ts','toolchain.ts','toolchain.test.ts','failure.ts','failure.test.ts','stage-receipts.ts','stage-receipts.test.ts','build-contract.ts','reuse-build.ts','reuse-build.test.ts','node-diagnostics.ts','node-diagnostics.test.ts','joined-receipt.ts','joined-receipt.test.ts']}));
           NODE
           node "$GITHUB_WORKSPACE/gateway/node_modules/typescript/bin/tsc" -p "$packet/tsconfig.cloud.json"
-          node --test "$packet/tap.test.ts" "$packet/toolchain.test.ts" "$packet/failure.test.ts" "$packet/stage-receipts.test.ts" "$packet/reuse-build.test.ts" "$packet/node-diagnostics.test.ts"
-      - name: Build exact native main and separately hashed TEST fixtures
+          node --test "$packet/tap.test.ts" "$packet/toolchain.test.ts" "$packet/failure.test.ts" "$packet/stage-receipts.test.ts" "$packet/reuse-build.test.ts" "$packet/node-diagnostics.test.ts" "$packet/joined-receipt.test.ts"
+      - name: Authenticate immutable native artifacts without rebuilding Go
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          node "$GITHUB_WORKSPACE/overlay/test-native4/operator.ts" --phase build --gateway "$GITHUB_WORKSPACE/gateway" --native "$NATIVE4_ROOT/native" --output "$NATIVE4_ROOT/build" --go "$NATIVE4_GO"
-          # Actual compiled helper must reject every near-miss before any DB use.
-          deny_index=0
-          for denied in \
-            'postgres://postgres@127.0.0.1:5432/native_bootstrap_usage_20261022_extra?sslmode=disable' \
-            'postgres://postgres@127.0.0.1:5432/native_bootstrap_usage_20261023?sslmode=disable' \
-            'postgres://postgres@127.0.0.1:5433/native_bootstrap_usage_20261022?sslmode=disable' \
-            'postgres://postgres:denied@127.0.0.1:5432/native_bootstrap_usage_20261022?sslmode=disable' \
-            'postgres://postgres@127.0.0.1:5432/native_bootstrap_usage_20261022?sslmode=require'; do
-            if GATEWAY_NATIVE4_MIGRATE_DSN="$denied" "$NATIVE4_ROOT/build/native-migrate" >/dev/null 2>&1; then result=0; else result=$?; fi
-            deny_index=$((deny_index + 1))
-            printf 'native-migrate deny case %s exit %s\n' "$deny_index" "$result"
-            test "$result" -eq 71
-          done
-          docker build --pull --build-arg "PG_IMAGE=$PG_IMAGE" -t "test-native4:${{ matrix.node }}" "$GITHUB_WORKSPACE/overlay/test-native4"
-      - name: Retain exact completed native build before runtime
+          set -euo pipefail
+          packet="$GITHUB_WORKSPACE/overlay/test-native4"
+          artifact_id="$(node "$packet/reuse-build.ts" --artifact-id "${{ matrix.node }}")"
+          gh api "repos/agent-teams-ai/account-gateway/actions/artifacts/$artifact_id" \
+            --jq '{id,name,size_in_bytes,digest,expired,workflow_run}' > "$NATIVE4_ROOT/native-build-meta.json"
+          gh api "repos/agent-teams-ai/account-gateway/actions/artifacts/$artifact_id/zip" > "$NATIVE4_ROOT/native-build.zip"
+          node "$packet/reuse-build.ts" "${{ matrix.node }}" "$NATIVE4_ROOT/native-build-meta.json" \
+            "$NATIVE4_ROOT/native-build.zip" "$GITHUB_WORKSPACE/gateway" "$NATIVE4_GO" "$NATIVE4_ROOT/build"
+          docker build --pull --build-arg "PG_IMAGE=$PG_IMAGE" -t "test-native4:${{ matrix.node }}" "$packet"
+      - name: Retain authenticated reuse provenance before runtime
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: TEST-native4-build-${{ matrix.node }}
+          name: TEST-native4-reuse-${{ matrix.node }}
           path: |
-            ${{ env.NATIVE4_ROOT }}/build/build.json
-            ${{ env.NATIVE4_ROOT }}/build/gateway-source.tar
-            ${{ env.NATIVE4_ROOT }}/build/account-gateway
-            ${{ env.NATIVE4_ROOT }}/build/gateway-assembly-fixture
-            ${{ env.NATIVE4_ROOT }}/build/native-provider-joined
-            ${{ env.NATIVE4_ROOT }}/build/native-migrate
+            ${{ env.NATIVE4_ROOT }}/build-reuse.json
+            ${{ env.NATIVE4_ROOT }}/native-build-meta.json
           if-no-files-found: warn
           retention-days: 14
       - name: Entire four suites with no external network

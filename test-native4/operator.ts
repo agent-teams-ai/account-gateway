@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, chmod
 import { join, resolve, dirname, isAbsolute } from 'node:path';
 import { createServer } from 'node:net';
 import { qualifyTap } from './tap.ts';
+import { qualifyJoined } from './joined-receipt.ts';
 import { qualifyGoPins } from './toolchain.ts';
 import { QualificationFailure, safeFailure, failureOutcome } from './failure.ts';
 import type { Failure } from './failure.ts';
@@ -141,7 +142,7 @@ async function runtime():Promise<void>{
     const jn='native_provider_joined_'+suffix,jk='ag_kernel_test_provider_joined_'+suffix;
     for(const db of [jn,jk])await run(join(pg,'createdb'),['-h','127.0.0.1','-p',port,'-U','postgres',db]);
     const joined='/tmp/native-provider-joined';fresh(joined,0o755);copyFileSync(join(build,'native-provider-joined'),joined+'/fixture');chmodSync(joined+'/fixture',0o755);
-    const joinedOutput=await run(process.execPath,[files[5]!],gateway,{AG_NATIVE_PROVIDER_JOINED_ALLOW:'disposable_pg17_10',AG_NATIVE_PROVIDER_JOINED_NATIVE_DSN:'postgres://postgres@127.0.0.1:'+port+'/'+jn+'?sslmode=disable',AG_NATIVE_PROVIDER_JOINED_KERNEL_DSN:'postgres://postgres@127.0.0.1:'+port+'/'+jk+'?sslmode=disable',AG_NATIVE_PROVIDER_JOINED_BINARY:joined+'/fixture',AG_NATIVE_PROVIDER_JOINED_GO:option('--go'),AG_NATIVE_PROVIDER_JOINED_GATEWAY_BASE_SHA:gatewayCommit,AG_NATIVE_PROVIDER_JOINED_GATEWAY_SOURCE_SHA256:b.gatewaySourceArchiveSHA256},180_000);const joinedReceipt=JSON.parse(joinedOutput) as Record<string,unknown>;check(joinedReceipt.phase==='completed'&&joinedReceipt.contract==='gateway-native-provider-joined/v1'&&joinedReceipt.nativeHead===nativeCommit&&joinedReceipt.liveProviderAccount===false,'joined-receipt');reports.joined={passed:true};
+    const joinedOutput=await run(process.execPath,[files[5]!],gateway,{AG_NATIVE_PROVIDER_JOINED_ALLOW:'disposable_pg17_10',AG_NATIVE_PROVIDER_JOINED_NATIVE_DSN:'postgres://postgres@127.0.0.1:'+port+'/'+jn+'?sslmode=disable',AG_NATIVE_PROVIDER_JOINED_KERNEL_DSN:'postgres://postgres@127.0.0.1:'+port+'/'+jk+'?sslmode=disable',AG_NATIVE_PROVIDER_JOINED_BINARY:joined+'/fixture',AG_NATIVE_PROVIDER_JOINED_GO:option('--go'),AG_NATIVE_PROVIDER_JOINED_GATEWAY_BASE_SHA:gatewayCommit,AG_NATIVE_PROVIDER_JOINED_GATEWAY_SOURCE_SHA256:b.gatewaySourceArchiveSHA256},180_000);qualifyJoined(joinedOutput,{nativeHead:nativeCommit,gatewayBaseHead:gatewayCommit,gatewaySourceArchiveSHA256:b.gatewaySourceArchiveSHA256,nativeBinarySHA256:b.binaries['native-provider-joined']!.sha256});reports.joined={passed:true};
     check(JSON.stringify(b.sourceHashes)===JSON.stringify(sourceHashes()),'final-source-change');
     runtimeReceipt={kind:'gateway-native4-runtime/v1',gatewayCommit,nativeCommit,node:process.version,pgImage,buildReceipt:hash(join(build,'build.json')),reports,tapEvidence,pythonPidfd,nodeExecutableSHA256:hash(process.execPath),externalProviderCalls:false};
   } catch(error) {
