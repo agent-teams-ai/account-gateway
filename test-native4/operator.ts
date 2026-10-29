@@ -12,7 +12,7 @@ import type { Failure } from './failure.ts';
 import type { BuildReceipt } from './build-contract.ts';
 import { diagnoseNode, loadSources, fixtureMetadata, frames as sourceFrames } from './node-diagnostics.ts';
 import type { Source, TestFile, Frame } from './node-diagnostics.ts';
-const gatewayCommit = '599d2f6b21b50a1e7ff698c15ebf24e37e1b619e';
+const gatewayCommit = 'ddad1fae61dcff2a90a30bd85b5451cef4d8f5f0';
 const expectedAssemblyFixtureSHA256 = '6179f4af873275aabdefd3a270cc338b47abff14379134ab4f65d4c02de59047';
 const nativeCommit = 'b3f012af5a54f1ffcccc1d34987a48120d1c39aa';
 const pgImage = 'postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317';
@@ -110,7 +110,7 @@ async function runtime():Promise<void>{
     await run('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=127.0.0.1','-addext','subjectAltName=IP:127.0.0.1','-keyout',tls+'/server-key.pem','-out',cert]);chmodSync(tls+'/server-key.pem',0o600);await run('update-ca-certificates',[]);
     for(const dir of ['/opt/account-gateway-assembly','/opt/account-gateway-service-entry','/opt/account-gateway-service-usage']){
       step='install-'+dir.split('/').at(-1);fresh(dir,0o755);const t=dir.endsWith('usage')?dir:dir+'/tls';if(t!==dir)fresh(t,0o755);
-      copyFileSync(cert,t+'/ca.pem');copyFileSync(cert,t+'/server.pem');copyFileSync(tls+'/server-key.pem',t+'/server-key.pem');chmodSync(t+'/server-key.pem',0o600);
+      copyFileSync(cert,t+'/ca.pem');copyFileSync(cert,t+'/server.pem');copyFileSync(tls+'/server-key.pem',t+'/server-key.pem');chmodSync(t+'/server.pem',0o600);chmodSync(t+'/server-key.pem',0o600);
       const name=dir.endsWith('assembly')?'gateway-assembly-fixture':'account-gateway';writeFileSync(dir+'/'+name,readFileSync(join(build,name)),{flag:'wx',mode:0o755});chmodSync(dir+'/'+name,0o755);check(hash(dir+'/'+name)===b.binaries[name]!.sha256,'installed-native-bytes');protectedPath(dir+'/'+name);
     }
     const ak='ag_kernel_test_assembly_'+suffix,an='native_bootstrap_assembly_'+suffix;await create(ak);await create(an);

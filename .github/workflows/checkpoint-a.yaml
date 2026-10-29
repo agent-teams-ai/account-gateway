@@ -17,7 +17,7 @@ jobs:
       NPM_CONFIG_ENGINE_STRICT: 'true'
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
       NATIVE_COMMIT: b3f012af5a54f1ffcccc1d34987a48120d1c39aa
-      GATEWAY_COMMIT: 599d2f6b21b50a1e7ff698c15ebf24e37e1b619e
+      GATEWAY_COMMIT: ddad1fae61dcff2a90a30bd85b5451cef4d8f5f0
     steps:
       # The TEST overlay ref must contain only reviewed operator packet files.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -26,7 +26,7 @@ jobs:
           path: overlay
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 599d2f6b21b50a1e7ff698c15ebf24e37e1b619e
+          ref: ddad1fae61dcff2a90a30bd85b5451cef4d8f5f0
           persist-credentials: false
           path: gateway
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
