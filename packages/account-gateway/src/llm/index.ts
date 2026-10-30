@@ -39,6 +39,9 @@ export type {
   LlmClientConfig,
 } from "../features/llm/application/index.js";
 
+export { LlmSchemaError } from "../features/llm/adapters/index.js";
+export type { StrictJsonSchema } from "../features/llm/adapters/index.js";
+
 /** Facade execution origins for the HTTP connector; the bearer comes from runAccess. */
 export type LlmExecutionOrigins = {
   readonly origin: string;
