@@ -17,7 +17,7 @@ interface Configuration {
 }
 interface Plan {
   requestId: string;
-  mode: "complete" | "held" | "flood" | "heavy";
+  mode: "complete" | "held" | "flood" | "heavy-held";
   delayMs: number;
 }
 let cfg: Configuration | undefined,
@@ -157,7 +157,7 @@ async function initialize(configuration: Configuration) {
         // Synthetic large-output profile stresses the actual SSE path, not
         // model token computation or a live provider quota.
         const text =
-            plan.mode === "heavy"
+            plan.mode === "heavy-held"
               ? "controlled fixture completion" + "x".repeat(262_144)
               : "controlled fixture completion",
           itemId = "msg_" + requestId.replaceAll("-", "");
@@ -240,7 +240,7 @@ async function initialize(configuration: Configuration) {
             return;
           }
         }
-        if (plan.mode === "held" && !isClosed()) {
+        if ((plan.mode === "held" || plan.mode === "heavy-held") && !isClosed()) {
           let released = false;
           const isReleased = () => released;
           const done = new Promise<void>((resolve) => {
@@ -339,7 +339,7 @@ try {
           /^[a-f0-9-]{36}$/.test(plan.requestId) &&
           !plans.has(plan.requestId) &&
           plans.size < bounds.attempts &&
-          ["complete", "held", "flood", "heavy"].includes(plan.mode) &&
+          ["complete", "held", "flood", "heavy-held"].includes(plan.mode) &&
           Number.isSafeInteger(plan.delayMs) &&
           plan.delayMs >= 0 &&
           plan.delayMs <= 10_000,

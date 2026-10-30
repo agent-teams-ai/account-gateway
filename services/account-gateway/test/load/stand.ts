@@ -771,7 +771,7 @@ void test(
       execution: Execution,
       scenario: Scenario,
       mode: "sdk" | "raw-tcp",
-      providerMode: "complete" | "held" | "flood" | "heavy",
+      providerMode: "complete" | "held" | "flood" | "heavy-held",
       delayMs: number,
       offeredAt = Date.now(),
     ) {
@@ -797,7 +797,7 @@ void test(
     async function launch(
       execution: Execution,
       scenario: Scenario,
-      providerMode: "complete" | "held" | "heavy" = "complete",
+      providerMode: "complete" | "held" | "heavy-held" = "complete",
       delayMs = 0,
       offeredAt = Date.now(),
       signal?: AbortSignal,
@@ -1708,42 +1708,100 @@ void test(
                 details.achieved = achieved;
                 details.interpretation = "large-context-synchronized-offer-characterization";
               } else if (scenario === "heavy-output") {
-                // The actual Go -> SDK SSE path carries 256 KiB of text in
-                // small deltas, followed by large completed-item/terminal JSON.
-                // No alternate fake transport, SQL bypass or inferred closure.
+                // Exercise actual concurrent stream occupancy, not just simultaneous
+                // offers. Send 256-KiB delta text before holding the terminal frame.
                 const achieved: Record<string, number>[] = [];
                 for (const level of [1, 8, 32, 64]) {
-                  const levelBegan = Date.now();
-                  const runs = await Promise.all(
-                    Array.from({ length: level }, (_, i) =>
-                      launch(executions[i % executions.length], scenario, "heavy", 250),
-                    ),
-                  );
-                  await Promise.all(runs.map((r) => r.work));
-                  await drain(runs.map((r) => r.attempt));
-                  requireCompletions(runs.map((r) => r.attempt), level <= 8 ? level : 8);
-                  const completed = runs.filter((r) => r.attempt.effect === "completed");
-                  check(
-                    completed.every(
-                      (r) =>
-                        r.attempt.bytes > 900_000 &&
-                        r.attempt.bytes < bounds.streamBytes &&
-                        r.attempt.validatedStream === true,
-                    ),
-                    "heavy-output-complete-bytes",
-                  );
-                  achieved.push({
-                    offered: level,
-                    completed: completed.length,
-                    safeRefusals: runs.filter((r) => capacityRefusal(r.attempt)).length,
-                    minimumCompletedBytes: Math.min(...completed.map((r) => r.attempt.bytes)),
-                    totalCompletedBytes: completed.reduce((n, r) => n + r.attempt.bytes, 0),
-                    elapsedMs: Date.now() - levelBegan,
-                  });
+                  const held: Awaited<ReturnType<typeof launch>>[] = [],
+                    beganLevel = Date.now();
+                  try {
+                    for (let index = 0; index < level; index += 4) {
+                      const batch = await Promise.all(
+                        Array.from({ length: Math.min(4, level - index) }, (_, j) =>
+                          launch(
+                            executions[(index + j) % executions.length],
+                            scenario,
+                            "heavy-held",
+                          ),
+                        ),
+                      );
+                      held.push(...batch);
+                      await until(
+                        () =>
+                          batch.every(
+                            (r) =>
+                              r.attempt.firstByteAt !== undefined &&
+                              entries(upstream.events, r.attempt.requestId) === 1,
+                          ),
+                        15_000,
+                        "heavy-output-admission",
+                      );
+                    }
+                    const occupied = (
+                      await kernel.query<{ n: number }>(
+                        "SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1 AND transport_occupied",
+                        [consumerId],
+                      )
+                    ).rows[0].n;
+                    check(occupied === level, "heavy-output-exact-occupancy");
+                    const controlAt = Date.now();
+                    check(
+                      (await control.get(accounts[0])).accountRef === accounts[0],
+                      "heavy-output-control-progress",
+                    );
+                    const controlMs = Date.now() - controlAt,
+                      heldAt = Date.now();
+                    await delay(3000);
+                    check(
+                      held.every((r) => r.attempt.finishedAt === undefined) &&
+                        (
+                          await kernel.query<{ n: number }>(
+                            "SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1 AND transport_occupied",
+                            [consumerId],
+                          )
+                        ).rows[0].n === level,
+                      "heavy-output-remains-occupied",
+                    );
+                    const releaseAt = Date.now();
+                    for (const run of held) {
+                      upstream.release(run.attempt.requestId);
+                    }
+                    await Promise.all(held.map((r) => r.work));
+                    await drain(held.map((r) => r.attempt));
+                    requireCompletions(
+                      held.map((r) => r.attempt),
+                      level,
+                    );
+                    check(
+                      held.every(
+                        (r) =>
+                          r.attempt.bytes > 900_000 &&
+                          r.attempt.bytes < bounds.streamBytes &&
+                          r.attempt.validatedStream === true,
+                      ),
+                      "heavy-output-complete-bytes",
+                    );
+                    achieved.push({
+                      streams: level,
+                      occupiedDuringHold: occupied,
+                      holdMs: releaseAt - heldAt,
+                      controlMs,
+                      completed: held.filter((r) => r.attempt.effect === "completed").length,
+                      minimumCompletedBytes: Math.min(...held.map((r) => r.attempt.bytes)),
+                      totalCompletedBytes: held.reduce((n, r) => n + r.attempt.bytes, 0),
+                      completionBurstMs: Date.now() - releaseAt,
+                      elapsedMs: Date.now() - beganLevel,
+                    });
+                  } finally {
+                    for (const run of held) {
+                      upstream.release(run.attempt.requestId);
+                    }
+                    await Promise.all(held.map((r) => r.work));
+                  }
                 }
                 details.achieved = achieved;
                 details.interpretation =
-                  "large-SSE-byte-pressure-with-exact-original-closure-not-provider-token-capacity";
+                  "large-SSE-simultaneous-physical-occupancy-and-exact-original-closure-not-model-token-capacity";
               }
               const group = attempts.slice(before);
               await drain(group);
