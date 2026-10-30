@@ -228,13 +228,15 @@ async function initialize(configuration: Configuration) {
         // Keep each incremental frame small, then exercise large terminal
         // JSON frames and the bounded terminal-success hold in the gateway.
         for (let offset = 0; offset < text.length; offset += 2048) {
-          if (!(await frame("response.output_text.delta", {
-            item_id: itemId,
-            output_index: 0,
-            content_index: 0,
-            delta: text.slice(offset, offset + 2048),
-            logprobs: [],
-          }))) {
+          if (
+            !(await frame("response.output_text.delta", {
+              item_id: itemId,
+              output_index: 0,
+              content_index: 0,
+              delta: text.slice(offset, offset + 2048),
+              logprobs: [],
+            }))
+          ) {
             return;
           }
         }
