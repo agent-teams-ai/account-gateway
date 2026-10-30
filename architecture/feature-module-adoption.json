@@ -14,16 +14,24 @@
       "role": "sdk",
       "sourceRoot": "packages/account-gateway/src",
       "features": [
-        "features/facade-client"
+        "features/facade-client",
+        "features/llm"
       ],
-      "featureLayers": [
-        "contracts",
-        "http"
-      ],
+      "featureLayers": {
+        "features/facade-client": [
+          "contracts",
+          "http"
+        ],
+        "features/llm": [
+          "domain",
+          "application"
+        ]
+      },
       "composition": "get-modular",
       "publicIndexes": [
         "contracts/index.ts",
         "http/index.ts",
+        "llm/index.ts",
         "index.ts"
       ],
       "tests": [
@@ -42,9 +50,9 @@
   "deviations": [
     {
       "scope": "tests",
-      "reason": "Root black-box tests exercise packaged facade clients and module composition together; no detached white-box unit tree.",
+      "reason": "Root black-box tests exercise packaged facade clients, the llm entry and module composition through built public entries; no detached white-box unit tree.",
       "owner": "gateway-maintainers",
-      "reviewTrigger": "Add a second feature or service."
+      "reviewTrigger": "Add a third feature or a service."
     }
   ],
   "enforcement": [

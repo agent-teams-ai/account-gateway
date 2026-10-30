@@ -37,6 +37,23 @@ boundaries:
     entrypoints: [packages/account-gateway/src/get-modular/index.ts]
     packageExports: [./get-modular]
     allow: {boundaries: [http], packages: ['@get-modular/core', '@get-modular/assembly'], builtins: [], runtimeReferences: []}
+  # The llm feature composes facade capabilities; its ports are those public client types.
+  - id: llm-domain
+    dependencyMode: runtime
+    roots: [packages/account-gateway/src/features/llm/domain]
+    entrypoints: [packages/account-gateway/src/features/llm/domain/index.ts]
+    allow: {boundaries: [], packages: [], builtins: [], runtimeReferences: []}
+  - id: llm-application
+    dependencyMode: runtime
+    roots: [packages/account-gateway/src/features/llm/application]
+    entrypoints: [packages/account-gateway/src/features/llm/application/index.ts]
+    allow: {boundaries: [llm-domain, facade-http, facade-contracts], packages: [], builtins: [], runtimeReferences: []}
+  - id: llm
+    dependencyMode: runtime
+    roots: [packages/account-gateway/src/llm]
+    entrypoints: [packages/account-gateway/src/llm/index.ts]
+    packageExports: [./llm]
+    allow: {boundaries: [llm-domain, llm-application, facade-http], packages: [], builtins: [], runtimeReferences: []}
   - id: kernel-domain
     dependencyMode: runtime
     roots: [services/account-gateway/src/domain.ts]

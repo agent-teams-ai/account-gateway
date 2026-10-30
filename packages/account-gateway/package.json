@@ -27,6 +27,11 @@
       "types": "./dist/get-modular/index.d.ts",
       "browser": null,
       "node": "./dist/get-modular/index.js"
+    },
+    "./llm": {
+      "types": "./dist/llm/index.d.ts",
+      "browser": null,
+      "node": "./dist/llm/index.js"
     }
   },
   "dependencies": {
