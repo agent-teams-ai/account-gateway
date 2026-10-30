@@ -268,7 +268,7 @@ function body(runId: string, requestId: string, paddingBytes = 0) {
     }),
   );
 }
-function terminal(bytes: Buffer) {
+function terminal(bytes: Buffer, expectedText = "controlled fixture completion") {
   const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes).replaceAll("\r\n", "\n");
   check(text.endsWith("\n\n"), "sse-complete-frame");
   const events = text
@@ -301,11 +301,14 @@ function terminal(bytes: Buffer) {
       usage.total_tokens === 5,
     "sse-content-usage",
   );
+  const output = response.output as { content?: { text?: string }[] }[] | undefined;
+  check(Array.isArray(output) && output.length === 1 && output[0].content?.[0]?.text === expectedText,
+    "sse-complete-output-text");
   check(
     events
       .filter((e) => e.type === "response.output_text.delta")
       .map((e) => e.delta)
-      .join("") === "controlled fixture completion",
+      .join("") === expectedText,
     "sse-delta",
   );
 }
@@ -342,7 +345,7 @@ void test(
       ? [selector as Scenario]
       : baselineScenarios;
     const scaled = selected.some((s) =>
-      ["scale-streams", "scale-arrivals", "sustained-arrivals", "large-context"].includes(s),
+      ["scale-streams", "scale-arrivals", "sustained-arrivals", "large-context", "heavy-output"].includes(s),
     );
     const publicMaxActive = scaled ? 1024 : 16;
     const limits = Object.freeze({
@@ -758,7 +761,7 @@ void test(
       execution: Execution,
       scenario: Scenario,
       mode: "sdk" | "raw-tcp",
-      providerMode: "complete" | "held" | "flood",
+      providerMode: "complete" | "held" | "flood" | "heavy",
       delayMs: number,
       offeredAt = Date.now(),
     ) {
@@ -784,7 +787,7 @@ void test(
     async function launch(
       execution: Execution,
       scenario: Scenario,
-      providerMode: "complete" | "held" = "complete",
+      providerMode: "complete" | "held" | "heavy" = "complete",
       delayMs = 0,
       offeredAt = Date.now(),
       signal?: AbortSignal,
@@ -825,7 +828,8 @@ void test(
               );
               chunks.push(Buffer.from(chunk));
             }
-            terminal(Buffer.concat(chunks));
+            terminal(Buffer.concat(chunks),
+              scenario === "heavy-output" ? "controlled fixture completion" + "x".repeat(262_144) : undefined);
             a.validatedStream = true;
           }
         } catch (error) {
@@ -1689,6 +1693,36 @@ void test(
                 }
                 details.achieved = achieved;
                 details.interpretation = "large-context-synchronized-offer-characterization";
+              } else if (scenario === "heavy-output") {
+                // The actual Go -> SDK SSE path carries 256 KiB of text in
+                // small deltas, followed by large completed-item/terminal JSON.
+                // No alternate fake transport, SQL bypass or inferred closure.
+                const achieved: Record<string, number>[] = [];
+                for (const level of [1, 8, 32, 64]) {
+                  const began = Date.now();
+                  const runs = await Promise.all(
+                    Array.from({ length: level }, (_, i) =>
+                      launch(executions[i % executions.length], scenario, "heavy", 250),
+                    ),
+                  );
+                  await Promise.all(runs.map((r) => r.work));
+                  await drain(runs.map((r) => r.attempt));
+                  requireCompletions(runs.map((r) => r.attempt), level <= 8 ? level : 8);
+                  const completed = runs.filter((r) => r.attempt.effect === "completed");
+                  check(completed.every((r) => r.attempt.bytes > 900_000 &&
+                    r.attempt.bytes < bounds.streamBytes && r.attempt.validatedStream === true),
+                    "heavy-output-complete-bytes");
+                  achieved.push({
+                    offered: level,
+                    completed: completed.length,
+                    safeRefusals: runs.filter((r) => capacityRefusal(r.attempt)).length,
+                    minimumCompletedBytes: Math.min(...completed.map((r) => r.attempt.bytes)),
+                    totalCompletedBytes: completed.reduce((n, r) => n + r.attempt.bytes, 0),
+                    elapsedMs: Date.now() - began,
+                  });
+                }
+                details.achieved = achieved;
+                details.interpretation = "large-SSE-byte-pressure-with-exact-original-closure-not-provider-token-capacity";
               }
               const group = attempts.slice(before);
               await drain(group);
