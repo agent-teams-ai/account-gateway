@@ -225,7 +225,7 @@ function provider(f: Fixture, credential: string) {
       check(!failed, "provider-start");
       return ready;
     },
-    async arm(requestId: string, mode: "complete" | "held" | "flood", delayMs: number) {
+    async arm(requestId: string, mode: "complete" | "held" | "flood" | "heavy", delayMs: number) {
       send({ command: "arm", plan: { requestId, mode, delayMs } });
       await until(() => armed.has(requestId) || failed, 5000, "provider-arm");
       check(!failed, "provider-arm");
@@ -1699,7 +1699,7 @@ void test(
                 // No alternate fake transport, SQL bypass or inferred closure.
                 const achieved: Record<string, number>[] = [];
                 for (const level of [1, 8, 32, 64]) {
-                  const began = Date.now();
+                  const levelBegan = Date.now();
                   const runs = await Promise.all(
                     Array.from({ length: level }, (_, i) =>
                       launch(executions[i % executions.length], scenario, "heavy", 250),
@@ -1718,7 +1718,7 @@ void test(
                     safeRefusals: runs.filter((r) => capacityRefusal(r.attempt)).length,
                     minimumCompletedBytes: Math.min(...completed.map((r) => r.attempt.bytes)),
                     totalCompletedBytes: completed.reduce((n, r) => n + r.attempt.bytes, 0),
-                    elapsedMs: Date.now() - began,
+                    elapsedMs: Date.now() - levelBegan,
                   });
                 }
                 details.achieved = achieved;
