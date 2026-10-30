@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       suite:
-        description: Smoke or baseline plus stream, burst/sustained arrival and large-context qualifications
+        description: Smoke or baseline plus stream, arrival, large-context and heavy-output qualifications
         required: true
         default: all
         type: choice
@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.suite == 'smoke' && '[{"node":"26.11.1","suite":"smoke","cpus":2,"memory":"4g","descriptors":4096},{"node":"24.21.0","suite":"smoke","cpus":2,"memory":"4g","descriptors":4096}]' || '[{"node":"26.11.1","suite":"all","cpus":2,"memory":"4g","descriptors":4096},{"node":"24.21.0","suite":"all","cpus":2,"memory":"4g","descriptors":4096},{"node":"26.11.1","suite":"scale-streams","cpus":2,"memory":"4g","descriptors":16384},{"node":"26.11.1","suite":"scale-arrivals","cpus":2,"memory":"4g","descriptors":16384},{"node":"26.11.1","suite":"sustained-arrivals","cpus":2,"memory":"4g","descriptors":16384},{"node":"26.11.1","suite":"large-context","cpus":2,"memory":"4g","descriptors":4096}]') }}
+        include: ${{ fromJSON(inputs.suite == 'smoke' && '[{"node":"26.11.1","suite":"smoke","cpus":2,"memory":"4g","descriptors":4096},{"node":"24.21.0","suite":"smoke","cpus":2,"memory":"4g","descriptors":4096}]' || '[{"node":"26.11.1","suite":"all","cpus":2,"memory":"4g","descriptors":4096},{"node":"24.21.0","suite":"all","cpus":2,"memory":"4g","descriptors":4096},{"node":"26.11.1","suite":"scale-streams","cpus":2,"memory":"4g","descriptors":16384},{"node":"26.11.1","suite":"scale-arrivals","cpus":2,"memory":"4g","descriptors":16384},{"node":"26.11.1","suite":"sustained-arrivals","cpus":2,"memory":"4g","descriptors":16384},{"node":"26.11.1","suite":"large-context","cpus":2,"memory":"4g","descriptors":4096},{"node":"26.11.1","suite":"heavy-output","cpus":2,"memory":"4g","descriptors":4096}]') }}
     env:
       NPM_CONFIG_ENGINE_STRICT: 'true'
       LOAD_SUITE: ${{ matrix.suite }}
