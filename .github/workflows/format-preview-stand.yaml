@@ -1,0 +1,26 @@
+name: Temporary source formatter diagnostic
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  formatter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.21.0'
+      - name: Install exact toolchain
+        run: |
+          npm install --prefix "$RUNNER_TEMP/gateway-pnpm" --ignore-scripts pnpm@11.28.2
+          node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --config.engine-strict=true install --frozen-lockfile
+      - name: Print normalized diff, never modify PR checkout
+        run: |
+          if ! node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" exec oxfmt --write services/account-gateway/test/load/stand.ts; then
+            node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" exec stack-toolchain format
+          fi
+          git diff -- services/account-gateway/test/load/stand.ts

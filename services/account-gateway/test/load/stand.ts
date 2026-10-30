@@ -225,7 +225,7 @@ function provider(f: Fixture, credential: string) {
       check(!failed, "provider-start");
       return ready;
     },
-    async arm(requestId: string, mode: "complete" | "held" | "flood" | "heavy", delayMs: number) {
+    async arm(requestId: string, mode: "complete" | "held" | "flood" | "heavy-held", delayMs: number) {
       send({ command: "arm", plan: { requestId, mode, delayMs } });
       await until(() => armed.has(requestId) || failed, 5000, "provider-arm");
       check(!failed, "provider-arm");
