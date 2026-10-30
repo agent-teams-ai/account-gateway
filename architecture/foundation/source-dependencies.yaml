@@ -48,12 +48,17 @@ boundaries:
     roots: [packages/account-gateway/src/features/llm/application]
     entrypoints: [packages/account-gateway/src/features/llm/application/index.ts]
     allow: {boundaries: [llm-domain, facade-http, facade-contracts], packages: [], builtins: [], runtimeReferences: []}
+  - id: llm-adapters
+    dependencyMode: runtime
+    roots: [packages/account-gateway/src/features/llm/adapters]
+    entrypoints: [packages/account-gateway/src/features/llm/adapters/index.ts]
+    allow: {boundaries: [llm-domain, llm-application], packages: [], builtins: [], runtimeReferences: []}
   - id: llm
     dependencyMode: runtime
     roots: [packages/account-gateway/src/llm]
     entrypoints: [packages/account-gateway/src/llm/index.ts]
     packageExports: [./llm]
-    allow: {boundaries: [llm-domain, llm-application, facade-http], packages: [], builtins: [], runtimeReferences: []}
+    allow: {boundaries: [llm-domain, llm-application, llm-adapters, facade-http], packages: [], builtins: [], runtimeReferences: []}
   - id: kernel-domain
     dependencyMode: runtime
     roots: [services/account-gateway/src/domain.ts]

@@ -24,7 +24,8 @@
         ],
         "features/llm": [
           "domain",
-          "application"
+          "application",
+          "adapters"
         ]
       },
       "composition": "get-modular",
@@ -36,7 +37,8 @@
       ],
       "tests": [
         "tests/client.test.mjs",
-        "tests/source-policy.test.mjs"
+        "tests/source-policy.test.mjs",
+        "tests/llm.test.mts"
       ]
     }
   ],

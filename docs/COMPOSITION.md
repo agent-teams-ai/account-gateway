@@ -81,7 +81,9 @@ private transport. No product domain model is introduced.
 
 The experimental llm feature owns one bounded model call over those clients:
 domain holds the task, result and failure vocabulary; application holds the
-attempt lifecycle and its ports. The ports are the facade client capabilities
+attempt lifecycle and its ports; adapters hold the OpenAI Responses request codec
+and stream reduction. The llm index wires that adapter and the HTTP connector.
+The execution ports are the facade client capabilities
 themselves (`Pick` of the consumer-control and execution clients), so a fake and
 the HTTP client share one contract and GatewayError effect semantics. The llm
 application imports only facade public entries. Layers are declared per feature
@@ -97,8 +99,8 @@ B/C/D. Creating another module, layer or dependency requires updating the local
 profile and its negative checks.
 Boundary inventory: facade contracts (Zod only), facade HTTP (contracts and Zod), curated indexes, optional
 composition (HTTP and public Core/Assembly), llm domain (no dependencies), llm
-application (llm domain and facade public entries) and the llm index (llm layers
-and facade HTTP). Source-dependencies v2 discovers
+application (llm domain and facade public entries), llm adapters (llm domain and
+application) and the llm index (llm layers and facade HTTP). Source-dependencies v2 discovers
 unowned roots under the governed SDK root and rejects forbidden imports,
 including type-only imports. Source policy, curated package exports and dev-only
 Foundation guard are the executable local checks. No independent import parser

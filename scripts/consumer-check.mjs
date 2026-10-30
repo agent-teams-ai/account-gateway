@@ -11,6 +11,7 @@ channel("undici:request:create").subscribe(observe);
 const sdk = await import("@agent-teams/account-gateway/http");
 const wire = await import("@agent-teams/account-gateway/contracts");
 const gm = await import("@agent-teams/account-gateway/get-modular");
+const llm = await import("@agent-teams/account-gateway/llm");
 assert.equal(networkRequests, 0, "importing declarations and entrypoints must be inert");
 channel("undici:request:create").unsubscribe(observe);
 assert.equal(wire.account.safeParse({}).success, false);
@@ -49,6 +50,8 @@ assert.equal(wire.LIFECYCLE_CLIENT_CONTRACT, "account-gateway-client/account-lif
 assert.equal(typeof wire.lifecycleOperation.parse, "function");
 assert.equal(typeof wire.lifecycleAccount.parse, "function");
 assert.equal(typeof gm.constructExecutionClient, "function");
+assert.equal(typeof llm.createLlmClient, "function");
+assert.equal(llm.LLM_MAX_REQUEST_BYTES, 4194304);
 assert.equal(
   "connect" in
     sdk.createExecutionClient({
@@ -96,6 +99,8 @@ import {LIFECYCLE_CAPABILITY_CONTRACT, LIFECYCLE_CLIENT_CONTRACT, lifecycleAccou
 import type {LifecycleAccount, LifecycleOperation} from '@agent-teams/account-gateway/contracts';
 import {constructManagementClient, bindExecutionFactory} from '@agent-teams/account-gateway/get-modular';
 import type {ConnectionReader} from './consumer-port.mjs';
+import {createLlmClient, executionConnector} from '@agent-teams/account-gateway/llm';
+import type {ConsumerControlPort, ExecutionPort, LlmClient, LlmResult, LlmTask} from '@agent-teams/account-gateway/llm';
 export {readOwnedConnection} from './consumer-port.mjs';
 // Only this outer adapter sees transport configuration and DTOs.
 export function readerFor(settings: ManagementConfig): ConnectionReader {
@@ -122,6 +127,12 @@ export function selectedIdentity(operation: Operation): {accountRef: string; aut
  return {accountRef:operation.result.accountRef,authorizationEpoch:operation.result.authorizationEpoch};
 }
 export type Closure=[Account, Operation, Prepare, ListQuery, typeof constructManagementClient, typeof bindExecutionFactory];
+// The installed llm ports are exactly the client capabilities a fake must match.
+export function llmFor(control: ConsumerControlPort): LlmClient {
+ return createLlmClient({control,connectExecution:executionConnector({origin:'http://127.0.0.1:1'})});
+}
+export const executionPortOf=(client: ReturnType<typeof createExecutionClient>): ExecutionPort=>client;
+export type LlmClosure=[LlmTask<{title:string}>, LlmResult<{title:string}>];
 `,
 );
 const typed = spawnSync(
