@@ -225,7 +225,11 @@ function provider(f: Fixture, credential: string) {
       check(!failed, "provider-start");
       return ready;
     },
-    async arm(requestId: string, mode: "complete" | "held" | "flood" | "heavy-held", delayMs: number) {
+    async arm(
+      requestId: string,
+      mode: "complete" | "held" | "flood" | "heavy-held",
+      delayMs: number,
+    ) {
       send({ command: "arm", plan: { requestId, mode, delayMs } });
       await until(() => armed.has(requestId) || failed, 5000, "provider-arm");
       check(!failed, "provider-arm");
@@ -303,9 +307,7 @@ function terminal(bytes: Buffer, expectedText = "controlled fixture completion")
   );
   const output = response.output as { content?: { text?: string }[] }[] | undefined;
   check(
-    Array.isArray(output) &&
-      output.length === 1 &&
-      output[0].content?.[0]?.text === expectedText,
+    Array.isArray(output) && output.length === 1 && output[0].content?.[0]?.text === expectedText,
     "sse-complete-output-text",
   );
   check(
