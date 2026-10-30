@@ -28,6 +28,7 @@ export const scenarios = [
   "scale-arrivals",
   "sustained-arrivals",
   "large-context",
+  "heavy-output",
 ] as const;
 export type Scenario = (typeof scenarios)[number];
 export type Outcome = "pass" | "fail" | "inconclusive";
