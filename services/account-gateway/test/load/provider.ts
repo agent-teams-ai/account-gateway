@@ -17,7 +17,7 @@ interface Configuration {
 }
 interface Plan {
   requestId: string;
-  mode: "complete" | "held" | "flood";
+  mode: "complete" | "held" | "flood" | "heavy-held";
   delayMs: number;
 }
 let cfg: Configuration | undefined,
@@ -154,7 +154,12 @@ async function initialize(configuration: Configuration) {
               JSON.stringify({ type, sequence_number: eventSequence++, ...fields }) +
               "\n\n",
           );
-        const text = "controlled fixture completion",
+        // Synthetic large-output profile stresses the actual SSE path, not
+        // model token computation or a live provider quota.
+        const text =
+            plan.mode === "heavy-held"
+              ? "controlled fixture completion" + "x".repeat(262_144)
+              : "controlled fixture completion",
           itemId = "msg_" + requestId.replaceAll("-", "");
         const part = { type: "output_text", text, annotations: [], logprobs: [] };
         const item = {
@@ -220,14 +225,22 @@ async function initialize(configuration: Configuration) {
           }
           return;
         }
-        await frame("response.output_text.delta", {
-          item_id: itemId,
-          output_index: 0,
-          content_index: 0,
-          delta: text,
-          logprobs: [],
-        });
-        if (plan.mode === "held" && !isClosed()) {
+        // Keep each incremental frame small, then exercise large terminal
+        // JSON frames and the bounded terminal-success hold in the gateway.
+        for (let offset = 0; offset < text.length; offset += 2048) {
+          if (
+            !(await frame("response.output_text.delta", {
+              item_id: itemId,
+              output_index: 0,
+              content_index: 0,
+              delta: text.slice(offset, offset + 2048),
+              logprobs: [],
+            }))
+          ) {
+            return;
+          }
+        }
+        if ((plan.mode === "held" || plan.mode === "heavy-held") && !isClosed()) {
           let released = false;
           const isReleased = () => released;
           const done = new Promise<void>((resolve) => {
@@ -326,7 +339,7 @@ try {
           /^[a-f0-9-]{36}$/.test(plan.requestId) &&
           !plans.has(plan.requestId) &&
           plans.size < bounds.attempts &&
-          ["complete", "held", "flood"].includes(plan.mode) &&
+          ["complete", "held", "flood", "heavy-held"].includes(plan.mode) &&
           Number.isSafeInteger(plan.delayMs) &&
           plan.delayMs >= 0 &&
           plan.delayMs <= 10_000,

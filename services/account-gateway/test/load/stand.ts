@@ -225,7 +225,11 @@ function provider(f: Fixture, credential: string) {
       check(!failed, "provider-start");
       return ready;
     },
-    async arm(requestId: string, mode: "complete" | "held" | "flood", delayMs: number) {
+    async arm(
+      requestId: string,
+      mode: "complete" | "held" | "flood" | "heavy-held",
+      delayMs: number,
+    ) {
       send({ command: "arm", plan: { requestId, mode, delayMs } });
       await until(() => armed.has(requestId) || failed, 5000, "provider-arm");
       check(!failed, "provider-arm");
@@ -268,7 +272,7 @@ function body(runId: string, requestId: string, paddingBytes = 0) {
     }),
   );
 }
-function terminal(bytes: Buffer) {
+function terminal(bytes: Buffer, expectedText = "controlled fixture completion") {
   const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes).replaceAll("\r\n", "\n");
   check(text.endsWith("\n\n"), "sse-complete-frame");
   const events = text
@@ -301,11 +305,16 @@ function terminal(bytes: Buffer) {
       usage.total_tokens === 5,
     "sse-content-usage",
   );
+  const output = response.output as { content?: { text?: string }[] }[] | undefined;
+  check(
+    Array.isArray(output) && output.length === 1 && output[0].content?.[0]?.text === expectedText,
+    "sse-complete-output-text",
+  );
   check(
     events
       .filter((e) => e.type === "response.output_text.delta")
       .map((e) => e.delta)
-      .join("") === "controlled fixture completion",
+      .join("") === expectedText,
     "sse-delta",
   );
 }
@@ -342,7 +351,13 @@ void test(
       ? [selector as Scenario]
       : baselineScenarios;
     const scaled = selected.some((s) =>
-      ["scale-streams", "scale-arrivals", "sustained-arrivals", "large-context"].includes(s),
+      [
+        "scale-streams",
+        "scale-arrivals",
+        "sustained-arrivals",
+        "large-context",
+        "heavy-output",
+      ].includes(s),
     );
     const publicMaxActive = scaled ? 1024 : 16;
     const limits = Object.freeze({
@@ -758,7 +773,7 @@ void test(
       execution: Execution,
       scenario: Scenario,
       mode: "sdk" | "raw-tcp",
-      providerMode: "complete" | "held" | "flood",
+      providerMode: "complete" | "held" | "flood" | "heavy-held",
       delayMs: number,
       offeredAt = Date.now(),
     ) {
@@ -784,7 +799,7 @@ void test(
     async function launch(
       execution: Execution,
       scenario: Scenario,
-      providerMode: "complete" | "held" = "complete",
+      providerMode: "complete" | "held" | "heavy-held" = "complete",
       delayMs = 0,
       offeredAt = Date.now(),
       signal?: AbortSignal,
@@ -825,7 +840,12 @@ void test(
               );
               chunks.push(Buffer.from(chunk));
             }
-            terminal(Buffer.concat(chunks));
+            terminal(
+              Buffer.concat(chunks),
+              scenario === "heavy-output"
+                ? "controlled fixture completion" + "x".repeat(262_144)
+                : undefined,
+            );
             a.validatedStream = true;
           }
         } catch (error) {
@@ -1689,6 +1709,101 @@ void test(
                 }
                 details.achieved = achieved;
                 details.interpretation = "large-context-synchronized-offer-characterization";
+              } else if (scenario === "heavy-output") {
+                // Exercise actual concurrent stream occupancy, not just simultaneous
+                // offers. Send 256-KiB delta text before holding the terminal frame.
+                const achieved: Record<string, number>[] = [];
+                for (const level of [1, 8, 32, 64]) {
+                  const held: Awaited<ReturnType<typeof launch>>[] = [],
+                    beganLevel = Date.now();
+                  try {
+                    for (let index = 0; index < level; index += 4) {
+                      const batch = await Promise.all(
+                        Array.from({ length: Math.min(4, level - index) }, (_, j) =>
+                          launch(
+                            executions[(index + j) % executions.length],
+                            scenario,
+                            "heavy-held",
+                          ),
+                        ),
+                      );
+                      held.push(...batch);
+                      await until(
+                        () =>
+                          batch.every(
+                            (r) =>
+                              r.attempt.firstByteAt !== undefined &&
+                              entries(upstream.events, r.attempt.requestId) === 1,
+                          ),
+                        15_000,
+                        "heavy-output-admission",
+                      );
+                    }
+                    const occupied = (
+                      await kernel.query<{ n: number }>(
+                        "SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1 AND transport_occupied",
+                        [consumerId],
+                      )
+                    ).rows[0].n;
+                    check(occupied === level, "heavy-output-exact-occupancy");
+                    const controlAt = Date.now();
+                    check(
+                      (await control.get(accounts[0])).accountRef === accounts[0],
+                      "heavy-output-control-progress",
+                    );
+                    const controlMs = Date.now() - controlAt,
+                      heldAt = Date.now();
+                    await delay(3000);
+                    check(
+                      held.every((r) => r.attempt.finishedAt === undefined) &&
+                        (
+                          await kernel.query<{ n: number }>(
+                            "SELECT count(*)::int AS n FROM ag_kernel.requests WHERE consumer=$1 AND transport_occupied",
+                            [consumerId],
+                          )
+                        ).rows[0].n === level,
+                      "heavy-output-remains-occupied",
+                    );
+                    const releaseAt = Date.now();
+                    for (const run of held) {
+                      upstream.release(run.attempt.requestId);
+                    }
+                    await Promise.all(held.map((r) => r.work));
+                    await drain(held.map((r) => r.attempt));
+                    requireCompletions(
+                      held.map((r) => r.attempt),
+                      level,
+                    );
+                    check(
+                      held.every(
+                        (r) =>
+                          r.attempt.bytes > 900_000 &&
+                          r.attempt.bytes < bounds.streamBytes &&
+                          r.attempt.validatedStream === true,
+                      ),
+                      "heavy-output-complete-bytes",
+                    );
+                    achieved.push({
+                      streams: level,
+                      occupiedDuringHold: occupied,
+                      holdMs: releaseAt - heldAt,
+                      controlMs,
+                      completed: held.filter((r) => r.attempt.effect === "completed").length,
+                      minimumCompletedBytes: Math.min(...held.map((r) => r.attempt.bytes)),
+                      totalCompletedBytes: held.reduce((n, r) => n + r.attempt.bytes, 0),
+                      completionBurstMs: Date.now() - releaseAt,
+                      elapsedMs: Date.now() - beganLevel,
+                    });
+                  } finally {
+                    for (const run of held) {
+                      upstream.release(run.attempt.requestId);
+                    }
+                    await Promise.all(held.map((r) => r.work));
+                  }
+                }
+                details.achieved = achieved;
+                details.interpretation =
+                  "large-SSE-simultaneous-physical-occupancy-and-exact-original-closure-not-model-token-capacity";
               }
               const group = attempts.slice(before);
               await drain(group);
