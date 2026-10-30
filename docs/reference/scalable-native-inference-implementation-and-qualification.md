@@ -409,9 +409,10 @@ PostgreSQL and controlled TLS provider without external container networking.
 | Arrivals, Node 26 | 2 CPU, 4 GiB, 16384 descriptors | Two-second offers at target 50/100/250/500/1000 requests per second; actual launch rate, lag, completions and safe refusals |
 | Sustained arrivals, Node 26 | 2 CPU, 4 GiB, 16384 descriptors | 3000 offers at target 50 requests per second over one minute; ten-second completion/refusal/launch-lag windows, control progress and exact final cleanup |
 | Large context, Node 26 | 2 CPU, 4 GiB, 4096 descriptors | Approximately 1 MB synthetic input at 1/8/32/64 synchronized offers; actual completions and safe refusals |
+| Heavy output, Node 26 | 2 CPU, 4 GiB, 4096 descriptors | Synthetic 256-KiB SSE text emitted in 2-KiB deltas with large completed-item and terminal frames; 1/8/32/64 synchronized offers, received-text validation and exact provider/SQL/ACK reconciliation |
 
 Manual `smoke` runs only the two smoke Node lanes with accurate artifact names.
-The default selection requires both complete baseline lanes and all four scale
+The default selection requires both complete baseline lanes and all five scale
 profiles. Every attempted request is reconciled with the controlled-provider
 entry ledger, SQL effect and exact native closure/ACK. Duplicate entry, unexpected
 authentication failure, ambiguity, a broken successful-client stream, occupied
@@ -545,6 +546,12 @@ for each offered cohort, and separately reports safe refusals and launch lag.
 It measures one minute of continuous
 arrival processing; it is not a multi-hour soak, a zero-refusal 50-rps SLO or an
 unlimited execution-retention claim.
+
+The heavy-output profile is a bounded synthetic byte-pressure check. Synchronized
+requests are *offers*, not proof of the same number of admitted concurrent streams;
+any preclaim refusals remain counted separately. It is not 1024-heavy-stream
+qualification, live model token throughput, multi-replica ownership or a multi-hour
+soak test. Only a passing source-pinned receipt can qualify this added profile.
 
 Node resource samples include the load driver and TypeScript service in one
 process. Go samples identify the exact native PID and birth. Provider/PostgreSQL
