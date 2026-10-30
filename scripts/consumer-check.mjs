@@ -51,7 +51,8 @@ assert.equal(typeof wire.lifecycleOperation.parse, "function");
 assert.equal(typeof wire.lifecycleAccount.parse, "function");
 assert.equal(typeof gm.constructExecutionClient, "function");
 assert.equal(typeof llm.createLlmClient, "function");
-assert.equal(llm.LLM_MAX_REQUEST_BYTES, 4194304);
+assert.equal(llm.LLM_MAX_REQUEST_BYTES, 1048576);
+assert.equal(typeof llm.prepareStrictJsonSchema, "function");
 assert.equal(
   "connect" in
     sdk.createExecutionClient({
@@ -99,7 +100,8 @@ import {LIFECYCLE_CAPABILITY_CONTRACT, LIFECYCLE_CLIENT_CONTRACT, lifecycleAccou
 import type {LifecycleAccount, LifecycleOperation} from '@agent-teams/account-gateway/contracts';
 import {constructManagementClient, bindExecutionFactory} from '@agent-teams/account-gateway/get-modular';
 import type {ConnectionReader} from './consumer-port.mjs';
-import {createLlmClient, executionConnector} from '@agent-teams/account-gateway/llm';
+import {createLlmClient, executionConnector, prepareStrictJsonSchema} from '@agent-teams/account-gateway/llm';
+import type {StrictJsonSchema} from '@agent-teams/account-gateway/llm';
 import type {ConsumerControlPort, ExecutionPort, LlmClient, LlmResult, LlmTask} from '@agent-teams/account-gateway/llm';
 export {readOwnedConnection} from './consumer-port.mjs';
 // Only this outer adapter sees transport configuration and DTOs.
@@ -133,6 +135,7 @@ export function llmFor(control: ConsumerControlPort): LlmClient {
 }
 export const executionPortOf=(client: ReturnType<typeof createExecutionClient>): ExecutionPort=>client;
 export type LlmClosure=[LlmTask<{title:string}>, LlmResult<{title:string}>];
+export const strictFor=(schema: Record<string, unknown>): StrictJsonSchema=>prepareStrictJsonSchema(schema);
 `,
 );
 const typed = spawnSync(

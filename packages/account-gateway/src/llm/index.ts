@@ -28,6 +28,8 @@ export type {
 export {
   LLM_DEFAULT_OUTPUT_BYTES,
   LLM_MAX_DEADLINE_MS,
+  LLM_MAX_OUTPUT_BYTES,
+  LLM_MAX_OUTPUT_TOKENS,
   LLM_MAX_REQUEST_BYTES,
 } from "../features/llm/domain/index.js";
 export type {
@@ -39,7 +41,7 @@ export type {
   LlmClientConfig,
 } from "../features/llm/application/index.js";
 
-export { LlmSchemaError } from "../features/llm/adapters/index.js";
+export { LlmSchemaError, prepareStrictJsonSchema } from "../features/llm/adapters/index.js";
 export type { StrictJsonSchema } from "../features/llm/adapters/index.js";
 
 /** Facade execution origins for the HTTP connector; the bearer comes from runAccess. */

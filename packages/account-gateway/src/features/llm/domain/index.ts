@@ -2,6 +2,8 @@ export type { LlmEffort, LlmMessage, LlmOutput, LlmPolicy, LlmTask } from "./tas
 export {
   LLM_DEFAULT_OUTPUT_BYTES,
   LLM_MAX_DEADLINE_MS,
+  LLM_MAX_OUTPUT_BYTES,
+  LLM_MAX_OUTPUT_TOKENS,
   LLM_MAX_REQUEST_BYTES,
   admissibleTask,
   taskIdentity,

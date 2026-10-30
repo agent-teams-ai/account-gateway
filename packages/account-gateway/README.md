@@ -155,7 +155,9 @@ is parsed and `decode` always runs. Failures carry only the safe gateway `traceR
 
 All profiles receive one OpenAI Responses body: stream, store false, service
 tier default, `max_output_tokens`, `reasoning` only for an explicit effort, and a
-`json_schema` format named `codex_output_schema`. Bodies over 4 MiB fail locally.
+`json_schema` format named `codex_output_schema`. The gateway kernel accepts no
+profile above a 1 MiB body, 100 000 output tokens or 8 MiB of output, so larger
+tasks fail locally as `invalid_task`; deployments may configure lower limits.
 The caller selects the output mode. Native admission at Sub2API `7a20c00` and the
 CI pin `a6bc1e36` gives these facts; provider execution of a schema is not
 verified for any profile:
@@ -166,6 +168,31 @@ verified for any profile:
 | Kimi Code, GLM, MiniMax, Grok | `text` or named `json_schema` only; `json_object` and non-null `reasoning` rejected; `max_output_tokens` required | schema enforcement by the provider |
 | MiMo | provider rejects `json_schema`; use `json_object` or `text` | `max_output_tokens` acceptance |
 | OpenRouter | root allowlist only; format passes through | per-model support |
+
+`prepareStrictJsonSchema(schema)` is an optional helper for strict providers
+such as Codex OAuth. It returns `{ schema, decode }`: every property becomes
+required, optional ones accept an added `null`, and objects close with
+`additionalProperties: false`. `decode` removes those added nulls and validates
+the value against the original schema. Pass `output: { mode: "json_schema",
+schema }` and `decode` (optionally chained with the consumer's own parser).
+Supported keywords: `$schema` (2020-12), local `$ref`/`$defs`, annotations,
+single or nullable `type`, `const`, `enum`, `anyOf`, `oneOf`, `properties`,
+`required`, `additionalProperties: false`, single-schema `items`, and the array,
+string and number bounds. Anything else throws `LlmSchemaError` with code
+`invalid_task` and a path-only detail; a nonconforming output throws
+`output_invalid`, which `generate` reports as `output_invalid`.
+
+Every call is one execution, and the gateway accounts it as permanent durable
+facts: the execution costs 3 units and its prepare and close operations 1 each.
+The request's own unit is released only when `requestReadbackRetentionMs` is
+configured. Budget about 5 units per call against three limits: the service
+capacity (1 000 000), the consumer limit (default 100 000) and the per-account
+limit (default 10 000, about 2 000 calls). Service configuration can only lower
+stored limits, so set `durableFacts` before the first start. At a few thousand
+calls a day the service capacity lasts weeks to months; monitor consumer and
+account fact use. A multi-request session API is deliberately
+not part of this entry yet; raising capacity or retaining closed executions is a
+gateway decision.
 
 To hand the SDK to a consumer, run `pnpm build`, then
 `pnpm --dir packages/account-gateway pack --pack-destination <dir>`. Vendor the

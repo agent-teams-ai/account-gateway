@@ -9,6 +9,8 @@ import type {
   SafeError,
 } from "../packages/account-gateway/dist/contracts/index.js";
 import {
+  LLM_MAX_OUTPUT_BYTES,
+  LLM_MAX_OUTPUT_TOKENS,
   LLM_MAX_REQUEST_BYTES,
   createLlmClient,
   executionConnector,
@@ -491,16 +493,22 @@ void test("gateway refusals map by stage and effect without hidden retries", asy
     drifted.closes.map((c) => c.reason),
     ["failed"],
   );
-  // The native 4 MiB body ceiling and task shape are checked before any gateway call.
+  // Kernel profile ceilings and task shape are checked before any gateway call.
   const local = gateway({});
   const oversized = failure(
     await local.client.generate(task({ input: "x".repeat(LLM_MAX_REQUEST_BYTES) })),
+  );
+  const tokens = failure(
+    await local.client.generate(task({ maxOutputTokens: LLM_MAX_OUTPUT_TOKENS + 1 })),
+  );
+  const output = failure(
+    await local.client.generate(task({ limits: { outputBytes: LLM_MAX_OUTPUT_BYTES + 1 } })),
   );
   const expired = failure(
     await local.client.generate(task({ deadline: new Date(Date.now() - 1) })),
   );
   const unnamed = failure(await local.client.generate(task({ taskId: "bad id" })));
-  for (const result of [oversized, expired, unnamed]) {
+  for (const result of [oversized, tokens, output, expired, unnamed]) {
     assert.deepEqual(
       { code: result.code, effect: result.effect, cleanup: result.cleanup },
       { code: "invalid_task", effect: "not_dispatched", cleanup: "not_needed" },

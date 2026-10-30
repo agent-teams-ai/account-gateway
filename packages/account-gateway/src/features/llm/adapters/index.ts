@@ -7,5 +7,5 @@ export const openAIResponses: ModelProtocol = Object.freeze({
   encode: encodeResponsesRequest,
   decoder: createResponsesDecoder,
 });
-export { LlmSchemaError } from "./strict-json-schema.js";
+export { LlmSchemaError, prepareStrictJsonSchema } from "./strict-json-schema.js";
 export type { StrictJsonSchema } from "./strict-json-schema.js";

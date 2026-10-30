@@ -52,8 +52,13 @@ export type LlmTask<T = unknown> = {
   readonly decode?: (value: unknown) => T;
 };
 
-/** Native provider admission ceiling for one request body. */
-export const LLM_MAX_REQUEST_BYTES = 4 * 1024 * 1024;
+/**
+ * Gateway kernel acceptance ceilings for one execution profile. Native admits
+ * larger bodies, but a facade profile above these bounds is never configured.
+ */
+export const LLM_MAX_REQUEST_BYTES = 1_048_576;
+export const LLM_MAX_OUTPUT_BYTES = 8_388_608;
+export const LLM_MAX_OUTPUT_TOKENS = 100_000;
 export const LLM_DEFAULT_OUTPUT_BYTES = 4 * 1024 * 1024;
 /** Run-access maxRunMs ceiling. */
 export const LLM_MAX_DEADLINE_MS = 3_600_000;
@@ -110,11 +115,11 @@ export function admissibleTask(task: LlmTask, now: number): boolean {
     input.every((m: unknown) => record(m) && roles.has(m.role as string) && text(m.text)) &&
     admissibleOutput(t.output) &&
     (t.effort === undefined || efforts.has(t.effort as string)) &&
-    integer(t.maxOutputTokens, 1, 10_000_000) &&
+    integer(t.maxOutputTokens, 1, LLM_MAX_OUTPUT_TOKENS) &&
     remaining > 0 &&
     remaining <= LLM_MAX_DEADLINE_MS &&
     record(limits) &&
-    (limits.outputBytes === undefined || integer(limits.outputBytes, 1, 67_108_864)) &&
+    (limits.outputBytes === undefined || integer(limits.outputBytes, 1, LLM_MAX_OUTPUT_BYTES)) &&
     (t.decode === undefined || typeof t.decode === "function")
   );
 }

@@ -38,7 +38,8 @@
       "tests": [
         "tests/client.test.mjs",
         "tests/source-policy.test.mjs",
-        "tests/llm.test.mts"
+        "tests/llm.test.mts",
+        "tests/llm-strict-schema.test.mts"
       ]
     }
   ],
