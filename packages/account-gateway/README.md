@@ -149,8 +149,9 @@ throwing. `effect` uses the gateway vocabulary. `retry` is advice only:
 any inference; `new_attempt` uses attempt + 1, and `mayDuplicateCost` marks a
 possibly paid previous attempt; `never` needs a changed task or a human.
 `cleanup: "pending"` means close was not acknowledged; the grant expires at its
-deadline. A decoded value is never trusted from the model alone: JSON is parsed
-and `decode` always runs. Failures carry only the safe gateway `traceRef`.
+deadline. Exceeding `limits.outputBytes` or `maxOutputTokens` is
+`output_truncated`. A decoded value is never trusted from the model alone: JSON
+is parsed and `decode` always runs. Failures carry only the safe gateway `traceRef`.
 
 All profiles receive one OpenAI Responses body: stream, store false, service
 tier default, `max_output_tokens`, `reasoning` only for an explicit effort, and a

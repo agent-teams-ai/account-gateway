@@ -619,6 +619,21 @@ void test("Responses stream reduction is byte-split safe and never trusts an unf
   }
   const truncated = gateway({ request: async (signal) => stream(signal, outcomes[0]?.[1] ?? []) });
   assert.equal(failure(await truncated.client.generate(task())).usage?.outputTokens, 512);
+  // The stream client's output byte bound is a truncation, not an unknown loss.
+  const bounded = gateway({
+    request: async (signal) =>
+      stream(
+        signal,
+        [completed("").slice(0, 20)],
+        new GatewayError("invalid_response", "effect_unknown"),
+      ),
+  });
+  const overflow = failure(await bounded.client.generate(task()));
+  assert.deepEqual(
+    { code: overflow.code, effect: overflow.effect },
+    { code: "output_truncated", effect: "response_started" },
+  );
+  assert.equal(bounded.statuses(), 0);
   const rejecting = gateway({});
   const invalid = failure(
     await rejecting.client.generate(

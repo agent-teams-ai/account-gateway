@@ -322,6 +322,14 @@ export function createLlmGenerator(
           // Malformed provider bytes after the response started.
           return fail(classifyFault({ ...lost, kind: "safe_error", effect: "response_started" }));
         }
+        if (error.code === "invalid_response" && !interruption()) {
+          // The stream client raises this only for its chunk and output byte bounds.
+          return fail({
+            code: "output_truncated",
+            effect: "response_started",
+            retry: { kind: "new_attempt", afterMs: 0, mayDuplicateCost: true },
+          });
+        }
         return fail(
           interruption()
             ? classifyFault({ ...lost, kind: "cancelled", effect: "response_started" })
