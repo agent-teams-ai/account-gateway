@@ -26,5 +26,13 @@
   installing; pin qualified versions and retain one native lockfile.
 - Stage release changes as bounded dependency-safe PRs. Product production
   cutover and public package release require their applicable owner approval.
+- Sub2API is the single source of truth for account state, quota, rate-limit
+  and cooldown. Do not rebuild account scheduling, rotation, cooldown or
+  failover in the gateway service, the SDK or any consumer. If the native layer
+  lacks a behavior, extend the Sub2API fork (for example mark an account paused
+  with its native `rate_limit_reset_at` on a provider 429 and skip paused
+  accounts at admission) and expose the result through the existing contract as
+  a typed busy outcome with a retry-after. Consumers only list candidate
+  accounts; they never keep their own copy of account health.
 
 Use [docs/.agents/skills/docs-authoring/SKILL.md](docs/.agents/skills/docs-authoring/SKILL.md) for documentation.
