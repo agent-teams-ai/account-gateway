@@ -61,6 +61,8 @@ export interface ServiceConfig {
 export interface OAuthEnrollmentConfig {
   readonly enabled: true;
   readonly profile: "openai-codex-oauth-responses-v1";
+  // Immutable enrollment anchor, also pinned by Native. A request selects its
+  // model from the account's live catalog without changing this scope.
   readonly modelScope: readonly ["gpt-5.6-sol"];
   readonly qualificationRef?: string;
   readonly limits?: Readonly<ApprovedLimits>;
