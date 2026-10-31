@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import {
+  AccountsLimitedError,
   KernelError,
   boundedConfig,
   boundedFacts,
@@ -60,6 +61,7 @@ import {
   requireNonEntry,
   captureOwnerRefs,
   capturePermittedAccounts,
+  captureLimitedAccounts,
 } from "./postgres-records.ts";
 import type {
   AccountRow,
@@ -889,6 +891,7 @@ export class PostgresKernel implements DurableKernel {
       throw new KernelError("invalid");
     }
     const permittedAccounts = capturePermittedAccounts(input.permittedAccounts);
+    const limitedAccounts = captureLimitedAccounts(input.limitedAccounts, permittedAccounts);
     // Capture trusted values before the first await; callers cannot widen them mid-transaction.
     input = {
       ...input,
@@ -952,15 +955,20 @@ export class PostgresKernel implements DurableKernel {
         if (Number(f.revision) > input.policyRevision) {
           throw new KernelError("denied");
         }
+        // Client order is kept; limited accounts are only skipped. One extra row
+        // per limited account is enough to reach the first unlimited candidate.
         const a = await tx.db.query<AccountRow>(
           `SELECT a.* FROM accounts a JOIN candidates c ON c.consumer=a.consumer
           AND c.generation=a.active_generation WHERE a.consumer=$1 AND a.ref=ANY($2::uuid[])
           AND a.state='active' AND c.state='ready' AND a.profile=$3
-          ORDER BY array_position($2::uuid[],a.ref) LIMIT 1`,
-          [tx.consumer, input.permittedAccounts, input.profile],
+          ORDER BY array_position($2::uuid[],a.ref) LIMIT $4`,
+          [tx.consumer, input.permittedAccounts, input.profile, limitedAccounts.length + 1],
         );
-        const selected = a.rows.at(0);
+        const selected = a.rows.find((row) => !limitedAccounts.includes(row.ref));
         if (selected === undefined) {
+          if (a.rows.length > 0) {
+            throw new AccountsLimitedError(a.rows.map((row) => row.ref));
+          }
           throw new KernelError("unknown");
         }
         e = (

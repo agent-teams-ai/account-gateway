@@ -19,6 +19,9 @@ import { composeKernelBounds } from "../src/service.ts";
 import { AccountManagement, exactCandidate } from "../src/management.ts";
 import type { CandidateNative, NativeReadback } from "../src/management.ts";
 import { IntentSecrets, PostgresManagementStore } from "../src/management-store.ts";
+import { NativeAdmissionLimits } from "../src/admission-limits.ts";
+import type { AdmissionLimits } from "../src/admission-limits.ts";
+import { providerConnectionDefinition } from "../src/provider-connections.ts";
 
 // Same fresh-disposable contract and migrated SQL adapters as facade-postgres.
 // Its fixture is private to that test file; use the exported production helpers
@@ -102,7 +105,7 @@ const profile = {
 const forbidden = (error: unknown): boolean =>
   error instanceof GatewayError && error.code === "safe_error" && error.effect === "not_dispatched";
 
-async function fixture(runControlMaxRunMs = 60_000) {
+async function fixture(runControlMaxRunMs = 60_000, admissionLimits?: AdmissionLimits) {
   const context = { consumerId: "run-access-" + randomUUID() },
     worker = randomUUID();
   const control: RunControlBearer = {
@@ -238,6 +241,7 @@ async function fixture(runControlMaxRunMs = 60_000) {
     enrollment: { originRef: "synthetic-origin", engineIncarnation: randomUUID(), worker },
     timeoutMs: 5000,
     bufferBytes: 4096,
+    ...(admissionLimits ? { admissionLimits } : {}),
   };
   let server = createFacade(options);
   await new Promise<void>((resolve) => {
@@ -741,5 +745,109 @@ void test("original prepare recovery survives settings drift and preserves scope
         await f.stop();
       }
     });
+  }
+});
+
+// Emulates the native cached read (/private/native/v1/account-limits/read). The
+// synthetic profile borrows the Codex limits definition and window family.
+function nativeLimits() {
+  const answers = new Map<string, unknown>(),
+    failing = new Set<string>();
+  const codex = providerConnectionDefinition("openai-codex-oauth-responses-v1");
+  assert.ok(codex);
+  const admission = new NativeAdmissionLimits({
+    v1: {
+      async readAccountLimits(input: c.AccountLimitsRequest) {
+        if (failing.has(input.accountRef)) {
+          throw new Error("native unavailable");
+        }
+        return answers.get(input.accountRef) ?? { status: "unknown" };
+      },
+    },
+    definition: (profileId) => (profileId === profile.profile ? codex : undefined),
+    ttlMs: 0,
+  });
+  const exhausted = (ref: string, id: "primary" | "secondary", resetAt: number) => {
+    answers.set(ref, {
+      status: "snapshot",
+      physicalGeneration: "native-generation",
+      principalVersion: "native-principal",
+      revision: 1,
+      scope: "account",
+      windows: [
+        {
+          id,
+          family: "codex",
+          durationSeconds: id === "primary" ? 18_000 : 604_800,
+          usedPercent: 100,
+          observedAt: new Date().toISOString(),
+          resetAt: new Date(resetAt).toISOString(),
+          basis: "duration",
+        },
+      ],
+    });
+  };
+  return { admission, failing, exhausted };
+}
+async function busy(response: Response, operationRef: string): Promise<number> {
+  assert.equal(response.status, 503);
+  const error = c.safeError.parse(await response.json());
+  assert.equal(error.code, "admission_limited");
+  assert.equal(error.effect, "not_dispatched");
+  assert.equal(error.operationRef, operationRef);
+  assert.ok(error.retry.kind === "after");
+  return error.retry.milliseconds;
+}
+
+// Red if selection ignores native exhaustion, reorders the client list, refuses
+// as effect_unknown, persists a refused preparation, refuses a recorded replay,
+// or lets an unavailable/expired native snapshot block an account.
+void test("native exhausted accounts are skipped in client order and an all-exhausted run is busy", async () => {
+  const native = nativeLimits();
+  const f = await fixture(60_000, native.admission);
+  try {
+    const a = f.accountRef,
+      b = await f.account(),
+      d = await f.account();
+    native.exhausted(a, "primary", Date.now() + 10 * 60_000);
+    // b has no native snapshot yet; it stays admissible in client order.
+    const firstInput = f.input({ accountRefs: [a, b, d] });
+    const first = await f.mint(firstInput);
+    assert.equal(first.admission.accountRef, b);
+    assert.equal((await f.mint(f.input({ accountRefs: [a, d] }))).admission.accountRef, d);
+
+    native.exhausted(d, "secondary", Date.now() + 3 * 24 * 3_600_000);
+    const executions = await f.count();
+    const refused = f.input({ accountRefs: [a, d] });
+    const retryAfter = await busy(await f.raw(refused), refused.operationId);
+    assert.ok(retryAfter > 9 * 60_000 && retryAfter <= 10 * 60_000, String(retryAfter));
+    // The weekly reset lies beyond the contract hour, so the client sees the cap.
+    const weekly = f.input({ accountRefs: [d] });
+    assert.equal(await busy(await f.raw(weekly), weekly.operationId), 3_600_000);
+    const managed = f.input({ accountRefs: [a] });
+    await busy(
+      await f.raw(managed, f.managementGrant.token, "/v1/executions"),
+      managed.operationId,
+    );
+    assert.equal(await f.count(), executions);
+    await assert.rejects(
+      f.kernel.operation(f.context, refused.operationId),
+      (error: unknown) => error instanceof KernelError && error.code === "unknown",
+    );
+
+    // Recorded preparations replay unchanged after every account is exhausted.
+    native.exhausted(b, "primary", Date.now() + 10 * 60_000);
+    assert.deepEqual(await f.mint(firstInput), first);
+    const sticky = await f.mint({ ...firstInput, operationId: randomUUID() });
+    assert.deepEqual(sticky.admission, first.admission);
+
+    native.exhausted(a, "primary", Date.now() - 1000);
+    assert.equal((await f.mint(f.input({ accountRefs: [a, d] }))).admission.accountRef, a);
+    native.exhausted(a, "primary", Date.now() + 10 * 60_000);
+    native.failing.add(a);
+    assert.equal((await f.mint(f.input({ accountRefs: [a, d] }))).admission.accountRef, a);
+    assert.deepEqual(f.stats(), { transportCalls: 0, entries: 0 });
+  } finally {
+    await f.stop();
   }
 });

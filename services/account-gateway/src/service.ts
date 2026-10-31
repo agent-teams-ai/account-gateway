@@ -53,6 +53,7 @@ import {
 import { NativeAuthority } from "./native-authority.ts";
 import { NativeHTTPTransport } from "./native-transport.ts";
 import { createFacade, FacadeBearers, cancelFacadeTransport } from "./facade.ts";
+import { NativeAdmissionLimits } from "./admission-limits.ts";
 import type { ConfiguredBearer, FacadeOptions } from "./facade.ts";
 import { strictJSON } from "./facade-ingress.ts";
 import { object } from "./native-wire.ts";
@@ -310,11 +311,16 @@ export function composeServiceCachedLimits(
     ReturnType<typeof composeServiceControl>,
     "accountModels" | "accountLimits" | "accountLimitsV2"
   >,
-): Pick<FacadeOptions, "accountModels" | "accountLimits" | "accountLimitsV2"> {
+): Pick<FacadeOptions, "accountModels" | "accountLimits" | "accountLimitsV2" | "admissionLimits"> {
   return {
     accountModels: control.accountModels,
     accountLimits: control.accountLimits,
     accountLimitsV2: control.accountLimitsV2,
+    // One read-through view shared by both facades; native stays the authority.
+    admissionLimits: new NativeAdmissionLimits({
+      v1: control.accountLimits,
+      v2: control.accountLimitsV2,
+    }),
   };
 }
 export function composeServiceNative(

@@ -341,3 +341,21 @@ export const capturePermittedAccounts = (value: unknown): string[] => {
   }
   return copy;
 };
+// A subset of the captured permitted accounts; it can only narrow selection.
+export const captureLimitedAccounts = (value: unknown, permitted: readonly string[]): string[] => {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value) || value.length > permitted.length) {
+    throw new KernelError("invalid");
+  }
+  const copy: string[] = [];
+  for (const element of value) {
+    const ref: unknown = element;
+    if (typeof ref !== "string" || !permitted.includes(ref)) {
+      throw new KernelError("invalid");
+    }
+    copy.push(ref);
+  }
+  return copy;
+};
