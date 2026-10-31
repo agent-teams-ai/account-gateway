@@ -14,7 +14,10 @@ import {
 } from "../src/postgres-records.ts";
 
 const unavailable = (work: () => unknown): void => {
-  assert.throws(work, (error: unknown) => error instanceof KernelError && error.code === "unavailable");
+  assert.throws(
+    work,
+    (error: unknown) => error instanceof KernelError && error.code === "unavailable",
+  );
 };
 const invalid = (work: () => unknown): void => {
   assert.throws(work, (error: unknown) => error instanceof KernelError && error.code === "invalid");
@@ -71,7 +74,7 @@ void test("persisted lifecycle snapshots bind the account and whitelist domain f
   unavailable(() => operationStatus({ ...row, intent: { kind: "resume", expectedRevision: -1 } }));
 });
 
-void test("native dispatch proofs reject incomplete stored evidence, not upgrade legacy closures", () => {
+void test("incomplete native proofs never upgrade legacy closure evidence", () => {
   const native = {
     originRef: "synthetic-native-origin",
     engineIncarnation: randomUUID(),

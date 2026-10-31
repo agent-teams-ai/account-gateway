@@ -276,7 +276,9 @@ export const captureClosure = (proof: unknown): TransportClosure => {
   uuid(generation);
   return { executionRef, requestRef, worker, token, native: { ...reservation, generation } };
 };
-export function validateNativeClosure(proof: TransportClosure): asserts proof is NativeDispatchProof {
+export function validateNativeClosure(
+  proof: TransportClosure,
+): asserts proof is NativeDispatchProof {
   uuid(proof.executionRef);
   identifier(proof.requestRef);
   uuid(proof.worker);
@@ -302,7 +304,8 @@ export const validateOAuthMethod = (method: unknown): void => {
     throw new KernelError("invalid");
   }
 };
-export const retainedContract = (contract: unknown): boolean => contract === "native-retained-custody/v1";
+export const retainedContract = (contract: unknown): boolean =>
+  contract === "native-retained-custody/v1";
 export const requireNonEntry = (entered: unknown): void => {
   if (entered !== false) {
     throw new KernelError("invalid");
