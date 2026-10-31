@@ -65,7 +65,10 @@ export type ConfiguredBearer =
 type RunControlGrant = Omit<RunControlBearer, "token"> | Omit<ConsumerControlBearer, "token">;
 type WithoutToken<T> = T extends unknown ? Omit<T, "token"> : never;
 type AccountGrant = WithoutToken<ManagementBearer> | Omit<ConsumerControlBearer, "token">;
-export type Grant = WithoutToken<ManagementBearer> | Omit<ExecutionBearer, "token"> | RunControlGrant;
+export type Grant =
+  | WithoutToken<ManagementBearer>
+  | Omit<ExecutionBearer, "token">
+  | RunControlGrant;
 export const permitsProfile = (grant: AccountGrant, profileId: string): boolean =>
   grant.profileIds === undefined || grant.profileIds.includes(profileId);
 export const permitsOwner = (grant: AccountGrant, ownerRef: string): boolean =>
