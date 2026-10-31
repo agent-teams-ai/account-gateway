@@ -71,11 +71,17 @@ boundaries:
     roots: [services/account-gateway/src/service-admission.ts]
     entrypoints: [services/account-gateway/src/service-admission.ts]
     allow: {boundaries: [kernel-domain], packages: [pg], builtins: ['node:async_hooks', 'node:http'], runtimeReferences: []}
+  # Pure validation of untrusted persisted rows, with no SQL/HTTP dependency.
+  - id: kernel-persisted-records
+    dependencyMode: runtime
+    roots: [services/account-gateway/src/postgres-records.ts]
+    entrypoints: [services/account-gateway/src/postgres-records.ts]
+    allow: {boundaries: [kernel-domain], packages: [], builtins: [], runtimeReferences: []}
   - id: kernel-postgres
     dependencyMode: runtime
     roots: [services/account-gateway/src/postgres.ts, services/account-gateway/src/retention.ts, services/account-gateway/src/native-reservation.ts]
     entrypoints: [services/account-gateway/src/postgres.ts, services/account-gateway/src/retention.ts, services/account-gateway/src/native-reservation.ts]
-    allow: {boundaries: [service-admission, kernel-domain], packages: [pg], builtins: ['node:crypto'], runtimeReferences: []}
+    allow: {boundaries: [service-admission, kernel-domain, kernel-persisted-records], packages: [pg], builtins: ['node:crypto'], runtimeReferences: []}
   - id: kernel-composition
     dependencyMode: runtime
     roots: [services/account-gateway/src/composition.ts]
@@ -86,7 +92,7 @@ boundaries:
     roots: [services/account-gateway/test/domain.test.ts, services/account-gateway/test/postgres.test.ts, services/account-gateway/test/postgres-client-error.test.ts, services/account-gateway/test/service-admission.test.ts]
     entrypoints: [services/account-gateway/test/domain.test.ts, services/account-gateway/test/postgres.test.ts, services/account-gateway/test/postgres-client-error.test.ts, services/account-gateway/test/service-admission.test.ts]
     # Retirement assertions cover the durable usage evidence retained after cleanup.
-    allow: {boundaries: [service-admission, kernel-domain, kernel-postgres, foreground-service-entry, usage-journal], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:timers/promises', 'node:child_process', 'node:util'], runtimeReferences: []}
+    allow: {boundaries: [service-admission, kernel-domain, kernel-postgres, kernel-persisted-records, foreground-service-entry, usage-journal], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:timers/promises', 'node:child_process', 'node:util'], runtimeReferences: []}
 
   - id: native-management
     dependencyMode: runtime
