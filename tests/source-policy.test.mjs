@@ -115,6 +115,21 @@ test("private kernel domain rejects a type-only database import without changing
   assert.deepEqual(readFileSync(file), original);
 });
 
+// The isolated bearer authority may validate contracts but must not import
+// the outer HTTP/transport facade, including through type-only dependencies.
+test("bearer authority forbids type-only HTTP facade dependencies", () =>
+  fixture((root) => {
+    passes(check(root));
+    const file = join(root, "services/account-gateway/src/facade-bearers.ts");
+    const original = readFileSync(file, "utf8");
+    writeFileSync(
+      file,
+      original +
+        "\nimport type { NativeTransport } from './facade.ts';\nexport type ForbiddenBearerDependency = NativeTransport;\n",
+    );
+    violates(check(root));
+  }));
+
 // Regression: the llm domain gains a transport dependency or an adapter bypasses the application entry.
 test("llm layers depend inward through public layer entries only", () =>
   fixture((root) => {
