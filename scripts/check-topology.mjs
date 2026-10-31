@@ -19,6 +19,13 @@ for (const module of profile.modules) {
   if (module.role !== "sdk" || !module.features.length) {
     failures.push("SDK role/feature missing");
   }
+  const layered = Object.keys(module.featureLayers ?? {});
+  if (
+    layered.length !== module.features.length ||
+    module.features.some((f) => !layered.includes(f) || !module.featureLayers[f].length)
+  ) {
+    failures.push("Feature layers must be declared per feature");
+  }
   const source = root + "/" + module.sourceRoot;
   const allowedFiles = new Set(module.publicIndexes);
   async function walk(relative = "") {
@@ -37,7 +44,7 @@ for (const module of profile.modules) {
       if (feature && path !== feature) {
         const layer = path.slice(feature.length + 1).split("/")[0];
         if (
-          !module.featureLayers.includes(layer) ||
+          !(module.featureLayers[feature] ?? []).includes(layer) ||
           (!entry.isDirectory() && !path.slice(feature.length + 1).includes("/"))
         ) {
           failures.push("Undeclared feature layer: " + path);

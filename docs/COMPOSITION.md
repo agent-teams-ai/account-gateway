@@ -73,21 +73,34 @@ eef92e7fd40f538b4e9ba03e01bbd4e2d23f12f2, declared full-byte digest
 851653f96643cf0466b67ab22963661976b00de44840fa3144a48a8c054f95fa.
 The retained immutable document at organization docs/architecture/feature-module-standard/v1.md was checked against that digest. The scoped
 [adoption profile](../architecture/feature-module-adoption.json) classifies
-packages/account-gateway as an SDK. Its one real facade-client feature owns
+packages/account-gateway as an SDK. Its facade-client feature owns
 contracts and HTTP (including private server ingress); get-modular owns optional
-module composition. The three public indexes are curated export surfaces.
+module composition. The public indexes are curated export surfaces.
 Management and execution factories expose different authorities while sharing
 private transport. No product domain model is introduced.
+
+The experimental llm feature owns one bounded model call over those clients:
+domain holds the task, result and failure vocabulary; application holds the
+attempt lifecycle and its ports; adapters hold the OpenAI Responses request codec
+and stream reduction. The llm index wires that adapter and the HTTP connector.
+The execution ports are the facade client capabilities
+themselves (`Pick` of the consumer-control and execution clients), so a fake and
+the HTTP client share one contract and GatewayError effect semantics. The llm
+application imports only facade public entries. Layers are declared per feature
+in the adoption profile; one feature's layer name grants nothing to another.
 
 The supported source-dependencies v2 gate owns import parsing, public entrypoint
 direction and cycles. The topology gate owns module inventory, feature placement
 and empty-layer rejection. Root black-box tests are an explicit ownership
-exception, reviewed when another feature or service is added. This is bounded
+exception over built public entries, reviewed when a third feature or a service
+is added. This is bounded
 adoption, with native engine and RR excluded; their owners revisit adoption at
 B/C/D. Creating another module, layer or dependency requires updating the local
 profile and its negative checks.
 Boundary inventory: facade contracts (Zod only), facade HTTP (contracts and Zod), curated indexes, optional
-composition (HTTP and public Core/Assembly). Source-dependencies v2 discovers
+composition (HTTP and public Core/Assembly), llm domain (no dependencies), llm
+application (llm domain and facade public entries), llm adapters (llm domain and
+application) and the llm index (llm layers and facade HTTP). Source-dependencies v2 discovers
 unowned roots under the governed SDK root and rejects forbidden imports,
 including type-only imports. Source policy, curated package exports and dev-only
 Foundation guard are the executable local checks. No independent import parser

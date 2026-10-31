@@ -28,7 +28,16 @@ test("scoped topology rejects unowned behavior, modules and empty feature layers
   const layer = root + "/packages/account-gateway/src/features/facade-client/domain";
   await mkdir(layer);
   assert.equal(check().status, 1);
+  // Layers are owned per feature: a sibling feature's layer name grants nothing.
+  await writeFile(layer + "/borrowed.ts", "export const borrowed = 1;\n");
+  assert.match(check().stderr, /Undeclared feature layer: features\/facade-client\/domain/);
   await rm(layer, { recursive: true });
+  const foreign = root + "/packages/account-gateway/src/features/llm/http";
+  await mkdir(foreign);
+  await writeFile(foreign + "/borrowed.ts", "export const borrowed = 1;\n");
+  assert.match(check().stderr, /Undeclared feature layer: features\/llm\/http/);
+  await rm(foreign, { recursive: true });
+  assert.equal(check().status, 0);
   await mkdir(root + "/packages/undeclared");
   assert.equal(check().status, 1);
 });

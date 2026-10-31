@@ -114,3 +114,21 @@ test("private kernel domain rejects a type-only database import without changing
   });
   assert.deepEqual(readFileSync(file), original);
 });
+
+// Regression: the llm domain gains a transport dependency or an adapter bypasses the application entry.
+test("llm layers depend inward through public layer entries only", () =>
+  fixture((root) => {
+    const llm = join(root, "packages/account-gateway/src/features/llm");
+    writeFileSync(
+      join(llm, "domain/transport-fixture.ts"),
+      "import type { ExecutionClient } from '../../facade-client/http/index.js';\nexport type Forbidden = ExecutionClient;\n",
+    );
+    violates(check(root));
+    rmSync(join(llm, "domain/transport-fixture.ts"));
+    passes(check(root));
+    writeFileSync(
+      join(llm, "adapters/deep-import-fixture.ts"),
+      "import { createLlmGenerator } from '../application/generate.js';\nexport const forbidden = createLlmGenerator;\n",
+    );
+    violates(check(root));
+  }));

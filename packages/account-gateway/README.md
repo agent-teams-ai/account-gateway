@@ -4,9 +4,10 @@ Private facade v1 SDK. Uses Node 26.11.1 by default, with Node 24.21.0 compatibi
 and requires a server-owned gateway origin and role credential. This package
 does not qualify Sub2API or implement a backend.
 
-Import safe schemas/types from `/contracts`, server clients from `/http` and
-optional static construction from `/get-modular`. Browser resolution of the
-server entries is explicitly blocked. No root or private wildcard export exists.
+Import safe schemas/types from `/contracts`, server clients from `/http`,
+optional static construction from `/get-modular` and the experimental model call
+from `/llm`. Browser resolution of the server entries is explicitly blocked. No
+root or private wildcard export exists.
 
 Management owns profiles/accounts, preparation and policy fences; execution owns
 request/status/close and scoped operation readback. The service must enforce the
@@ -21,8 +22,8 @@ readback 404 cannot establish no effect. Do not replay using a fresh identity.
 Native requests supply approved JSON protocol bytes unchanged, plus bounded
 trusted admission in `x-gateway-admission` and stable `x-gateway-request-id`.
 The facade responds with `x-gateway-request-ref`. These are our facade headers,
-not existing engine headers. Streams remain bytes; the SDK does not parse SSE
-or record output. A repeated request may return `{kind:'status', status}` at
+not existing engine headers. Streams remain bytes; the `/http` clients do not
+parse SSE or record output. A repeated request may return `{kind:'status', status}` at
 202; a new stream returns `{kind:'stream', body, cancel, requestRef}`. Consume
 or cancel every stream. AbortSignal, explicit cancellation, output limits and
 zero-prefetch application streaming propagate cancellation to the transport.
@@ -104,3 +105,97 @@ enabling OpenRouter discovery in a consumer. An older producer returning
 unsupported cannot become dynamic merely because a newer client understands the
 source. Consumer rollout switches and display-only public pricing remain owned
 by the consumer, independently of this admission contract.
+
+## Experimental llm entry
+
+`/llm` is an experimental 0.x server entry for one bounded model call. Its
+contract may change in any minor release. It composes the consumer-control and
+execution clients and adds no retry, failover, replay, storage or logging.
+
+```ts
+import { createConsumerControlClient } from "@agent-teams/account-gateway/http";
+import { createLlmClient, executionConnector } from "@agent-teams/account-gateway/llm";
+
+const llm = createLlmClient({
+  control: createConsumerControlClient({ role: "consumer-control", origin, token }),
+  connectExecution: executionConnector({ origin }),
+});
+const result = await llm.generate({
+  taskId: "summary-2026-10-30",
+  attempt: 1,
+  profileId: "openai-codex-oauth-responses-v1",
+  model: "gpt-5.6-sol",
+  accountRefs: [accountRef],
+  policy: { subjectRef, policyRevision, bindingRevision },
+  instructions: "Summarize the posts.",
+  input: posts,
+  output: { mode: "json_schema", schema },
+  maxOutputTokens: 4096,
+  deadline: new Date(Date.now() + 10 * 60_000),
+  decode: (value) => summary.parse(value),
+});
+```
+
+One attempt runs run access, verifies the grant against its intent, sends one
+request, reduces the Responses stream, reads request status after an ambiguous
+loss and closes the execution with its own 10-second bound. Every gateway
+identity derives from `taskId` and `attempt`. The deadline, at most one hour
+ahead, is part of the execution intent. Tests and consumers can pass their own
+`control` and `connectExecution`; the ports are `Pick` types of the clients.
+
+Expected outcomes resolve to `{ ok: false, code, effect, retry }` instead of
+throwing. `effect` uses the gateway vocabulary. `retry` is advice only:
+`same_attempt` replays the identical task after an ambiguous run access, before
+any inference; `new_attempt` uses attempt + 1, and `mayDuplicateCost` marks a
+possibly paid previous attempt; `never` needs a changed task or a human.
+`cleanup: "pending"` means close was not acknowledged; the grant expires at its
+deadline. Exceeding `limits.outputBytes` or `maxOutputTokens` is
+`output_truncated`. A decoded value is never trusted from the model alone: JSON
+is parsed and `decode` always runs. Failures carry only the safe gateway `traceRef`.
+
+All profiles receive one OpenAI Responses body: stream, store false, service
+tier default, `max_output_tokens`, `reasoning` only for an explicit effort, and a
+`json_schema` format named `codex_output_schema`. The gateway kernel accepts no
+profile above a 1 MiB body, 100 000 output tokens or 8 MiB of output, so larger
+tasks fail locally as `invalid_task`; deployments may configure lower limits.
+The caller selects the output mode. Native admission at Sub2API `7a20c00` and the
+CI pin `a6bc1e36` gives these facts; provider execution of a schema is not
+verified for any profile:
+
+| Profile | Native admission | Not verified |
+| --- | --- | --- |
+| Codex OAuth | requires service tier and `max_output_tokens` (removed before Codex); effort checked against account models | `json_object` |
+| Kimi Code, GLM, MiniMax, Grok | `text` or named `json_schema` only; `json_object` and non-null `reasoning` rejected; `max_output_tokens` required | schema enforcement by the provider |
+| MiMo | provider rejects `json_schema`; use `json_object` or `text` | `max_output_tokens` acceptance |
+| OpenRouter | root allowlist only; format passes through | per-model support |
+
+`prepareStrictJsonSchema(schema)` is an optional helper for strict providers
+such as Codex OAuth. It returns `{ schema, decode }`: every property becomes
+required, optional ones accept an added `null`, and objects close with
+`additionalProperties: false`. `decode` removes those added nulls and validates
+the value against the original schema. Pass `output: { mode: "json_schema",
+schema }` and `decode` (optionally chained with the consumer's own parser).
+Supported keywords: `$schema` (2020-12), local `$ref`/`$defs`, annotations,
+single or nullable `type`, `const`, `enum`, `anyOf`, `oneOf`, `properties`,
+`required`, `additionalProperties: false`, single-schema `items`, and the array,
+string and number bounds. Anything else throws `LlmSchemaError` with code
+`invalid_task` and a path-only detail; a nonconforming output throws
+`output_invalid`, which `generate` reports as `output_invalid`.
+
+Every call is one execution, and the gateway accounts it as permanent durable
+facts: the execution costs 3 units and its prepare and close operations 1 each.
+The request's own unit is released only when `requestReadbackRetentionMs` is
+configured. Budget about 5 units per call against three limits: the service
+capacity (1 000 000), the consumer limit (default 100 000) and the per-account
+limit (default 10 000, about 2 000 calls). Service configuration can only lower
+stored limits, so set `durableFacts` before the first start. At a few thousand
+calls a day the service capacity lasts weeks to months; monitor consumer and
+account fact use. A multi-request session API is deliberately
+not part of this entry yet; raising capacity or retaining closed executions is a
+gateway decision.
+
+To hand the SDK to a consumer, run `pnpm build`, then
+`pnpm --dir packages/account-gateway pack --pack-destination <dir>`. Vendor the
+archive with a provenance record: source commit and tree, archive bytes,
+SHA-256 and npm `sha512` integrity, package version, Node and pnpm versions,
+and the gates that passed on that commit.
