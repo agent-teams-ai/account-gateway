@@ -189,7 +189,14 @@ export interface ApprovedPreparation {
   limits: ApprovedLimits;
   // Permitted accounts the native source reports as limited. Selection skips
   // them; they are not part of the intent, so replay and sticky reuse ignore them.
-  limitedAccounts?: readonly string[];
+  limitedAccounts?: readonly LimitedAccount[];
+}
+// A native observation applies only to the exact epoch and physical generation
+// it was read for; a reconnected or changed account is selectable again.
+export interface LimitedAccount {
+  accountRef: string;
+  authorizationEpoch: number;
+  generation: string;
 }
 // Server-approved policy values, independent of SDK validation and provider DTOs.
 export interface ApprovedLimits {

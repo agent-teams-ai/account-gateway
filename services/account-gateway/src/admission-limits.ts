@@ -1,18 +1,19 @@
 import type * as c from "@agent-teams/account-gateway/contracts";
-import type { AccountStatus, TrustedContext } from "./domain.ts";
+import { KernelError } from "./domain.ts";
+import type { AccountStatus, LimitedAccount, TrustedContext } from "./domain.ts";
 import { acceptedLimitsWire } from "./limits-port.ts";
 import {
   providerConnectionDefinition,
   type ProviderConnectionDefinition,
 } from "./provider-connections.ts";
 
-type LimitsWire = c.AccountLimits | c.AccountLimitsV2;
+type CodexSnapshot = Extract<c.AccountLimits, { status: "snapshot" }>;
 export interface AdmissionLimitsSource {
   readAccountLimits(input: c.AccountLimitsRequest, deadlineMs?: number): Promise<unknown>;
 }
 export interface AdmissionLimitsScreen {
   // Permitted accounts the native snapshot reports as exhausted, in client order.
-  readonly limitedAccounts: readonly string[];
+  readonly limitedAccounts: readonly LimitedAccount[];
   // Earliest reset among the given limited accounts, bounded by the wire contract.
   retryAfterMs(accountRefs: readonly string[]): number;
 }
@@ -27,18 +28,26 @@ export interface AdmissionLimits {
 export const MAX_RETRY_AFTER_MS = 3_600_000;
 
 /**
- * Sub2API's exhaustion rule (calculateOpenAI429ResetTime): a window used at or
- * above 100% with a known future reset. The account is usable again only after
- * its last exhausted window resets. No threshold or cooldown is added here.
+ * Sub2API's Codex rule (calculateOpenAI429ResetTime), applied verbatim to the
+ * native snapshot: the account-wide primary/secondary window used at or above
+ * 100% with a known future reset. Usable again after the last such reset. No
+ * threshold, cooldown or counter of the gateway's own. Other providers' windows
+ * (for example model-scoped Claude windows) are deliberately not interpreted.
  */
-export function exhaustedUntil(wire: LimitsWire, now: number): number | undefined {
+export function exhaustedUntil(wire: c.AccountLimits, now: number): number | undefined {
   if (wire.status !== "snapshot") {
     return undefined;
   }
   let until: number | undefined;
   for (const window of wire.windows) {
     const reset = window.resetAt === null ? Number.NaN : Date.parse(window.resetAt);
-    if (window.usedPercent !== null && window.usedPercent >= 100 && reset > now) {
+    if (
+      window.family === "codex" &&
+      (window.id === "primary" || window.id === "secondary") &&
+      window.usedPercent !== null &&
+      window.usedPercent >= 100 &&
+      reset > now
+    ) {
       until = Math.max(until ?? reset, reset);
     }
   }
@@ -69,52 +78,65 @@ async function within<T>(work: Promise<T>, ms: number): Promise<T | undefined> {
 }
 
 export interface NativeAdmissionLimitsOptions {
-  readonly v1?: AdmissionLimitsSource;
-  readonly v2?: AdmissionLimitsSource;
+  readonly codex?: AdmissionLimitsSource;
   readonly definition?: (profileId: string) => ProviderConnectionDefinition | undefined;
   readonly now?: () => number;
   readonly ttlMs?: number;
   readonly readMs?: number;
   readonly budgetMs?: number;
+  readonly maxReads?: number;
 }
 const maxEntries = 1024;
+const bounded = (value: number, maximum: number): number => {
+  if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {
+    throw new KernelError("invalid");
+  }
+  return value;
+};
 
 /**
- * Read-only admission view of the native cached account limits. It keeps no
+ * Read-only admission view of the native cached Codex limits. It keeps no
  * account health: a short read-through cache of native snapshots, evaluated
- * against the current clock. Any missing, failed, late or foreign snapshot is
- * treated as admissible, so the native source can only narrow selection.
+ * against the current clock. Any missing, failed, late, saturated or foreign
+ * snapshot is treated as admissible, so native data can only narrow selection.
  */
 export class NativeAdmissionLimits implements AdmissionLimits {
-  readonly #v1?: AdmissionLimitsSource;
-  readonly #v2?: AdmissionLimitsSource;
+  readonly #codex?: AdmissionLimitsSource;
   readonly #definition: (profileId: string) => ProviderConnectionDefinition | undefined;
   readonly #now: () => number;
   readonly #ttlMs: number;
   readonly #readMs: number;
   readonly #budgetMs: number;
-  readonly #cache = new Map<string, { expires: number; wire: Promise<LimitsWire | undefined> }>();
+  // Each uncached read costs one native read and its owner callbacks, which
+  // share the small critical callback lane with dispatch proof and closure.
+  readonly #maxReads: number;
+  #reads = 0;
+  readonly #cache = new Map<
+    string,
+    { expires: number; wire: Promise<CodexSnapshot | undefined> }
+  >();
   constructor(options: NativeAdmissionLimitsOptions) {
-    this.#v1 = options.v1;
-    this.#v2 = options.v2;
+    this.#codex = options.codex;
     this.#definition = options.definition ?? providerConnectionDefinition;
     this.#now = options.now ?? Date.now;
-    this.#ttlMs = options.ttlMs ?? 5000;
-    this.#readMs = options.readMs ?? 1000;
-    this.#budgetMs = options.budgetMs ?? 2000;
+    this.#ttlMs = bounded(options.ttlMs ?? 5000, 60_000);
+    this.#readMs = bounded(options.readMs ?? 1000, 3000);
+    this.#budgetMs = bounded(options.budgetMs ?? 2000, 5000);
+    this.#maxReads = bounded(options.maxReads ?? 1, 8);
   }
   async screen(
     context: TrustedContext,
     accounts: readonly AccountStatus[],
   ): Promise<AdmissionLimitsScreen> {
-    const until = new Map<string, number>();
+    const until = new Map<string, number>(),
+      limited: LimitedAccount[] = [];
     const deadline = this.#now() + this.#budgetMs;
     for (const account of accounts) {
       // Kernel selection skips non-active accounts without any native read.
       if (account.state !== "active") {
         continue;
       }
-      let wire: LimitsWire | undefined;
+      let wire: CodexSnapshot | undefined;
       try {
         const pending = this.#snapshot(context, account);
         wire = pending && (await within(pending, deadline - this.#now()));
@@ -122,14 +144,21 @@ export class NativeAdmissionLimits implements AdmissionLimits {
         /* A source that throws synchronously is no data, never a refusal. */
       }
       const reset = wire && exhaustedUntil(wire, this.#now());
-      if (reset === undefined) {
+      if (wire === undefined || reset === undefined) {
         break; // First admissible or unknown account in client order.
       }
       until.set(account.accountRef, reset);
+      limited.push(
+        Object.freeze({
+          accountRef: account.accountRef,
+          authorizationEpoch: account.epoch,
+          generation: wire.physicalGeneration,
+        }),
+      );
     }
     const now = this.#now;
     return Object.freeze({
-      limitedAccounts: Object.freeze([...until.keys()]),
+      limitedAccounts: Object.freeze(limited),
       retryAfterMs(accountRefs: readonly string[]) {
         const resets = accountRefs.flatMap((ref) => until.get(ref) ?? []);
         if (!resets.length) {
@@ -139,18 +168,18 @@ export class NativeAdmissionLimits implements AdmissionLimits {
       },
     });
   }
-  // Undefined when the profile has no native limits source to read.
+  // Undefined when there is nothing to read or the read lane is saturated.
   #snapshot(
     context: TrustedContext,
     account: AccountStatus,
-  ): Promise<LimitsWire | undefined> | undefined {
-    const definition = this.#definition(account.profile);
-    if (!definition || definition.limitsContract === "none") {
-      return undefined;
-    }
-    const contract = definition.limitsContract,
-      source = contract === "account-limits/v1" ? this.#v1 : this.#v2;
-    if (!source) {
+  ): Promise<CodexSnapshot | undefined> | undefined {
+    const definition = this.#definition(account.profile),
+      source = this.#codex;
+    if (
+      !source ||
+      definition?.limitsContract !== "account-limits/v1" ||
+      definition.provider.identity !== "openai"
+    ) {
       return undefined;
     }
     // Reconnect and lifecycle changes advance the epoch, so they miss the cache.
@@ -166,7 +195,12 @@ export class NativeAdmissionLimits implements AdmissionLimits {
     if (cached && cached.expires > now) {
       return cached.wire;
     }
-    const wire = within(
+    if (this.#reads >= this.#maxReads) {
+      return undefined;
+    }
+    this.#reads++;
+    // The async wrapper turns a synchronous source throw into "no data".
+    const read = (async () =>
       source.readAccountLimits(
         {
           ownerRef: account.ownerRef,
@@ -175,13 +209,18 @@ export class NativeAdmissionLimits implements AdmissionLimits {
           expectedAuthorizationEpoch: account.epoch,
         },
         this.#readMs,
-      ),
-      this.#readMs,
-    ).then((observed) =>
-      observed === undefined
-        ? undefined
-        : acceptedLimitsWire(contract, observed, definition.provider.identity),
-    );
+      ))();
+    const wire = within(read, this.#readMs)
+      .then((observed) => {
+        const accepted =
+          observed === undefined
+            ? undefined
+            : acceptedLimitsWire("account-limits/v1", observed, "openai");
+        return accepted?.status === "snapshot" ? (accepted as CodexSnapshot) : undefined;
+      })
+      .finally(() => {
+        this.#reads--;
+      });
     this.#cache.delete(key);
     if (this.#cache.size >= maxEntries) {
       for (const [entry, value] of this.#cache) {

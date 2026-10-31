@@ -317,10 +317,7 @@ export function composeServiceCachedLimits(
     accountLimits: control.accountLimits,
     accountLimitsV2: control.accountLimitsV2,
     // One read-through view shared by both facades; native stays the authority.
-    admissionLimits: new NativeAdmissionLimits({
-      v1: control.accountLimits,
-      v2: control.accountLimitsV2,
-    }),
+    admissionLimits: new NativeAdmissionLimits({ codex: control.accountLimits }),
   };
 }
 export function composeServiceNative(

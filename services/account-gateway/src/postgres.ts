@@ -964,8 +964,17 @@ export class PostgresKernel implements DurableKernel {
           ORDER BY array_position($2::uuid[],a.ref) LIMIT $4`,
           [tx.consumer, input.permittedAccounts, input.profile, limitedAccounts.length + 1],
         );
-        const selected = a.rows.find((row) => !limitedAccounts.includes(row.ref));
+        const selected = a.rows.find(
+          (row) =>
+            !limitedAccounts.some(
+              (l) =>
+                l.accountRef === row.ref &&
+                l.authorizationEpoch === row.epoch &&
+                l.generation === row.active_generation,
+            ),
+        );
         if (selected === undefined) {
+          // Rolled back before any insert; existing and sticky intents returned above.
           if (a.rows.length > 0) {
             throw new AccountsLimitedError(a.rows.map((row) => row.ref));
           }

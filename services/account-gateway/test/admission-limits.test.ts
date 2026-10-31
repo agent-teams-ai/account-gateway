@@ -24,9 +24,8 @@ function window(id: "primary" | "secondary", usedPercent: number | null, resetAt
     basis: "duration" as const,
   };
 }
-function snapshot(
-  ...windows: ReturnType<typeof window>[]
-): Extract<c.AccountLimits, { status: "snapshot" }> {
+type Snapshot = Extract<c.AccountLimits, { status: "snapshot" }>;
+function snapshot(...windows: Snapshot["windows"]): Snapshot {
   return {
     status: "snapshot",
     physicalGeneration: "generation-a",
@@ -36,6 +35,7 @@ function snapshot(
     windows,
   };
 }
+const exhausted = () => snapshot(window("primary", 100, start + 10 * minute));
 function account(accountRef: string, patch: Partial<AccountStatus> = {}): AccountStatus {
   return {
     accountRef,
@@ -61,8 +61,10 @@ function native(answers: Record<string, () => Promise<unknown>>) {
     },
   };
 }
+const refs = (screen: { limitedAccounts: readonly { accountRef: string }[] }) =>
+  screen.limitedAccounts.map((l) => l.accountRef);
 
-void test("exhaustion follows the Sub2API rule until the last exhausted window resets", () => {
+void test("exhaustion follows the Sub2API Codex rule until the last exhausted window resets", () => {
   const weekly = start + 3 * 24 * 60 * minute;
   assert.equal(
     exhaustedUntil(
@@ -84,6 +86,16 @@ void test("exhaustion follows the Sub2API rule until the last exhausted window r
     snapshot(window("primary", 100, start)),
     snapshot(window("primary", 100, null)),
     snapshot(window("primary", null, start + 10 * minute)),
+    // A model-scoped Claude window never gates the account's own model.
+    snapshot({
+      id: "claude-7d-fable",
+      family: "claude",
+      durationSeconds: 604_800,
+      usedPercent: 137.5,
+      observedAt: iso(start),
+      resetAt: iso(weekly),
+      basis: "duration",
+    }),
   ]) {
     assert.equal(exhaustedUntil(unlimited, start), undefined);
   }
@@ -91,29 +103,31 @@ void test("exhaustion follows the Sub2API rule until the last exhausted window r
 });
 
 void test("screen keeps client order and stops reading at the first admissible account", async () => {
-  const exhausted = async () => snapshot(window("primary", 100, start + 10 * minute));
-  const n = native({ a: exhausted, c: exhausted, d: exhausted });
-  const limits = new NativeAdmissionLimits({ v1: n.source, now: () => start });
+  const n = native({ a: async () => exhausted(), c: async () => exhausted() });
+  const limits = new NativeAdmissionLimits({ codex: n.source, now: () => start });
   const screen = await limits.screen(context, [
-    account("a"),
+    account("a", { epoch: 3 }),
     account("s", { state: "suspended" }),
     account("b"),
     account("c"),
-    account("d"),
   ]);
-  assert.deepEqual(screen.limitedAccounts, ["a"]);
-  assert.deepEqual(n.reads, ["a@1", "b@1"]);
+  assert.deepEqual(screen.limitedAccounts, [
+    { accountRef: "a", authorizationEpoch: 3, generation: "generation-a" },
+  ]);
+  assert.deepEqual(n.reads, ["a@3", "b@1"]);
 });
 
-void test("failed, late, malformed and foreign snapshots never limit an account", async () => {
-  const late = new NativeAdmissionLimits({
-    v1: native({ a: () => new Promise<never>(() => {}) }).source,
-    readMs: 20,
-  });
-  const begun = Date.now();
-  assert.deepEqual((await late.screen(context, [account("a")])).limitedAccounts, []);
-  assert.ok(Date.now() - begun < 1000);
-  const foreign = snapshot(window("primary", 100, start + 10 * minute));
+void test("failed, late, saturated, malformed and foreign snapshots never limit an account", async () => {
+  for (const options of [{ readMs: 20 }, { budgetMs: 20 }]) {
+    const late = new NativeAdmissionLimits({
+      codex: native({ a: () => new Promise<never>(() => {}) }).source,
+      ...options,
+    });
+    const begun = Date.now();
+    assert.deepEqual(refs(await late.screen(context, [account("a")])), []);
+    assert.ok(Date.now() - begun < 500);
+  }
+  const foreign = exhausted();
   for (const answer of [
     async () => {
       throw new Error("native unavailable");
@@ -122,36 +136,63 @@ void test("failed, late, malformed and foreign snapshots never limit an account"
     async () => ({ ...foreign, windows: [{ ...foreign.windows[0], family: "claude" }] }),
   ]) {
     const limits = new NativeAdmissionLimits({
-      v1: native({ a: answer }).source,
+      codex: native({ a: answer }).source,
       now: () => start,
     });
-    assert.deepEqual((await limits.screen(context, [account("a")])).limitedAccounts, []);
+    assert.deepEqual(refs(await limits.screen(context, [account("a")])), []);
   }
-  const throwing = new NativeAdmissionLimits({
-    v1: {
+  // Only Codex profiles are read; Claude and API-key profiles keep today's behavior.
+  const others = native({ a: async () => foreign });
+  const limits = new NativeAdmissionLimits({ codex: others.source, now: () => start });
+  for (const profile of ["anthropic-claude-oauth-messages-v1", "openai-responses-apikey-v1"]) {
+    assert.deepEqual(refs(await limits.screen(context, [account("a", { profile })])), []);
+  }
+  assert.deepEqual(others.reads, []);
+  // A saturated read lane fails open instead of queueing behind native.
+  const gate: { open?: (value: unknown) => void } = {};
+  const slow = native({
+    a: () =>
+      new Promise((resolve) => {
+        gate.open = resolve;
+      }),
+    b: async () => exhausted(),
+  });
+  const busy = new NativeAdmissionLimits({ codex: slow.source, now: () => start });
+  const first = busy.screen(context, [account("a")]);
+  assert.deepEqual(refs(await busy.screen(context, [account("b")])), []);
+  gate.open?.(exhausted());
+  assert.deepEqual(refs(await first), ["a"]);
+  assert.deepEqual(slow.reads, ["a@1"]);
+});
+
+void test("a synchronous source failure releases its read slot", async () => {
+  let calls = 0;
+  const limits = new NativeAdmissionLimits({
+    codex: {
       readAccountLimits() {
-        throw new Error("synchronous source failure");
+        calls++;
+        if (calls === 1) {
+          throw new Error("synchronous source failure");
+        }
+        return Promise.resolve(exhausted());
       },
     },
+    now: () => start,
+    ttlMs: 0,
   });
-  assert.deepEqual((await throwing.screen(context, [account("a")])).limitedAccounts, []);
-  // A profile without a native limits contract is never read.
-  const none = native({ a: async () => foreign });
-  const mimo = new NativeAdmissionLimits({ v1: none.source, now: () => start });
-  const unsupported = account("a", { profile: "openai-responses-apikey-v1" });
-  assert.deepEqual((await mimo.screen(context, [unsupported])).limitedAccounts, []);
-  assert.deepEqual(none.reads, []);
+  assert.deepEqual(refs(await limits.screen(context, [account("a")])), []);
+  assert.deepEqual(refs(await limits.screen(context, [account("a")])), ["a"]);
 });
 
 void test("a cached snapshot is re-evaluated against the clock and misses on a new epoch", async () => {
   let now = start;
-  const n = native({ a: async () => snapshot(window("primary", 100, start + minute)) });
-  const limits = new NativeAdmissionLimits({ v1: n.source, now: () => now, ttlMs: 5 * minute });
-  assert.deepEqual((await limits.screen(context, [account("a")])).limitedAccounts, ["a"]);
-  now = start + minute / 2;
-  assert.deepEqual((await limits.screen(context, [account("a")])).limitedAccounts, ["a"]);
-  now = start + 2 * minute;
-  assert.deepEqual((await limits.screen(context, [account("a")])).limitedAccounts, []);
+  const n = native({ a: async () => snapshot(window("primary", 100, start + 10_000)) });
+  const limits = new NativeAdmissionLimits({ codex: n.source, now: () => now, ttlMs: 50_000 });
+  assert.deepEqual(refs(await limits.screen(context, [account("a")])), ["a"]);
+  now = start + 5000;
+  assert.deepEqual(refs(await limits.screen(context, [account("a")])), ["a"]);
+  now = start + 20_000;
+  assert.deepEqual(refs(await limits.screen(context, [account("a")])), []);
   assert.deepEqual(n.reads, ["a@1"]);
   await limits.screen(context, [account("a", { epoch: 2 })]);
   assert.deepEqual(n.reads, ["a@1", "a@2"]);
@@ -159,12 +200,12 @@ void test("a cached snapshot is re-evaluated against the clock and misses on a n
 
 void test("retry-after is the earliest reset among refused accounts within the contract hour", async () => {
   const n = native({
-    a: async () => snapshot(window("primary", 100, start + 10 * minute)),
+    a: async () => exhausted(),
     b: async () => snapshot(window("secondary", 100, start + 3 * 24 * 60 * minute)),
   });
-  const limits = new NativeAdmissionLimits({ v1: n.source, now: () => start });
+  const limits = new NativeAdmissionLimits({ codex: n.source, now: () => start });
   const screen = await limits.screen(context, [account("a"), account("b")]);
-  assert.deepEqual(screen.limitedAccounts, ["a", "b"]);
+  assert.deepEqual(refs(screen), ["a", "b"]);
   assert.equal(screen.retryAfterMs(["a", "b"]), 10 * minute);
   assert.equal(screen.retryAfterMs(["b"]), MAX_RETRY_AFTER_MS);
 });

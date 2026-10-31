@@ -1176,10 +1176,7 @@ export class NativeAccountLimitsV2Client extends NativeControlHTTP {
       throw new NativeFailure("invalid_readback");
     }
   }
-  async readAccountLimits(
-    input: AccountLimitsRequest,
-    deadlineMs?: number,
-  ): Promise<AccountLimitsV2> {
+  async readAccountLimits(input: AccountLimitsRequest): Promise<AccountLimitsV2> {
     try {
       return accountLimitsV2.parse(
         decode(
@@ -1187,7 +1184,6 @@ export class NativeAccountLimitsV2Client extends NativeControlHTTP {
             "POST",
             "/private/native/v2/account-limits/read",
             accountLimitsRequest.parse(input),
-            deadlineMs,
           ),
         ),
       );

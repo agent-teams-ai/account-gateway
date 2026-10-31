@@ -756,7 +756,7 @@ function nativeLimits() {
   const codex = providerConnectionDefinition("openai-codex-oauth-responses-v1");
   assert.ok(codex);
   const admission = new NativeAdmissionLimits({
-    v1: {
+    codex: {
       async readAccountLimits(input: c.AccountLimitsRequest) {
         if (failing.has(input.accountRef)) {
           throw new Error("native unavailable");
@@ -767,10 +767,15 @@ function nativeLimits() {
     definition: (profileId) => (profileId === profile.profile ? codex : undefined),
     ttlMs: 0,
   });
-  const exhausted = (ref: string, id: "primary" | "secondary", resetAt: number) => {
+  const exhausted = (
+    ref: string,
+    generation: string,
+    id: "primary" | "secondary",
+    resetAt: number,
+  ) => {
     answers.set(ref, {
       status: "snapshot",
-      physicalGeneration: "native-generation",
+      physicalGeneration: generation,
       principalVersion: "native-principal",
       revision: 1,
       scope: "account",
@@ -799,24 +804,31 @@ async function busy(response: Response, operationRef: string): Promise<number> {
   return error.retry.milliseconds;
 }
 
-// Red if selection ignores native exhaustion, reorders the client list, refuses
-// as effect_unknown, persists a refused preparation, refuses a recorded replay,
+const soon = () => Date.now() + 10 * 60_000;
+// Red if selection ignores native exhaustion, reorders the client list, applies
+// a snapshot of another physical generation, refuses as effect_unknown, persists
+// a refused preparation, refuses a recorded replay on either preparation route,
 // or lets an unavailable/expired native snapshot block an account.
 void test("native exhausted accounts are skipped in client order and an all-exhausted run is busy", async () => {
   const native = nativeLimits();
   const f = await fixture(60_000, native.admission);
   try {
+    const generation = async (ref: string) =>
+      (await f.kernel.accountLimitsIdentity(f.context, ref)).generation;
     const a = f.accountRef,
       b = await f.account(),
       d = await f.account();
-    native.exhausted(a, "primary", Date.now() + 10 * 60_000);
+    native.exhausted(a, await generation(a), "primary", soon());
     // b has no native snapshot yet; it stays admissible in client order.
     const firstInput = f.input({ accountRefs: [a, b, d] });
     const first = await f.mint(firstInput);
     assert.equal(first.admission.accountRef, b);
     assert.equal((await f.mint(f.input({ accountRefs: [a, d] }))).admission.accountRef, d);
 
-    native.exhausted(d, "secondary", Date.now() + 3 * 24 * 3_600_000);
+    // A snapshot of another physical generation never refuses the current one.
+    native.exhausted(d, randomUUID(), "secondary", Date.now() + 3 * 24 * 3_600_000);
+    assert.equal((await f.mint(f.input({ accountRefs: [a, d] }))).admission.accountRef, d);
+    native.exhausted(d, await generation(d), "secondary", Date.now() + 3 * 24 * 3_600_000);
     const executions = await f.count();
     const refused = f.input({ accountRefs: [a, d] });
     const retryAfter = await busy(await f.raw(refused), refused.operationId);
@@ -836,14 +848,21 @@ void test("native exhausted accounts are skipped in client order and an all-exha
     );
 
     // Recorded preparations replay unchanged after every account is exhausted.
-    native.exhausted(b, "primary", Date.now() + 10 * 60_000);
+    native.exhausted(b, await generation(b), "primary", soon());
     assert.deepEqual(await f.mint(firstInput), first);
     const sticky = await f.mint({ ...firstInput, operationId: randomUUID() });
     assert.deepEqual(sticky.admission, first.admission);
 
-    native.exhausted(a, "primary", Date.now() - 1000);
+    native.exhausted(a, await generation(a), "primary", Date.now() - 1000);
     assert.equal((await f.mint(f.input({ accountRefs: [a, d] }))).admission.accountRef, a);
-    native.exhausted(a, "primary", Date.now() + 10 * 60_000);
+    const managedInput = f.input({ accountRefs: [a] });
+    const prepared = await f.raw(managedInput, f.managementGrant.token, "/v1/executions");
+    assert.equal(prepared.status, 200);
+    const preparedBody: unknown = await prepared.json();
+    native.exhausted(a, await generation(a), "primary", soon());
+    const replayed = await f.raw(managedInput, f.managementGrant.token, "/v1/executions");
+    assert.equal(replayed.status, 200);
+    assert.deepEqual(await replayed.json(), preparedBody);
     native.failing.add(a);
     assert.equal((await f.mint(f.input({ accountRefs: [a, d] }))).admission.accountRef, a);
     assert.deepEqual(f.stats(), { transportCalls: 0, entries: 0 });
