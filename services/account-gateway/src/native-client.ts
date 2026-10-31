@@ -1140,7 +1140,11 @@ export class NativeAccountLimitsClient extends NativeControlHTTP {
       throw new NativeFailure("invalid_readback");
     }
   }
-  async readAccountLimits(input: AccountLimitsRequest): Promise<AccountLimits> {
+  // A caller deadline can only shorten the fixed control deadline.
+  async readAccountLimits(
+    input: AccountLimitsRequest,
+    deadlineMs?: number,
+  ): Promise<AccountLimits> {
     try {
       return accountLimits.parse(
         decode(
@@ -1148,6 +1152,7 @@ export class NativeAccountLimitsClient extends NativeControlHTTP {
             "POST",
             "/private/native/v1/account-limits/read",
             accountLimitsRequest.parse(input),
+            deadlineMs,
           ),
         ),
       );

@@ -34,6 +34,10 @@ Only this backend response carries a credential. Admission and execution result
 are existing public projections; generation and issuer remain server-private.
 Errors are unchanged safe v1 DTOs (400 invalid, 401 authentication, 403 denied,
 409 changed intent, 404 absence, 503 unavailable); no secret/vendor details.
+A new selection skips Codex accounts whose native cached limits show an
+exhausted window with a future reset. When every selectable account is
+exhausted the reply is 503 `admission_limited`, `not_dispatched`, with
+`retry.after` at the earliest reset (at most one hour); nothing is persisted.
 
 Bounds: 16 permitted UUID accounts, 100 configured owners, 128 profiles,
 maxRunMs 1..3600000; references <=128 characters, profile IDs <=64,

@@ -20,8 +20,9 @@ import { createHmac, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import * as c from "@agent-teams/account-gateway/contracts";
 import { secretSubmission } from "@agent-teams/account-gateway/http";
-import { KernelError, identifier, uuid } from "./domain.ts";
+import { AccountsLimitedError, KernelError, identifier, uuid } from "./domain.ts";
 import type {
+  AccountStatus,
   ApprovedLimits,
   ClaimResult,
   DurableKernel,
@@ -47,6 +48,7 @@ import { providerConnectionDefinition } from "./provider-connections.ts";
 import { projectProviderConnections } from "./provider-connection-capabilities.ts";
 import { strictJSON, validateResponses } from "./facade-ingress.ts";
 import { readCachedAccountLimits } from "./limits-port.ts";
+import type { AdmissionLimits, AdmissionLimitsScreen } from "./admission-limits.ts";
 import {
   configuredAccountModelSource,
   readAccountModels,
@@ -139,6 +141,8 @@ export interface FacadeOptions {
     getAccountLimitsCapabilities(): Promise<c.AccountLimitsV2Capabilities>;
     readAccountLimits(input: c.AccountLimitsRequest): Promise<c.AccountLimitsV2>;
   };
+  // Native limits observed at preparation; exhausted accounts are skipped.
+  readonly admissionLimits?: AdmissionLimits;
   readonly usage?: UsageJournal;
   readonly admission?: ServiceAdmission;
   readonly controlOnly?: boolean;
@@ -786,6 +790,7 @@ export function createFacade(options: FacadeOptions): Server {
       };
       controller.signal.addEventListener("abort", onAbort, { once: true });
       let identity: { operationRef?: string; requestRef?: string } = {};
+      let limited: AdmissionLimitsScreen | undefined;
       const finishRequest = async (): Promise<void> => {
         clearTimeout(ingressTimer);
         res.removeListener("close", disconnected);
@@ -1138,6 +1143,7 @@ export function createFacade(options: FacadeOptions): Server {
             const original =
               old && savedCopy(await kernel.savedExecution(context, old.executionRef!));
             // Ownership only: never derive original admission/epoch from Account GET.
+            const accounts: AccountStatus[] = [];
             for (const ref of input.accountRefs) {
               const account = await management.account(context, ref);
               if (
@@ -1146,6 +1152,7 @@ export function createFacade(options: FacadeOptions): Server {
               ) {
                 throw new KernelError("denied");
               }
+              accounts.push(account);
             }
             if (
               (!original && Date.parse(input.deadline) <= Date.now()) ||
@@ -1153,6 +1160,8 @@ export function createFacade(options: FacadeOptions): Server {
             ) {
               throw new KernelError("denied");
             }
+            // A recorded operation replays as is; only a new selection is screened.
+            limited = old ? undefined : await options.admissionLimits?.screen(context, accounts);
             const issuer = original?.admission.issuerEpoch ?? (await kernel.issuer(context));
             requireCurrent(grant);
             const tuple = [
@@ -1187,6 +1196,7 @@ export function createFacade(options: FacadeOptions): Server {
               issuerEpoch: issuer,
               deadline: new Date(input.deadline),
               limits: input.limits,
+              limitedAccounts: limited?.limitedAccounts ?? [],
             });
             if (op.state !== "applied" || !nonempty(op.executionRef)) {
               throw new KernelError("unavailable");
@@ -2127,12 +2137,15 @@ export function createFacade(options: FacadeOptions): Server {
             ) {
               throw new KernelError("denied");
             }
+            const accounts: AccountStatus[] = [];
             for (const ref of input.accountRefs) {
               const a = await management.account(context, ref);
               if (!permitsOwner(grant, a.ownerRef) || a.profile !== p.profileId) {
                 throw new KernelError("denied");
               }
+              accounts.push(a);
             }
+            limited = await options.admissionLimits?.screen(context, accounts);
             const issuer = await kernel.issuer(context);
             requireCurrent(grant);
             const tuple = [
@@ -2167,6 +2180,7 @@ export function createFacade(options: FacadeOptions): Server {
               issuerEpoch: issuer,
               deadline: new Date(input.deadline),
               limits: input.limits,
+              limitedAccounts: limited?.limitedAccounts ?? [],
             });
             reply(c.preparationOperation, await operationDTO(context, op));
             return;
@@ -2215,6 +2229,21 @@ export function createFacade(options: FacadeOptions): Server {
             if (res.headersSent || res.destroyed) {
               controller.abort();
               res.destroy();
+              return;
+            }
+            if (error instanceof AccountsLimitedError && limited && !enteredTransport) {
+              // The preparation transaction rolled back before any execution existed,
+              // so this one refusal is definitely not dispatched despite `uncertain`.
+              res.shouldKeepAlive = false;
+              send(
+                res,
+                c.safeError,
+                {
+                  ...safe("admission_limited", "not_dispatched", identity),
+                  retry: { kind: "after", milliseconds: limited.retryAfterMs(error.accountRefs) },
+                },
+                503,
+              );
               return;
             }
             const code = error instanceof KernelError ? error.code : "unavailable";

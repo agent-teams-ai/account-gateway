@@ -19,6 +19,15 @@ export class KernelError extends Error {
     this.code = code;
   }
 }
+// Every selectable permitted account was excluded as limited. Thrown inside the
+// preparation transaction, so nothing was persisted or dispatched.
+export class AccountsLimitedError extends KernelError {
+  readonly accountRefs: readonly string[];
+  constructor(accountRefs: readonly string[]) {
+    super("unavailable");
+    this.accountRefs = Object.freeze([...accountRefs]);
+  }
+}
 // Compare nanoseconds, including offsets and differently marshalled fractions.
 // Date is used only for the whole second, never to round fractional authority.
 export function instant(value: unknown): bigint {
@@ -178,6 +187,16 @@ export interface ApprovedPreparation {
   // Supplied only by trusted server policy, never extended by the client.
   deadline: Date;
   limits: ApprovedLimits;
+  // Permitted accounts the native source reports as limited. Selection skips
+  // them; they are not part of the intent, so replay and sticky reuse ignore them.
+  limitedAccounts?: readonly LimitedAccount[];
+}
+// A native observation applies only to the exact epoch and physical generation
+// it was read for; a reconnected or changed account is selectable again.
+export interface LimitedAccount {
+  accountRef: string;
+  authorizationEpoch: number;
+  generation: string;
 }
 // Server-approved policy values, independent of SDK validation and provider DTOs.
 export interface ApprovedLimits {
