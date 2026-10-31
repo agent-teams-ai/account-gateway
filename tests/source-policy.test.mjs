@@ -130,6 +130,22 @@ test("bearer authority forbids type-only HTTP facade dependencies", () =>
     violates(check(root));
   }));
 
+// SQL row projections must not import SQL drivers or HTTP even as type-only
+// dependencies: validation is a pure domain-boundary adapter.
+test("persisted SQL record decoder forbids DB and HTTP type imports", () =>
+  fixture((root) => {
+    passes(check(root));
+    const file = join(root, "services/account-gateway/src/postgres-records.ts");
+    const original = readFileSync(file, "utf8");
+    for (const forbidden of [
+      "import type { Pool } from 'pg';\nexport type ForbiddenProjection = Pool;\n",
+      "import type { NativeTransport } from './facade.ts';\nexport type ForbiddenProjection = NativeTransport;\n",
+    ]) {
+      writeFileSync(file, original + "\n" + forbidden);
+      violates(check(root));
+    }
+  }));
+
 // Regression: the llm domain gains a transport dependency or an adapter bypasses the application entry.
 test("llm layers depend inward through public layer entries only", () =>
   fixture((root) => {

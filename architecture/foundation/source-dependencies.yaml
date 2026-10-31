@@ -89,8 +89,8 @@ boundaries:
     allow: {boundaries: [kernel-domain, kernel-postgres], packages: [pg], builtins: [], runtimeReferences: []}
   - id: kernel-tests
     dependencyMode: runtime
-    roots: [services/account-gateway/test/domain.test.ts, services/account-gateway/test/postgres.test.ts, services/account-gateway/test/postgres-client-error.test.ts, services/account-gateway/test/service-admission.test.ts]
-    entrypoints: [services/account-gateway/test/domain.test.ts, services/account-gateway/test/postgres.test.ts, services/account-gateway/test/postgres-client-error.test.ts, services/account-gateway/test/service-admission.test.ts]
+    roots: [services/account-gateway/test/domain.test.ts, services/account-gateway/test/postgres.test.ts, services/account-gateway/test/postgres-records.test.ts, services/account-gateway/test/postgres-client-error.test.ts, services/account-gateway/test/service-admission.test.ts]
+    entrypoints: [services/account-gateway/test/domain.test.ts, services/account-gateway/test/postgres.test.ts, services/account-gateway/test/postgres-records.test.ts, services/account-gateway/test/postgres-client-error.test.ts, services/account-gateway/test/service-admission.test.ts]
     # Retirement assertions cover the durable usage evidence retained after cleanup.
     allow: {boundaries: [service-admission, kernel-domain, kernel-postgres, kernel-persisted-records, foreground-service-entry, usage-journal], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:timers/promises', 'node:child_process', 'node:util'], runtimeReferences: []}
 
