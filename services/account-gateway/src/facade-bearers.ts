@@ -57,11 +57,6 @@ export interface ConsumerControlBearer {
   readonly maxRunMs: number;
 }
 export const RUN_CONTROL_MAX_RUN_MS = 21_600_000;
-export interface RunAccess {
-  readonly operation: c.Operation;
-  readonly bearer: string;
-  readonly admission: c.Admission;
-}
 export type ConfiguredBearer =
   | ManagementBearer
   | ExecutionBearer

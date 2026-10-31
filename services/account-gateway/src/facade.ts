@@ -75,6 +75,11 @@ export type {
 
 // Re-export the single wire authority to private composition/configuration.
 export const lifecycleContract = c.LIFECYCLE_CAPABILITY_CONTRACT;
+export interface RunAccess {
+  readonly operation: c.Operation;
+  readonly bearer: string;
+  readonly admission: c.Admission;
+}
 function nonempty(value: string | undefined): value is string {
   return Boolean(value);
 }
