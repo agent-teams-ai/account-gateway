@@ -119,7 +119,7 @@ precedence. Existing v1/v2 quota display contracts remain unchanged. The gateway
 only validates the typed decision, generation and expiry; no threshold, account
 health counter or cooldown state exists in the gateway or SDK.
 
-Native source pin: `330ef3d859108435a867d8a72609d48e824c58ef`. Both native-client
+Native source pin: `f2deab244b62469cebfa1492e70d80a4f766dc1f`. Both native-client
 qualification and full-stack workflows use that immutable source. Deploy Native
 before the gateway to enable the additive private route; old Native returns no
 usable decision and retains the previous fail-open admission behavior. No SQL
