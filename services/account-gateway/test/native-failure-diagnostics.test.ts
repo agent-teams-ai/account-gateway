@@ -68,7 +68,6 @@ async function fixture(reply: (res: ServerResponse) => void) {
       if (recoveryError) {
         throw recoveryError;
       }
-      return undefined;
     },
     async close(_context: unknown, closeRef: string) { closeFences.add(closeRef); },
   };
@@ -150,7 +149,7 @@ void test("native preparation failure retains its closed cause without a native 
   try {
     f.prepareFailure();
     await assert.rejects(f.transport.request(f.input), { code: "unavailable", message: "SECRET_SENTINEL" });
-    assert.deepEqual(records.map((record) => JSON.parse(record)), [{
+    assert.deepEqual(records.map((record) => JSON.parse(record) as unknown), [{
       event: "gateway_native_transport_failure", phase: "prepare", kernel_code: "unavailable",
       request_ref: f.input.requestId,
     }]);
@@ -171,7 +170,7 @@ for (const throwingSink of [false, true]) {
     const f = await fixture((res) => res.writeHead(503, { "x-private-detail": "SECRET_SENTINEL" }).end("SECRET_SENTINEL"));
     try {
       await assert.rejects(f.transport.request(f.input), { code: "unavailable", message: "unavailable" });
-      assert.deepEqual(records.map((record) => JSON.parse(record)), [{
+      assert.deepEqual(records.map((record) => JSON.parse(record) as unknown), [{
         event: "gateway_native_transport_failure", phase: "native_response", kernel_code: "denied",
         request_ref: f.input.requestId, http_status: 503,
       }]);
@@ -188,7 +187,7 @@ void test("native receipt recovery failure retains its closed cause and does not
   try {
     f.recoveryFailure();
     await assert.rejects(f.transport.request(f.input), { code: "unavailable", message: "unavailable" });
-    assert.deepEqual(records.map((record) => JSON.parse(record)), [{
+    assert.deepEqual(records.map((record) => JSON.parse(record) as unknown), [{
       event: "gateway_native_transport_failure", phase: "receipt_recovery", kernel_code: "unknown",
       request_ref: f.input.requestId, http_status: 202,
     }]);
@@ -206,7 +205,7 @@ for (const associated of [false, true]) {
       const response = await f.callback(associated ? f.input.requestId : "SECRET_SENTINEL");
       assert.equal(response.status, 403);
       assert.deepEqual(await response.json(), { code: "denied" });
-      assert.deepEqual(records.map((record) => JSON.parse(record)), [{
+      assert.deepEqual(records.map((record) => JSON.parse(record) as unknown), [{
         event: "gateway_native_callback_failure", phase: associated ? "admit_claim" : "admit_validation",
         kernel_code: associated ? "conflict" : "denied",
         ...(associated ? { request_ref: f.input.requestId } : {}),
@@ -228,7 +227,7 @@ void test("callback pre-work authentication refusal survives a throwing diagnost
     const response = await f.unauthenticatedCallback();
     assert.equal(response.status, 403);
     assert.deepEqual(await response.json(), { code: "denied" });
-    assert.deepEqual(records.map((record) => JSON.parse(record)), [{
+    assert.deepEqual(records.map((record) => JSON.parse(record) as unknown), [{
       event: "gateway_native_callback_failure", phase: "callback_authentication", kernel_code: "denied",
     }]);
     assert.deepEqual(f.counts(), { posts: 0, closeFences: 0, claims: 0 });
@@ -244,7 +243,7 @@ void test("public execution authority preserves its HTTP503 refusal without logg
     const response = await f.executionAuthorityFailure();
     assert.equal(response.status, 503);
     assert.deepEqual(await response.json(), { code: "unavailable" });
-    assert.deepEqual(records.map((record) => JSON.parse(record)), [{
+    assert.deepEqual(records.map((record) => JSON.parse(record) as unknown), [{
       event: "gateway_native_callback_failure", phase: "callback_execution_authority", kernel_code: "unavailable",
     }]);
     assert.deepEqual(f.counts(), { posts: 0, closeFences: 0, claims: 0 });
