@@ -122,8 +122,10 @@ health counter or cooldown state exists in the gateway or SDK.
 Native source pin: `f2deab244b62469cebfa1492e70d80a4f766dc1f`. Both native-client
 qualification and full-stack workflows use that immutable source. Deploy Native
 before the gateway to enable the additive private route; old Native returns no
-usable decision and retains the previous fail-open admission behavior. No SQL
-migration or OAuth reenrollment is needed. The first provider 429 can still be
+usable decision and retains the previous fail-open admission behavior. The admission delta adds no SQL
+migration and needs no OAuth reenrollment. Upgrading the Native source from an
+older deployed pin must still apply the existing migrations included in current
+main through the normal backed-up migration procedure. The first provider 429 can still be
 classified as effect_unknown; this read-only change never replays that dispatch.
 
 Local TypeScript domain/HTTP tests, strict kernel typecheck, lint, formatting,
