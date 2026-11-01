@@ -108,3 +108,26 @@ The workflow now runs this nearest boundary in its own newly created database.
 Both primary disposable containers were removed after receipt capture. Controlled
 native fixture only: zero actual provider calls. Independent source review and
 current CI remain required; this does not prove real agent/T0/parser/App E2E.
+
+
+## Native admission authority, 2026-11-01
+
+PR #93 consumes the private Native `account-admission/read` decision instead of
+interpreting quota windows in TypeScript. Native reuses its fenced logical quota
+read and the stock Sub2API Codex reset policy, including duration-based 7d/5h
+precedence. Existing v1/v2 quota display contracts remain unchanged. The gateway
+only validates the typed decision, generation and expiry; no threshold, account
+health counter or cooldown state exists in the gateway or SDK.
+
+Native source pin: `330ef3d859108435a867d8a72609d48e824c58ef`. Both native-client
+qualification and full-stack workflows use that immutable source. Deploy Native
+before the gateway to enable the additive private route; old Native returns no
+usable decision and retains the previous fail-open admission behavior. No SQL
+migration or OAuth reenrollment is needed. The first provider 429 can still be
+classified as effect_unknown; this read-only change never replays that dispatch.
+
+Local TypeScript domain/HTTP tests, strict kernel typecheck, lint, formatting,
+Foundation and docs validation pass. Native local focused tests reached linking
+but could not finish because the machine ran out of disk. Native Linux CI and
+current-head full-stack qualification remain required; no native PASS is claimed
+from the failed local build.

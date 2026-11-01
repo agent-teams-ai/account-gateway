@@ -1,3 +1,4 @@
+import { acceptedNativeAdmission, type NativeAccountAdmission } from "./native-admission-wire.ts";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import type {
@@ -1136,6 +1137,29 @@ export class NativeAccountLimitsClient extends NativeControlHTTP {
       return accountLimitsCapabilities.parse(
         decode(await this.call("GET", "/private/native/v1/account-limits/capabilities")),
       );
+    } catch {
+      throw new NativeFailure("invalid_readback");
+    }
+  }
+  async readAccountAdmission(
+    input: AccountLimitsRequest,
+    deadlineMs?: number,
+  ): Promise<NativeAccountAdmission> {
+    try {
+      const result = acceptedNativeAdmission(
+        decode(
+          await this.call(
+            "POST",
+            "/private/native/v1/account-admission/read",
+            accountLimitsRequest.parse(input),
+            deadlineMs,
+          ),
+        ),
+      );
+      if (!result) {
+        throw new NativeFailure("invalid_readback");
+      }
+      return result;
     } catch {
       throw new NativeFailure("invalid_readback");
     }

@@ -757,7 +757,7 @@ function nativeLimits() {
   assert.ok(codex);
   const admission = new NativeAdmissionLimits({
     codex: {
-      async readAccountLimits(input: c.AccountLimitsRequest) {
+      async readAccountAdmission(input: c.AccountLimitsRequest) {
         if (failing.has(input.accountRef)) {
           throw new Error("native unavailable");
         }
@@ -774,22 +774,9 @@ function nativeLimits() {
     resetAt: number,
   ) => {
     answers.set(ref, {
-      status: "snapshot",
+      status: "limited",
       physicalGeneration: generation,
-      principalVersion: "native-principal",
-      revision: 1,
-      scope: "account",
-      windows: [
-        {
-          id,
-          family: "codex",
-          durationSeconds: id === "primary" ? 18_000 : 604_800,
-          usedPercent: 100,
-          observedAt: new Date().toISOString(),
-          resetAt: new Date(resetAt).toISOString(),
-          basis: "duration",
-        },
-      ],
+      retryAt: new Date(resetAt).toISOString(),
     });
   };
   return { admission, failing, exhausted };

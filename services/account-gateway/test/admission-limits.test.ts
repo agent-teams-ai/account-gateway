@@ -1,11 +1,9 @@
+import { NativeAccountLimitsClient } from "../src/native-client.ts";
+import { createServer } from "node:http";
 import test from "node:test";
 import assert from "node:assert/strict";
 import type * as c from "@agent-teams/account-gateway/contracts";
-import {
-  MAX_RETRY_AFTER_MS,
-  NativeAdmissionLimits,
-  exhaustedUntil,
-} from "../src/admission-limits.ts";
+import { MAX_RETRY_AFTER_MS, NativeAdmissionLimits } from "../src/admission-limits.ts";
 import type { AccountStatus } from "../src/domain.ts";
 
 const codex = "openai-codex-oauth-responses-v1";
@@ -13,29 +11,11 @@ const context = { consumerId: "consumer-a" };
 const start = Date.parse("2026-10-31T12:00:00Z");
 const minute = 60_000;
 const iso = (ms: number) => new Date(ms).toISOString();
-function window(id: "primary" | "secondary", usedPercent: number | null, resetAt: number | null) {
-  return {
-    id,
-    family: "codex" as const,
-    durationSeconds: id === "primary" ? 18_000 : 604_800,
-    usedPercent,
-    observedAt: iso(start),
-    resetAt: resetAt === null ? null : iso(resetAt),
-    basis: "duration" as const,
-  };
-}
-type Snapshot = Extract<c.AccountLimits, { status: "snapshot" }>;
-function snapshot(...windows: Snapshot["windows"]): Snapshot {
-  return {
-    status: "snapshot",
-    physicalGeneration: "generation-a",
-    principalVersion: "principal-a",
-    revision: 1,
-    scope: "account",
-    windows,
-  };
-}
-const exhausted = () => snapshot(window("primary", 100, start + 10 * minute));
+const exhausted = (retryAt = start + 10 * minute) => ({
+  status: "limited",
+  physicalGeneration: "generation-a",
+  retryAt: iso(retryAt),
+});
 function account(accountRef: string, patch: Partial<AccountStatus> = {}): AccountStatus {
   return {
     accountRef,
@@ -48,13 +28,13 @@ function account(accountRef: string, patch: Partial<AccountStatus> = {}): Accoun
     ...patch,
   };
 }
-// Native boundary emulator: answers like /private/native/v1/account-limits/read.
+// Native boundary emulator: answers like /private/native/v1/account-admission/read.
 function native(answers: Record<string, () => Promise<unknown>>) {
   const reads: string[] = [];
   return {
     reads,
     source: {
-      async readAccountLimits(input: c.AccountLimitsRequest) {
+      async readAccountAdmission(input: c.AccountLimitsRequest) {
         reads.push(input.accountRef + "@" + input.expectedAuthorizationEpoch);
         return (answers[input.accountRef] ?? (async () => ({ status: "unknown" })))();
       },
@@ -63,44 +43,6 @@ function native(answers: Record<string, () => Promise<unknown>>) {
 }
 const refs = (screen: { limitedAccounts: readonly { accountRef: string }[] }) =>
   screen.limitedAccounts.map((l) => l.accountRef);
-
-void test("exhaustion follows the Sub2API Codex rule until the last exhausted window resets", () => {
-  const weekly = start + 3 * 24 * 60 * minute;
-  assert.equal(
-    exhaustedUntil(
-      snapshot(window("primary", 100, start + 10 * minute), window("secondary", 16, weekly)),
-      start,
-    ),
-    start + 10 * minute,
-  );
-  assert.equal(
-    exhaustedUntil(
-      snapshot(window("primary", 100, start + 10 * minute), window("secondary", 100, weekly)),
-      start,
-    ),
-    weekly,
-  );
-  for (const unlimited of [
-    snapshot(window("primary", 99.9, start + 10 * minute)),
-    snapshot(window("primary", 100, start - 1)),
-    snapshot(window("primary", 100, start)),
-    snapshot(window("primary", 100, null)),
-    snapshot(window("primary", null, start + 10 * minute)),
-    // A model-scoped Claude window never gates the account's own model.
-    snapshot({
-      id: "claude-7d-fable",
-      family: "claude",
-      durationSeconds: 604_800,
-      usedPercent: 137.5,
-      observedAt: iso(start),
-      resetAt: iso(weekly),
-      basis: "duration",
-    }),
-  ]) {
-    assert.equal(exhaustedUntil(unlimited, start), undefined);
-  }
-  assert.equal(exhaustedUntil({ status: "unknown" }, start), undefined);
-});
 
 void test("screen keeps client order and stops reading at the first admissible account", async () => {
   const n = native({ a: async () => exhausted(), c: async () => exhausted() });
@@ -133,7 +75,7 @@ void test("failed, late, saturated, malformed and foreign snapshots never limit 
       throw new Error("native unavailable");
     },
     async () => ({ status: "snapshot", windows: [{ id: "primary", usedPercent: 100 }] }),
-    async () => ({ ...foreign, windows: [{ ...foreign.windows[0], family: "claude" }] }),
+    async () => ({ ...foreign, retryAt: "not-a-date" }),
   ]) {
     const limits = new NativeAdmissionLimits({
       codex: native({ a: answer }).source,
@@ -169,7 +111,7 @@ void test("a synchronous source failure releases its read slot", async () => {
   let calls = 0;
   const limits = new NativeAdmissionLimits({
     codex: {
-      readAccountLimits() {
+      readAccountAdmission() {
         calls++;
         if (calls === 1) {
           throw new Error("synchronous source failure");
@@ -186,7 +128,7 @@ void test("a synchronous source failure releases its read slot", async () => {
 
 void test("a cached snapshot is re-evaluated against the clock and misses on a new epoch", async () => {
   let now = start;
-  const n = native({ a: async () => snapshot(window("primary", 100, start + 10_000)) });
+  const n = native({ a: async () => exhausted(start + 10_000) });
   const limits = new NativeAdmissionLimits({ codex: n.source, now: () => now, ttlMs: 50_000 });
   assert.deepEqual(refs(await limits.screen(context, [account("a")])), ["a"]);
   now = start + 5000;
@@ -201,11 +143,68 @@ void test("a cached snapshot is re-evaluated against the clock and misses on a n
 void test("retry-after is the earliest reset among refused accounts within the contract hour", async () => {
   const n = native({
     a: async () => exhausted(),
-    b: async () => snapshot(window("secondary", 100, start + 3 * 24 * 60 * minute)),
+    b: async () => exhausted(start + 3 * 24 * 60 * minute),
   });
   const limits = new NativeAdmissionLimits({ codex: n.source, now: () => start });
   const screen = await limits.screen(context, [account("a"), account("b")]);
   assert.deepEqual(refs(screen), ["a", "b"]);
   assert.equal(screen.retryAfterMs(["a", "b"]), 10 * minute);
   assert.equal(screen.retryAfterMs(["b"]), MAX_RETRY_AFTER_MS);
+});
+
+void test("native admission HTTP forwards only the logical selector and rejects window snapshots", async () => {
+  let calls = 0;
+  const server = createServer((req, res) => {
+    assert.equal(req.url, "/private/native/v1/account-admission/read");
+    assert.equal(req.headers.authorization, "Bearer fixture-control");
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => {
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString()), {
+        ownerRef: "owner-a",
+        accountRef: "a",
+        profileId: codex,
+        expectedAuthorizationEpoch: 1,
+      });
+      res.setHeader("content-type", "application/json");
+      res.end(
+        JSON.stringify(
+          calls++ === 0
+            ? exhausted()
+            : {
+                status: "snapshot",
+                windows: [{ usedPercent: 100, resetAt: iso(start + minute) }],
+              },
+        ),
+      );
+    });
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert.ok(address !== null && typeof address === "object");
+  const client = new NativeAccountLimitsClient({
+    origin: `http://127.0.0.1:${address.port}`,
+    consumerId: context.consumerId,
+    controlCredential: "fixture-control",
+  });
+  const limits = new NativeAdmissionLimits({ codex: client, now: () => start, ttlMs: 0 });
+  try {
+    assert.deepEqual(refs(await limits.screen(context, [account("a")])), ["a"]);
+    assert.deepEqual(refs(await limits.screen(context, [account("a")])), []);
+    assert.equal(calls, 2);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve();
+        }
+      });
+    });
+  }
 });

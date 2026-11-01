@@ -1,18 +1,18 @@
 import type * as c from "@agent-teams/account-gateway/contracts";
 import { KernelError } from "./domain.ts";
 import type { AccountStatus, LimitedAccount, TrustedContext } from "./domain.ts";
-import { acceptedLimitsWire } from "./limits-port.ts";
+import { acceptedNativeAdmission, type NativeAccountAdmission } from "./native-admission-wire.ts";
 import {
   providerConnectionDefinition,
   type ProviderConnectionDefinition,
 } from "./provider-connections.ts";
 
-type CodexSnapshot = Extract<c.AccountLimits, { status: "snapshot" }>;
+type NativeLimited = Extract<NativeAccountAdmission, { status: "limited" }>;
 export interface AdmissionLimitsSource {
-  readAccountLimits(input: c.AccountLimitsRequest, deadlineMs?: number): Promise<unknown>;
+  readAccountAdmission(input: c.AccountLimitsRequest, deadlineMs?: number): Promise<unknown>;
 }
 export interface AdmissionLimitsScreen {
-  // Permitted accounts the native snapshot reports as exhausted, in client order.
+  // Permitted accounts native policy reports as limited, in client order.
   readonly limitedAccounts: readonly LimitedAccount[];
   // Earliest reset among the given limited accounts, bounded by the wire contract.
   retryAfterMs(accountRefs: readonly string[]): number;
@@ -26,33 +26,6 @@ export interface AdmissionLimits {
 
 // safeError retry.after upper bound (facade-client contracts).
 export const MAX_RETRY_AFTER_MS = 3_600_000;
-
-/**
- * Sub2API's Codex rule (calculateOpenAI429ResetTime), applied verbatim to the
- * native snapshot: the account-wide primary/secondary window used at or above
- * 100% with a known future reset. Usable again after the last such reset. No
- * threshold, cooldown or counter of the gateway's own. Other providers' windows
- * (for example model-scoped Claude windows) are deliberately not interpreted.
- */
-export function exhaustedUntil(wire: c.AccountLimits, now: number): number | undefined {
-  if (wire.status !== "snapshot") {
-    return undefined;
-  }
-  let until: number | undefined;
-  for (const window of wire.windows) {
-    const reset = window.resetAt === null ? Number.NaN : Date.parse(window.resetAt);
-    if (
-      window.family === "codex" &&
-      (window.id === "primary" || window.id === "secondary") &&
-      window.usedPercent !== null &&
-      window.usedPercent >= 100 &&
-      reset > now
-    ) {
-      until = Math.max(until ?? reset, reset);
-    }
-  }
-  return until;
-}
 
 const late = Symbol("late");
 // A failed or late read is "no data"; the timer never keeps the process alive.
@@ -95,8 +68,8 @@ const bounded = (value: number, maximum: number): number => {
 };
 
 /**
- * Read-only admission view of the native cached Codex limits. It keeps no
- * account health: a short read-through cache of native snapshots, evaluated
+ * Read-only admission view of the native eligibility decision. It keeps no
+ * account health: a short read-through cache of native decisions, evaluated
  * against the current clock. Any missing, failed, late, saturated or foreign
  * snapshot is treated as admissible, so native data can only narrow selection.
  */
@@ -113,7 +86,7 @@ export class NativeAdmissionLimits implements AdmissionLimits {
   #reads = 0;
   readonly #cache = new Map<
     string,
-    { expires: number; wire: Promise<CodexSnapshot | undefined> }
+    { expires: number; wire: Promise<NativeLimited | undefined> }
   >();
   constructor(options: NativeAdmissionLimitsOptions) {
     this.#codex = options.codex;
@@ -136,15 +109,15 @@ export class NativeAdmissionLimits implements AdmissionLimits {
       if (account.state !== "active") {
         continue;
       }
-      let wire: CodexSnapshot | undefined;
+      let wire: NativeLimited | undefined;
       try {
         const pending = this.#snapshot(context, account);
         wire = pending && (await within(pending, deadline - this.#now()));
       } catch {
         /* A source that throws synchronously is no data, never a refusal. */
       }
-      const reset = wire && exhaustedUntil(wire, this.#now());
-      if (wire === undefined || reset === undefined) {
+      const reset = wire && Date.parse(wire.retryAt);
+      if (wire === undefined || reset === undefined || reset <= this.#now()) {
         break; // First admissible or unknown account in client order.
       }
       until.set(account.accountRef, reset);
@@ -172,7 +145,7 @@ export class NativeAdmissionLimits implements AdmissionLimits {
   #snapshot(
     context: TrustedContext,
     account: AccountStatus,
-  ): Promise<CodexSnapshot | undefined> | undefined {
+  ): Promise<NativeLimited | undefined> | undefined {
     const definition = this.#definition(account.profile),
       source = this.#codex;
     if (
@@ -201,7 +174,7 @@ export class NativeAdmissionLimits implements AdmissionLimits {
     this.#reads++;
     // The async wrapper turns a synchronous source throw into "no data".
     const read = (async () =>
-      source.readAccountLimits(
+      source.readAccountAdmission(
         {
           ownerRef: account.ownerRef,
           accountRef: account.accountRef,
@@ -212,11 +185,8 @@ export class NativeAdmissionLimits implements AdmissionLimits {
       ))();
     const wire = within(read, this.#readMs)
       .then((observed) => {
-        const accepted =
-          observed === undefined
-            ? undefined
-            : acceptedLimitsWire("account-limits/v1", observed, "openai");
-        return accepted?.status === "snapshot" ? (accepted as CodexSnapshot) : undefined;
+        const accepted = observed === undefined ? undefined : acceptedNativeAdmission(observed);
+        return accepted?.status === "limited" ? accepted : undefined;
       })
       .finally(() => {
         this.#reads--;
