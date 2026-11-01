@@ -1,6 +1,5 @@
 // Actual CLI -> TypeScript authority/usage -> Go OAuth -> controlled TLS/PG.
 // Build/install happen before this disposable, explicitly egress-free process.
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
@@ -24,69 +23,13 @@ import {
   joinedSourceHashes,
 } from "./joined-evidence.ts";
 import type { ClientPins, InstalledClients, JoinedBuildReceipt } from "./joined-evidence.ts";
+import { CommandFailure, command } from "./joined-command.ts";
 
 function check(value: unknown, code: string): asserts value {
   const accepted = Boolean(value);
   if (!accepted) {
     throw new Error(code);
   }
-}
-class CommandFailure extends Error {
-  readonly output: string;
-  constructor(output: string) {
-    super("joined-command-failed");
-    this.output = output;
-  }
-}
-async function command(
-  binary: string,
-  args: string[],
-  env: NodeJS.ProcessEnv,
-  options: { uid?: number; timeout?: number; expected?: number; cwd?: string } = {},
-) {
-  const child = spawn(binary, args, {
-    cwd: options.cwd,
-    env,
-    uid: options.uid,
-    gid: options.uid,
-    stdio: ["ignore", "pipe", "pipe"],
-    detached: true,
-  });
-  let output = "",
-    size = 0,
-    overflow = false,
-    expired = false;
-  const kill = () => {
-    try {
-      process.kill(-child.pid!, "SIGKILL");
-    } catch {}
-  };
-  const capture = (bytes: Buffer) => {
-    size += bytes.length;
-    if (size > 4_194_304) {
-      overflow = true;
-      kill();
-    } else {
-      output += bytes.toString("utf8");
-    }
-  };
-  child.stdout.on("data", capture);
-  child.stderr.on("data", capture);
-  const timer = setTimeout(() => {
-    expired = true;
-    kill();
-  }, options.timeout ?? 30_000);
-  const code = await new Promise<number | null>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", resolve);
-  }).finally(() => {
-    clearTimeout(timer);
-  });
-  const commandFailed = () => expired || overflow;
-  if (commandFailed() || code !== (options.expected ?? 0)) {
-    throw new CommandFailure(output);
-  }
-  return output;
 }
 async function freePort() {
   const server = createServer();
@@ -288,14 +231,14 @@ async function main() {
         [prefix + "GO"]: go,
         [prefix + "SCRATCH_ROOT"]: scratch,
       });
-      const output = await command(
+      const stdout = await command(
         process.execPath,
         [join(repo, joinedFiles[(client.id + "Harness") as "claudeHarness" | "codexHarness"])],
         childEnv,
         { cwd: repo, timeout: 120_000 },
       );
       receipts.push(
-        joinedReceipt(output, client.id, {
+        joinedReceipt(stdout, client.id, {
           nativeCommit,
           gatewayCommit,
           binarySHA256: binaries[client.id],
