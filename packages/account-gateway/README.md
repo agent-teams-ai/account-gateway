@@ -169,6 +169,16 @@ verified for any profile:
 | MiMo | provider rejects `json_schema`; use `json_object` or `text` | `max_output_tokens` acceptance |
 | OpenRouter | root allowlist only; format passes through | per-model support |
 
+For Codex OAuth, `model` may name any model of the account's live catalog, for
+example `gpt-6.1-sol`, and `effort` must be one of that model's catalog levels.
+Both the facade and Native check the request against the catalog. The
+enrollment anchor stays `gpt-5.6-sol` in
+`oauthEnrollment.modelScope` and the Native `oauth.profile.model`; Native denies
+any other anchor at startup, so selecting another model needs neither a
+configuration change nor a new device login. While the catalog is explicitly
+unavailable, only the anchor is admitted, so a request for another model fails
+before dispatch instead of falling back.
+
 `prepareStrictJsonSchema(schema)` is an optional helper for strict providers
 such as Codex OAuth. It returns `{ schema, decode }`: every property becomes
 required, optional ones accept an added `null`, and objects close with
