@@ -50,6 +50,8 @@ import {
   singleton,
 } from "./native-wire.ts";
 import type { BridgeConfig, Configuration, Descriptor } from "./native-wire.ts";
+import { emitNativeFailure } from "./native-failure-diagnostics.ts";
+import type { NativeFailureContext } from "./native-failure-diagnostics.ts";
 
 type Input = Parameters<NativeTransport["request"]>[0];
 export interface Association {
@@ -1070,7 +1072,11 @@ export class NativeAuthority {
     );
     await this.kernel.acknowledgeTransportClosed(ctx, p.worker, p);
   }
-  async #admit(ctx: TrustedContext, value: unknown): Promise<unknown> {
+  async #admit(
+    ctx: TrustedContext,
+    value: unknown,
+    diagnostic: NativeFailureContext,
+  ): Promise<unknown> {
     const r = object(value, [
       "consumerId",
       "requestRef",
@@ -1116,6 +1122,9 @@ export class NativeAuthority {
     ) {
       return denied();
     }
+    // Only the fully matched, authorized saved association supplies correlation.
+    diagnostic.requestRef = a.requestId;
+    diagnostic.phase = "admit_claim";
     if (a.admitStarted) {
       const status = await this.kernel.request(ctx, admitted.executionRef, a.requestId);
       return { consumerId: ctx.consumerId, admission: a.saved.admission, status };
@@ -1152,6 +1161,7 @@ export class NativeAuthority {
     ) {
       return denied();
     }
+    diagnostic.phase = "admit_dispatch";
     await this.dispatch(ctx, p, permit.permitExpiresAt);
     return {
       consumerId: ctx.consumerId,
@@ -1180,6 +1190,7 @@ export class NativeAuthority {
         connectionsCheckingInterval: 100,
       },
       (req, res) => {
+        const diagnostic: NativeFailureContext = { phase: "callback_input" };
         const send = (status: number, body: unknown) => {
           if (!res.destroyed) {
             res.writeHead(status, { "content-type": "application/json", connection: "close" });
@@ -1205,6 +1216,7 @@ export class NativeAuthority {
           ) {
             return denied();
           }
+          diagnostic.phase = "callback_authentication";
           const authorization = singleton(req, "authorization");
           if (
             !nonempty(authorization) ||
@@ -1231,7 +1243,8 @@ export class NativeAuthority {
           if (reservationNonce !== undefined) {
             uuid(reservationNonce);
           }
-        } catch {
+        } catch (error) {
+          emitNativeFailure("callback", error, diagnostic);
           send(403, { code: "denied" });
           return;
         }
@@ -1256,6 +1269,7 @@ export class NativeAuthority {
             const custodyLookup = path.endsWith("/oauth-custody-authority");
             const refreshLookup = path.endsWith("/oauth-refresh-authority");
             const cleanupLookup = path.endsWith("/oauth-cleanup-authority");
+            diagnostic.phase = "callback_body";
             const ctx = Object.freeze({ consumerId }),
               body = await jsonBody(
                 req,
@@ -1264,10 +1278,12 @@ export class NativeAuthority {
                   : cfg.controlBytes,
               );
             if (path.endsWith("/execution-authority")) {
+              diagnostic.phase = "callback_execution_authority";
               send(200, await this.#publicAuthority(ctx, body));
               return;
             }
             if (path.endsWith("/public-admit")) {
+              diagnostic.phase = "callback_public_admit";
               if (
                 reservationNonce !== undefined &&
                 binding((body as Record<string, unknown>).native).requestNonce !== reservationNonce
@@ -1278,10 +1294,12 @@ export class NativeAuthority {
               return;
             }
             if (path.endsWith("/execution-settle")) {
+              diagnostic.phase = "callback_execution_settle";
               await this.#publicSettle(ctx, body);
               send(200, { ok: true });
               return;
             }
+            diagnostic.phase = "callback_owner";
             if (limitsLookup) {
               send(200, await this.#accountLimitsOwner(ctx, body));
               return;
@@ -1303,6 +1321,7 @@ export class NativeAuthority {
               return;
             }
             if (path.endsWith("/enrollment")) {
+              diagnostic.phase = "callback_enrollment";
               const r = object(body, ["originRef", "engineIncarnation", "qualificationRef"]),
                 e = cfg.enrollment;
               if (
@@ -1313,6 +1332,7 @@ export class NativeAuthority {
                 return denied();
               }
             } else if (path.endsWith("/admit")) {
+              diagnostic.phase = "admit_validation";
               const r = object(body, [
                 "consumerId",
                 "requestRef",
@@ -1324,9 +1344,10 @@ export class NativeAuthority {
               if (r.consumerId !== ctx.consumerId) {
                 return denied();
               }
-              send(200, await this.#admit(ctx, r));
+              send(200, await this.#admit(ctx, r, diagnostic));
               return;
             } else {
+              diagnostic.phase = "callback_proof";
               const route = path.slice(path.lastIndexOf("/") + 1);
               const r = object(
                 body,
@@ -1348,12 +1369,15 @@ export class NativeAuthority {
               }
               const p = proof(r.proof);
               if (route === "dispatch-proof") {
+                diagnostic.phase = "callback_dispatch";
                 await this.dispatch(ctx, p, r.leaseExpiresAt);
               } else if (route === "cleanup-authority") {
+                diagnostic.phase = "callback_cleanup";
                 await this.delegated(ctx, p, r.cleanup);
               } else {
                 await this.persisted(ctx, p);
                 if (route === "closure-ack") {
+                  diagnostic.phase = "callback_closure";
                   const closed = receipt(r.receipt, ctx.consumerId, p);
                   if (!physicallyClosed(closed)) {
                     return denied();
@@ -1393,6 +1417,7 @@ export class NativeAuthority {
             send(200, { ok: true });
           })()
             .catch((error: unknown) => {
+              emitNativeFailure("callback", error, diagnostic);
               if (
                 req.url === "/private/native/v1/execution-authority" &&
                 error instanceof KernelError &&

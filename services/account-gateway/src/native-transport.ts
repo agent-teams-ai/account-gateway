@@ -18,6 +18,8 @@ import {
   singleton,
 } from "./native-wire.ts";
 import type { CleanupLease, Receipt } from "./native-wire.ts";
+import { emitNativeFailure } from "./native-failure-diagnostics.ts";
+import type { NativeFailureContext } from "./native-failure-diagnostics.ts";
 
 const path = "/private/native/v1/transports";
 const streamChunkBytes = 65_536;
@@ -182,11 +184,13 @@ export class NativeHTTPTransport implements NativeTransport {
       return { kind: "status" };
     }
     let envelope: Buffer;
+    const diagnostic: NativeFailureContext = { phase: "prepare", requestRef: a.requestId };
     try {
       // Public grant/body checks already completed at ingress. Original native
       // mapping/lease validation is protocol work; it holds no SQL checkout
       // across the subsequent HTTP call and cannot consume another data permit.
       await inServiceLane("control", () => authority.prepare(a, bytes));
+      diagnostic.phase = "prepare_envelope";
       envelope = Buffer.concat([
         Buffer.from(
           JSON.stringify({
@@ -199,10 +203,12 @@ export class NativeHTTPTransport implements NativeTransport {
         bytes,
         Buffer.from("}"),
       ]);
+      diagnostic.phase = "prepare_lifetime";
       if (a.signal.aborted || instant(a.saved.admission.expiresAt) <= now()) {
         return denied();
       }
     } catch (error) {
+      emitNativeFailure("transport", error, diagnostic);
       authority.reclaimUnstarted(a);
       throw error;
     }
@@ -258,6 +264,7 @@ export class NativeHTTPTransport implements NativeTransport {
       void cancel().catch(() => {});
     };
     a.signal.addEventListener("abort", onAbort, { once: true });
+    diagnostic.phase = "native_post";
     try {
       const duration = Math.min(
         cfg.maxStreamMs,
@@ -272,6 +279,7 @@ export class NativeHTTPTransport implements NativeTransport {
         duration,
       );
       const response = hop.response;
+      diagnostic.phase = "native_response";
       response.once("aborted", onResponseAbort);
       if (
         response.statusCode === 202 &&
@@ -280,6 +288,7 @@ export class NativeHTTPTransport implements NativeTransport {
         // An early/lost-admit-ACK receipt is not physical closure. Drain only
         // bounded JSON, then read the sealed reservation with the original SQL
         // proof (which Go may not yet have attached to its receipt).
+        diagnostic.phase = "receipt_recovery";
         await jsonBody(response, cfg.controlBytes);
         const p = await this.#recover(a);
         if (!p) {
@@ -359,7 +368,8 @@ export class NativeHTTPTransport implements NativeTransport {
           }
         })(),
       };
-    } catch {
+    } catch (error) {
+      emitNativeFailure("transport", error, diagnostic, hop?.response.statusCode);
       hop?.abort();
       a.signal.removeEventListener("abort", onAbort);
       await uncertain().catch(() => {});
