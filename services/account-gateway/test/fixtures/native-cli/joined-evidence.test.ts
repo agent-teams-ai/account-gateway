@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { joinedFailure, joinedReceipt } from "./joined-evidence.ts";
+import { CommandFailure, command } from "./joined-command.ts";
 
-void test("joined client evidence requires real terminal proofs and discards arbitrary assertion and client values", () => {
+void test("joined client evidence requires real terminal proofs and discards arbitrary assertion and client values", async (t) => {
   const expected = {
     nativeCommit: "a".repeat(40),
     gatewayCommit: "b".repeat(40),
@@ -112,4 +114,61 @@ void test("joined client evidence requires real terminal proofs and discards arb
     joinedFailure(JSON.stringify({ phase: "failed", at: "refresh-token-fixture" })),
     { code: "joined-driver-failed", at: "driver" },
   );
+
+  const child = fileURLToPath(new URL("./joined-command-fixture.ts", import.meta.url));
+  const runChild = (mode: string, stdout = "", stderr = "", timeout = 5000) =>
+    command(process.execPath, [child, mode, stdout, stderr], {}, { timeout });
+  const diagnostic =
+    JSON.stringify({
+      event: "gateway_native_callback_failure",
+      phase: "callback_execution_authority",
+      kernel_code: "denied",
+    }) + "\n";
+  const proof = JSON.stringify(value) + "\n";
+
+  await t.test("real child stderr diagnostics do not enter its strict stdout proof", async () => {
+    const stdout = await runChild("success", proof, diagnostic);
+    assert.equal(stdout, proof);
+    assert.deepEqual(joinedReceipt(stdout, "codex", expected), safe);
+  });
+  await t.test(
+    "multiple or malformed stdout proofs remain rejected beside stderr diagnostics",
+    async () => {
+      for (const raw of [proof + proof, "not-json\n"]) {
+        const stdout = await runChild("success", raw, diagnostic);
+        assert.throws(() => joinedReceipt(stdout, "codex", expected), /joined-proof-invalid/);
+      }
+    },
+  );
+  await t.test("combined stdout and stderr still spend the original four MiB bound", async () => {
+    await assert.rejects(runChild("overflow"), CommandFailure);
+  });
+  await t.test(
+    "real child failure keeps bounded stderr in the existing private sanitizer",
+    async () => {
+      const raw =
+        JSON.stringify({
+          phase: "failed",
+          at: "real-execution-cleanup",
+          frame: "native-device-joined.ts:42:9",
+          assertion: "SECRET_STDOUT",
+        }) + "\n";
+      await assert.rejects(runChild("failure", raw, "SECRET_STDERR\n"), (error: unknown) => {
+        assert.ok(error instanceof CommandFailure);
+        assert.equal(error.output.includes("SECRET_STDERR"), true);
+        assert.equal(error.output.includes("SECRET_STDOUT"), true);
+        const sanitized = joinedFailure(error.output);
+        assert.deepEqual(sanitized, {
+          code: "joined-driver-failed",
+          at: "real-execution-cleanup",
+          frame: "native-device-joined.ts:42:9",
+        });
+        assert.equal(JSON.stringify(sanitized).includes("SECRET"), false);
+        return true;
+      });
+    },
+  );
+  await t.test("child timeout still terminates the detached command", async () => {
+    await assert.rejects(runChild("wait", "", "", 100), CommandFailure);
+  });
 });
