@@ -39,8 +39,12 @@ export async function command(
       output.push({ stream, text: bytes.toString("utf8") });
     }
   };
-  child.stdout.on("data", (bytes: Buffer) => capture(bytes, "stdout"));
-  child.stderr.on("data", (bytes: Buffer) => capture(bytes, "stderr"));
+  child.stdout.on("data", (bytes: Buffer) => {
+    capture(bytes, "stdout");
+  });
+  child.stderr.on("data", (bytes: Buffer) => {
+    capture(bytes, "stderr");
+  });
   const timer = setTimeout(() => {
     expired = true;
     kill();
