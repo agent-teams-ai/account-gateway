@@ -34,6 +34,10 @@ Only this backend response carries a credential. Admission and execution result
 are existing public projections; generation and issuer remain server-private.
 Errors are unchanged safe v1 DTOs (400 invalid, 401 authentication, 403 denied,
 409 changed intent, 404 absence, 503 unavailable); no secret/vendor details.
+A new selection skips Codex accounts whose native cached limits show an
+exhausted window with a future reset. When every selectable account is
+exhausted the reply is 503 `admission_limited`, `not_dispatched`, with
+`retry.after` at the earliest reset (at most one hour); nothing is persisted.
 
 Bounds: 16 permitted UUID accounts, 100 configured owners, 128 profiles,
 maxRunMs 1..3600000; references <=128 characters, profile IDs <=64,
@@ -104,3 +108,28 @@ The workflow now runs this nearest boundary in its own newly created database.
 Both primary disposable containers were removed after receipt capture. Controlled
 native fixture only: zero actual provider calls. Independent source review and
 current CI remain required; this does not prove real agent/T0/parser/App E2E.
+
+
+## Native admission authority, 2026-11-01
+
+PR #93 consumes the private Native `account-admission/read` decision instead of
+interpreting quota windows in TypeScript. Native reuses its fenced logical quota
+read and the stock Sub2API Codex reset policy, including duration-based 7d/5h
+precedence. Existing v1/v2 quota display contracts remain unchanged. The gateway
+only validates the typed decision, generation and expiry; no threshold, account
+health counter or cooldown state exists in the gateway or SDK.
+
+Native source pin: `f2deab244b62469cebfa1492e70d80a4f766dc1f`. Both native-client
+qualification and full-stack workflows use that immutable source. Deploy Native
+before the gateway to enable the additive private route; old Native returns no
+usable decision and retains the previous fail-open admission behavior. The admission delta adds no SQL
+migration and needs no OAuth reenrollment. Upgrading the Native source from an
+older deployed pin must still apply the existing migrations included in current
+main through the normal backed-up migration procedure. The first provider 429 can still be
+classified as effect_unknown; this read-only change never replays that dispatch.
+
+Local TypeScript domain/HTTP tests, strict kernel typecheck, lint, formatting,
+Foundation and docs validation pass. Native local focused tests reached linking
+but could not finish because the machine ran out of disk. Native Linux CI and
+current-head full-stack qualification remain required; no native PASS is claimed
+from the failed local build.

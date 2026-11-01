@@ -1,6 +1,6 @@
 // Pure projections of persisted SQL rows and native dispatch evidence.
 // No SQL driver, connection, transaction, HTTP, or framework dependency.
-import { KernelError, identifier, uuid } from "./domain.ts";
+import { KernelError, identifier, revision, uuid } from "./domain.ts";
 import type {
   AccountStatus,
   OperationStatus,
@@ -12,6 +12,7 @@ import type {
   NativeDispatchProof,
   TransportClosure,
   ApprovedLimits,
+  LimitedAccount,
   RequestStatus,
 } from "./domain.ts";
 
@@ -338,6 +339,33 @@ export const capturePermittedAccounts = (value: unknown): string[] => {
     const ref: unknown = element;
     uuid(ref);
     copy.push(ref);
+  }
+  return copy;
+};
+// A subset of the captured permitted accounts; it can only narrow selection.
+export const captureLimitedAccounts = (
+  value: unknown,
+  permitted: readonly string[],
+): LimitedAccount[] => {
+  if (value === undefined) {
+    return [];
+  }
+  if (!Array.isArray(value) || value.length > permitted.length) {
+    throw new KernelError("invalid");
+  }
+  const copy: LimitedAccount[] = [];
+  for (const element of value) {
+    const entry: unknown = element;
+    if (typeof entry !== "object" || entry === null) {
+      throw new KernelError("invalid");
+    }
+    const { accountRef, authorizationEpoch, generation } = entry as Record<string, unknown>;
+    if (typeof accountRef !== "string" || !permitted.includes(accountRef)) {
+      throw new KernelError("invalid");
+    }
+    revision(authorizationEpoch);
+    uuid(generation);
+    copy.push({ accountRef, authorizationEpoch, generation });
   }
   return copy;
 };

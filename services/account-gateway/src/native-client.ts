@@ -1,3 +1,4 @@
+import { acceptedNativeAdmission, type NativeAccountAdmission } from "./native-admission-wire.ts";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import type {
@@ -1140,7 +1141,34 @@ export class NativeAccountLimitsClient extends NativeControlHTTP {
       throw new NativeFailure("invalid_readback");
     }
   }
-  async readAccountLimits(input: AccountLimitsRequest): Promise<AccountLimits> {
+  async readAccountAdmission(
+    input: AccountLimitsRequest,
+    deadlineMs?: number,
+  ): Promise<NativeAccountAdmission> {
+    try {
+      const result = acceptedNativeAdmission(
+        decode(
+          await this.call(
+            "POST",
+            "/private/native/v1/account-admission/read",
+            accountLimitsRequest.parse(input),
+            deadlineMs,
+          ),
+        ),
+      );
+      if (!result) {
+        throw new NativeFailure("invalid_readback");
+      }
+      return result;
+    } catch {
+      throw new NativeFailure("invalid_readback");
+    }
+  }
+  // A caller deadline can only shorten the fixed control deadline.
+  async readAccountLimits(
+    input: AccountLimitsRequest,
+    deadlineMs?: number,
+  ): Promise<AccountLimits> {
     try {
       return accountLimits.parse(
         decode(
@@ -1148,6 +1176,7 @@ export class NativeAccountLimitsClient extends NativeControlHTTP {
             "POST",
             "/private/native/v1/account-limits/read",
             accountLimitsRequest.parse(input),
+            deadlineMs,
           ),
         ),
       );
