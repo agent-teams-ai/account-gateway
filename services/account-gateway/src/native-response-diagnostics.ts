@@ -3,33 +3,53 @@ import { object } from "./native-wire.ts";
 import { identifier, uuid } from "./domain.ts";
 
 const rateLimitSources = new Set([
-  "openrouter_free_models_per_day", "openrouter_free_models_per_minute",
-  "free-models-per-day", "free-models-per-min", "upstream_provider_shared_pool",
-  "upstream_provider", "openrouter_rate_limit", "openrouter_ddos_protection",
+  "openrouter_free_models_per_day",
+  "openrouter_free_models_per_minute",
+  "free-models-per-day",
+  "free-models-per-min",
+  "upstream_provider_shared_pool",
+  "upstream_provider",
+  "openrouter_rate_limit",
+  "openrouter_ddos_protection",
 ]);
 const rateLimitHeaders = new Set([
-  "Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset",
-  "X-RateLimit-Limit-Requests", "X-RateLimit-Remaining-Requests", "X-RateLimit-Reset-Requests",
+  "Retry-After",
+  "X-RateLimit-Limit",
+  "X-RateLimit-Remaining",
+  "X-RateLimit-Reset",
+  "X-RateLimit-Limit-Requests",
+  "X-RateLimit-Remaining-Requests",
+  "X-RateLimit-Reset-Requests",
 ]);
 function rateLimitEvidence(value: unknown): Record<string, unknown> {
   object(value, [], ["limit_source", "headers"]);
   const row = value as Record<string, unknown>;
-  if (row.limit_source !== undefined &&
-    (typeof row.limit_source !== "string" || !rateLimitSources.has(row.limit_source))) {
+  if (
+    row.limit_source !== undefined &&
+    (typeof row.limit_source !== "string" ||
+      !rateLimitSources.has(row.limit_source))
+  ) {
     throw new Error("invalid rate limit source");
   }
   const headers: Record<string, string> = {};
   if (row.headers !== undefined) {
     object(row.headers, [], [...rateLimitHeaders]);
-    for (const [key, item] of Object.entries(row.headers as Record<string, unknown>)) {
-      if (typeof item !== "string" || !/^[0-9]{1,16}(\.[0-9]{1,3})?$/.test(item)) {
+    for (const [key, item] of Object.entries(
+      row.headers as Record<string, unknown>,
+    )) {
+      if (
+        typeof item !== "string" ||
+        !/^[0-9]{1,16}(\.[0-9]{1,3})?$/.test(item)
+      ) {
         throw new Error("invalid rate limit header");
       }
       headers[key] = item;
     }
   }
   return {
-    ...(row.limit_source === undefined ? {} : { limit_source: row.limit_source }),
+    ...(row.limit_source === undefined
+      ? {}
+      : { limit_source: row.limit_source }),
     ...(Object.keys(headers).length ? { headers } : {}),
   };
 }
@@ -101,7 +121,12 @@ const oauthConflictReasons = new Set([
   "replay_mismatch",
   "unclassified",
 ]);
-const oauthIntentFields = ["consumer", "account_ref", "generation", "operation_ref"];
+const oauthIntentFields = [
+  "consumer",
+  "account_ref",
+  "generation",
+  "operation_ref",
+];
 
 const readErrorReasons = new Set([
   "idle_expired",
@@ -135,7 +160,13 @@ const transportRequiredFields = [
 ];
 const transportFields = [...transportRequiredFields, "native_entered"];
 
-const upstreamMediaCategories = new Set(["missing", "json", "html", "sse", "other"]);
+const upstreamMediaCategories = new Set([
+  "missing",
+  "json",
+  "html",
+  "sse",
+  "other",
+]);
 const upstreamBodyShapes = new Set(["empty", "json", "sse", "html", "other"]);
 const upstreamBodyPrefixes = new Set([
   "json_prefix",
@@ -260,7 +291,10 @@ export function nativeResponseDiagnostics(
       );
       if (row.event === "gateway_native_codex_request_shape") {
         object(row, ["event", ...shapeFields, "unsupported_fields_present"]);
-        const fields = object(row.unsupported_fields_present, unsupportedCodexFields);
+        const fields = object(
+          row.unsupported_fields_present,
+          unsupportedCodexFields,
+        );
         if (
           ![
             ...shapeFields.map((key) => row[key]),
@@ -270,8 +304,10 @@ export function nativeResponseDiagnostics(
           return;
         }
         if (
-          (row.instructions_nonblank === true && row.instructions_string === false) ||
-          (row.instructions_string === true && row.instructions_present === false)
+          (row.instructions_nonblank === true &&
+            row.instructions_string === false) ||
+          (row.instructions_string === true &&
+            row.instructions_present === false)
         ) {
           return;
         }
@@ -315,7 +351,11 @@ export function nativeResponseDiagnostics(
           ],
         );
         if (row.event === "gateway_native_oauth_connect_failure") {
-          object(row, ["event", "phase"], ["http_status", "reason", ...oauthIntentFields]);
+          object(
+            row,
+            ["event", "phase"],
+            ["http_status", "reason", ...oauthIntentFields],
+          );
           if (typeof row.phase !== "string" || !oauthPhases.has(row.phase)) {
             return;
           }
@@ -391,17 +431,25 @@ export function nativeResponseDiagnostics(
           const status = row.http_status;
           if (
             Object.hasOwn(row, "http_status") &&
-            (!Number.isSafeInteger(status) || (status as number) < 100 || (status as number) > 599)
+            (!Number.isSafeInteger(status) ||
+              (status as number) < 100 ||
+              (status as number) > 599)
           ) {
             return;
           }
           const rateLimit = Object.hasOwn(row, "rate_limit")
-            ? rateLimitEvidence(row.rate_limit) : undefined;
-          if (rateLimit !== undefined && (status !== 429 || row.phase !== "http_status")) return;
+            ? rateLimitEvidence(row.rate_limit)
+            : undefined;
+          if (
+            rateLimit !== undefined &&
+            (status !== 429 || row.phase !== "http_status")
+          )
+            return;
           const category = row.provider_error_category;
           if (
             Object.hasOwn(row, "provider_error_category") &&
-            (typeof category !== "string" || !providerErrorCategories.has(category))
+            (typeof category !== "string" ||
+              !providerErrorCategories.has(category))
           ) {
             return;
           }
@@ -415,7 +463,8 @@ export function nativeResponseDiagnostics(
           const parameter = row.provider_error_parameter;
           if (
             Object.hasOwn(row, "provider_error_parameter") &&
-            (typeof parameter !== "string" || !providerErrorParameters.has(parameter))
+            (typeof parameter !== "string" ||
+              !providerErrorParameters.has(parameter))
           ) {
             return;
           }
@@ -432,18 +481,23 @@ export function nativeResponseDiagnostics(
           const connection = row.upstream_connection;
           // Older native binaries emit the phase alone. New transport facts are
           // one complete closed projection; partial or misplaced facts are dropped.
-          const hasTransportFacts = transportFields.some((key) => Object.hasOwn(row, key));
+          const hasTransportFacts = transportFields.some((key) =>
+            Object.hasOwn(row, key),
+          );
           if (
             hasTransportFacts &&
             (row.phase !== "transport" ||
-              !transportRequiredFields.every((key) => Object.hasOwn(row, key)) ||
+              !transportRequiredFields.every((key) =>
+                Object.hasOwn(row, key),
+              ) ||
               typeof transportReason !== "string" ||
               !transportErrorReasons.has(transportReason) ||
               typeof connection !== "string" ||
               !upstreamConnections.has(connection) ||
               typeof row.upstream_request_written !== "boolean" ||
               typeof row.upstream_response_started !== "boolean" ||
-              (Object.hasOwn(row, "native_entered") && typeof row.native_entered !== "boolean"))
+              (Object.hasOwn(row, "native_entered") &&
+                typeof row.native_entered !== "boolean"))
           ) {
             return;
           }
@@ -482,10 +536,16 @@ export function nativeResponseDiagnostics(
               phase: row.phase,
               ...(status === undefined ? {} : { http_status: status }),
               ...(rateLimit === undefined ? {} : { rate_limit: rateLimit }),
-              ...(category === undefined ? {} : { provider_error_category: category }),
+              ...(category === undefined
+                ? {}
+                : { provider_error_category: category }),
               ...(shape === undefined ? {} : { provider_error_shape: shape }),
-              ...(parameter === undefined ? {} : { provider_error_parameter: parameter }),
-              ...(readReason === undefined ? {} : { read_error_reason: readReason }),
+              ...(parameter === undefined
+                ? {}
+                : { provider_error_parameter: parameter }),
+              ...(readReason === undefined
+                ? {}
+                : { read_error_reason: readReason }),
               ...(hasTransportFacts
                 ? {
                     transport_error_reason: transportReason,
@@ -497,9 +557,15 @@ export function nativeResponseDiagnostics(
                       : {}),
                   }
                 : {}),
-              ...(mediaCategory === undefined ? {} : { upstream_media_category: mediaCategory }),
-              ...(bodyShape === undefined ? {} : { upstream_body_shape: bodyShape }),
-              ...(bodyPrefix === undefined ? {} : { upstream_body_prefix: bodyPrefix }),
+              ...(mediaCategory === undefined
+                ? {}
+                : { upstream_media_category: mediaCategory }),
+              ...(bodyShape === undefined
+                ? {}
+                : { upstream_body_shape: bodyShape }),
+              ...(bodyPrefix === undefined
+                ? {}
+                : { upstream_body_prefix: bodyPrefix }),
             }) + "\n";
         }
       }
