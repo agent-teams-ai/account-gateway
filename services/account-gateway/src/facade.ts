@@ -2273,11 +2273,18 @@ export function createFacade(options: FacadeOptions): Server {
             send(
               res,
               c.safeError,
-              safe(
-                dtoCode,
-                enteredTransport || uncertain ? "effect_unknown" : "not_dispatched",
-                identity,
-              ),
+              {
+                ...safe(
+                  dtoCode,
+                  enteredTransport || uncertain ? "effect_unknown" : "not_dispatched",
+                  identity,
+                ),
+                ...(dtoCode === "upstream_failure" &&
+                error instanceof KernelError &&
+                error.providerQuota
+                  ? { providerQuota: error.providerQuota }
+                  : {}),
+              },
               code === "denied"
                 ? 403
                 : code === "invalid"

@@ -1424,3 +1424,64 @@ test("client configuration reads getters once without retaining their objects", 
   assert.equal(originReads, 1);
   assert.equal(tokenReads, 1);
 });
+
+test("provider quota diagnostic survives strict SDK parsing without changing unknown/readback", async (t) => {
+  const quota = {
+    provider: "openrouter",
+    limit: 50,
+    remaining: 0,
+    resetAt: "2026-11-05T00:00:00.000Z",
+  };
+  let diagnostic = {
+    ...safe("upstream_failure", "effect_unknown"),
+    providerQuota: quota,
+  };
+  const f = await fixture(t, (_req, res) => json(res, diagnostic, 503));
+  await assert.rejects(
+    f.execution.request("execution-a", {
+      requestId: "request-one",
+      admission,
+      body: Buffer.from("{}"),
+    }),
+    (error) => {
+      assert.ok(error instanceof sdk.GatewayError);
+      assert.equal(error.code, "safe_error");
+      assert.equal(error.diagnostic.code, "upstream_failure");
+      assert.equal(error.effect, "effect_unknown");
+      assert.deepEqual(error.diagnostic.providerQuota, quota);
+      assert.deepEqual(error.diagnostic.retry, { kind: "readback" });
+      return true;
+    },
+  );
+  for (const bad of [
+    { ...quota, remaining: 1 },
+    { ...quota, limit: 0 },
+    { ...quota, resetAt: "2026-11-05T00:00:00Z" },
+    { ...quota, provider: "another" },
+    { ...quota, secret: "private-sentinel" },
+  ]) {
+    diagnostic = {
+      ...safe("upstream_failure", "effect_unknown"),
+      providerQuota: bad,
+    };
+    await rejects(
+      f.execution.request("execution-a", {
+        requestId: "request-one",
+        admission,
+        body: Buffer.from("{}"),
+      }),
+      "invalid_response",
+      "effect_unknown",
+    );
+  }
+  diagnostic = { ...safe("forbidden", "effect_unknown"), providerQuota: quota };
+  await rejects(
+    f.execution.request("execution-a", {
+      requestId: "request-one",
+      admission,
+      body: Buffer.from("{}"),
+    }),
+    "invalid_response",
+    "effect_unknown",
+  );
+});
