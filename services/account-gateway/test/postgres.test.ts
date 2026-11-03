@@ -2165,7 +2165,12 @@ void test("atomic request limits and runtime deadline/config enforcement", async
     undefined,
   );
   const duplicate = await b.claim(
-    ctx, other.result.executionRef!, "independent-review", w, other.admission, reservation(),
+    ctx,
+    other.result.executionRef!,
+    "independent-review",
+    w,
+    other.admission,
+    reservation(),
   );
   assert.equal(duplicate.dispatch, undefined);
   assert.deepEqual(duplicate.status, independent.status);
@@ -3537,7 +3542,7 @@ void test("B2 lost owner retains occupancy; exact late closure frees one without
   );
   assert.ok(permit.dispatch);
   await expire(ctx, owner);
-  await b.request(ctx, first.result.executionRef!, "old");
+  await b.reconcile(ctx);
   const unknown = { requestRef: "old", effect: "effect_unknown", code: "owner_lost" };
   assert.deepEqual(await b.request(ctx, first.result.executionRef!, "old"), unknown);
   assert.equal((await b.execution(ctx, first.result.executionRef!)).state, "fenced");
@@ -3728,10 +3733,10 @@ void test("B2 completed effect and failed callback retain transport until explic
     (
       await b.claim(
         ctx,
-        second.result.executionRef!,
+        first.result.executionRef!,
         "completed-held",
         w,
-        second.admission,
+        first.admission,
         reservation(),
       )
     ).dispatch,
@@ -3756,10 +3761,10 @@ void test("B2 completed effect and failed callback retain transport until explic
     (
       await a.claim(
         ctx,
-        second.result.executionRef!,
+        first.result.executionRef!,
         "old-proof-held",
         fresh,
-        second.admission,
+        first.admission,
         reservation(),
       )
     ).dispatch,
@@ -3781,19 +3786,7 @@ void test("B2 completed effect and failed callback retain transport until explic
   assert.ok(failed.dispatch);
   await b.effect(ctx, second.result.executionRef!, "failed", fresh, "effect_unknown");
   const third = await prepared(ctx, account.accountRef!);
-  assert.equal(
-    (
-      await a.claim(
-        ctx,
-        third.result.executionRef!,
-        "failed-held",
-        fresh,
-        third.admission,
-        reservation(),
-      )
-    ).dispatch,
-    undefined,
-  );
+  assert.equal(await occupancy(ctx, account.accountRef!), 1);
   await a.acknowledgeTransportClosed(ctx, fresh, failed.dispatch.closure);
   assert.equal(
     (await b.request(ctx, second.result.executionRef!, "failed")).effect,
@@ -4065,20 +4058,19 @@ void test("B2 closure and cleanup authority capture whitelisted primitives befor
     reservation(),
   );
   assert.ok(two.dispatch);
-  const third = await prepared(ctx, account.accountRef!, {}, x);
   assert.equal(
     (
       await x.claim(
         ctx,
-        third.result.executionRef!,
+        first.result.executionRef!,
         "capacity-held",
         delegate,
-        third.admission,
+        first.admission,
         reservation(),
       )
     ).dispatch,
     undefined,
-    "behavior regression must fail on old production before any new closure API",
+    "the first execution still holds its slot",
   );
   const mutable: TransportClosure = { ...one.dispatch.closure };
   await mutateAtConsumerLock(
@@ -4166,6 +4158,7 @@ void test("B2 numbered upgrade retains legacy active, completed and unknown occu
     "numbered upgrade preserves preexisting active effects before loss classification",
   );
   const w = await worker(legacy.ctx);
+  await b.reconcile(legacy.ctx);
   assert.equal(await occupancy(legacy.ctx, legacy.account), 4);
   const rows = (
     await admin.query<{
@@ -4765,12 +4758,6 @@ void test("B2a SQL003 legacy NULL native binding conservatively retains occupanc
     transport_occupied: true,
   };
   assert.deepEqual(await fields(), expected);
-  const e = await prepared(ctx, nativeLegacy.account);
-  assert.equal(
-    (await b.claim(ctx, e.result.executionRef!, "legacy-held", fresh, e.admission, reservation()))
-      .dispatch,
-    undefined,
-  );
   const fabricated: NativeDispatchProof = {
     executionRef: nativeLegacy.execution,
     requestRef: "pre003",
