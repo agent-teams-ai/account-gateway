@@ -4165,8 +4165,7 @@ void test("B2 numbered upgrade retains legacy active, completed and unknown occu
     ],
     "numbered upgrade preserves preexisting active effects before loss classification",
   );
-  const w = await worker(legacy.ctx),
-    fresh = await prepared(legacy.ctx, legacy.account);
+  const w = await worker(legacy.ctx);
   assert.equal(await occupancy(legacy.ctx, legacy.account), 4);
   const rows = (
     await admin.query<{
