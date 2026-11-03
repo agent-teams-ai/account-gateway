@@ -762,8 +762,9 @@ void test("429 diagnostics retain bounded quota evidence and reject private or m
     { headers: { "Retry-After": "1".repeat(17) } },
     { limit_source: "upstream_provider", message: "SECRET_SENTINEL" },
     null,
-  ])
+  ]) {
     f.feed(Buffer.from(JSON.stringify({ ...base, rate_limit: invalid }) + "\n"));
+  }
   f.feed(Buffer.from(JSON.stringify({ ...base, http_status: 400, rate_limit }) + "\n"));
   assert.equal(f.records.length, 1);
 });
