@@ -728,3 +728,21 @@ void test("native admission diagnostics retain phases and reject extra or unknow
   assert.deepEqual(f.records, expected);
   assert.equal(f.records.join("").includes("SECRET_SENTINEL"), false);
 });
+
+void test("429 diagnostics retain bounded quota evidence and reject private or misplaced values", () => {
+  const f = sink();
+  const base = { event: "gateway_native_response_failure", phase: "http_status", http_status: 429 };
+  const rate_limit = { limit_source: "upstream_provider_shared_pool", headers: { "Retry-After": "60", "X-RateLimit-Remaining": "0" } };
+  f.feed(Buffer.from(JSON.stringify({ ...base, rate_limit }) + "\n"));
+  assert.deepEqual(JSON.parse(f.records[0]!), { ...base, rate_limit });
+  for (const invalid of [
+    { limit_source: "SECRET_SENTINEL" },
+    { headers: { Authorization: "SECRET_SENTINEL" } },
+    { headers: { "Retry-After": "SECRET_SENTINEL" } },
+    { headers: { "Retry-After": "1".repeat(17) } },
+    { limit_source: "upstream_provider", message: "SECRET_SENTINEL" },
+    null,
+  ]) f.feed(Buffer.from(JSON.stringify({ ...base, rate_limit: invalid }) + "\n"));
+  f.feed(Buffer.from(JSON.stringify({ ...base, http_status: 400, rate_limit }) + "\n"));
+  assert.equal(f.records.length, 1);
+});
