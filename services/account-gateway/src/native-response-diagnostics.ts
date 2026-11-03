@@ -410,7 +410,9 @@ export function nativeResponseDiagnostics(
           const rateLimit = Object.hasOwn(row, "rate_limit")
             ? rateLimitEvidence(row.rate_limit)
             : undefined;
-          if (rateLimit !== undefined && (status !== 429 || row.phase !== "http_status")) return;
+          if (rateLimit !== undefined && (status !== 429 || row.phase !== "http_status")) {
+            return;
+          }
           const category = row.provider_error_category;
           if (
             Object.hasOwn(row, "provider_error_category") &&

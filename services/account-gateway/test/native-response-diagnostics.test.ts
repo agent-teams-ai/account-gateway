@@ -754,7 +754,7 @@ void test("429 diagnostics retain bounded quota evidence and reject private or m
     headers: { "Retry-After": "60", "X-RateLimit-Remaining": "0" },
   };
   f.feed(Buffer.from(JSON.stringify({ ...base, rate_limit }) + "\n"));
-  assert.deepEqual(JSON.parse(f.records[0]!), { ...base, rate_limit });
+  assert.deepEqual(JSON.parse(f.records[0]), { ...base, rate_limit });
   for (const invalid of [
     { limit_source: "SECRET_SENTINEL" },
     { headers: { Authorization: "SECRET_SENTINEL" } },
