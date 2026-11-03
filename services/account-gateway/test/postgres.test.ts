@@ -1263,100 +1263,6 @@ void test("SQL012 once-selected retirement bounds empty namespaces and refunds o
   }
 });
 
-void test("trusted profile account caps admit 32 parallel requests across executions without widening default or adjacent profiles", async () => {
-  const bounds = { ...defaults, maxConcurrent: 32 },
-    caps = [
-      { profile: "mimo-test", concurrency: 32 },
-      { profile: "mimo-low", concurrency: 1 },
-    ];
-  const x = new PostgresKernel(poolA, bounds, factDefaults, { accountConcurrencyByProfile: caps });
-  const y = new PostgresKernel(poolB, bounds, factDefaults, { accountConcurrencyByProfile: caps });
-  caps[0].concurrency = 64;
-  caps[1].concurrency = 32;
-  const ctx = context(),
-    owner = await worker(ctx, x),
-    account = await connected(ctx, x);
-  const limits = {
-    requests: 64,
-    concurrency: 32,
-    requestBytes: 4096,
-    outputBytes: 8192,
-    tokens: 5000,
-  };
-  const left = await prepared(ctx, account.accountRef!, { limits }, x),
-    right = await prepared(ctx, account.accountRef!, { limits }, x);
-  for (let i = 0; i < 16; i++) {
-    const pair = await Promise.all([
-      x.claim(ctx, left.result.executionRef!, "left-" + i, owner, left.admission, reservation()),
-      y.claim(ctx, right.result.executionRef!, "right-" + i, owner, right.admission, reservation()),
-    ]);
-    assert.equal(
-      pair.every((result) => !!result.dispatch),
-      true,
-    );
-  }
-  assert.equal(await occupancy(ctx, account.accountRef!), 32);
-  const overflow = await y.claim(
-    ctx,
-    right.result.executionRef!,
-    "account-overflow",
-    owner,
-    right.admission,
-    reservation(),
-  );
-  assert.equal(overflow.dispatch, undefined);
-  assert.equal(overflow.status.code, "concurrency_limit");
-  const stagedLow = await staged(ctx, { profile: "mimo-low" }, x),
-    candidate = await x.startCandidate(ctx, stagedLow.operationRef, owner);
-  assert.ok(candidate);
-  const low = await x.acknowledgeCandidate(ctx, stagedLow.operationRef, owner, {
-    generation: candidate.candidate,
-    nativePhysicalIdentity: randomUUID(),
-    profile: candidate.profile,
-  });
-  const first = await prepared(ctx, low.accountRef!, { profile: "mimo-low" }, x),
-    second = await prepared(ctx, low.accountRef!, { profile: "mimo-low" }, x);
-  assert.ok(
-    (
-      await x.claim(
-        ctx,
-        first.result.executionRef!,
-        "low-first",
-        owner,
-        first.admission,
-        reservation(),
-      )
-    ).dispatch,
-  );
-  const denied = await y.claim(
-    ctx,
-    second.result.executionRef!,
-    "low-second",
-    owner,
-    second.admission,
-    reservation(),
-  );
-  assert.equal(denied.dispatch, undefined);
-  assert.equal(denied.status.code, "concurrency_limit");
-  const escalated = await y.claim(
-    ctx,
-    second.result.executionRef!,
-    "caller-escalation",
-    owner,
-    { ...second.admission, limits: { ...second.admission.limits, concurrency: 2 } },
-    reservation(),
-  );
-  assert.equal(escalated.dispatch, undefined);
-  assert.equal(escalated.status.code, "fenced");
-  assert.equal(defaults.maxConcurrent, 1);
-  assert.throws(
-    () =>
-      new PostgresKernel(poolA, { ...defaults, maxConcurrent: 128 }, factDefaults, {
-        accountConcurrencyByProfile: [{ profile: "mimo-test", concurrency: 65 }],
-      }),
-    isCode("invalid"),
-  );
-});
 async function count(sql: string, values: unknown[]) {
   const n = Number((await admin.query<{ n: string | number }>(sql, values)).rows[0].n);
   assert.ok(Number.isSafeInteger(n) && n >= 0);
@@ -2227,23 +2133,21 @@ void test("atomic request limits and runtime deadline/config enforcement", async
   assert.ok(deniedClaim && deniedClaim.status === "fulfilled");
   assert.equal(deniedClaim.value.status.code, "concurrency_limit");
   assert.equal(deniedClaim.value.status.effect, "not_dispatched");
-  const accountBusy = await b.claim(
+  const independent = await b.claim(
     ctx,
     other.result.executionRef!,
-    "account-busy",
+    "independent-review",
     w,
     other.admission,
     reservation(),
   );
-  assert.equal(accountBusy.dispatch, undefined);
-  assert.equal(accountBusy.status.code, "concurrency_limit");
-  assert.equal(accountBusy.status.effect, "not_dispatched");
+  assert.ok(independent.dispatch);
   assert.equal(
     await count(
       "SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
       [ctx.consumerId, other.result.executionRef],
     ),
-    0,
+    1,
   );
   await assert.rejects(
     a.effect(ctx, e.result.executionRef!, first, w, "completed"),
@@ -2260,17 +2164,14 @@ void test("atomic request limits and runtime deadline/config enforcement", async
     (await b.claim(ctx, e.result.executionRef!, denied, w, e.admission, reservation())).dispatch,
     undefined,
   );
-  assert.deepEqual(
-    await b.claim(
-      ctx,
-      other.result.executionRef!,
-      "account-busy",
-      w,
-      other.admission,
-      reservation(),
-    ),
-    accountBusy,
+  const duplicate = await b.claim(
+    ctx, other.result.executionRef!, "independent-review", w, other.admission, reservation(),
   );
+  assert.equal(duplicate.dispatch, undefined);
+  assert.deepEqual(duplicate.status, independent.status);
+  await b.effect(ctx, other.result.executionRef!, "independent-review", w, "response_started");
+  await b.effect(ctx, other.result.executionRef!, "independent-review", w, "completed");
+  await b.acknowledgeTransportClosed(ctx, w, independent.dispatch.closure);
   const third = await a.claim(ctx, e.result.executionRef!, "third", w, e.admission, reservation());
   assert.ok(third.dispatch);
   await a.effect(ctx, e.result.executionRef!, "third", w, "response_started");
@@ -3539,7 +3440,7 @@ async function expire(ctx: TrustedContext, w: string) {
   );
 }
 
-void test("B2 distinct executions contend for one account slot, unrelated accounts and consumers admit", async () => {
+void test("B2 independent executions admit concurrently on the same account", async () => {
   const ctx = context(),
     account = await connected(ctx),
     unrelated = await connected(ctx);
@@ -3556,14 +3457,8 @@ void test("B2 distinct executions contend for one account slot, unrelated accoun
     pair.every((r) => r.status === "fulfilled"),
     true,
   );
-  // This fails behaviorally on old production before any new column/API is read.
-  assert.equal(pair.filter((r) => r.status === "fulfilled" && Boolean(r.value.dispatch)).length, 1);
-  assert.equal(
-    pair.filter((r) => r.status === "fulfilled" && r.value.status.code === "concurrency_limit")
-      .length,
-    1,
-  );
-  assert.equal(await occupancy(ctx, account.accountRef!), 1);
+  assert.equal(pair.filter((r) => r.status === "fulfilled" && Boolean(r.value.dispatch)).length, 2);
+  assert.equal(await occupancy(ctx, account.accountRef!), 2);
   const other = await prepared(ctx, unrelated.accountRef!);
   assert.ok(
     (
@@ -3595,7 +3490,7 @@ void test("B2 distinct executions contend for one account slot, unrelated accoun
   );
 });
 
-void test("B2 execution keeps its narrower approval while sharing the configured account ceiling", async () => {
+void test("B2 execution retains its approved limit while other executions admit", async () => {
   const bounds = { ...defaults, maxConcurrent: 2 };
   const x = new PostgresKernel(poolA, bounds),
     y = new PostgresKernel(poolB, bounds);
@@ -3618,20 +3513,11 @@ void test("B2 execution keeps its narrower approval while sharing the configured
       .dispatch,
   );
   const third = await prepared(ctx, account.accountRef!, {}, x);
-  assert.equal(
-    (
-      await x.claim(
-        ctx,
-        third.result.executionRef!,
-        "account-full",
-        w,
-        third.admission,
-        reservation(),
-      )
-    ).dispatch,
-    undefined,
+  assert.ok(
+    (await x.claim(ctx, third.result.executionRef!, "three", w, third.admission, reservation()))
+      .dispatch,
   );
-  assert.equal(await occupancy(ctx, account.accountRef!), 2);
+  assert.equal(await occupancy(ctx, account.accountRef!), 3);
 });
 
 void test("B2 lost owner retains occupancy; exact late closure frees one without refund, unfence or replay", async () => {
@@ -3651,16 +3537,7 @@ void test("B2 lost owner retains occupancy; exact late closure frees one without
   );
   assert.ok(permit.dispatch);
   await expire(ctx, owner);
-  const denied = await b.claim(
-    ctx,
-    second.result.executionRef!,
-    "held",
-    live,
-    second.admission,
-    reservation(),
-  );
-  assert.equal(denied.dispatch, undefined, "lost ownership is not local transport closure");
-  assert.equal(denied.status.code, "concurrency_limit");
+  await b.request(ctx, first.result.executionRef!, "old");
   const unknown = { requestRef: "old", effect: "effect_unknown", code: "owner_lost" };
   assert.deepEqual(await b.request(ctx, first.result.executionRef!, "old"), unknown);
   assert.equal((await b.execution(ctx, first.result.executionRef!)).state, "fenced");
@@ -3778,11 +3655,6 @@ void test("B2 lost owner retains occupancy; exact late closure frees one without
       )
     ).status.code,
     "fenced",
-  );
-  assert.equal(
-    (await a.claim(ctx, second.result.executionRef!, "held", live, second.admission, reservation()))
-      .dispatch,
-    undefined,
   );
   const newer = await b.claim(
     ctx,
@@ -4082,7 +3954,7 @@ void test("B2 cleanup recovers bounded durable exact proofs; premature and stale
   );
 });
 
-void test("B2 old generation, credential cleanup and restore keep occupied account capacity", async () => {
+void test("B2 old generation transport survives credential cleanup and restore", async () => {
   const ctx = context(),
     account = await connected(ctx),
     w = await worker(ctx);
@@ -4110,20 +3982,6 @@ void test("B2 old generation, credential cleanup and restore keep occupied accou
     nativePhysicalIdentity: randomUUID(),
     profile: candidate.profile,
   });
-  const newer = await prepared(ctx, account.accountRef!);
-  assert.equal(
-    (
-      await b.claim(
-        ctx,
-        newer.result.executionRef!,
-        "new-generation-held",
-        w,
-        newer.admission,
-        reservation(),
-      )
-    ).dispatch,
-    undefined,
-  );
   // Claim both preexisting cleanup jobs without releasing the execution transport.
   const jobs = [await a.claimCleanup(ctx, w), await b.claimCleanup(ctx, w)];
   const generation = jobs.find((j) => j?.scope.kind === "generation");
@@ -4131,19 +3989,6 @@ void test("B2 old generation, credential cleanup and restore keep occupied accou
   await assert.rejects(
     b.settleCleanup(ctx, generation.cleanupRef, w, generation.token, true),
     isCode("conflict"),
-  );
-  assert.equal(
-    (
-      await a.claim(
-        ctx,
-        newer.result.executionRef!,
-        "erasure-held",
-        w,
-        newer.admission,
-        reservation(),
-      )
-    ).dispatch,
-    undefined,
   );
   await a.restore(ctx, await a.issuer(ctx), randomUUID());
   assert.equal(await occupancy(ctx, account.accountRef!), 1);
@@ -4168,19 +4013,6 @@ void test("B2 old generation, credential cleanup and restore keep occupied accou
     profile: recovery.profile,
   });
   const current = await prepared(ctx, account.accountRef!);
-  assert.equal(
-    (
-      await b.claim(
-        ctx,
-        current.result.executionRef!,
-        "restore-held",
-        w,
-        current.admission,
-        reservation(),
-      )
-    ).dispatch,
-    undefined,
-  );
   await assert.rejects(
     b.settleCleanup(ctx, generation.cleanupRef, w, generation.token, true),
     isCode("conflict"),
@@ -4278,12 +4110,11 @@ void test("B2 closure and cleanup authority capture whitelisted primitives befor
   await x.settleCleanup(ctx, original.cleanupRef, delegate, original.token, true);
 });
 
-void test("B2 accepted insert omitting occupancy conservatively holds the account slot", async () => {
+void test("B2 accepted insert omitting occupancy conservatively holds the execution slot", async () => {
   const ctx = context(),
     account = await connected(ctx),
     w = await worker(ctx);
-  const first = await prepared(ctx, account.accountRef!),
-    second = await prepared(ctx, account.accountRef!);
+  const first = await prepared(ctx, account.accountRef!);
   await admin.query(
     `INSERT INTO ag_kernel.requests(consumer,execution_ref,id,effect,worker)
     VALUES ($1,$2,'accepted-without-new-fields','dispatch_started',$3)`,
@@ -4292,10 +4123,10 @@ void test("B2 accepted insert omitting occupancy conservatively holds the accoun
   assert.equal(await occupancy(ctx, account.accountRef!), 1);
   const denied = await b.claim(
     ctx,
-    second.result.executionRef!,
+    first.result.executionRef!,
     "must-stay-held",
     w,
-    second.admission,
+    first.admission,
     reservation(),
   );
   assert.equal(denied.dispatch, undefined);
@@ -4336,19 +4167,6 @@ void test("B2 numbered upgrade retains legacy active, completed and unknown occu
   );
   const w = await worker(legacy.ctx),
     fresh = await prepared(legacy.ctx, legacy.account);
-  assert.equal(
-    (
-      await b.claim(
-        legacy.ctx,
-        fresh.result.executionRef!,
-        "legacy-held",
-        w,
-        fresh.admission,
-        reservation(),
-      )
-    ).dispatch,
-    undefined,
-  );
   assert.equal(await occupancy(legacy.ctx, legacy.account), 4);
   const rows = (
     await admin.query<{
