@@ -16,6 +16,7 @@ import {
   proof,
   receipt,
   singleton,
+  providerQuota,
 } from "./native-wire.ts";
 import type { CleanupLease, Receipt } from "./native-wire.ts";
 import { emitNativeFailure } from "./native-failure-diagnostics.ts";
@@ -303,6 +304,8 @@ export class NativeHTTPTransport implements NativeTransport {
         await settleRetained();
         return { kind: "status" };
       }
+      const quota = providerQuota(response, a.requestId);
+      if (quota) throw new KernelError("unavailable", quota);
       if (
         response.statusCode !== 200 ||
         singleton(response, "content-type")?.split(";")[0] !== "text/event-stream" ||
@@ -374,7 +377,10 @@ export class NativeHTTPTransport implements NativeTransport {
       a.signal.removeEventListener("abort", onAbort);
       await uncertain().catch(() => {});
       await settleRetained();
-      throw new KernelError("unavailable");
+      throw new KernelError(
+        "unavailable",
+        error instanceof KernelError ? error.providerQuota : undefined,
+      );
     }
   }
   async cancel(

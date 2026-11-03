@@ -480,6 +480,7 @@ async function sourceHTTP(
   callbackAdmission?: Parameters<NativeAuthority["createServer"]>[0],
   limitsRead?: { contract: "v1" | "v2"; enter(): Promise<void> },
   omitModelSource = false,
+  quotaFailure = false,
 ) {
   const oauthProfile =
     oauth === "grok"
@@ -1220,6 +1221,22 @@ async function sourceHTTP(
             sealed: true,
           },
         });
+        if (quotaFailure) {
+          const retained = receipts.get(proof.requestRef)!;
+          retained.effect = "effect_unknown";
+          retained.lifetime = {
+            ...(retained.lifetime as Record<string, unknown>),
+            completed: false,
+          };
+          res.writeHead(502, {
+            "X-Gateway-Request-Ref": proof.requestRef,
+            "X-Gateway-Provider-Quota-Limit": "50",
+            "X-Gateway-Provider-Quota-Remaining": "0",
+            "X-Gateway-Provider-Quota-Reset-At": "2026-11-05T00:00:00.000Z",
+          });
+          res.end("private-provider-body-sentinel");
+          return;
+        }
         res.writeHead(200, {
           "content-type": "text/event-stream",
           "x-gateway-request-ref": proof.requestRef,
@@ -4607,6 +4624,79 @@ void test("qualified OpenRouter execution with a missing discovery source denies
       f.seen.some((row) => row.path === "POST /private/native/v1/transports"),
       false,
     );
+  } finally {
+    await f.close();
+  }
+});
+
+void test("private quota headers reach facade safeError with unknown/readback preserved", async () => {
+  const f = await sourceHTTP(true, false, undefined, undefined, undefined, false, true);
+  try {
+    const { account, profile, generation, snapshot } = modelAccount(f, "openrouter");
+    assert.ok(snapshot.source === "openrouter");
+    const executionRef = randomUUID();
+    const saved: SavedExecution = {
+      generation,
+      state: "open",
+      dispatchAllowed: true,
+      admission: {
+        executionRef,
+        issuerEpoch: await f.kernel.issuer(f.context),
+        invocationRef: "openrouter-models",
+        attemptRef: "attempt",
+        accountRef: account.accountRef,
+        authorizationEpoch: 1,
+        subjectRef: "subject",
+        policyRevision: 1,
+        bindingRevision: 1,
+        profileId: profile.profile,
+        limits: profile.limits,
+        expiresAt: new Date(Date.now() + 20_000).toISOString(),
+      },
+    };
+    f.executions.set(f.scopeKey(f.context, executionRef), saved);
+    f.control.bearers.replace([
+      ...f.cfg.bearers,
+      {
+        role: "execution",
+        consumerId: f.context.consumerId,
+        token: "source-openrouter-model-execution",
+        saved,
+      },
+    ]);
+    const { executionRef: _, issuerEpoch: __, ...admission } = saved.admission;
+    const submit = (model = "future-vendor/review:model", patch: Record<string, unknown> = {}) =>
+      f.publicCall(
+        "/v1/executions/" + executionRef + "/requests",
+        {
+          model,
+          stream: true,
+          store: false,
+          tools: [{ type: "function", name: "fixture", parameters: {} }],
+          ...patch,
+        },
+        "source-openrouter-model-execution",
+        {
+          "x-gateway-request-id": randomUUID(),
+          "x-gateway-admission": JSON.stringify(admission),
+        },
+      );
+    f.modelResult(snapshot);
+    const response = await submit();
+    assert.equal(response.status, 503);
+    const diagnostic = lifecycleWire.safeError.parse(await response.json());
+    assert.deepEqual(lifecycleWire.safeError.parse(diagnostic), diagnostic);
+    assert.equal(diagnostic.code, "upstream_failure");
+    assert.equal(diagnostic.effect, "effect_unknown");
+    assert.deepEqual(diagnostic.retry, { kind: "readback" });
+    assert.deepEqual(diagnostic.providerQuota, {
+      provider: "openrouter",
+      limit: 50,
+      remaining: 0,
+      resetAt: "2026-11-05T00:00:00.000Z",
+    });
+    assert.equal(JSON.stringify(diagnostic).includes("private-provider-body-sentinel"), false);
+    assert.equal(f.forwarded.length, 1);
   } finally {
     await f.close();
   }

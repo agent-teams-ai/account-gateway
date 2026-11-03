@@ -32,6 +32,15 @@ export const errorCode = z.enum([
   "upstream_failure",
   "internal_error",
 ]);
+export const providerQuota = z.strictObject({
+  provider: z.literal("openrouter"),
+  limit: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  remaining: z.literal(0),
+  resetAt: z.string().refine((value) => {
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) && date.toISOString() === value;
+  }),
+});
 export const safeError = z
   .strictObject({
     code: errorCode,
@@ -39,6 +48,7 @@ export const safeError = z
     operationRef: reference.optional(),
     requestRef: reference.optional(),
     effect: effectState,
+    providerQuota: providerQuota.optional(),
     retry: z.discriminatedUnion("kind", [
       z.strictObject({ kind: z.literal("never") }),
       z.strictObject({ kind: z.literal("readback") }),
@@ -50,6 +60,7 @@ export const safeError = z
   })
   .refine(
     (v) =>
+      (v.providerQuota === undefined || v.code === "upstream_failure") &&
       (v.retry.kind !== "after" || v.effect === "not_dispatched") &&
       (v.effect !== "rejected_before_dispatch" || v.retry.kind === "never"),
   );

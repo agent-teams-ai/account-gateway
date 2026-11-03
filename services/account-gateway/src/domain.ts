@@ -12,11 +12,19 @@ export type Effect =
   | "effect_unknown"
   | "rejected_before_dispatch";
 export type AccountState = "staging" | "active" | "suspended" | "disabled" | "quarantined";
+export type ProviderQuota = {
+  readonly provider: "openrouter";
+  readonly limit: number;
+  readonly remaining: 0;
+  readonly resetAt: string;
+};
 export class KernelError extends Error {
   readonly code: "invalid" | "unknown" | "conflict" | "denied" | "unavailable";
-  constructor(code: KernelError["code"]) {
+  readonly providerQuota?: ProviderQuota;
+  constructor(code: KernelError["code"], providerQuota?: ProviderQuota) {
     super(code);
     this.code = code;
+    if (providerQuota !== undefined) this.providerQuota = providerQuota;
   }
 }
 // Every selectable permitted account was excluded as limited. Thrown inside the

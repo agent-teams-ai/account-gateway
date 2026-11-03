@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
-import { config, post } from "../src/native-wire.ts";
+import { config, post, providerQuota } from "../src/native-wire.ts";
 import { KernelError } from "../src/domain.ts";
 
 async function peer(handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>) {
@@ -192,3 +192,66 @@ void test(
     }
   },
 );
+
+void test("native wire: provider quota is scoped to a singleton matched private502 receipt", async () => {
+  const headers = [
+    "X-Gateway-Request-Ref",
+    "request-one",
+    "X-Gateway-Provider-Quota-Limit",
+    "50",
+    "X-Gateway-Provider-Quota-Remaining",
+    "0",
+    "X-Gateway-Provider-Quota-Reset-At",
+    "2026-11-05T00:00:00.000Z",
+  ];
+  for (const scenario of [
+    "valid",
+    "wrong-request",
+    "wrong-status",
+    "missing",
+    "duplicate",
+    "nonzero",
+    "overflow",
+    "fraction",
+    "noncanonical",
+    "bad-date",
+  ]) {
+    const raw = [...headers];
+    if (scenario === "missing") raw.splice(4, 2);
+    if (scenario === "duplicate") raw.push("x-gateway-provider-quota-limit", "50");
+    if (scenario === "nonzero") raw[5] = "1";
+    if (scenario === "overflow") raw[3] = "9007199254740992";
+    if (scenario === "fraction") raw[3] = "1.5";
+    if (scenario === "noncanonical") raw[7] = "2026-11-05T00:00:00Z";
+    if (scenario === "bad-date") raw[7] = "private-provider-sentinel";
+    const f = await peer(async (req, res) => {
+      for await (const _ of req) {
+        /* Drain fixture request. */
+      }
+      res.writeHead(scenario === "wrong-status" ? 429 : 502, raw);
+      res.end("private-provider-sentinel");
+    });
+    try {
+      const hop = await post(f.cfg, credential, route, body, new AbortController().signal, 1000);
+      const quota = providerQuota(
+        hop.response,
+        scenario === "wrong-request" ? "another-request" : "request-one",
+      );
+      assert.deepEqual(
+        quota,
+        scenario === "valid"
+          ? {
+              provider: "openrouter",
+              limit: 50,
+              remaining: 0,
+              resetAt: "2026-11-05T00:00:00.000Z",
+            }
+          : undefined,
+        scenario,
+      );
+      hop.abort();
+    } finally {
+      await f.stop();
+    }
+  }
+});
