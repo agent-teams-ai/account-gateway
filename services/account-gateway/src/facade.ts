@@ -734,7 +734,16 @@ export function createFacade(options: FacadeOptions): Server {
             /* no unvalidated identity */
           }
         }
-        send(res, c.safeError, safe("admission_limited", "not_dispatched", deniedIdentity), 503);
+        const refusal = safe("admission_limited", "not_dispatched", deniedIdentity);
+        // The request has not entered the kernel, so its reference is reusable.
+        send(
+          res,
+          c.safeError,
+          deniedIdentity.requestRef
+            ? { ...refusal, retry: { kind: "after", milliseconds: 1000 } }
+            : refusal,
+          503,
+        );
         return;
       }
       const retained = new Set<Promise<void>>();
