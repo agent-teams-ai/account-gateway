@@ -739,7 +739,7 @@ export function createFacade(options: FacadeOptions): Server {
         send(
           res,
           c.safeError,
-          deniedIdentity.requestRef
+          deniedIdentity.requestRef !== undefined
             ? { ...refusal, retry: { kind: "after", milliseconds: 1000 } }
             : refusal,
           503,
