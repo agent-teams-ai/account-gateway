@@ -2,6 +2,50 @@ import { strictJSON } from "./facade-ingress.ts";
 import { object } from "./native-wire.ts";
 import { identifier, uuid } from "./domain.ts";
 
+const rateLimitSources = new Set([
+  "openrouter_free_models_per_day",
+  "openrouter_free_models_per_minute",
+  "free-models-per-day",
+  "free-models-per-min",
+  "upstream_provider_shared_pool",
+  "upstream_provider",
+  "openrouter_rate_limit",
+  "openrouter_ddos_protection",
+]);
+const rateLimitHeaders = new Set([
+  "Retry-After",
+  "X-RateLimit-Limit",
+  "X-RateLimit-Remaining",
+  "X-RateLimit-Reset",
+  "X-RateLimit-Limit-Requests",
+  "X-RateLimit-Remaining-Requests",
+  "X-RateLimit-Reset-Requests",
+]);
+function rateLimitEvidence(value: unknown): Record<string, unknown> {
+  object(value, [], ["limit_source", "headers"]);
+  const row = value as Record<string, unknown>;
+  if (
+    row.limit_source !== undefined &&
+    (typeof row.limit_source !== "string" || !rateLimitSources.has(row.limit_source))
+  ) {
+    throw new Error("invalid rate limit source");
+  }
+  const headers: Record<string, string> = {};
+  if (row.headers !== undefined) {
+    object(row.headers, [], [...rateLimitHeaders]);
+    for (const [key, item] of Object.entries(row.headers as Record<string, unknown>)) {
+      if (typeof item !== "string" || !/^[0-9]{1,16}(\.[0-9]{1,3})?$/.test(item)) {
+        throw new Error("invalid rate limit header");
+      }
+      headers[key] = item;
+    }
+  }
+  return {
+    ...(row.limit_source === undefined ? {} : { limit_source: row.limit_source }),
+    ...(Object.keys(headers).length ? { headers } : {}),
+  };
+}
+
 const phases = new Set([
   "transport",
   "invalid_response",
@@ -211,6 +255,7 @@ export function nativeResponseDiagnostics(
         [
           "phase",
           "http_status",
+          "rate_limit",
           "reason",
           ...oauthIntentFields,
           "provider_error_category",
@@ -268,6 +313,7 @@ export function nativeResponseDiagnostics(
           ["event", "phase"],
           [
             "http_status",
+            "rate_limit",
             "reason",
             ...oauthIntentFields,
             "provider_error_category",
@@ -333,6 +379,7 @@ export function nativeResponseDiagnostics(
             ["event", "phase"],
             [
               "http_status",
+              "rate_limit",
               "provider_error_category",
               "provider_error_shape",
               "provider_error_parameter",
@@ -358,6 +405,12 @@ export function nativeResponseDiagnostics(
             Object.hasOwn(row, "http_status") &&
             (!Number.isSafeInteger(status) || (status as number) < 100 || (status as number) > 599)
           ) {
+            return;
+          }
+          const rateLimit = Object.hasOwn(row, "rate_limit")
+            ? rateLimitEvidence(row.rate_limit)
+            : undefined;
+          if (rateLimit !== undefined && (status !== 429 || row.phase !== "http_status")) {
             return;
           }
           const category = row.provider_error_category;
@@ -443,6 +496,7 @@ export function nativeResponseDiagnostics(
               event: "gateway_native_response_failure",
               phase: row.phase,
               ...(status === undefined ? {} : { http_status: status }),
+              ...(rateLimit === undefined ? {} : { rate_limit: rateLimit }),
               ...(category === undefined ? {} : { provider_error_category: category }),
               ...(shape === undefined ? {} : { provider_error_shape: shape }),
               ...(parameter === undefined ? {} : { provider_error_parameter: parameter }),

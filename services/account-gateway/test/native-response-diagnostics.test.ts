@@ -106,7 +106,11 @@ void test("native diagnostics forwards d718 OAuth intent references and closed c
     { ...conflict, consumer: "" },
     { ...conflict, account_ref: "SECRET_SENTINEL" },
     { ...conflict, generation: "SECRET_SENTINEL" },
-    { event: conflict.event, phase: conflict.phase, account_ref: refs.account_ref },
+    {
+      event: conflict.event,
+      phase: conflict.phase,
+      account_ref: refs.account_ref,
+    },
     { event: "gateway_native_response_failure", phase: "transport", ...refs },
   ]) {
     f.feed(Buffer.from(JSON.stringify(record) + "\n"));
@@ -571,7 +575,10 @@ void test("native private Codex request shape reaches operator sink with scalar 
 // request URLs, credentials, provider bodies, or network address details.
 void test("native diagnostics retains complete closed transport facts through arbitrary pipe chunks", () => {
   const f = sink();
-  const legacy = { event: "gateway_native_response_failure", phase: "transport" };
+  const legacy = {
+    event: "gateway_native_response_failure",
+    phase: "transport",
+  };
   const expected = [JSON.stringify(legacy) + "\n"];
   f.feed(Buffer.from(expected[0]));
   const reasons = [
@@ -641,7 +648,13 @@ void test("native diagnostics drops secret, malformed, partial or misplaced tran
     delete partial[key];
     unsafe.push(JSON.stringify(partial));
   }
-  unsafe.push(JSON.stringify({ event: row.event, phase: row.phase, native_entered: true }));
+  unsafe.push(
+    JSON.stringify({
+      event: row.event,
+      phase: row.phase,
+      native_entered: true,
+    }),
+  );
   for (const phase of ["http_status", "deadline", "sse_read", "invalid_response", "body_read"]) {
     unsafe.push(JSON.stringify({ ...row, phase }));
   }
@@ -727,4 +740,31 @@ void test("native admission diagnostics retain phases and reject extra or unknow
   expected.push(valid + "\n");
   assert.deepEqual(f.records, expected);
   assert.equal(f.records.join("").includes("SECRET_SENTINEL"), false);
+});
+
+void test("429 diagnostics retain bounded quota evidence and reject private or misplaced values", () => {
+  const f = sink();
+  const base = {
+    event: "gateway_native_response_failure",
+    phase: "http_status",
+    http_status: 429,
+  };
+  const rate_limit = {
+    limit_source: "upstream_provider_shared_pool",
+    headers: { "Retry-After": "60", "X-RateLimit-Remaining": "0" },
+  };
+  f.feed(Buffer.from(JSON.stringify({ ...base, rate_limit }) + "\n"));
+  assert.deepEqual(JSON.parse(f.records[0]), { ...base, rate_limit });
+  for (const invalid of [
+    { limit_source: "SECRET_SENTINEL" },
+    { headers: { Authorization: "SECRET_SENTINEL" } },
+    { headers: { "Retry-After": "SECRET_SENTINEL" } },
+    { headers: { "Retry-After": "1".repeat(17) } },
+    { limit_source: "upstream_provider", message: "SECRET_SENTINEL" },
+    null,
+  ]) {
+    f.feed(Buffer.from(JSON.stringify({ ...base, rate_limit: invalid }) + "\n"));
+  }
+  f.feed(Buffer.from(JSON.stringify({ ...base, http_status: 400, rate_limit }) + "\n"));
+  assert.equal(f.records.length, 1);
 });
