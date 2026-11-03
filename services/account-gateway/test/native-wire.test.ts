@@ -217,13 +217,27 @@ void test("native wire: provider quota is scoped to a singleton matched private5
     "bad-date",
   ]) {
     const raw = [...headers];
-    if (scenario === "missing") raw.splice(4, 2);
-    if (scenario === "duplicate") raw.push("x-gateway-provider-quota-limit", "50");
-    if (scenario === "nonzero") raw[5] = "1";
-    if (scenario === "overflow") raw[3] = "9007199254740992";
-    if (scenario === "fraction") raw[3] = "1.5";
-    if (scenario === "noncanonical") raw[7] = "2026-11-05T00:00:00Z";
-    if (scenario === "bad-date") raw[7] = "private-provider-sentinel";
+    if (scenario === "missing") {
+      raw.splice(4, 2);
+    }
+    if (scenario === "duplicate") {
+      raw.push("x-gateway-provider-quota-limit", "50");
+    }
+    if (scenario === "nonzero") {
+      raw[5] = "1";
+    }
+    if (scenario === "overflow") {
+      raw[3] = "9007199254740992";
+    }
+    if (scenario === "fraction") {
+      raw[3] = "1.5";
+    }
+    if (scenario === "noncanonical") {
+      raw[7] = "2026-11-05T00:00:00Z";
+    }
+    if (scenario === "bad-date") {
+      raw[7] = "private-provider-sentinel";
+    }
     const f = await peer(async (req, res) => {
       for await (const _ of req) {
         /* Drain fixture request. */

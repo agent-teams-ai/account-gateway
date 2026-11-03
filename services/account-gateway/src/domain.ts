@@ -24,7 +24,9 @@ export class KernelError extends Error {
   constructor(code: KernelError["code"], providerQuota?: ProviderQuota) {
     super(code);
     this.code = code;
-    if (providerQuota !== undefined) this.providerQuota = providerQuota;
+    if (providerQuota !== undefined) {
+      this.providerQuota = providerQuota;
+    }
   }
 }
 // Every selectable permitted account was excluded as limited. Thrown inside the

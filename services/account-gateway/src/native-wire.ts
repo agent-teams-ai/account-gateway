@@ -559,21 +559,30 @@ export function providerQuota(
   message: IncomingMessage,
   requestRef: string,
 ): import("./domain.ts").ProviderQuota | undefined {
-  if (message.statusCode !== 502 || singleton(message, "x-gateway-request-ref") !== requestRef)
+  if (message.statusCode !== 502 || singleton(message, "x-gateway-request-ref") !== requestRef) {
     return undefined;
+  }
   const limitText = singleton(message, "x-gateway-provider-quota-limit");
   const remaining = singleton(message, "x-gateway-provider-quota-remaining");
   const resetAt = singleton(message, "x-gateway-provider-quota-reset-at");
-  if (!limitText || !/^[1-9][0-9]{0,15}$/.test(limitText) || remaining !== "0" || !resetAt)
+  if (
+    limitText === undefined ||
+    !/^[1-9][0-9]{0,15}$/.test(limitText) ||
+    remaining !== "0" ||
+    resetAt === undefined ||
+    resetAt === ""
+  ) {
     return undefined;
+  }
   const limit = Number(limitText),
     date = new Date(resetAt);
   if (
     !Number.isSafeInteger(limit) ||
     !Number.isFinite(date.getTime()) ||
     date.toISOString() !== resetAt
-  )
+  ) {
     return undefined;
+  }
   return Object.freeze({
     provider: "openrouter",
     limit,

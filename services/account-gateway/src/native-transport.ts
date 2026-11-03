@@ -305,7 +305,9 @@ export class NativeHTTPTransport implements NativeTransport {
         return { kind: "status" };
       }
       const quota = providerQuota(response, a.requestId);
-      if (quota) throw new KernelError("unavailable", quota);
+      if (quota) {
+        throw new KernelError("unavailable", quota);
+      }
       if (
         response.statusCode !== 200 ||
         singleton(response, "content-type")?.split(";")[0] !== "text/event-stream" ||
