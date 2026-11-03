@@ -80,11 +80,6 @@ type ReadTx = { db: PoolClient; consumer: string };
 export interface PostgresKernelOptions {
   // Captured on new executions. Absence keeps permanent legacy readback.
   readonly requestReadbackRetentionMs?: number;
-  // Trusted qualified profile caps; execution callers cannot supply this map.
-  readonly accountConcurrencyByProfile?: readonly {
-    readonly profile: string;
-    readonly concurrency: number;
-  }[];
 }
 type Tx = ReadTx & { issuer: string };
 // Mutations serialize per consumer; snapshots never acquire mutation locks.
@@ -96,7 +91,6 @@ export class PostgresKernel implements DurableKernel {
   private readonly bounds: Readonly<Bounds>;
   private readonly facts: Readonly<DurableFactBounds>;
   private readonly requestReadbackRetentionMs?: number;
-  private readonly accountConcurrencyByProfile?: ReadonlyMap<string, number>;
   constructor(
     pool: Pool,
     bounds: Bounds = defaults,
@@ -111,33 +105,6 @@ export class PostgresKernel implements DurableKernel {
       integer(retention, 31_536_000_000);
     }
     this.requestReadbackRetentionMs = retention;
-    if (options.accountConcurrencyByProfile !== undefined) {
-      const source = options.accountConcurrencyByProfile;
-      if (!Array.isArray(source) || !source.length || source.length > 128) {
-        throw new KernelError("invalid");
-      }
-      const caps = new Map<string, number>();
-      for (const candidate of source) {
-        const entry: unknown = candidate;
-        if (
-          typeof entry !== "object" ||
-          entry === null ||
-          !("profile" in entry) ||
-          !("concurrency" in entry)
-        ) {
-          throw new KernelError("invalid");
-        }
-        const profile = entry.profile,
-          concurrency = entry.concurrency;
-        identifier(profile, 64);
-        integer(concurrency, Math.min(64, this.bounds.maxConcurrent));
-        if (caps.has(profile)) {
-          throw new KernelError("invalid");
-        }
-        caps.set(profile, concurrency);
-      }
-      this.accountConcurrencyByProfile = caps;
-    }
   }
   private async session<T>(
     context: TrustedContext,
@@ -1273,8 +1240,7 @@ export class PostgresKernel implements DurableKernel {
       if (previousRequest !== undefined) {
         return { status: requestStatus(previousRequest) };
       }
-      // All generations/states of this consumer/account share occupancy. The
-      // hard ceiling is 128; overfull legacy accounts remain conservatively denied.
+      // Reconcile stale workers across the account before admitting a request.
       const ownerLost = await this.reconcileRequests(tx, ref, 128, e.account_ref);
       const a = await this.one<AccountRow>(
         tx,
@@ -1339,25 +1305,20 @@ export class PostgresKernel implements DurableKernel {
         await this.cleanup(tx, undefined, ref);
       } else {
         const occupied = (
-          await tx.db.query<{ account_n: number; execution_n: number }>(
-            `SELECT count(*)::integer AS account_n,
-          count(*) FILTER (WHERE r.execution_ref=$2)::integer AS execution_n
-          FROM requests r JOIN executions x ON x.consumer=r.consumer AND x.ref=r.execution_ref
-          WHERE r.consumer=$1 AND x.account_ref=$3 AND r.transport_occupied`,
-            [tx.consumer, ref, e.account_ref],
+          await tx.db.query<{ execution_n: number }>(
+            `SELECT count(*)::integer AS execution_n
+             FROM requests WHERE consumer=$1 AND execution_ref=$2 AND transport_occupied`,
+            [tx.consumer, ref],
           )
         ).rows.at(0);
         if (occupied === undefined) {
           throw new KernelError("unavailable");
         }
+        // Independent reviews can share an account. Keep concurrency scoped to
+        // the execution so a busy review cannot deny another review's requests.
         if (e.request_count >= e.max_requests) {
           code = "limit";
-        } else if (
-          occupied.execution_n >= e.max_concurrent ||
-          occupied.account_n >=
-            (this.accountConcurrencyByProfile?.get(e.profile) ??
-              (this.accountConcurrencyByProfile ? 0 : this.bounds.maxConcurrent))
-        ) {
+        } else if (occupied.execution_n >= e.max_concurrent) {
           code = "concurrency_limit";
         }
       }

@@ -750,10 +750,6 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
       cfg.durableFacts,
       {
         requestReadbackRetentionMs: cfg.requestReadbackRetentionMs,
-        accountConcurrencyByProfile: qualifiedProfiles.map((p) => ({
-          profile: p.profile,
-          concurrency: p.limits.concurrency,
-        })),
       },
     ),
     worker = randomUUID(),
