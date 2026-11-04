@@ -208,3 +208,14 @@ test("management record projections and secret custody cannot acquire SQL author
       violates(check(root));
     }
   }));
+
+test("SDK transport cannot be deep-imported by optional composition", () =>
+  fixture((root) => {
+    passes(check(root));
+    const file = join(root, "packages/account-gateway/src/get-modular/transport-fixture.ts");
+    writeFileSync(
+      file,
+      "import { transport } from '../features/facade-client/http/transport.js';\nexport const forbidden = transport;\n",
+    );
+    violates(check(root));
+  }));
