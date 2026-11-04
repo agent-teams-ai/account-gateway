@@ -1,4 +1,5 @@
 import { KernelError, identifier, uuid, revision } from "./domain.ts";
+import { exactCandidate, physicalCandidate } from "./account-management.ts";
 export {
   codexOAuthProfile,
   codexOAuthCleanupModels,
