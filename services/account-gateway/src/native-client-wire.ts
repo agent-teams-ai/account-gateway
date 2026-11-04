@@ -291,4 +291,3 @@ export function samePhysical(a: PhysicalCandidate, b: PhysicalCandidate): boolea
     a.model === b.model
   );
 }
-

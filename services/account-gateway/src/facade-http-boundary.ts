@@ -59,4 +59,3 @@ export function send<T>(
   });
   res.end(bytes);
 }
-

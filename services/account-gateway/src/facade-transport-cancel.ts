@@ -65,4 +65,3 @@ export async function cancelFacadeTransport(
   }
   await transport.cancel(ctx, proof, cleanup);
 }
-

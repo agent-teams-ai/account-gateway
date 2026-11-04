@@ -1399,4 +1399,3 @@ export class AccountManagement {
     return result.credentialsErased && result.closure === "closed";
   }
 }
-

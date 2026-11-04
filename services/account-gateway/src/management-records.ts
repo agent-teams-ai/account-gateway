@@ -90,4 +90,3 @@ export function refreshProfile(source: ManagedProfile): ManagedProfile {
   identifier(p.qualificationRef);
   return p;
 }
-
