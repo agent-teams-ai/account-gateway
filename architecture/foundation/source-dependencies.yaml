@@ -96,7 +96,7 @@ boundaries:
 
   - id: native-management
     dependencyMode: runtime
-    roots: [services/account-gateway/src/management.ts, services/account-gateway/src/oauth-profiles.ts, services/account-gateway/src/provider-connections.ts]
+    roots: [services/account-gateway/src/management.ts, services/account-gateway/src/account-management.ts, services/account-gateway/src/oauth-profiles.ts, services/account-gateway/src/provider-connections.ts]
     entrypoints: [services/account-gateway/src/management.ts, services/account-gateway/src/oauth-profiles.ts, services/account-gateway/src/provider-connections.ts]
     allow: {boundaries: [kernel-domain], packages: [], builtins: [], runtimeReferences: []}
   - id: native-management-postgres
@@ -109,11 +109,17 @@ boundaries:
     roots: [services/account-gateway/src/native-admission-wire.ts]
     entrypoints: [services/account-gateway/src/native-admission-wire.ts]
     allow: {boundaries: [contracts], packages: ['@agent-teams/account-gateway'], builtins: [], runtimeReferences: []}
+  # Physical readback and JSON identity checks cannot reach HTTP or PostgreSQL.
+  - id: native-control-codec
+    dependencyMode: runtime
+    roots: [services/account-gateway/src/native-client-wire.ts]
+    entrypoints: [services/account-gateway/src/native-client-wire.ts]
+    allow: {boundaries: [kernel-domain, native-management], packages: [], builtins: [], runtimeReferences: []}
   - id: native-management-http
     dependencyMode: runtime
-    roots: [services/account-gateway/src/native-client.ts]
+    roots: [services/account-gateway/src/native-client.ts, services/account-gateway/src/native-client-transport.ts, services/account-gateway/src/native-client-accounts.ts, services/account-gateway/src/native-client-oauth.ts, services/account-gateway/src/native-client-discovery.ts]
     entrypoints: [services/account-gateway/src/native-client.ts]
-    allow: {boundaries: [service-admission, kernel-domain, native-management, native-admission-wire, contracts], packages: ['@agent-teams/account-gateway'], builtins: ['node:http', 'node:https'], runtimeReferences: []}
+    allow: {boundaries: [service-admission, kernel-domain, native-management, native-admission-wire, native-control-codec, contracts], packages: ['@agent-teams/account-gateway'], builtins: ['node:http', 'node:https'], runtimeReferences: []}
   - id: native-management-tests
     dependencyMode: runtime
     roots: [services/account-gateway/test/management.test.ts, services/account-gateway/test/management-postgres.test.ts]

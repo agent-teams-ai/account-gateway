@@ -163,3 +163,17 @@ test("llm layers depend inward through public layer entries only", () =>
     );
     violates(check(root));
   }));
+
+test("native control wire cannot import outbound HTTP or SQL types", () =>
+  fixture((root) => {
+    passes(check(root));
+    const file = join(root, "services/account-gateway/src/native-client-wire.ts");
+    const original = readFileSync(file, "utf8");
+    for (const forbidden of [
+      "\nimport type { IncomingMessage } from 'node:http';\nexport type ForbiddenNativeCodec = IncomingMessage;\n",
+      "\nimport type { Pool } from 'pg';\nexport type ForbiddenNativeCodec = Pool;\n",
+    ]) {
+      writeFileSync(file, original + forbidden);
+      violates(check(root));
+    }
+  }));
