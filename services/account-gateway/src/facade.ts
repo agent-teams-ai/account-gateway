@@ -15,8 +15,8 @@ import {
   inServiceLane,
 } from "./service-admission.ts";
 import type { ServiceAdmission } from "./service-admission.ts";
-import type { IncomingMessage, Server, ServerResponse } from "node:http";
-import { createHmac, randomUUID } from "node:crypto";
+import type { Server } from "node:http";
+import { createHmac } from "node:crypto";
 import { once } from "node:events";
 import * as c from "@agent-teams/account-gateway/contracts";
 import { secretSubmission } from "@agent-teams/account-gateway/http";
@@ -42,7 +42,6 @@ import {
   type AccountManagement,
   type ManagementStore,
   type PhysicalCandidate,
-  type AccountLifecycleReadback,
 } from "./management.ts";
 import { providerConnectionDefinition } from "./provider-connections.ts";
 import { projectProviderConnections } from "./provider-connection-capabilities.ts";
@@ -172,207 +171,16 @@ export interface FacadeOptions {
     readonly writeGate: "enabled" | "disabled";
   };
 }
-function safe(
-  code: c.SafeError["code"],
-  effect: c.SafeError["effect"] = "effect_unknown",
-  identity: { operationRef?: string; requestRef?: string } = {},
-): c.SafeError {
-  return c.safeError.parse({
-    code,
-    traceRef: randomUUID(),
-    ...identity,
-    effect,
-    retry: { kind: effect === "effect_unknown" ? "readback" : "never" },
-  });
-}
-function requestDTO(r: RequestStatus): c.RequestStatus {
-  const status =
-    r.effect === "completed"
-      ? "completed"
-      : r.effect === "effect_unknown"
-        ? "unknown"
-        : ["not_dispatched", "rejected_before_dispatch"].includes(r.effect)
-          ? "failed"
-          : "pending";
-  const concurrencyLimited = r.code === "concurrency_limit" && r.effect === "not_dispatched";
-  const error =
-    status === "failed" || status === "unknown"
-      ? {
-          ...safe(
-            r.code === "limit" || r.code === "concurrency_limit"
-              ? "admission_limited"
-              : "upstream_failure",
-            r.effect,
-            { requestRef: r.requestRef },
-          ),
-          ...(concurrencyLimited ? { retry: { kind: "after", milliseconds: 1000 } } : {}),
-        }
-      : undefined;
-  return c.requestStatus.parse({
-    requestRef: r.requestRef,
-    effect: r.effect,
-    status,
-    ...(error ? { error } : {}),
-  });
-}
-function accountDTO(a: Awaited<ReturnType<AccountManagement["account"]>>): c.Account {
-  return c.account.parse({
-    accountRef: a.accountRef,
-    ownerRef: a.ownerRef,
-    profileId: a.profile,
-    displayName: a.displayName,
-    state: a.state,
-    metadataRevision: a.revision,
-    authorizationEpoch: a.epoch,
-  });
-}
-function lifecycleAccountDTO(r: AccountLifecycleReadback): c.LifecycleAccount {
-  const a = r.account;
-  return c.lifecycleAccount.parse({
-    accountRef: a.accountRef,
-    ownerRef: a.ownerRef,
-    profileId: a.profile,
-    displayName: a.displayName,
-    state: a.state,
-    metadataRevision: a.revision,
-    authorizationEpoch: a.epoch,
-    authKind: r.authKind,
-    resumeCustody: r.resumeCustody,
-  });
-}
-function retirementDTO(
-  r: Awaited<ReturnType<AccountManagement["retirement"]>>,
-): c.AccountRetirement {
-  return c.accountRetirement.parse({
-    operationRef: r.operationRef,
-    account: accountDTO(r.account),
-    state: r.state,
-    fence: r.fence,
-    counts: r.counts,
-    inert: r.inert,
-  });
-}
-const executionState = (state: SavedExecution["state"]): c.Execution["state"] =>
-  state === "open" ? "active" : state === "closed" ? "terminal" : "fenced";
-function singleton(req: IncomingMessage, name: string, required = true): string | undefined {
-  const values: string[] = [];
-  for (let i = 0; i < req.rawHeaders.length; i += 2) {
-    if (req.rawHeaders[i].toLowerCase() === name) {
-      values.push(req.rawHeaders[i + 1]);
-    }
-  }
-  if (values.length !== (required ? 1 : 0) && !(values.length === 1 && !required)) {
-    throw new KernelError("invalid");
-  }
-  return values[0];
-}
-async function body(req: IncomingMessage, maximum: number): Promise<Uint8Array> {
-  const content = singleton(req, "content-type");
-  if (content !== "application/json") {
-    throw new KernelError("invalid");
-  }
-  const encoding = singleton(req, "content-encoding", false);
-  if (encoding !== undefined) {
-    throw new KernelError("invalid");
-  }
-  const length = singleton(req, "content-length", false);
-  if (length !== undefined && (!/^(0|[1-9]\d*)$/.test(length) || Number(length) > maximum)) {
-    throw new KernelError("invalid");
-  }
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    const part = Buffer.from(chunk as Uint8Array);
-    size += part.byteLength;
-    if (size > maximum) {
-      throw new KernelError("invalid");
-    }
-    chunks.push(part);
-  }
-  return Buffer.concat(chunks, size);
-}
-function send<T>(
-  res: ServerResponse,
-  schema: Pick<Schema<T>, "parse">,
-  value: T,
-  status = 200,
-  privateCache = false,
-  maximumBytes = 65_536,
-): void {
-  const bytes = JSON.stringify(schema.parse(value));
-  if (Buffer.byteLength(bytes) > maximumBytes) {
-    throw new KernelError("unavailable");
-  }
-  res.writeHead(status, {
-    "content-type": "application/json",
-    "cache-control": privateCache ? "private, no-store" : "no-store",
-    "content-length": Buffer.byteLength(bytes),
-  });
-  res.end(bytes);
-}
-
-// Cleanup is a separate exact leased authority. A successful outbound cancel
-// does not certify provider transport closure or release SQL occupancy.
-export async function cancelFacadeTransport(
-  options: FacadeOptions,
-  context: TrustedContext,
-  input: NativeDispatchProof,
-  authority: CleanupAuthority,
-): Promise<void> {
-  const ctx = captureContext(context),
-    proof = {
-      executionRef: input.executionRef,
-      requestRef: input.requestRef,
-      worker: input.worker,
-      token: input.token,
-      native: {
-        originRef: input.native.originRef,
-        engineIncarnation: input.native.engineIncarnation,
-        requestNonce: input.native.requestNonce,
-        generation: input.native.generation,
-      },
-    },
-    cleanup = { cleanupRef: authority.cleanupRef, token: authority.token };
-  const configured = options.enrollment,
-    transport = options.transport,
-    kernel = options.kernel;
-  if (!configured || !transport?.cancel) {
-    throw new KernelError("unavailable");
-  }
-  const peer = {
-    originRef: configured.originRef,
-    engineIncarnation: configured.engineIncarnation,
-    worker: configured.worker,
-  };
-  if (
-    proof.native.originRef !== peer.originRef ||
-    proof.native.engineIncarnation !== peer.engineIncarnation
-  ) {
-    throw new KernelError("denied");
-  }
-  const transports = await kernel.cleanupTransports(
-    ctx,
-    cleanup.cleanupRef,
-    peer.worker,
-    cleanup.token,
-  );
-  if (
-    !transports.some(
-      (p) =>
-        p.executionRef === proof.executionRef &&
-        p.requestRef === proof.requestRef &&
-        p.worker === proof.worker &&
-        p.token === proof.token &&
-        p.native?.originRef === proof.native.originRef &&
-        p.native.engineIncarnation === proof.native.engineIncarnation &&
-        p.native.requestNonce === proof.native.requestNonce &&
-        p.native.generation === proof.native.generation,
-    )
-  ) {
-    throw new KernelError("denied");
-  }
-  await transport.cancel(ctx, proof, cleanup);
-}
+import {
+  safe,
+  requestDTO,
+  accountDTO,
+  lifecycleAccountDTO,
+  retirementDTO,
+  executionState,
+} from "./facade-wire.ts";
+import { singleton, body, send } from "./facade-http-boundary.ts";
+export { cancelFacadeTransport } from "./facade-transport-cancel.ts";
 
 export function createFacade(options: FacadeOptions): Server {
   const admission = options.admission,

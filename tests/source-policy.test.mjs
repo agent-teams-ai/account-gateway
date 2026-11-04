@@ -177,3 +177,17 @@ test("native control wire cannot import outbound HTTP or SQL types", () =>
       violates(check(root));
     }
   }));
+
+test("facade wire projections cannot import database or HTTP policy", () =>
+  fixture((root) => {
+    passes(check(root));
+    const file = join(root, "services/account-gateway/src/facade-wire.ts");
+    const original = readFileSync(file, "utf8");
+    for (const forbidden of [
+      "\nimport type { Pool } from 'pg';\nexport type ForbiddenFacadeCodec = Pool;\n",
+      "\nimport type { Server } from 'node:http';\nexport type ForbiddenFacadeCodec = Server;\n",
+    ]) {
+      writeFileSync(file, original + forbidden);
+      violates(check(root));
+    }
+  }));
