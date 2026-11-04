@@ -1,3 +1,8 @@
+export { createAccountLimitsRefreshClient } from "../features/facade-client/http/index.js";
+export type {
+  AccountLimitsRefreshClient,
+  AccountLimitsRefreshConfig,
+} from "../features/facade-client/http/index.js";
 export {
   createManagementClient,
   createExecutionClient,

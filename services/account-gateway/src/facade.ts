@@ -137,6 +137,10 @@ export interface FacadeOptions {
     getAccountLimitsCapabilities(): Promise<c.AccountLimitsCapabilities>;
     readAccountLimits(input: c.AccountLimitsRequest): Promise<c.AccountLimits>;
   };
+  readonly accountLimitsRefresh?: {
+    getAccountLimitsRefreshCapabilities(): Promise<c.AccountLimitsRefreshCapabilities>;
+    refreshAccountLimits(input: c.AccountLimitsRequest): Promise<c.AccountLimits>;
+  };
   readonly accountLimitsV2?: {
     getAccountLimitsCapabilities(): Promise<c.AccountLimitsV2Capabilities>;
     readAccountLimits(input: c.AccountLimitsRequest): Promise<c.AccountLimitsV2>;
@@ -873,6 +877,29 @@ export function createFacade(options: FacadeOptions): Server {
           ) {
             throw new KernelError("invalid");
           }
+          if (path === "/v1/capabilities/account-limits-refresh" && method === "GET") {
+            if (grant.role !== "consumer-control" && grant.role !== "management") {
+              throw new KernelError("denied");
+            }
+            let capabilities: c.AccountLimitsRefreshCapabilities = {
+              contract: c.ACCOUNT_LIMITS_REFRESH_CONTRACT,
+              quotaOnlyRefresh: false,
+              profileIds: [],
+            };
+            try {
+              if (options.accountLimitsRefresh) {
+                capabilities = parse(
+                  c.accountLimitsRefreshCapabilities,
+                  await options.accountLimitsRefresh.getAccountLimitsRefreshCapabilities(),
+                );
+              }
+            } catch {
+              /* Unsupported native versions never advertise refresh. */
+            }
+            requireCurrent(grant);
+            send(res, c.accountLimitsRefreshCapabilities, capabilities, 200, true);
+            return;
+          }
           if (path === "/v1/capabilities/account-limits" && method === "GET") {
             if (grant.role !== "consumer-control" && grant.role !== "management") {
               throw new KernelError("denied");
@@ -962,7 +989,10 @@ export function createFacade(options: FacadeOptions): Server {
             send(res, c.accountModels, result, 200, true, 2 * 1024 * 1024);
             return;
           }
-          const limitsRead = async (contract: "account-limits/v1" | "account-limits/v2") => {
+          const limitsRead = async (
+            contract: "account-limits/v1" | "account-limits/v2",
+            refresh = false,
+          ) => {
             const input = parse(
               c.accountLimitsRequest,
               strictJSON(await body(req, Math.min(ingressBytes, 1024)), true),
@@ -984,7 +1014,11 @@ export function createFacade(options: FacadeOptions): Server {
               throw new KernelError("denied");
             }
             requireCurrent(grant);
-            if (!definition || definition.limitsContract !== contract) {
+            if (
+              !definition ||
+              definition.limitsContract !== contract ||
+              (refresh && input.profileId !== "openai-codex-oauth-responses-v1")
+            ) {
               return { input, result: { status: "unsupported" as const } };
             }
             const before: { value?: PhysicalCandidate } = {};
@@ -1012,6 +1046,27 @@ export function createFacade(options: FacadeOptions): Server {
                 ? {
                     contract: "account-limits/v1" as const,
                     read: async (selector: c.AccountLimitsRequest): Promise<c.AccountLimits> => {
+                      if (refresh) {
+                        if (!options.accountLimitsRefresh) {
+                          return { status: "unsupported" };
+                        }
+                        try {
+                          const caps = parse(
+                            c.accountLimitsRefreshCapabilities,
+                            await options.accountLimitsRefresh.getAccountLimitsRefreshCapabilities(),
+                          );
+                          if (
+                            !caps.quotaOnlyRefresh ||
+                            !caps.profileIds.includes("openai-codex-oauth-responses-v1")
+                          ) {
+                            return { status: "unsupported" };
+                          }
+                        } catch {
+                          return { status: "unsupported" };
+                        }
+                        requireCurrent(grant);
+                        return options.accountLimitsRefresh.refreshAccountLimits(selector);
+                      }
                       if (!options.accountLimits) {
                         return { status: "unavailable" };
                       }
@@ -1052,6 +1107,11 @@ export function createFacade(options: FacadeOptions): Server {
             }
             return { input, result: result.wire };
           };
+          if (path === "/v1/account-limits/refresh" && method === "POST") {
+            const { result } = await limitsRead("account-limits/v1", true);
+            send(res, c.accountLimits, result as c.AccountLimits, 200, true);
+            return;
+          }
           if (path === "/v1/account-limits/read" && method === "POST") {
             if (grant.role !== "consumer-control" && grant.role !== "management") {
               throw new KernelError("denied");

@@ -1,3 +1,5 @@
+export { createAccountLimitsRefreshClient } from "./http/index.js";
+export type { AccountLimitsRefreshClient, AccountLimitsRefreshConfig } from "./http/index.js";
 export { createAccountLimitsClient, createAccountLimitsV2Client } from "./http/index.js";
 export type {
   AccountLimitsConfig,
@@ -22,3 +24,5 @@ export type {
 } from "./contracts/index.js";
 
 export { accountModelDiscoveryProfile, accountModelDiscoverySource } from "./contracts/index.js";
+
+export type { AccountLimitsRefreshCapabilities } from "./contracts/index.js";

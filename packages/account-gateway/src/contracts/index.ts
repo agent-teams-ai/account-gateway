@@ -89,6 +89,8 @@ export type {
 } from "../features/facade-client/contracts/index.js";
 
 export {
+  ACCOUNT_LIMITS_REFRESH_CONTRACT,
+  accountLimitsRefreshCapabilities,
   ACCOUNT_LIMITS_CONTRACT,
   accountLimitsRequest,
   accountLimitsCapabilities,
@@ -101,6 +103,7 @@ export {
   accountLimitsV2,
 } from "../features/facade-client/contracts/index.js";
 export type {
+  AccountLimitsRefreshCapabilities,
   AccountLimitsRequest,
   AccountLimitsCapabilities,
   AccountLimits,

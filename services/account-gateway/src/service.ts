@@ -44,6 +44,7 @@ import { providerConnectionDefinition } from "./provider-connections.ts";
 import {
   NativeAccountModelsClient,
   NativeAccountLimitsClient,
+  NativeAccountLimitsRefreshClient,
   NativeAccountLimitsV2Client,
   NativeManagementClient,
   NativeRetainedCustodyClient,
@@ -302,6 +303,7 @@ export function composeServiceControl(
     nativeControls,
     accountModels: new NativeAccountModelsClient(control),
     accountLimits: new NativeAccountLimitsClient(control),
+    accountLimitsRefresh: new NativeAccountLimitsRefreshClient(control),
     accountLimitsV2: new NativeAccountLimitsV2Client(control),
   });
 }
@@ -309,12 +311,16 @@ export function composeServiceControl(
 export function composeServiceCachedLimits(
   control: Pick<
     ReturnType<typeof composeServiceControl>,
-    "accountModels" | "accountLimits" | "accountLimitsV2"
+    "accountModels" | "accountLimits" | "accountLimitsV2" | "accountLimitsRefresh"
   >,
-): Pick<FacadeOptions, "accountModels" | "accountLimits" | "accountLimitsV2" | "admissionLimits"> {
+): Pick<
+  FacadeOptions,
+  "accountModels" | "accountLimits" | "accountLimitsV2" | "accountLimitsRefresh" | "admissionLimits"
+> {
   return {
     accountModels: control.accountModels,
     accountLimits: control.accountLimits,
+    accountLimitsRefresh: control.accountLimitsRefresh,
     accountLimitsV2: control.accountLimitsV2,
     // One read-through view shared by both facades; native stays the authority.
     admissionLimits: new NativeAdmissionLimits({ codex: control.accountLimits }),
