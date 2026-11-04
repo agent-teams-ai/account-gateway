@@ -191,3 +191,20 @@ test("facade wire projections cannot import database or HTTP policy", () =>
       violates(check(root));
     }
   }));
+
+test("management record projections and secret custody cannot acquire SQL authority", () =>
+  fixture((root) => {
+    passes(check(root));
+    for (const path of [
+      "services/account-gateway/src/management-records.ts",
+      "services/account-gateway/src/intent-secrets.ts",
+    ]) {
+      const file = join(root, path);
+      const original = readFileSync(file, "utf8");
+      writeFileSync(
+        file,
+        original + "\nimport type { Pool } from 'pg';\nexport type ForbiddenManagementBoundary = Pool;\n",
+      );
+      violates(check(root));
+    }
+  }));
