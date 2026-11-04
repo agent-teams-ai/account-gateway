@@ -9,6 +9,7 @@ import type {
   AccountLimits,
   AccountLimitsV2,
   AccountLimitsV2Capabilities,
+  AccountLimitsRefreshCapabilities,
 } from "@agent-teams/account-gateway/contracts";
 import type { RetainedCustodyProof } from "./domain.ts";
 import { KernelError, identifier, uuid } from "./domain.ts";
@@ -18,6 +19,7 @@ import {
   accountModelsRequest,
   accountModels,
   accountLimitsRequest,
+  accountLimitsRefreshCapabilities,
   accountLimitsCapabilities,
   accountLimits,
   accountLimitsV2,
@@ -1177,6 +1179,37 @@ export class NativeAccountLimitsClient extends NativeControlHTTP {
             "/private/native/v1/account-limits/read",
             accountLimitsRequest.parse(input),
             deadlineMs,
+          ),
+        ),
+      );
+    } catch {
+      throw new NativeFailure("invalid_readback");
+    }
+  }
+}
+
+/** Native alone performs custody-bound provider quota metadata refresh. */
+export class NativeAccountLimitsRefreshClient extends NativeControlHTTP {
+  constructor(options: NativeManagementOptions) {
+    super({ ...options, deadlineMs: 7000, bodyBytes: 262144 });
+  }
+  async getAccountLimitsRefreshCapabilities(): Promise<AccountLimitsRefreshCapabilities> {
+    try {
+      return accountLimitsRefreshCapabilities.parse(
+        decode(await this.call("GET", "/private/native/v1/account-limits/refresh-capabilities")),
+      );
+    } catch {
+      throw new NativeFailure("invalid_readback");
+    }
+  }
+  async refreshAccountLimits(input: AccountLimitsRequest): Promise<AccountLimits> {
+    try {
+      return accountLimits.parse(
+        decode(
+          await this.call(
+            "POST",
+            "/private/native/v1/account-limits/refresh",
+            accountLimitsRequest.parse(input),
           ),
         ),
       );

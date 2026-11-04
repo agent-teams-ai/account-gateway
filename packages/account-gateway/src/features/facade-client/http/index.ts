@@ -803,6 +803,40 @@ export function createAccountLimitsClient(settings: AccountLimitsConfig) {
 }
 export type AccountLimitsClient = ReturnType<typeof createAccountLimitsClient>;
 
+const accountLimitsRefreshConfig = accountLimitsConfig.extend({
+  timeoutMs: z.number().int().min(1).max(10000).default(10000),
+});
+export type AccountLimitsRefreshConfig = z.input<typeof accountLimitsRefreshConfig>;
+/** Explicit quota metadata refresh, bounded and never retried. */
+export function createAccountLimitsRefreshClient(settings: AccountLimitsRefreshConfig) {
+  const captured = valid(accountLimitsRefreshConfig, settings);
+  const { json } = transport(captured, captured.role);
+  return Object.freeze({
+    getAccountLimitsRefreshCapabilities: (
+      options?: CallOptions,
+    ): Promise<c.AccountLimitsRefreshCapabilities> =>
+      json(
+        "/v1/capabilities/account-limits-refresh",
+        c.accountLimitsRefreshCapabilities,
+        "GET",
+        undefined,
+        options,
+      ),
+    refreshAccountLimits: (
+      input: c.AccountLimitsRequest,
+      options?: CallOptions,
+    ): Promise<c.AccountLimits> =>
+      json(
+        "/v1/account-limits/refresh",
+        c.accountLimits,
+        "POST",
+        valid(c.accountLimitsRequest, input),
+        options,
+      ),
+  });
+}
+export type AccountLimitsRefreshClient = ReturnType<typeof createAccountLimitsRefreshClient>;
+
 const accountLimitsV2Config = accountLimitsConfig.extend({
   contract: z.literal(c.ACCOUNT_LIMITS_V2_CONTRACT),
 });

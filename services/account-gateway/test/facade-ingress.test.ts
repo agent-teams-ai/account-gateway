@@ -481,6 +481,7 @@ async function sourceHTTP(
   limitsRead?: { contract: "v1" | "v2"; enter(): Promise<void> },
   omitModelSource = false,
   quotaFailure = false,
+  limitsRefresh?: () => Promise<void>,
 ) {
   const oauthProfile =
     oauth === "grok"
@@ -941,6 +942,30 @@ async function sourceHTTP(
         assert.equal(req.headers.authorization, "Bearer " + consumer.managementCredential);
         await modelRead?.();
         reply(modelResult, modelHTTPStatus);
+        return;
+      }
+      if (
+        req.method === "GET" &&
+        path === "/private/native/v1/account-limits/refresh-capabilities" &&
+        limitsRefresh
+      ) {
+        reply({
+          contract: "account-limits-refresh/v1",
+          quotaOnlyRefresh: true,
+          profileIds: ["openai-codex-oauth-responses-v1"],
+        });
+        return;
+      }
+      if (
+        req.method === "POST" &&
+        path === "/private/native/v1/account-limits/refresh" &&
+        limitsRefresh
+      ) {
+        const grant = await callback("account-limits-authority", { consumerId, ...tuple });
+        assert.equal(grant.status, 200);
+        await grant.arrayBuffer();
+        await limitsRefresh();
+        reply({ status: "unknown" });
         return;
       }
       if (req.method === "GET" && path === "/private/native/v1/account-limits/capabilities") {
@@ -4699,5 +4724,68 @@ void test("private quota headers reach facade safeError with unknown/readback pr
     assert.equal(f.forwarded.length, 1);
   } finally {
     await f.close();
+  }
+});
+
+void test("quota refresh is additive, owner fenced and unavailable on old native", async () => {
+  let mutate: (() => void) | undefined;
+  const f = await sourceHTTP(
+    true,
+    false,
+    undefined,
+    undefined,
+    undefined,
+    false,
+    false,
+    async () => {
+      mutate?.();
+    },
+  );
+  try {
+    const { account, input } = modelAccount(f, "codex");
+    const cap = await f.publicCall("/v1/capabilities/account-limits-refresh");
+    assert.equal(cap.status, 200);
+    assert.equal(((await cap.json()) as { quotaOnlyRefresh: boolean }).quotaOnlyRefresh, true);
+    const refreshed = await f.publicCall("/v1/account-limits/refresh", input);
+    assert.equal(refreshed.status, 200);
+    assert.deepEqual(await refreshed.json(), { status: "unknown" });
+    const calls = f.seen.filter(
+      (r) => r.path === "POST /private/native/v1/account-limits/refresh",
+    ).length;
+    assert.equal(
+      (await f.publicCall("/v1/account-limits/refresh", { ...input, ownerRef: "foreign" })).status,
+      403,
+    );
+    assert.equal(
+      f.seen.filter((r) => r.path === "POST /private/native/v1/account-limits/refresh").length,
+      calls,
+    );
+    mutate = () => {
+      account.epoch++;
+    };
+    assert.equal((await f.publicCall("/v1/account-limits/refresh", input)).status, 403);
+    assert.equal(f.forwarded.length, 0);
+    assert.equal(f.begins(), 0);
+  } finally {
+    await f.close();
+  }
+  const old = await sourceHTTP(true);
+  try {
+    const { input } = modelAccount(old, "codex");
+    const caps = await old.publicCall("/v1/capabilities/account-limits-refresh");
+    assert.deepEqual(await caps.json(), {
+      contract: "account-limits-refresh/v1",
+      quotaOnlyRefresh: false,
+      profileIds: [],
+    });
+    const refreshed = await old.publicCall("/v1/account-limits/refresh", input);
+    assert.equal(refreshed.status, 200);
+    assert.deepEqual(await refreshed.json(), { status: "unsupported" });
+    assert.equal(
+      old.seen.some((r) => r.path === "POST /private/native/v1/account-limits/refresh"),
+      false,
+    );
+  } finally {
+    await old.close();
   }
 });

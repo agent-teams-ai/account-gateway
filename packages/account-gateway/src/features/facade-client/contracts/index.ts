@@ -748,6 +748,13 @@ export const accountLimitsCapabilities = z.strictObject({
   cachedRead: z.boolean(),
   quotaOnlyRefresh: z.boolean(),
 });
+export const ACCOUNT_LIMITS_REFRESH_CONTRACT = "account-limits-refresh/v1" as const;
+export const accountLimitsRefreshCapabilities = z.strictObject({
+  contract: z.literal(ACCOUNT_LIMITS_REFRESH_CONTRACT),
+  quotaOnlyRefresh: z.boolean(),
+  profileIds: z.array(z.literal("openai-codex-oauth-responses-v1")).max(1),
+});
+export type AccountLimitsRefreshCapabilities = z.infer<typeof accountLimitsRefreshCapabilities>;
 const accountLimitsWindow = z
   .strictObject({
     id: reference,
