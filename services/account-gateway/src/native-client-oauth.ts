@@ -6,7 +6,11 @@ import {
 } from "@agent-teams/account-gateway/contracts";
 import { secretSubmission } from "@agent-teams/account-gateway/http";
 import { KernelError, identifier, uuid } from "./domain.ts";
-import { codexOAuthProfile, oauthProfileDefinition, type OAuthProfileDefinition } from "./oauth-profiles.ts";
+import {
+  codexOAuthProfile,
+  oauthProfileDefinition,
+  type OAuthProfileDefinition,
+} from "./oauth-profiles.ts";
 import type {
   OAuthScope,
   OAuthEnrollmentNative,
@@ -423,4 +427,3 @@ export class NativeOAuthLifecycleClient extends NativeControlHTTP implements OAu
     }
   }
 }
-

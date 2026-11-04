@@ -203,7 +203,8 @@ test("management record projections and secret custody cannot acquire SQL author
       const original = readFileSync(file, "utf8");
       writeFileSync(
         file,
-        original + "\nimport type { Pool } from 'pg';\nexport type ForbiddenManagementBoundary = Pool;\n",
+        original +
+          "\nimport type { Pool } from 'pg';\nexport type ForbiddenManagementBoundary = Pool;\n",
       );
       violates(check(root));
     }

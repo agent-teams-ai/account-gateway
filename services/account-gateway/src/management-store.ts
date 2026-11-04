@@ -1,17 +1,9 @@
 import type { Pool, PoolClient } from "pg";
 import { sharedCheckout } from "./service-admission.ts";
 import type { Checkout } from "./service-admission.ts";
-import {
-  KernelError,
-  identifier,
-  uuid,
-} from "./domain.ts";
+import { KernelError, identifier, uuid } from "./domain.ts";
 import type { TrustedContext, AccountStatus } from "./domain.ts";
-import {
-  captureContext,
-  exactCandidate,
-  physicalCandidate,
-} from "./management.ts";
+import { captureContext, exactCandidate, physicalCandidate } from "./management.ts";
 import { oauthProfileDefinition } from "./oauth-profiles.ts";
 import type {
   CandidateJournal,
@@ -26,7 +18,13 @@ import type {
 } from "./management.ts";
 import { scopeCopy } from "./intent-secrets.ts";
 import type { IntentEnvelope, IntentSecrets } from "./intent-secrets.ts";
-import { journalRow, journalValues, sameJournal, mappingRow, refreshProfile } from "./management-records.ts";
+import {
+  journalRow,
+  journalValues,
+  sameJournal,
+  mappingRow,
+  refreshProfile,
+} from "./management-records.ts";
 import type { JournalRow, MappingRow, JoinedMapping } from "./management-records.ts";
 // Existing service/test import surface remains unchanged.
 export { IntentSecrets } from "./intent-secrets.ts";

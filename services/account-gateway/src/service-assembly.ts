@@ -13,11 +13,7 @@ import {
   type ExecutionRead,
   type TrustedContext,
 } from "./domain.ts";
-import {
-  AccountManagement,
-  exactCandidate,
-  sameCandidate,
-} from "./management.ts";
+import { AccountManagement, exactCandidate, sameCandidate } from "./management.ts";
 import type {
   CandidateJournal,
   CandidateNative,
@@ -353,4 +349,3 @@ export function composeServiceNative(
     transport: new NativeHTTPTransport(authority, control.nativeControls),
   });
 }
-
