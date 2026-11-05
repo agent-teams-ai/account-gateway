@@ -6,6 +6,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import { config, post, providerQuota } from "../src/native-wire.ts";
 import { KernelError } from "../src/domain.ts";
+import { decode, NativeFailure } from "../src/native-client-wire.ts";
 
 async function peer(handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>) {
   let requests = 0;
@@ -267,5 +268,20 @@ void test("native wire: provider quota is scoped to a singleton matched private5
     } finally {
       await f.stop();
     }
+  }
+});
+
+// Regression: the native duplicate-member guard must accept valid JSON arrays
+// without mistaking a closing bracket for part of the final primitive value.
+void test("native control JSON accepts primitive array tails and still rejects ambiguity", () => {
+  const valid = '{"values":[1,true,null,{"x":2},[3,false]]}';
+  assert.deepEqual(decode(Buffer.from(valid)), {
+    values: [1, true, null, { x: 2 }, [3, false]],
+  });
+  for (const invalid of ['{"values":[1,]}', '{"values":[1,2],"x":1,"x":2}']) {
+    assert.throws(
+      () => decode(Buffer.from(invalid)),
+      (error: unknown) => error instanceof NativeFailure && error.code === "invalid_readback",
+    );
   }
 });

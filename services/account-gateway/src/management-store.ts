@@ -1,4 +1,3 @@
-import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { sharedCheckout } from "./service-admission.ts";
 import type { Checkout } from "./service-admission.ts";
@@ -7,11 +6,9 @@ import type { TrustedContext, AccountStatus } from "./domain.ts";
 import { captureContext, exactCandidate, physicalCandidate } from "./management.ts";
 import { oauthProfileDefinition } from "./oauth-profiles.ts";
 import type {
-  AcceptedIntent,
   CandidateJournal,
   CandidateMapping,
   CandidateScope,
-  IntentCustody,
   ManagedProfile,
   ManagementStore,
   OAuthSelectors,
@@ -19,196 +16,20 @@ import type {
   OAuthCleanupAction,
   OAuthCleanupScope,
 } from "./management.ts";
+import { scopeCopy } from "./intent-secrets.ts";
+import type { IntentEnvelope, IntentSecrets } from "./intent-secrets.ts";
+import {
+  journalRow,
+  journalValues,
+  sameJournal,
+  mappingRow,
+  refreshProfile,
+} from "./management-records.ts";
+import type { JournalRow, MappingRow, JoinedMapping } from "./management-records.ts";
+// Existing service/test import surface remains unchanged.
+export { IntentSecrets } from "./intent-secrets.ts";
+export type { IntentEnvelope } from "./intent-secrets.ts";
 
-export interface IntentEnvelope {
-  readonly nonce: Buffer;
-  readonly ciphertext: Buffer;
-  readonly tag: Buffer;
-}
-function scopeCopy(s: CandidateScope): CandidateScope {
-  const copy = Object.freeze({
-    consumerId: s.consumerId,
-    operationId: s.operationId,
-    accountRef: s.accountRef,
-    ownerRef: s.ownerRef,
-    purpose: s.purpose,
-  });
-  identifier(copy.consumerId);
-  identifier(copy.operationId);
-  uuid(copy.accountRef);
-  identifier(copy.ownerRef);
-  if (!["create", "reconnect"].includes(copy.purpose)) {
-    throw new KernelError("invalid");
-  }
-  return copy;
-}
-function aad(s: CandidateScope): Buffer {
-  return Buffer.from(
-    JSON.stringify([
-      "account-gateway/transient/v1",
-      s.consumerId,
-      s.operationId,
-      s.accountRef,
-      s.ownerRef,
-      s.purpose,
-    ]),
-    "utf8",
-  );
-}
-// Trusted composition supplies two distinct keys from outside DB/backups. No env lookup.
-export class IntentSecrets implements IntentCustody {
-  readonly #aead: Buffer;
-  readonly #hmac: Buffer;
-  constructor(aeadKey: Uint8Array, hmacKey: Uint8Array) {
-    if (
-      aeadKey.byteLength !== 32 ||
-      hmacKey.byteLength !== 32 ||
-      Buffer.from(aeadKey).equals(Buffer.from(hmacKey))
-    ) {
-      throw new KernelError("invalid");
-    }
-    this.#aead = Buffer.from(aeadKey);
-    this.#hmac = Buffer.from(hmacKey);
-  }
-  digest(accepted: AcceptedIntent): string {
-    const i = accepted.intent;
-    // Fixed primitive tuple binds every accepted field, including exact submitted key.
-    return createHmac("sha256", this.#hmac)
-      .update(
-        JSON.stringify([
-          "account-gateway/intent/v1",
-          accepted.context.consumerId,
-          i.operationId,
-          i.kind,
-          i.accountRef ?? null,
-          i.expectedRevision ?? null,
-          i.ownerRef ?? null,
-          i.profile ?? null,
-          i.displayName ?? null,
-          accepted.apiKey ?? null,
-          ...(i.oauthMethod === undefined ? [] : [i.oauthMethod]),
-        ]),
-      )
-      .digest("hex");
-  }
-  seal(scope: CandidateScope, apiKey: string): IntentEnvelope {
-    const s = scopeCopy(scope);
-    if (typeof apiKey !== "string" || !apiKey.isWellFormed()) {
-      throw new KernelError("invalid");
-    }
-    const plaintext = Buffer.from(apiKey, "utf8");
-    try {
-      if (plaintext.length < 1 || plaintext.length > 4096) {
-        throw new KernelError("invalid");
-      }
-      const nonce = randomBytes(12),
-        cipher = createCipheriv("aes-256-gcm", this.#aead, nonce);
-      cipher.setAAD(aad(s));
-      return {
-        nonce,
-        ciphertext: Buffer.concat([cipher.update(plaintext), cipher.final()]),
-        tag: cipher.getAuthTag(),
-      };
-    } finally {
-      plaintext.fill(0);
-    }
-  }
-  open(scope: CandidateScope, envelope: IntentEnvelope): string {
-    const s = scopeCopy(scope);
-    let plaintext: Buffer | undefined;
-    try {
-      if (
-        envelope.nonce.length !== 12 ||
-        envelope.tag.length !== 16 ||
-        envelope.ciphertext.length < 1 ||
-        envelope.ciphertext.length > 4096
-      ) {
-        throw new KernelError("unavailable");
-      }
-      const decipher = createDecipheriv("aes-256-gcm", this.#aead, envelope.nonce);
-      decipher.setAAD(aad(s));
-      decipher.setAuthTag(envelope.tag);
-      plaintext = Buffer.concat([decipher.update(envelope.ciphertext), decipher.final()]);
-      return new TextDecoder("utf-8", { fatal: true }).decode(plaintext);
-    } catch {
-      throw new KernelError("unavailable");
-    } finally {
-      plaintext?.fill(0);
-    } // Does not promise immutable JS string zeroization.
-  }
-}
-interface JournalRow {
-  consumer: string;
-  operation_id: string;
-  account_ref: string;
-  owner_ref: string;
-  purpose: "create" | "reconnect";
-  generation: string;
-  worker: string;
-  profile: string;
-  base_url: string;
-  model: string;
-  qualification_ref: string;
-}
-function journalRow(r: JournalRow): CandidateJournal {
-  return Object.freeze({
-    consumerId: r.consumer,
-    operationId: r.operation_id,
-    accountRef: r.account_ref,
-    ownerRef: r.owner_ref,
-    purpose: r.purpose,
-    generation: r.generation,
-    worker: r.worker,
-    profile: Object.freeze({
-      profile: r.profile,
-      baseURL: r.base_url,
-      model: r.model,
-      qualificationRef: r.qualification_ref,
-    }),
-  });
-}
-const journalValues = (j: CandidateJournal): readonly unknown[] => [
-  j.consumerId,
-  j.operationId,
-  j.accountRef,
-  j.ownerRef,
-  j.purpose,
-  j.generation,
-  j.worker,
-  j.profile.profile,
-  j.profile.baseURL,
-  j.profile.model,
-  j.profile.qualificationRef,
-];
-function sameJournal(a: CandidateJournal, b: CandidateJournal): boolean {
-  return JSON.stringify(journalValues(a)) === JSON.stringify(journalValues(b));
-}
-type MappingRow = JournalRow & {
-  native_physical_identity: string;
-  native_id: string;
-  native_created_at: string;
-};
-// SQL004's non-null mapping columns move together through this LEFT JOIN.
-// An absent mapping is SQL NULL, not a Partial row with undefined fields.
-type JoinedMapping =
-  | Pick<MappingRow, "native_physical_identity" | "native_id" | "native_created_at">
-  | { native_physical_identity: null; native_id: null; native_created_at: null };
-function mappingRow(r: MappingRow): CandidateMapping {
-  const j = journalRow(r);
-  const descriptor = physicalCandidate({
-    generation: j.generation,
-    nativePhysicalIdentity: r.native_physical_identity,
-    nativeId: Number(r.native_id),
-    createdAt: r.native_created_at,
-    profile: j.profile.profile,
-    baseURL: j.profile.baseURL,
-    model: j.profile.model,
-  });
-  if (!exactCandidate(j, descriptor)) {
-    throw new KernelError("conflict");
-  }
-  return Object.freeze({ ...j, descriptor });
-}
 // Both selection and the protected callback use the same active physical scope.
 // The journal's worker is historical; the CURRENT service lease gates maintenance.
 const activeOAuthMapping = `SELECT j.*,m.native_physical_identity,m.native_id,m.native_created_at
@@ -250,21 +71,6 @@ const pendingOAuthJournal = `SELECT j.* FROM ag_kernel.accounts a
     AND EXISTS (SELECT 1 FROM ag_kernel.workers w WHERE w.consumer=a.consumer
       AND w.worker=c.worker AND w.lease_until>clock_timestamp())
     AND NOT EXISTS (SELECT 1 FROM ag_kernel.cleanup l WHERE l.consumer=c.consumer AND l.generation=c.generation)`;
-function refreshProfile(source: ManagedProfile): ManagedProfile {
-  const p = Object.freeze({
-    profile: source.profile,
-    baseURL: source.baseURL,
-    model: source.model,
-    qualificationRef: source.qualificationRef,
-  });
-  const definition = oauthProfileDefinition(p.profile);
-  if (!definition || p.baseURL !== definition.baseURL || p.model !== definition.model) {
-    throw new KernelError("invalid");
-  }
-  identifier(p.qualificationRef);
-  return p;
-}
-
 export class PostgresManagementStore implements ManagementStore {
   private readonly checkout: Checkout;
   private readonly secrets: IntentSecrets;

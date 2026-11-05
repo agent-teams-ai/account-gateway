@@ -163,3 +163,77 @@ test("llm layers depend inward through public layer entries only", () =>
     );
     violates(check(root));
   }));
+
+test("native control wire cannot import outbound HTTP or SQL types", () =>
+  fixture((root) => {
+    passes(check(root));
+    const file = join(root, "services/account-gateway/src/native-client-wire.ts");
+    const original = readFileSync(file, "utf8");
+    for (const forbidden of [
+      "\nimport type { IncomingMessage } from 'node:http';\nexport type ForbiddenNativeCodec = IncomingMessage;\n",
+      "\nimport type { Pool } from 'pg';\nexport type ForbiddenNativeCodec = Pool;\n",
+    ]) {
+      writeFileSync(file, original + forbidden);
+      violates(check(root));
+    }
+  }));
+
+test("facade wire projections cannot import database or HTTP policy", () =>
+  fixture((root) => {
+    passes(check(root));
+    const file = join(root, "services/account-gateway/src/facade-wire.ts");
+    const original = readFileSync(file, "utf8");
+    for (const forbidden of [
+      "\nimport type { Pool } from 'pg';\nexport type ForbiddenFacadeCodec = Pool;\n",
+      "\nimport type { Server } from 'node:http';\nexport type ForbiddenFacadeCodec = Server;\n",
+    ]) {
+      writeFileSync(file, original + forbidden);
+      violates(check(root));
+    }
+  }));
+
+test("management record projections and secret custody cannot acquire SQL authority", () =>
+  fixture((root) => {
+    passes(check(root));
+    for (const path of [
+      "services/account-gateway/src/management-records.ts",
+      "services/account-gateway/src/intent-secrets.ts",
+    ]) {
+      const file = join(root, path);
+      const original = readFileSync(file, "utf8");
+      writeFileSync(
+        file,
+        original +
+          "\nimport type { Pool } from 'pg';\nexport type ForbiddenManagementBoundary = Pool;\n",
+      );
+      violates(check(root));
+      // Each boundary must fail independently, not because a prior file is poisoned.
+      writeFileSync(file, original);
+    }
+  }));
+
+test("SDK transport cannot be deep-imported by optional composition", () =>
+  fixture((root) => {
+    passes(check(root));
+    const file = join(root, "packages/account-gateway/src/get-modular/transport-fixture.ts");
+    writeFileSync(
+      file,
+      "import { transport } from '../features/facade-client/http/transport.js';\nexport const forbidden = transport;\n",
+    );
+    violates(check(root));
+  }));
+
+test("candidate identity cannot depend on app, SQL or HTTP", () =>
+  fixture((root) => {
+    passes(check(root));
+    const file = join(root, "services/account-gateway/src/candidate-identity.ts");
+    const original = readFileSync(file, "utf8");
+    for (const forbidden of [
+      "\nimport type { AccountManagement } from './account-management.ts';\nexport type ForbiddenCandidateBoundary = AccountManagement;\n",
+      "\nimport type { Pool } from 'pg';\nexport type ForbiddenCandidateBoundary = Pool;\n",
+      "\nimport type { IncomingMessage } from 'node:http';\nexport type ForbiddenCandidateBoundary = IncomingMessage;\n",
+    ]) {
+      writeFileSync(file, original + forbidden);
+      violates(check(root));
+    }
+  }));
