@@ -1,7 +1,7 @@
 import { KernelError, identifier } from "./domain.ts";
-import { exactCandidate, physicalCandidate } from "./management.ts";
+import { exactCandidate, physicalCandidate } from "./candidate-identity.ts";
 import { oauthProfileDefinition } from "./oauth-profiles.ts";
-import type { CandidateJournal, CandidateMapping, ManagedProfile } from "./management.ts";
+import type { CandidateJournal, CandidateMapping, ManagedProfile } from "./candidate-identity.ts";
 
 // Persisted row projections are fail-closed and own no SQL or network access.
 export interface JournalRow {

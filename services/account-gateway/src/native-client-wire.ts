@@ -1,5 +1,5 @@
-import type { NativeReadback, PhysicalCandidate } from "./management.ts";
-import { physicalCandidate } from "./management.ts";
+import type { NativeReadback, PhysicalCandidate } from "./candidate-identity.ts";
+import { physicalCandidate } from "./candidate-identity.ts";
 import type { OAuthProfileDefinition } from "./oauth-profiles.ts";
 
 export type NativeFailureCode =

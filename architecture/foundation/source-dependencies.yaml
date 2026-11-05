@@ -94,11 +94,18 @@ boundaries:
     # Retirement assertions cover the durable usage evidence retained after cleanup.
     allow: {boundaries: [service-admission, kernel-domain, kernel-postgres, kernel-persisted-records, foreground-service-entry, usage-journal], packages: [pg], builtins: ['node:test', 'node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:timers/promises', 'node:child_process', 'node:util'], runtimeReferences: []}
 
+  # Candidate identity and exact matching are pure domain rules. Application
+  # orchestration, sockets and persistence must not flow back into this boundary.
+  - id: native-candidate-identity
+    dependencyMode: runtime
+    roots: [services/account-gateway/src/candidate-identity.ts]
+    entrypoints: [services/account-gateway/src/candidate-identity.ts]
+    allow: {boundaries: [kernel-domain], packages: [], builtins: [], runtimeReferences: []}
   - id: native-management
     dependencyMode: runtime
     roots: [services/account-gateway/src/management.ts, services/account-gateway/src/account-management.ts, services/account-gateway/src/oauth-profiles.ts, services/account-gateway/src/provider-connections.ts]
     entrypoints: [services/account-gateway/src/management.ts, services/account-gateway/src/oauth-profiles.ts, services/account-gateway/src/provider-connections.ts]
-    allow: {boundaries: [kernel-domain], packages: [], builtins: [], runtimeReferences: []}
+    allow: {boundaries: [kernel-domain, native-candidate-identity], packages: [], builtins: [], runtimeReferences: []}
   # Security-sensitive transient key custody and row projection depend only inward.
   - id: native-intent-secrets
     dependencyMode: runtime
@@ -109,7 +116,7 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/src/management-records.ts]
     entrypoints: [services/account-gateway/src/management-records.ts]
-    allow: {boundaries: [kernel-domain, native-management], packages: [], builtins: [], runtimeReferences: []}
+    allow: {boundaries: [kernel-domain, native-management, native-candidate-identity], packages: [], builtins: [], runtimeReferences: []}
   - id: native-management-postgres
     dependencyMode: runtime
     roots: [services/account-gateway/src/management-store.ts]
@@ -125,12 +132,12 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/src/native-client-wire.ts]
     entrypoints: [services/account-gateway/src/native-client-wire.ts]
-    allow: {boundaries: [kernel-domain, native-management], packages: [], builtins: [], runtimeReferences: []}
+    allow: {boundaries: [kernel-domain, native-management, native-candidate-identity], packages: [], builtins: [], runtimeReferences: []}
   - id: native-management-http
     dependencyMode: runtime
     roots: [services/account-gateway/src/native-client.ts, services/account-gateway/src/native-client-transport.ts, services/account-gateway/src/native-client-accounts.ts, services/account-gateway/src/native-client-oauth.ts, services/account-gateway/src/native-client-discovery.ts]
     entrypoints: [services/account-gateway/src/native-client.ts]
-    allow: {boundaries: [service-admission, kernel-domain, native-management, native-admission-wire, native-control-codec, contracts], packages: ['@agent-teams/account-gateway'], builtins: ['node:http', 'node:https'], runtimeReferences: []}
+    allow: {boundaries: [service-admission, kernel-domain, native-management, native-candidate-identity, native-admission-wire, native-control-codec, contracts], packages: ['@agent-teams/account-gateway'], builtins: ['node:http', 'node:https'], runtimeReferences: []}
   - id: native-management-tests
     dependencyMode: runtime
     roots: [services/account-gateway/test/management.test.ts, services/account-gateway/test/management-postgres.test.ts]

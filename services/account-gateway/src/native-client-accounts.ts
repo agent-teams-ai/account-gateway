@@ -1,7 +1,7 @@
 import { identifier, uuid } from "./domain.ts";
 import type { RetainedCustodyProof } from "./domain.ts";
 import { oauthProfileDefinition } from "./oauth-profiles.ts";
-import { exactCandidate, physicalCandidate } from "./management.ts";
+import { exactCandidate, physicalCandidate } from "./candidate-identity.ts";
 import type {
   RetainedCustodyVerifier,
   CandidateJournal,

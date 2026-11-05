@@ -220,3 +220,18 @@ test("SDK transport cannot be deep-imported by optional composition", () =>
     );
     violates(check(root));
   }));
+
+test("candidate identity cannot depend on app, SQL or HTTP", () =>
+  fixture((root) => {
+    passes(check(root));
+    const file = join(root, "services/account-gateway/src/candidate-identity.ts");
+    const original = readFileSync(file, "utf8");
+    for (const forbidden of [
+      "\nimport type { AccountManagement } from './account-management.ts';\nexport type ForbiddenCandidateBoundary = AccountManagement;\n",
+      "\nimport type { Pool } from 'pg';\nexport type ForbiddenCandidateBoundary = Pool;\n",
+      "\nimport type { IncomingMessage } from 'node:http';\nexport type ForbiddenCandidateBoundary = IncomingMessage;\n",
+    ]) {
+      writeFileSync(file, original + forbidden);
+      violates(check(root));
+    }
+  }));

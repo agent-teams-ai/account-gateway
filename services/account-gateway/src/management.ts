@@ -1,5 +1,26 @@
 import { KernelError, identifier, uuid, revision } from "./domain.ts";
-import { exactCandidate, physicalCandidate } from "./account-management.ts";
+import { exactCandidate, physicalCandidate } from "./candidate-identity.ts";
+import type {
+  ManagedProfile,
+  CandidateScope,
+  PhysicalCandidate,
+  NativeReadback,
+  CandidateJournal,
+  CandidateMapping,
+} from "./candidate-identity.ts";
+export type {
+  ManagedProfile,
+  CandidateScope,
+  PhysicalCandidate,
+  NativeReadback,
+  CandidateJournal,
+  CandidateMapping,
+} from "./candidate-identity.ts";
+export {
+  exactCandidate,
+  sameCandidate,
+  physicalCandidate,
+} from "./candidate-identity.ts";
 export {
   codexOAuthProfile,
   codexOAuthCleanupModels,
@@ -17,40 +38,6 @@ import type {
 } from "./domain.ts";
 
 // Private consumer-owned ports. They are not SDK DTOs or an inference authority.
-export interface ManagedProfile {
-  readonly profile: string;
-  readonly baseURL: string;
-  readonly model: string;
-  // Receipt comes from trusted fixture/non-inference qualification, never ingress.
-  readonly qualificationRef: string;
-}
-export interface CandidateScope {
-  readonly consumerId: string;
-  readonly operationId: string;
-  readonly accountRef: string;
-  readonly ownerRef: string;
-  readonly purpose: "create" | "reconnect";
-}
-export interface PhysicalCandidate {
-  readonly generation: string;
-  readonly nativePhysicalIdentity: string;
-  readonly nativeId: number;
-  readonly createdAt: string;
-  readonly profile: string;
-  readonly baseURL: string;
-  readonly model: string;
-}
-export interface NativeReadback extends PhysicalCandidate {
-  readonly state: "inactive" | "active";
-}
-export interface CandidateJournal extends CandidateScope {
-  readonly generation: string;
-  readonly worker: string;
-  readonly profile: ManagedProfile;
-}
-export interface CandidateMapping extends CandidateJournal {
-  readonly descriptor: PhysicalCandidate;
-}
 export interface CandidateNative {
   // Each call makes at most one candidate-management HTTP request. Never inference.
   create(scope: CandidateJournal, displayName: string, apiKey: string): Promise<void>;
@@ -287,13 +274,7 @@ export type SuspendInput = Pick<AccountIntent, "operationId" | "accountRef" | "e
 export type ResumeInput = Pick<AccountIntent, "operationId" | "accountRef" | "expectedRevision">;
 
 // Private port and contract entrypoint; implementations live at application edge.
-export {
-  AccountManagement,
-  captureContext,
-  exactCandidate,
-  sameCandidate,
-  physicalCandidate,
-} from "./account-management.ts";
+export { AccountManagement, captureContext } from "./account-management.ts";
 
 export interface AccountLimitsSelector {
   readonly ownerRef: string;
