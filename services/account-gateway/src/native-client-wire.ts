@@ -135,7 +135,7 @@ export function decode(bytes: Buffer, maximumDepth = 4): unknown {
       return;
     }
     const start = position;
-    while (position < text.length && !/[\s,}]/.test(text[position])) {
+    while (position < text.length && !/[\s,}\]]/.test(text[position])) {
       position++;
     }
     if (position === start) {
