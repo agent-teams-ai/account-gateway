@@ -16,11 +16,7 @@ export type {
   CandidateJournal,
   CandidateMapping,
 } from "./candidate-identity.ts";
-export {
-  exactCandidate,
-  sameCandidate,
-  physicalCandidate,
-} from "./candidate-identity.ts";
+export { exactCandidate, sameCandidate, physicalCandidate } from "./candidate-identity.ts";
 export {
   codexOAuthProfile,
   codexOAuthCleanupModels,
