@@ -207,6 +207,8 @@ test("management record projections and secret custody cannot acquire SQL author
           "\nimport type { Pool } from 'pg';\nexport type ForbiddenManagementBoundary = Pool;\n",
       );
       violates(check(root));
+      // Each boundary must fail independently, not because a prior file is poisoned.
+      writeFileSync(file, original);
     }
   }));
 
