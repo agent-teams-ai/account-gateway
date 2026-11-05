@@ -278,10 +278,7 @@ void test("native control JSON accepts primitive array tails and still rejects a
   assert.deepEqual(decode(Buffer.from(valid)), {
     values: [1, true, null, { x: 2 }, [3, false]],
   });
-  for (const invalid of [
-    '{"values":[1,]}',
-    '{"values":[1,2],"x":1,"x":2}',
-  ]) {
+  for (const invalid of ['{"values":[1,]}', '{"values":[1,2],"x":1,"x":2}']) {
     assert.throws(
       () => decode(Buffer.from(invalid)),
       (error: unknown) => error instanceof NativeFailure && error.code === "invalid_readback",
