@@ -1,6 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { PassThrough, Writable } from "node:stream";
 import {
   forwardNativeResponseDiagnostics,
   nativeResponseDiagnostics,
@@ -786,41 +785,35 @@ void test("long-lived diagnostic stream survives cumulative volume and rejects o
   assert.equal(f.records.join("").includes("SECRET_SENTINEL"), false);
 });
 
-void test("native stderr continues beyond the lifetime limit and bounds a stalled log destination", () => {
-  const source = new PassThrough();
-  const records: string[] = [];
-  const destination = new Writable({
-    highWaterMark: 1,
-    write(chunk, _encoding, _callback) {
-      records.push(String(chunk));
+void test("native stderr keeps forwarding beyond 64 KiB and bounds a stalled sink", () => {
+  let receive: ((chunk: Buffer) => void) | undefined;
+  const source = {
+    on(_event: "data", listener: (chunk: Buffer) => void) {
+      receive = listener;
     },
-  });
-  forwardNativeResponseDiagnostics(source, destination);
-  const line = valid + "\n";
-  for (let i = 0; i < 1500; i++) {
-    source.write(line);
-  }
-  assert.equal(records.length, 1);
-  assert.ok(destination.writableLength <= Buffer.byteLength(line));
-  source.destroy();
-  destination.destroy();
-});
-
-void test("native stderr keeps forwarding validated records after 64 KiB", () => {
-  const source = new PassThrough();
+  };
   let count = 0;
-  const destination = new Writable({
-    write(_chunk, _encoding, callback) {
+  const destination = {
+    writableNeedDrain: false,
+    destroyed: false,
+    write(_record: string) {
       count++;
-      callback();
+      return true;
     },
-  });
+  };
   forwardNativeResponseDiagnostics(source, destination);
-  const line = valid + "\n";
+  assert.ok(receive);
+  const line = Buffer.from(valid + "\n");
   for (let i = 0; i < 1500; i++) {
-    source.write(line);
+    receive(line);
   }
   assert.equal(count, 1500);
-  source.destroy();
-  destination.destroy();
+  destination.writableNeedDrain = true;
+  for (let i = 0; i < 1500; i++) {
+    receive(line);
+  }
+  assert.equal(count, 1500);
+  destination.writableNeedDrain = false;
+  receive(line);
+  assert.equal(count, 1501);
 });
