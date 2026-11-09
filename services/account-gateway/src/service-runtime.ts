@@ -21,7 +21,7 @@ import { createFacade, cancelFacadeTransport } from "./facade.ts";
 import type { FacadeOptions } from "./facade.ts";
 import { strictJSON } from "./facade-ingress.ts";
 import { object } from "./native-wire.ts";
-import { nativeResponseDiagnostics } from "./native-response-diagnostics.ts";
+import { forwardNativeResponseDiagnostics } from "./native-response-diagnostics.ts";
 import {
   captureServiceProfiles,
   loadServiceConfig,
@@ -313,7 +313,6 @@ type RuntimeFailureCause =
   | "callback_error"
   | "child_error"
   | "child_exit"
-  | "diagnostic_limit"
   | "child_pending"
   | "metadata_invalid"
   | "stdout_incomplete"
@@ -704,21 +703,11 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
         void stop();
       }
     });
-    let diagnostics = 0,
-      metadata = 0,
+    let metadata = 0,
       buffer = Buffer.alloc(0),
       sequence = 0;
-    const forwardDiagnostics = nativeResponseDiagnostics((record) => {
-      process.stderr.write(record);
-    });
-    child.stderr!.on("data", (b: Buffer) => {
-      diagnostics += b.length;
-      if (diagnostics > 65_536) {
-        fail(undefined, "diagnostic_limit");
-        return;
-      }
-      forwardDiagnostics(b);
-    });
+    // The native process is long-lived; only individual records are bounded.
+    forwardNativeResponseDiagnostics(child.stderr!, process.stderr);
     child.stdout!.on("data", (b: Buffer) => {
       try {
         metadata += b.length;

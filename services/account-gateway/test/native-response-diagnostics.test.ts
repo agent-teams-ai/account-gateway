@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { nativeResponseDiagnostics } from "../src/native-response-diagnostics.ts";
+import { PassThrough, Writable } from "node:stream";
+import {
+  forwardNativeResponseDiagnostics,
+  nativeResponseDiagnostics,
+} from "../src/native-response-diagnostics.ts";
 
 const categorized =
   '{"event":"gateway_native_response_failure","phase":"http_status","http_status":400,"provider_error_category":"responses_lite_required"}';
@@ -767,4 +771,56 @@ void test("429 diagnostics retain bounded quota evidence and reject private or m
   }
   f.feed(Buffer.from(JSON.stringify({ ...base, http_status: 400, rate_limit }) + "\n"));
   assert.equal(f.records.length, 1);
+});
+
+void test("long-lived diagnostic stream survives cumulative volume and rejects oversized private records", () => {
+  const f = sink();
+  const line = valid + "\n";
+  const count = Math.ceil(70_000 / Buffer.byteLength(line));
+  for (let i = 0; i < count; i++) {
+    f.feed(Buffer.from(line));
+  }
+  f.feed(Buffer.from("SECRET_SENTINEL" + "x".repeat(5000) + "\n" + line));
+  assert.equal(f.records.length, count + 1);
+  assert.equal(f.records.at(-1), line);
+  assert.equal(f.records.join("").includes("SECRET_SENTINEL"), false);
+});
+
+void test("native stderr continues beyond the lifetime limit and bounds a stalled log destination", () => {
+  const source = new PassThrough();
+  const records: string[] = [];
+  const destination = new Writable({
+    highWaterMark: 1,
+    write(chunk, _encoding, _callback) {
+      records.push(String(chunk));
+    },
+  });
+  forwardNativeResponseDiagnostics(source, destination);
+  const line = valid + "\n";
+  for (let i = 0; i < 1500; i++) {
+    source.write(line);
+  }
+  assert.equal(records.length, 1);
+  assert.ok(destination.writableLength <= Buffer.byteLength(line));
+  source.destroy();
+  destination.destroy();
+});
+
+void test("native stderr keeps forwarding validated records after 64 KiB", () => {
+  const source = new PassThrough();
+  let count = 0;
+  const destination = new Writable({
+    write(_chunk, _encoding, callback) {
+      count++;
+      callback();
+    },
+  });
+  forwardNativeResponseDiagnostics(source, destination);
+  const line = valid + "\n";
+  for (let i = 0; i < 1500; i++) {
+    source.write(line);
+  }
+  assert.equal(count, 1500);
+  source.destroy();
+  destination.destroy();
 });
