@@ -548,3 +548,23 @@ export function nativeResponseDiagnostics(
     }
   };
 }
+
+/** Attach one long-lived native stderr stream without a cumulative byte limit. */
+export function forwardNativeResponseDiagnostics(
+  source: { on(event: "data", listener: (chunk: Buffer) => void): unknown },
+  destination: {
+    readonly writableNeedDrain: boolean;
+    readonly destroyed: boolean;
+    write(record: string): boolean;
+  },
+): void {
+  const forward = nativeResponseDiagnostics((record) => {
+    // Diagnostics are best effort: do not accumulate an unbounded write queue.
+    if (!destination.writableNeedDrain && !destination.destroyed) {
+      destination.write(record);
+    }
+  });
+  source.on("data", (chunk: Buffer) => {
+    forward(chunk);
+  });
+}

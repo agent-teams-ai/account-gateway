@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { nativeResponseDiagnostics } from "../src/native-response-diagnostics.ts";
+import {
+  forwardNativeResponseDiagnostics,
+  nativeResponseDiagnostics,
+} from "../src/native-response-diagnostics.ts";
 
 const categorized =
   '{"event":"gateway_native_response_failure","phase":"http_status","http_status":400,"provider_error_category":"responses_lite_required"}';
@@ -767,4 +770,50 @@ void test("429 diagnostics retain bounded quota evidence and reject private or m
   }
   f.feed(Buffer.from(JSON.stringify({ ...base, http_status: 400, rate_limit }) + "\n"));
   assert.equal(f.records.length, 1);
+});
+
+void test("long-lived diagnostic stream survives cumulative volume and rejects oversized private records", () => {
+  const f = sink();
+  const line = valid + "\n";
+  const count = Math.ceil(70_000 / Buffer.byteLength(line));
+  for (let i = 0; i < count; i++) {
+    f.feed(Buffer.from(line));
+  }
+  f.feed(Buffer.from("SECRET_SENTINEL" + "x".repeat(5000) + "\n" + line));
+  assert.equal(f.records.length, count + 1);
+  assert.equal(f.records.at(-1), line);
+  assert.equal(f.records.join("").includes("SECRET_SENTINEL"), false);
+});
+
+void test("native stderr keeps forwarding beyond 64 KiB and bounds a stalled sink", () => {
+  let receive: ((chunk: Buffer) => void) | undefined;
+  const source = {
+    on(_event: "data", listener: (chunk: Buffer) => void) {
+      receive = listener;
+    },
+  };
+  let count = 0;
+  const destination = {
+    writableNeedDrain: false,
+    destroyed: false,
+    write(_record: string) {
+      count++;
+      return true;
+    },
+  };
+  forwardNativeResponseDiagnostics(source, destination);
+  assert.ok(receive);
+  const line = Buffer.from(valid + "\n");
+  for (let i = 0; i < 1500; i++) {
+    receive(line);
+  }
+  assert.equal(count, 1500);
+  destination.writableNeedDrain = true;
+  for (let i = 0; i < 1500; i++) {
+    receive(line);
+  }
+  assert.equal(count, 1500);
+  destination.writableNeedDrain = false;
+  receive(line);
+  assert.equal(count, 1501);
 });
