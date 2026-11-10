@@ -357,7 +357,10 @@ function captureProfile(value: unknown): ServiceProfile {
     deny();
   }
   const definition = providerConnectionDefinition(profile.profile);
-  if (definition?.provider.identity === "nvidia" && profile.model !== definition.models[0]?.modelId) {
+  if (
+    definition?.provider.identity === "nvidia" &&
+    profile.model !== definition.models[0]?.modelId
+  ) {
     deny();
   }
   if (
@@ -427,7 +430,10 @@ export function captureServiceProfiles(
       profiles.push(p);
     }
     if (input.providerProfiles !== undefined) {
-      if (!Array.isArray(input.providerProfiles) || input.providerProfiles.length > optionalAPIKeyProfiles.size) {
+      if (
+        !Array.isArray(input.providerProfiles) ||
+        input.providerProfiles.length > optionalAPIKeyProfiles.size
+      ) {
         return deny();
       }
       for (const raw of input.providerProfiles) {
