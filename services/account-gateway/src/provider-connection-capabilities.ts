@@ -6,27 +6,30 @@ export function providerConnectionCapability(
   definition: ProviderConnectionDefinition,
   modelIds?: readonly string[],
 ): c.ProviderConnectionCapability {
-  const selected =
-    modelIds &&
-    definition.profileId !== "openai-responses-apikey-v1" &&
-    definition.provider.identity !== "openrouter"
+  // One account is born with one immutable anchor, while its qualified
+  // NVIDIA model membership contains two static reviewed model IDs.
+  const nvidia = definition.provider.identity === "nvidia";
+  const anchored = !modelIds ||
+    (modelIds.length === 1 && modelIds[0] === definition.models[0]?.modelId);
+  const selected = nvidia
+    ? (anchored ? definition.models : [])
+    : modelIds &&
+        definition.profileId !== "openai-responses-apikey-v1" &&
+        definition.provider.identity !== "openrouter"
       ? definition.models.filter((model) => modelIds.includes(model.modelId))
       : (modelIds?.map((modelId) => ({
           modelId,
           reasoning: null,
           fast: null,
           tools: {
-            allowed:
-              definition.provider.identity === "openrouter"
-                ? (["none"] as const)
-                : (["function", "function_and_custom"] as const),
-            default:
-              definition.provider.identity === "openrouter"
-                ? ("none" as const)
-                : ("function" as const),
+            allowed: definition.provider.identity === "openrouter"
+              ? (["none"] as const) : (["function", "function_and_custom"] as const),
+            default: definition.provider.identity === "openrouter"
+              ? ("none" as const) : ("function" as const),
           },
         })) ?? definition.models);
-  if (!selected.length || selected.length !== (modelIds?.length ?? definition.models.length)) {
+  if (!selected.length ||
+    (!nvidia && selected.length !== (modelIds?.length ?? definition.models.length))) {
     throw new Error("unqualified_model");
   }
   return c.providerConnectionCapability.parse({
