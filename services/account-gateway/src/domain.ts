@@ -29,6 +29,13 @@ export class KernelError extends Error {
     }
   }
 }
+// The database refused a new durable fact, not the caller's authority.
+// Keep the legacy internal code for callers that treat all denials alike.
+export class FactCapacityError extends KernelError {
+  constructor() {
+    super("denied");
+  }
+}
 // Every selectable permitted account was excluded as limited. Thrown inside the
 // preparation transaction, so nothing was persisted or dispatched.
 export class AccountsLimitedError extends KernelError {

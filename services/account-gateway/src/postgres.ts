@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import {
   AccountsLimitedError,
+  FactCapacityError,
   KernelError,
   boundedConfig,
   boundedFacts,
@@ -168,9 +169,12 @@ export class PostgresKernel implements DurableKernel {
         typeof error === "object" &&
         error !== null &&
         "code" in error &&
-        error.code === "54000"
+        error.code === "54000" &&
+        "message" in error &&
+        error.message === "fact capacity"
       ) {
-        throw new KernelError("denied");
+        console.warn("account_gateway_fact_capacity");
+        throw new FactCapacityError();
       }
       // Never export vendor exception bodies, query parameters or connection data.
       throw new KernelError("unavailable");

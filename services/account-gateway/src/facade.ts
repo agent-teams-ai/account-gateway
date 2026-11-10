@@ -20,7 +20,13 @@ import { createHmac } from "node:crypto";
 import { once } from "node:events";
 import * as c from "@agent-teams/account-gateway/contracts";
 import { secretSubmission } from "@agent-teams/account-gateway/http";
-import { AccountsLimitedError, KernelError, identifier, uuid } from "./domain.ts";
+import {
+  AccountsLimitedError,
+  FactCapacityError,
+  KernelError,
+  identifier,
+  uuid,
+} from "./domain.ts";
 import type {
   AccountStatus,
   ApprovedLimits,
@@ -2125,7 +2131,8 @@ export function createFacade(options: FacadeOptions): Server {
             }
             const code = error instanceof KernelError ? error.code : "unavailable";
             const dtoCode: c.SafeError["code"] =
-              error instanceof ServiceCapacityError && !enteredTransport && !uncertain
+              error instanceof FactCapacityError ||
+              (error instanceof ServiceCapacityError && !enteredTransport && !uncertain)
                 ? "admission_limited"
                 : code === "invalid"
                   ? "invalid_request"
@@ -2153,15 +2160,17 @@ export function createFacade(options: FacadeOptions): Server {
                   ? { providerQuota: error.providerQuota }
                   : {}),
               },
-              code === "denied"
-                ? 403
-                : code === "invalid"
-                  ? 400
-                  : code === "conflict"
-                    ? 409
-                    : code === "unknown"
-                      ? 404
-                      : 503,
+              error instanceof FactCapacityError
+                ? 503
+                : code === "denied"
+                  ? 403
+                  : code === "invalid"
+                    ? 400
+                    : code === "conflict"
+                      ? 409
+                      : code === "unknown"
+                        ? 404
+                        : 503,
             );
           })
           .then(
