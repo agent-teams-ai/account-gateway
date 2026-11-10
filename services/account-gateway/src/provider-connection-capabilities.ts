@@ -36,7 +36,10 @@ export function providerConnectionCapability(
                 : ("function" as const),
           },
         })) ?? definition.models);
-  if (!selected.length || (!nvidia && selected.length !== (modelIds?.length ?? definition.models.length))) {
+  if (
+    !selected.length ||
+    (!nvidia && selected.length !== (modelIds?.length ?? definition.models.length))
+  ) {
     throw new Error("unqualified_model");
   }
   return c.providerConnectionCapability.parse({
