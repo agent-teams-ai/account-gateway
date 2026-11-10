@@ -46,6 +46,23 @@ jobs:
   native-source:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
+        env:
+          POSTGRES_USER: native_contract_test
+          POSTGRES_DB: native_review_ci
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U native_contract_test -d native_review_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis_http:
+        image: redis:8.10.2-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
+        ports:
+          - 127.0.0.1:6380:6379
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -70,3 +87,15 @@ jobs:
           set -euo pipefail
           go test -tags unit ./internal/service ./internal/gatewaytransport ./internal/handler/admin ./internal/gatewaybootstrap -run 'TestGatewayNVIDIABuild|TestGatewayProviderResponses' -count=1
           go test -tags unit ./internal/service ./internal/gatewaytransport -run '^TestGatewayNative' -count=1
+      - name: Real PostgreSQL native candidate and migration qualification
+        working-directory: backend
+        env:
+          GATEWAY_NATIVE_TEST_PG_DSN: postgres://native_contract_test@127.0.0.1:5432/native_review_ci?sslmode=disable
+          GATEWAY_NATIVE_TEST_HTTP_REDIS_ADDR: 127.0.0.1:6380
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -tags integration ./internal/handler/admin -run '^TestGatewayNativeReviewPrivateHTTPPostgres
+ -count=1 -v -timeout 180s | tee "$RUNNER_TEMP/nvidia-native-pg.txt"
+          grep -q -- '--- PASS: TestGatewayNativeReviewPrivateHTTPPostgres ' "$RUNNER_TEMP/nvidia-native-pg.txt"
+
