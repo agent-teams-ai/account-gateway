@@ -27,3 +27,18 @@ jobs:
           echo BEGIN_NVIDIA_FORMAT_DIFF
           git --no-pager diff -- services/account-gateway/src/provider-connection-capabilities.ts services/account-gateway/src/service-config.ts tests/account-models.test.mts tests/provider-connections-sdk.test.mts
           echo END_NVIDIA_FORMAT_DIFF
+      - name: Build pinned candidate SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run build
+          mkdir -p "$RUNNER_TEMP/nvidia-sdk"
+          node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir packages/account-gateway pack --pack-destination "$RUNNER_TEMP/nvidia-sdk"
+          ls -l "$RUNNER_TEMP/nvidia-sdk"
+      - name: Export candidate SDK archive (not released)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: nvidia-account-gateway-candidate-sdk
+          path: ${{ runner.temp }}/nvidia-sdk/*.tgz
+          retention-days: 3
+          if-no-files-found: error
