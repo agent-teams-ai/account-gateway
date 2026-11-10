@@ -11,6 +11,7 @@ export type ProviderConnectionDefinition = {
     readonly identity:
       | "mimo"
       | "openrouter"
+      | "nvidia"
       | "openai"
       | "anthropic"
       | "kimi"
@@ -114,6 +115,27 @@ export const providerConnectionRegistry: readonly ProviderConnectionDefinition[]
     baseURL: "https://openrouter.ai/api/v1",
     // Model membership and controls come from the account-scoped Native snapshot.
     models: [],
+    authMethods: ["api_key"],
+    completionInputKind: "none",
+    oauthCallbackMode: null,
+    reconnect: "replace_api_key",
+    limitsContract: "none",
+    availability: "enabled",
+  }),
+  definition({
+    profileId: "nvidia-build-chat-apikey-v1",
+    provider: { identity: "nvidia", label: "NVIDIA Build" },
+    plan: { identity: "unknown", label: "NVIDIA API trial (evaluation only)" },
+    region: { identity: "global", label: "Global" },
+    // The consumer wire is Responses; native alone selects the fixed Chat backend.
+    protocol: "openai-responses",
+    baseURL: "https://integrate.api.nvidia.com/v1",
+    models: [
+      { modelId: "deepseek-ai/deepseek-v4.1-flash", ...standard, reasoning: null, fast: null,
+        tools: { allowed: ["none"], default: "none" } },
+      { modelId: "z-ai/glm-5.3-flash", ...standard, reasoning: null, fast: null,
+        tools: { allowed: ["none"], default: "none" } },
+    ],
     authMethods: ["api_key"],
     completionInputKind: "none",
     oauthCallbackMode: null,
