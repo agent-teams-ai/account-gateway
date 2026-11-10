@@ -9,10 +9,7 @@ export function providerConnectionCapability(
   // The physical NVIDIA account keeps one birth anchor; the trusted model
   // authority independently qualifies the two selectable model IDs.
   const nvidia = definition.provider.identity === "nvidia";
-  if (
-    nvidia &&
-    (modelIds?.length !== 1 || modelIds[0] !== definition.models[0]?.modelId)
-  ) {
+  if (nvidia && (modelIds?.length !== 1 || modelIds[0] !== definition.models[0]?.modelId)) {
     throw new Error("unqualified_model");
   }
   const selected = nvidia
