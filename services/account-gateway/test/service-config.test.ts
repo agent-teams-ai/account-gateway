@@ -86,6 +86,31 @@ void test("all keyed provider leaves coexist and duplicate or invented leaves de
   );
 });
 
+void test("NVIDIA is a fixed independent API-key profile with one immutable birth anchor", () => {
+  const nvidia = {
+    profile: "nvidia-build-chat-apikey-v1",
+    model: "deepseek-ai/deepseek-v4.1-flash",
+    baseURL: "https://integrate.api.nvidia.com/v1",
+    qualificationRef: "nvidia-synthetic",
+    limits: { requests: 2, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 1000 },
+    providerTokenUpperBound: 1000,
+  };
+  const captured = captureServiceProfiles({ profile: serviceProfile(2), providerProfiles: [nvidia] });
+  assert.equal(captured[1].profile, nvidia.profile);
+  assert.equal(captured[1].model, nvidia.model);
+  for (const mutation of [
+    { baseURL: "https://openrouter.ai/api/v1" },
+    { baseURL: "https://integrate.api.nvidia.com/v1/" },
+    { model: "z-ai/glm-5.3-flash" },
+    { profile: "glm-coding-global-responses-apikey-v1" },
+  ]) {
+    denied(() => captureServiceProfiles({
+      profile: serviceProfile(2),
+      providerProfiles: [{ ...nvidia, ...mutation }],
+    }));
+  }
+});
+
 // Red if raising the run budget needs a code change again: the operational knob is the service
 // profile, the code keeps only the acceptance ceiling.
 void test("service profile admits production budgets up to the code ceiling and denies above it", () => {
