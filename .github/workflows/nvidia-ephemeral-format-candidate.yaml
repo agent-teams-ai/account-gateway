@@ -95,7 +95,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          go test -tags integration ./internal/handler/admin -run '^TestGatewayNativeReviewPrivateHTTPPostgres
- -count=1 -v -timeout 180s | tee "$RUNNER_TEMP/nvidia-native-pg.txt"
+          go test -tags integration ./internal/handler/admin -run TestGatewayNativeReviewPrivateHTTPPostgres -count=1 -v -timeout 180s | tee "$RUNNER_TEMP/nvidia-native-pg.txt"
           grep -q -- '--- PASS: TestGatewayNativeReviewPrivateHTTPPostgres ' "$RUNNER_TEMP/nvidia-native-pg.txt"
 
