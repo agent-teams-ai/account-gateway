@@ -9,7 +9,7 @@ import { strictJSON } from "./facade-ingress.ts";
 import { object } from "./native-wire.ts";
 import { physicalCandidate, codexOAuthProfile, claudeOAuthProfile } from "./management.ts";
 import { grokOAuthProfile } from "./oauth-profiles.ts";
-import { providerConnectionDefinition } from "./provider-connections.ts";
+import { providerConnectionDefinition, providerConnectionRegistry } from "./provider-connections.ts";
 
 export class ServiceError extends Error {
   readonly code: "config_denied" | "startup_denied" | "runtime_denied" | "shutdown_pending";
@@ -357,6 +357,9 @@ function captureProfile(value: unknown): ServiceProfile {
     deny();
   }
   const definition = providerConnectionDefinition(profile.profile);
+  if (definition?.provider.identity === "nvidia" && profile.model !== definition.models[0]?.modelId) {
+    deny();
+  }
   if (
     definition &&
     profile.profile !== "openai-responses-apikey-v1" &&
@@ -377,6 +380,19 @@ function qualifiedEnrollment(
     Boolean(value.providerTokenUpperBound)
   );
 }
+// One trusted provider registry defines the finite optional API-key profiles.
+// These are deployment-qualified inputs, never caller-provided origins.
+const optionalAPIKeyProfiles = new Set(
+  providerConnectionRegistry
+    .filter((entry) =>
+      entry.authMethods.length === 1 &&
+      entry.authMethods[0] === "api_key" &&
+      entry.profileId !== "openai-responses-apikey-v1" &&
+      entry.profileId !== openRouterProfile.profile,
+    )
+    .map((entry) => entry.profileId),
+);
+
 // Pure server configuration capture is shared by startup and source HTTP tests.
 // The singleton stays compatible; only the optional second tuple is fixed.
 export function captureServiceProfiles(
@@ -411,15 +427,13 @@ export function captureServiceProfiles(
       profiles.push(p);
     }
     if (input.providerProfiles !== undefined) {
-      if (!Array.isArray(input.providerProfiles) || input.providerProfiles.length > 3) {
+      if (!Array.isArray(input.providerProfiles) || input.providerProfiles.length > optionalAPIKeyProfiles.size) {
         return deny();
       }
       for (const raw of input.providerProfiles) {
         const p = captureProfile(raw);
         if (
-          !new Set<string>([kimiProfile.profile, glmProfile.profile, minimaxProfile.profile]).has(
-            p.profile,
-          ) ||
+          !optionalAPIKeyProfiles.has(p.profile) ||
           profiles.some((old) => old.profile === p.profile)
         ) {
           return deny();
