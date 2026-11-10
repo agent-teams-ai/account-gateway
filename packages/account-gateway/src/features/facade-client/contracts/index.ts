@@ -805,6 +805,7 @@ export const PROVIDER_CONNECTIONS_CONTRACT = "provider-connections/v1" as const;
 export const providerIdentity = z.enum([
   "mimo",
   "openrouter",
+  "nvidia",
   "openai",
   "anthropic",
   "kimi",
@@ -912,6 +913,12 @@ const accountModelDiscoveryProfiles = Object.freeze([
     authKind: "api_key",
     source: "openrouter",
   } as const),
+  Object.freeze({
+    profileId: "nvidia-build-chat-apikey-v1",
+    protocol: "openai-responses",
+    authKind: "api_key",
+    source: "nvidia",
+  } as const),
 ]);
 export function accountModelDiscoveryProfile(profileId: string) {
   return accountModelDiscoveryProfiles.find((candidate) => candidate.profileId === profileId);
@@ -921,7 +928,7 @@ export function accountModelDiscoverySource(candidate: {
   readonly profileId: string;
   readonly protocol: string;
   readonly authKind: string;
-}): "codex" | "openrouter" | undefined {
+}): "codex" | "openrouter" | "nvidia" | undefined {
   const qualified = accountModelDiscoveryProfile(candidate.profileId);
   return qualified &&
     candidate.protocol === qualified.protocol &&
@@ -969,6 +976,13 @@ export const accountModels = z.union([
     .extend({
       source: z.literal("openrouter"),
       models: z.array(openRouterAccountModelCapability).max(2048).refine(distinctModels),
+    })
+    .refine(validSnapshotPeriod),
+  accountModelSnapshot
+    .extend({
+      source: z.literal("nvidia"),
+      // Static source-owned scope, not a fresh external model entitlement claim.
+      models: z.array(openRouterAccountModelCapability).min(1).max(2).refine(distinctModels),
     })
     .refine(validSnapshotPeriod),
   z.strictObject({ status: z.literal("unknown") }),
