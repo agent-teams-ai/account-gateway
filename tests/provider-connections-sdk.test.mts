@@ -94,29 +94,49 @@ void test("provider connection projection is versioned, closed and additive to t
 
 void test("NVIDIA connection advertises one account with two qualified models, not two accounts", () => {
   const models = ["deepseek-ai/deepseek-v4.1-flash", "z-ai/glm-5.3-flash"].map((modelId) => ({
-    modelId, reasoning: null, fast: null, tools: { allowed: ["none"], default: "none" },
+    modelId,
+    reasoning: null,
+    fast: null,
+    tools: { allowed: ["none"], default: "none" },
   }));
   const profile = {
-    contract: "provider-connections/v1", profileId: "nvidia-build-chat-apikey-v1",
+    contract: "provider-connections/v1",
+    profileId: "nvidia-build-chat-apikey-v1",
     provider: { identity: "nvidia", label: "NVIDIA Build" },
     plan: { identity: "unknown", label: "NVIDIA API trial (evaluation only)" },
     region: { identity: "global", label: "Global" },
     protocol: "openai-responses",
-    modelIds: models.map((m) => m.modelId), models, authMethods: ["api_key"],
-    completionInputKind: "none", availability: "enabled", oauthCallbackMode: null,
-    reconnect: "replace_api_key", limitsContract: "none",
+    modelIds: models.map((m) => m.modelId),
+    models,
+    authMethods: ["api_key"],
+    completionInputKind: "none",
+    availability: "enabled",
+    oauthCallbackMode: null,
+    reconnect: "replace_api_key",
+    limitsContract: "none",
   };
-  assert.equal(providerConnectionCapabilities.safeParse({
-    contract: "provider-connections/v1", capabilities: [profile],
-  }).success, true);
-  assert.equal(providerConnectionCapabilities.safeParse({
-    contract: "provider-connections/v1",
-    capabilities: [{ ...profile, provider: { identity: "openrouter", label: "NVIDIA Build" } }],
-  }).success, true, "provider identity remains presentation; actual native profile tuple must also be qualified");
-  assert.equal(providerConnectionCapabilities.safeParse({
-    contract: "provider-connections/v1",
-    capabilities: [{ ...profile, modelIds: [models[0].modelId] }],
-  }).success, false);
+  assert.equal(
+    providerConnectionCapabilities.safeParse({
+      contract: "provider-connections/v1",
+      capabilities: [profile],
+    }).success,
+    true,
+  );
+  assert.equal(
+    providerConnectionCapabilities.safeParse({
+      contract: "provider-connections/v1",
+      capabilities: [{ ...profile, provider: { identity: "openrouter", label: "NVIDIA Build" } }],
+    }).success,
+    true,
+    "provider identity remains presentation; actual native profile tuple must also be qualified",
+  );
+  assert.equal(
+    providerConnectionCapabilities.safeParse({
+      contract: "provider-connections/v1",
+      capabilities: [{ ...profile, modelIds: [models[0].modelId] }],
+    }).success,
+    false,
+  );
 });
 
 void test("capability client never converts 401, 403 or unsupported-contract into legacy discovery", async (t) => {
