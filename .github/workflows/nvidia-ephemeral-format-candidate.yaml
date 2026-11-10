@@ -67,7 +67,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: agent-teams-ai/sub2api
-          ref: b478afa0c17d1994b90c1835738f765eeef30f7b
+          ref: 282352f3c5009e2b30ebfab0c0f602998eb26fa1
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
@@ -77,9 +77,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gofmt -w backend/internal/gatewaybootstrap/config.go backend/internal/gatewaybootstrap/server_linux.go backend/internal/gatewaytransport/registry.go backend/internal/gatewaytransport/wire.go backend/internal/handler/admin/native_gateway_identity.go backend/internal/service/native_gateway_account_models.go backend/internal/service/native_gateway_identity.go backend/internal/service/native_gateway_provider_responses.go backend/internal/service/native_gateway_provider_responses_test.go backend/internal/service/native_gateway_responses.go backend/internal/service/native_gateway_nvidia_profile_test.go
+          gofmt -w backend/internal/gatewaybootstrap/config.go backend/internal/gatewaybootstrap/server_linux.go backend/internal/gatewaytransport/registry.go backend/internal/gatewaytransport/wire.go backend/internal/handler/admin/native_gateway_identity.go backend/internal/service/native_gateway_account_models.go backend/internal/service/native_gateway_identity.go backend/internal/service/native_gateway_provider_responses.go backend/internal/service/native_gateway_provider_responses_test.go backend/internal/service/native_gateway_responses.go backend/internal/service/native_gateway_nvidia_profile_test.go backend/internal/handler/admin/native_gateway_review_integration_test.go
           echo BEGIN_NVIDIA_NATIVE_FORMAT_DIFF
-          git --no-pager diff -- backend/internal/gatewaybootstrap/config.go backend/internal/gatewaybootstrap/server_linux.go backend/internal/gatewaytransport/registry.go backend/internal/gatewaytransport/wire.go backend/internal/handler/admin/native_gateway_identity.go backend/internal/service/native_gateway_account_models.go backend/internal/service/native_gateway_identity.go backend/internal/service/native_gateway_provider_responses.go backend/internal/service/native_gateway_provider_responses_test.go backend/internal/service/native_gateway_responses.go backend/internal/service/native_gateway_nvidia_profile_test.go
+          git --no-pager diff -- backend/internal/gatewaybootstrap/config.go backend/internal/gatewaybootstrap/server_linux.go backend/internal/gatewaytransport/registry.go backend/internal/gatewaytransport/wire.go backend/internal/handler/admin/native_gateway_identity.go backend/internal/service/native_gateway_account_models.go backend/internal/service/native_gateway_identity.go backend/internal/service/native_gateway_provider_responses.go backend/internal/service/native_gateway_provider_responses_test.go backend/internal/service/native_gateway_responses.go backend/internal/service/native_gateway_nvidia_profile_test.go backend/internal/handler/admin/native_gateway_review_integration_test.go
           echo END_NVIDIA_NATIVE_FORMAT_DIFF
       - name: Source-pinned Sub2API unit and protected-contract tests
         working-directory: backend
