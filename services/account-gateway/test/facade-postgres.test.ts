@@ -674,6 +674,39 @@ void test("feature default hides lifecycle writes; explicit gate suspends and re
     await f.stop();
   }
 });
+void test("durable fact saturation is a capacity response, not an authorization denial", async () => {
+  const f = await fixture();
+  try {
+    await pool.query(
+      `UPDATE ag_kernel.consumers c SET account_fact_limit=a.fact_used
+       FROM ag_kernel.accounts a WHERE c.consumer=$1 AND a.consumer=c.consumer AND a.ref=$2`,
+      [f.context.consumerId, f.accountRef],
+    );
+    const operationId = randomUUID();
+    const response = await f.raw("/v1/executions", "POST", {
+      ...f.preparedInput,
+      operationId,
+    });
+    assert.equal(response.status, 503);
+    const result = c.safeError.parse(await response.json());
+    assert.equal(result.code, "admission_limited");
+    assert.equal(result.effect, "effect_unknown");
+    assert.deepEqual(result.retry, { kind: "readback" });
+    assert.equal(
+      (
+        await pool.query("SELECT 1 FROM ag_kernel.operations WHERE consumer=$1 AND id=$2", [
+          f.context.consumerId,
+          operationId,
+        ])
+      ).rowCount,
+      0,
+    );
+    assert.equal(f.stats().calls, 0);
+  } finally {
+    await f.stop();
+  }
+});
+
 void test("exported SDK preparation with fresh operation IDs reads the original execution before and after unknown fencing", async () => {
   const f = await fixture("lost_ack");
   try {
