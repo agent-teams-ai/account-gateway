@@ -42,3 +42,31 @@ jobs:
           path: ${{ runner.temp }}/nvidia-sdk/*.tgz
           retention-days: 3
           if-no-files-found: error
+
+  native-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: agent-teams-ai/sub2api
+          ref: e648cf939a77636f7f571fd10dd51a01d7f0a17c
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: '1.27.3'
+          cache-dependency-path: backend/go.sum
+      - name: Print exact Sub2API gofmt diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          gofmt -w backend/internal/gatewaybootstrap/config.go backend/internal/gatewaybootstrap/server_linux.go backend/internal/gatewaytransport/registry.go backend/internal/gatewaytransport/wire.go backend/internal/handler/admin/native_gateway_identity.go backend/internal/service/native_gateway_account_models.go backend/internal/service/native_gateway_identity.go backend/internal/service/native_gateway_provider_responses.go backend/internal/service/native_gateway_provider_responses_test.go backend/internal/service/native_gateway_responses.go backend/internal/service/native_gateway_nvidia_profile_test.go
+          echo BEGIN_NVIDIA_NATIVE_FORMAT_DIFF
+          git --no-pager diff -- backend/internal/gatewaybootstrap/config.go backend/internal/gatewaybootstrap/server_linux.go backend/internal/gatewaytransport/registry.go backend/internal/gatewaytransport/wire.go backend/internal/handler/admin/native_gateway_identity.go backend/internal/service/native_gateway_account_models.go backend/internal/service/native_gateway_identity.go backend/internal/service/native_gateway_provider_responses.go backend/internal/service/native_gateway_provider_responses_test.go backend/internal/service/native_gateway_responses.go backend/internal/service/native_gateway_nvidia_profile_test.go
+          echo END_NVIDIA_NATIVE_FORMAT_DIFF
+      - name: Source-pinned Sub2API unit and protected-contract tests
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          go test -tags unit ./internal/service ./internal/gatewaytransport ./internal/handler/admin ./internal/gatewaybootstrap -run 'TestGatewayNVIDIABuild|TestGatewayProviderResponses' -count=1
+          go test -tags unit ./internal/service ./internal/gatewaytransport -run '^TestGatewayNative' -count=1
