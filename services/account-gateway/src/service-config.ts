@@ -9,7 +9,10 @@ import { strictJSON } from "./facade-ingress.ts";
 import { object } from "./native-wire.ts";
 import { physicalCandidate, codexOAuthProfile, claudeOAuthProfile } from "./management.ts";
 import { grokOAuthProfile } from "./oauth-profiles.ts";
-import { providerConnectionDefinition, providerConnectionRegistry } from "./provider-connections.ts";
+import {
+  providerConnectionDefinition,
+  providerConnectionRegistry,
+} from "./provider-connections.ts";
 
 export class ServiceError extends Error {
   readonly code: "config_denied" | "startup_denied" | "runtime_denied" | "shutdown_pending";
@@ -387,11 +390,12 @@ function qualifiedEnrollment(
 // These are deployment-qualified inputs, never caller-provided origins.
 const optionalAPIKeyProfiles = new Set(
   providerConnectionRegistry
-    .filter((entry) =>
-      entry.authMethods.length === 1 &&
-      entry.authMethods[0] === "api_key" &&
-      entry.profileId !== "openai-responses-apikey-v1" &&
-      entry.profileId !== openRouterProfile.profile,
+    .filter(
+      (entry) =>
+        entry.authMethods.length === 1 &&
+        entry.authMethods[0] === "api_key" &&
+        entry.profileId !== "openai-responses-apikey-v1" &&
+        entry.profileId !== openRouterProfile.profile,
     )
     .map((entry) => entry.profileId),
 );
