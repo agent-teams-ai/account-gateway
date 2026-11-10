@@ -22,7 +22,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" exec oxfmt --write services/account-gateway/src/provider-connection-capabilities.ts services/account-gateway/src/service-config.ts tests/account-models.test.mts tests/provider-connections-sdk.test.mts
+          npm install --prefix "$RUNNER_TEMP/format-tools" --ignore-scripts --no-audit oxfmt@0.74.0
+          "$RUNNER_TEMP/format-tools/node_modules/.bin/oxfmt" --write services/account-gateway/src/provider-connection-capabilities.ts services/account-gateway/src/service-config.ts tests/account-models.test.mts tests/provider-connections-sdk.test.mts
           echo BEGIN_NVIDIA_FORMAT_DIFF
           git --no-pager diff -- services/account-gateway/src/provider-connection-capabilities.ts services/account-gateway/src/service-config.ts tests/account-models.test.mts tests/provider-connections-sdk.test.mts
           echo END_NVIDIA_FORMAT_DIFF
