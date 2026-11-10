@@ -6,13 +6,17 @@ export function providerConnectionCapability(
   definition: ProviderConnectionDefinition,
   modelIds?: readonly string[],
 ): c.ProviderConnectionCapability {
-  // One account is born with one immutable anchor, while its qualified
-  // NVIDIA model membership contains two static reviewed model IDs.
+  // The physical NVIDIA account keeps one birth anchor; the trusted model
+  // authority independently qualifies the two selectable model IDs.
   const nvidia = definition.provider.identity === "nvidia";
-  const anchored = !modelIds ||
-    (modelIds.length === 1 && modelIds[0] === definition.models[0]?.modelId);
+  if (
+    nvidia &&
+    (modelIds?.length !== 1 || modelIds[0] !== definition.models[0]?.modelId)
+  ) {
+    throw new Error("unqualified_model");
+  }
   const selected = nvidia
-    ? (anchored ? definition.models : [])
+    ? definition.models
     : modelIds &&
         definition.profileId !== "openai-responses-apikey-v1" &&
         definition.provider.identity !== "openrouter"
@@ -22,14 +26,17 @@ export function providerConnectionCapability(
           reasoning: null,
           fast: null,
           tools: {
-            allowed: definition.provider.identity === "openrouter"
-              ? (["none"] as const) : (["function", "function_and_custom"] as const),
-            default: definition.provider.identity === "openrouter"
-              ? ("none" as const) : ("function" as const),
+            allowed:
+              definition.provider.identity === "openrouter"
+                ? (["none"] as const)
+                : (["function", "function_and_custom"] as const),
+            default:
+              definition.provider.identity === "openrouter"
+                ? ("none" as const)
+                : ("function" as const),
           },
         })) ?? definition.models);
-  if (!selected.length ||
-    (!nvidia && selected.length !== (modelIds?.length ?? definition.models.length))) {
+  if (!selected.length || (!nvidia && selected.length !== (modelIds?.length ?? definition.models.length))) {
     throw new Error("unqualified_model");
   }
   return c.providerConnectionCapability.parse({
