@@ -167,6 +167,29 @@ void test("model discovery recognizes only qualified protocol/auth identities", 
   assert.equal(accountModelDiscoverySource(codex), "codex");
 });
 
+void test("NVIDIA model discovery is a closed two-model, API-key-only account source", () => {
+  const nvidia = accountModelDiscoveryProfile("nvidia-build-chat-apikey-v1");
+  assert.ok(nvidia);
+  assert.equal(accountModelDiscoverySource(nvidia), "nvidia");
+  assert.equal(accountModelDiscoverySource({ ...nvidia, protocol: "openai-chat" }), undefined);
+  assert.equal(accountModelDiscoverySource({ ...nvidia, authKind: "oauth" }), undefined);
+  assert.equal(accountModelDiscoverySource({ ...nvidia, profileId: "nvidia-unqualified" }), undefined);
+  const models = ["deepseek-ai/deepseek-v4.1-flash", "z-ai/glm-5.3-flash"].map((modelId) => ({
+    modelId, reasoning: null, fast: null, tools: { allowed: ["none"], default: "none" },
+  }));
+  const snapshot = {
+    status: "snapshot", source: "nvidia", physicalGeneration: "generation-a",
+    principalVersion: "principal-a", fetchedAt: "2026-10-25T00:00:00Z",
+    expiresAt: "2026-10-25T00:01:00Z", models,
+  };
+  assert.equal(accountModels.safeParse(snapshot).success, true);
+  assert.equal(accountModels.safeParse({ ...snapshot, models: [...models, models[0]] }).success, false);
+  assert.equal(accountModels.safeParse({ ...snapshot, models: [{ ...models[0], modelId: "bad model" }] }).success, false);
+  assert.equal(accountModels.safeParse({
+    ...snapshot, models: [{ ...models[0], tools: { allowed: ["function_and_custom"], default: "function_and_custom" } }],
+  }).success, false);
+});
+
 void test("OpenRouter discovery supports bounded full catalogs without weakening Codex controls", () => {
   const model = {
     modelId: "future-vendor/review:model",
