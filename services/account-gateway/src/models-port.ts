@@ -54,8 +54,12 @@ export async function readAccountModels(
   return result;
 }
 
-/** Empty/unknown observations admit nothing; only explicit unavailability retains the frozen anchor. */
-export function accountModelAdmission(result: c.AccountModels, anchor: string) {
+/** Empty/unknown observations admit nothing. NVIDIA trial has no unobserved-anchor fallback. */
+export function accountModelAdmission(
+  result: c.AccountModels,
+  anchor: string,
+  source?: ReturnType<typeof configuredAccountModelSource>,
+) {
   return result.status === "snapshot"
     ? {
         modelIds: result.models.map((model) => model.modelId),
@@ -63,7 +67,7 @@ export function accountModelAdmission(result: c.AccountModels, anchor: string) {
         enforceCapabilities: true,
       }
     : {
-        modelIds: result.status === "unavailable" ? [anchor] : [],
+        modelIds: result.status === "unavailable" && source !== "nvidia" ? [anchor] : [],
         models: undefined,
         enforceCapabilities: false,
       };
