@@ -167,7 +167,7 @@ void test("model discovery recognizes only qualified protocol/auth identities", 
   assert.equal(accountModelDiscoverySource(codex), "codex");
 });
 
-void test("NVIDIA model discovery is a closed two-model, API-key-only account source", () => {
+void test("NVIDIA model discovery is a closed one-model, API-key-only account source", () => {
   const nvidia = accountModelDiscoveryProfile("nvidia-build-chat-apikey-v1");
   assert.ok(nvidia);
   assert.equal(accountModelDiscoverySource(nvidia), "nvidia");
@@ -177,11 +177,11 @@ void test("NVIDIA model discovery is a closed two-model, API-key-only account so
     accountModelDiscoverySource({ ...nvidia, profileId: "nvidia-unqualified" }),
     undefined,
   );
-  const models = ["deepseek-ai/deepseek-v4.1-flash", "z-ai/glm-5.3-flash"].map((modelId) => ({
+  const models = ["nvidia/nemotron-3.5-super-vl-120b-a12b"].map((modelId) => ({
     modelId,
     reasoning: null,
     fast: null,
-    tools: { allowed: ["none"], default: "none" },
+    tools: { allowed: ["function"], default: "function" },
   }));
   const snapshot = {
     status: "snapshot",
