@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readCachedAccountLimits } from "../src/limits-port.ts";
+import { accountModelAdmission } from "../src/models-port.ts";
 import { KernelError } from "../src/domain.ts";
 
 const input = {
@@ -93,4 +94,17 @@ void test("cached limits rejects a foreign provider snapshot without revealing i
     expected,
   );
   assert.deepEqual(result.wire, { status: "unavailable" });
+});
+
+void test("NVIDIA sandbox does not admit an unobserved anchor when model authority is unavailable", () => {
+  const unavailable = { status: "unavailable" } as const;
+  const anchor = "deepseek-ai/deepseek-v4.1-flash";
+  assert.deepEqual(accountModelAdmission(unavailable, anchor, "nvidia"), {
+    modelIds: [],
+    models: undefined,
+    enforceCapabilities: false,
+  });
+  assert.deepEqual(accountModelAdmission(unavailable, anchor, "codex").modelIds, [anchor]);
+  assert.deepEqual(accountModelAdmission(unavailable, anchor, "openrouter").modelIds, [anchor]);
+  assert.deepEqual(accountModelAdmission({ status: "unknown" }, anchor, "nvidia").modelIds, []);
 });
