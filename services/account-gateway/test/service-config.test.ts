@@ -89,7 +89,7 @@ void test("all keyed provider leaves coexist and duplicate or invented leaves de
 void test("NVIDIA is a fixed independent API-key profile with one immutable birth anchor", () => {
   const nvidia = {
     profile: "nvidia-build-chat-apikey-v1",
-    model: "deepseek-ai/deepseek-v4.1-flash",
+    model: "nvidia/nemotron-3.5-super-vl-120b-a12b",
     baseURL: "https://integrate.api.nvidia.com/v1",
     qualificationRef: "nvidia-synthetic",
     limits: {
