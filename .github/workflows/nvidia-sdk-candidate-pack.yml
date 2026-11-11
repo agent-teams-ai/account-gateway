@@ -1,0 +1,38 @@
+# Temporary, source-pinned SDK pack for disposable ReviewRouter consumer CI.
+# No publishing or deployment.
+name: NVIDIA qualified SDK candidate pack
+on:
+  push:
+    branches: [feat/nvidia-build-sandbox-profile]
+    paths: [".github/workflows/nvidia-sdk-candidate-pack.yml"]
+permissions:
+  contents: read
+jobs:
+  pack:
+    if: github.repository == 'agent-teams-ai/account-gateway'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.21.0'
+      - name: Install frozen source and build private SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --prefix "$RUNNER_TEMP/gateway-pnpm" --ignore-scripts --no-audit pnpm@11.28.2
+          node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --config.engine-strict=true install --frozen-lockfile
+          node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run build
+          mkdir -p "$RUNNER_TEMP/nvidia-sdk"
+          node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir packages/account-gateway pack --pack-destination "$RUNNER_TEMP/nvidia-sdk"
+          sha256sum "$RUNNER_TEMP/nvidia-sdk/agent-teams-account-gateway-0.1.0.tgz"
+      - name: Export sandbox SDK candidate (not a release)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: nvidia-qualified-gateway-sdk-${{ github.sha }}
+          path: ${{ runner.temp }}/nvidia-sdk/agent-teams-account-gateway-0.1.0.tgz
+          retention-days: 7
+          if-no-files-found: error
