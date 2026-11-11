@@ -92,12 +92,12 @@ void test("provider connection projection is versioned, closed and additive to t
   assert.equal(JSON.stringify(result).includes("cli-chat-proxy.grok.com"), false);
 });
 
-void test("NVIDIA connection advertises one account with two qualified models, not two accounts", () => {
-  const models = ["deepseek-ai/deepseek-v4.1-flash", "z-ai/glm-5.3-flash"].map((modelId) => ({
+void test("NVIDIA connection advertises one account with one qualified model", () => {
+  const models = ["nvidia/nemotron-3.5-super-vl-120b-a12b"].map((modelId) => ({
     modelId,
     reasoning: null,
     fast: null,
-    tools: { allowed: ["none"], default: "none" },
+    tools: { allowed: ["function"], default: "function" },
   }));
   const profile = {
     contract: "provider-connections/v1",
@@ -133,7 +133,7 @@ void test("NVIDIA connection advertises one account with two qualified models, n
   assert.equal(
     providerConnectionCapabilities.safeParse({
       contract: "provider-connections/v1",
-      capabilities: [{ ...profile, modelIds: [models[0].modelId] }],
+      capabilities: [{ ...profile, modelIds: ["unqualified/model"] }],
     }).success,
     false,
   );
