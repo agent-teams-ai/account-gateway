@@ -67,7 +67,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: agent-teams-ai/sub2api
-          ref: 6cb5a845f038d39f9ac2cdccf5985dfafc9e71f5
+          ref: 28402d51121ee3f75db74e0416bdce6194a98449
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
