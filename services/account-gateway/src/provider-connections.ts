@@ -132,18 +132,12 @@ export const providerConnectionRegistry: readonly ProviderConnectionDefinition[]
     baseURL: "https://integrate.api.nvidia.com/v1",
     models: [
       {
-        modelId: "deepseek-ai/deepseek-v4.1-flash",
+        modelId: "nvidia/nemotron-3.5-super-vl-120b-a12b",
         ...standard,
         reasoning: null,
         fast: null,
-        tools: { allowed: ["none"], default: "none" },
-      },
-      {
-        modelId: "z-ai/glm-5.3-flash",
-        ...standard,
-        reasoning: null,
-        fast: null,
-        tools: { allowed: ["none"], default: "none" },
+        // Qualified by a real two-turn NVIDIA Build function-call canary.
+        tools: { allowed: ["function"], default: "function" },
       },
     ],
     authMethods: ["api_key"],
