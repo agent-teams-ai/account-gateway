@@ -165,7 +165,7 @@ export function validateResponses(
     readonly reasoning: { readonly allowed: readonly string[] } | null;
   }[],
   enforceModelCapabilities = false,
-  modelSource?: "codex" | "openrouter",
+  modelSource?: "codex" | "openrouter" | "nvidia",
 ): string {
   const input = strictJSON(bytes);
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
@@ -173,7 +173,7 @@ export function validateResponses(
   }
   const p = input as Record<string, unknown>;
   if (
-    modelSource === "openrouter" &&
+    (modelSource === "openrouter" || modelSource === "nvidia") &&
     Object.keys(p).some((key) => !openRouterResponseFields.has(key))
   ) {
     throw new KernelError("invalid");

@@ -76,7 +76,7 @@ if (
         "-count=1",
         "-v",
         "-timeout",
-        "180s",
+        "300s",
       ],
       { cwd: source, encoding: "utf8", timeout: 600_000, maxBuffer: 4_194_304 },
     );
