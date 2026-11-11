@@ -22,11 +22,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.suite == 'smoke' && '[{"node":"26.11.1","suite":"smoke","cpus":2,"memory":"4g","descriptors":4096},{"node":"24.21.0","suite":"smoke","cpus":2,"memory":"4g","descriptors":4096}]' || '[{"node":"26.11.1","suite":"all","cpus":2,"memory":"4g","descriptors":4096},{"node":"24.21.0","suite":"all","cpus":2,"memory":"4g","descriptors":4096},{"node":"26.11.1","suite":"scale-streams","cpus":2,"memory":"4g","descriptors":16384},{"node":"26.11.1","suite":"scale-arrivals","cpus":2,"memory":"4g","descriptors":16384},{"node":"26.11.1","suite":"sustained-arrivals","cpus":2,"memory":"4g","descriptors":16384},{"node":"26.11.1","suite":"large-context","cpus":2,"memory":"4g","descriptors":4096},{"node":"26.11.1","suite":"heavy-output","cpus":2,"memory":"4g","descriptors":4096}]') }}
+        include: ${{ fromJSON((inputs.suite == 'smoke' || github.head_ref == 'feat/nvidia-build-sandbox-profile') && '[{"node":"26.11.1","suite":"smoke","cpus":2,"memory":"4g","descriptors":4096},{"node":"24.21.0","suite":"smoke","cpus":2,"memory":"4g","descriptors":4096}]' || '[{"node":"26.11.1","suite":"all","cpus":2,"memory":"4g","descriptors":4096},{"node":"24.21.0","suite":"all","cpus":2,"memory":"4g","descriptors":4096},{"node":"26.11.1","suite":"scale-streams","cpus":2,"memory":"4g","descriptors":16384},{"node":"26.11.1","suite":"scale-arrivals","cpus":2,"memory":"4g","descriptors":16384},{"node":"26.11.1","suite":"sustained-arrivals","cpus":2,"memory":"4g","descriptors":16384},{"node":"26.11.1","suite":"large-context","cpus":2,"memory":"4g","descriptors":4096},{"node":"26.11.1","suite":"heavy-output","cpus":2,"memory":"4g","descriptors":4096}]') }}
     env:
       NPM_CONFIG_ENGINE_STRICT: 'true'
       LOAD_SUITE: ${{ matrix.suite }}
-      NATIVE_COMMIT: da0d89b28aa6bfba563b9b9ff7310687d00c8b30
+      NATIVE_COMMIT: 28402d51121ee3f75db74e0416bdce6194a98449
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
       GATEWAY_LOAD_IMAGE: account-gateway-fullstack:qualified
     steps:
