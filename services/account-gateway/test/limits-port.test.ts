@@ -98,7 +98,7 @@ void test("cached limits rejects a foreign provider snapshot without revealing i
 
 void test("NVIDIA sandbox does not admit an unobserved anchor when model authority is unavailable", () => {
   const unavailable = { status: "unavailable" } as const;
-  const anchor = "deepseek-ai/deepseek-v4.1-flash";
+  const anchor = "nvidia/nemotron-3.5-super-vl-120b-a12b";
   assert.deepEqual(accountModelAdmission(unavailable, anchor, "nvidia"), {
     modelIds: [],
     models: undefined,
