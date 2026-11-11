@@ -1299,7 +1299,11 @@ export function createFacade(options: FacadeOptions): Server {
                 },
               );
               requireCurrent(grant);
-              admittedModels = accountModelAdmission(catalogue, profile.dto.modelIds[0]);
+              admittedModels = accountModelAdmission(
+                catalogue,
+                profile.dto.modelIds[0],
+                configuredAccountModelSource(saved.admission.profileId),
+              );
             }
             const requestedModel = validateResponses(
               raw,
