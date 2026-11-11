@@ -981,8 +981,8 @@ export const accountModels = z.union([
   accountModelSnapshot
     .extend({
       source: z.literal("nvidia"),
-      // Static source-owned scope, not a fresh external model entitlement claim.
-      models: z.array(openRouterAccountModelCapability).min(1).max(2).refine(distinctModels),
+      // One tested sandbox model; never claim entitlement to another NVIDIA model.
+      models: z.array(openRouterAccountModelCapability).length(1).refine(distinctModels),
     })
     .refine(validSnapshotPeriod),
   z.strictObject({ status: z.literal("unknown") }),
