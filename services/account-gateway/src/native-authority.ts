@@ -363,7 +363,11 @@ export class NativeAuthority {
       ) {
         return denied();
       }
-      models = accountModelAdmission(catalogue, profile.model);
+      models = accountModelAdmission(
+        catalogue,
+        profile.model,
+        configuredAccountModelSource(profile.profile),
+      );
     }
     validateResponses(
       bytes,
