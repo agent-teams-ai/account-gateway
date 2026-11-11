@@ -6,17 +6,10 @@ export function providerConnectionCapability(
   definition: ProviderConnectionDefinition,
   modelIds?: readonly string[],
 ): c.ProviderConnectionCapability {
-  // The physical NVIDIA account keeps one birth anchor; the trusted model
-  // authority independently qualifies the two selectable model IDs.
-  const nvidia = definition.provider.identity === "nvidia";
-  if (nvidia && (modelIds?.length !== 1 || modelIds[0] !== definition.models[0]?.modelId)) {
-    throw new Error("unqualified_model");
-  }
-  const selected = nvidia
-    ? definition.models
-    : modelIds &&
-        definition.profileId !== "openai-responses-apikey-v1" &&
-        definition.provider.identity !== "openrouter"
+  const selected =
+    modelIds &&
+    definition.profileId !== "openai-responses-apikey-v1" &&
+    definition.provider.identity !== "openrouter"
       ? definition.models.filter((model) => modelIds.includes(model.modelId))
       : (modelIds?.map((modelId) => ({
           modelId,
@@ -33,10 +26,7 @@ export function providerConnectionCapability(
                 : ("function" as const),
           },
         })) ?? definition.models);
-  if (
-    !selected.length ||
-    (!nvidia && selected.length !== (modelIds?.length ?? definition.models.length))
-  ) {
+  if (!selected.length || selected.length !== (modelIds?.length ?? definition.models.length)) {
     throw new Error("unqualified_model");
   }
   return c.providerConnectionCapability.parse({
