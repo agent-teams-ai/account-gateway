@@ -482,7 +482,9 @@ async function sourceHTTP(
   omitModelSource = false,
   quotaFailure = false,
   limitsRefresh?: () => Promise<void>,
+  streamTiming?: { idleMs: number; quietMs: number },
 ) {
+  let earlyStreamCloses = 0;
   const oauthProfile =
     oauth === "grok"
       ? grokOAuthProfile
@@ -1266,6 +1268,17 @@ async function sourceHTTP(
           "content-type": "text/event-stream",
           "x-gateway-request-ref": proof.requestRef,
         });
+        if (streamTiming) {
+          res.once("close", () => {
+            if (!res.writableFinished) {
+              earlyStreamCloses++;
+            }
+          });
+          res.flushHeaders();
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, streamTiming.quietMs);
+          });
+        }
         res.end(
           responseBytes === undefined
             ? 'data: {"type":"response.completed","fixture":"tools-and-final"}\n\n'
@@ -1439,6 +1452,7 @@ async function sourceHTTP(
       ...(omitModelSource ? { accountModels: undefined } : {}),
       intentHmacKey,
       ingressBytes: outputEnvelope ? 1_048_576 : 4096,
+      ...(streamTiming ? { timeoutMs: streamTiming.idleMs } : {}),
     });
     servers.push(facade);
     const facadeOrigin = await listen(facade);
@@ -1508,6 +1522,7 @@ async function sourceHTTP(
       nativeRows,
       scopeKey,
       intentHmacKey,
+      earlyStreamCloses: () => earlyStreamCloses,
       callbackOriginTo: (nextOrigin: string) => {
         callbackOrigin = nextOrigin;
       },
@@ -1517,6 +1532,182 @@ async function sourceHTTP(
     throw error;
   }
 }
+
+async function quietStreamFixture(quietMs: number, deadlineMs = 10_000) {
+  const f = await sourceHTTP(
+    false,
+    false,
+    undefined,
+    undefined,
+    undefined,
+    false,
+    false,
+    undefined,
+    { idleMs: 100, quietMs },
+  );
+  try {
+    const operationId = randomUUID();
+    const created = await f.publicCall("/v1/accounts", {
+      operationId,
+      ownerRef: "owner-one",
+      profileId: f.profile.profile,
+      displayName: "Quiet stream fixture",
+      credential: { kind: "api_key", value: "fixture-write-only" },
+    });
+    assert.equal(created.status, 200);
+    const accountRef = f.journals.get(f.scopeKey(f.context, operationId))!.accountRef;
+    const access = await f.publicCall(
+      "/internal/v1/run-access",
+      {
+        operationId: randomUUID(),
+        invocationRef: "quiet-stream",
+        attemptRef: "attempt",
+        accountRefs: [accountRef],
+        profileId: f.profile.profile,
+        subjectRef: "source-subject",
+        policyRevision: 1,
+        bindingRevision: 1,
+        limits: f.secondProfile.limits,
+        deadline: new Date(Date.now() + deadlineMs).toISOString(),
+      },
+      "source-public-run",
+    );
+    assert.equal(access.status, 200);
+    const run = (await access.json()) as {
+      operation: { result: { executionRef: string } };
+      bearer: string;
+      admission: Record<string, unknown>;
+    };
+    const url =
+      f.facadeOrigin + "/v1/executions/" + run.operation.result.executionRef + "/requests";
+    const headers = {
+      authorization: "Bearer " + run.bearer,
+      "content-type": "application/json",
+      accept: "text/event-stream",
+      "x-gateway-admission": JSON.stringify(run.admission),
+      "x-gateway-request-id": randomUUID(),
+    };
+    const payload = JSON.stringify({ ...valid, model: f.profile.model });
+    return {
+      f,
+      url,
+      headers,
+      payload,
+      submit: (signal?: AbortSignal) =>
+        fetch(url, { method: "POST", headers, body: payload, ...(signal ? { signal } : {}) }),
+    };
+  } catch (error) {
+    await f.close();
+    throw error;
+  }
+}
+async function assertNativeStreamCancelled(f: Awaited<ReturnType<typeof sourceHTTP>>) {
+  for (let i = 0; i < 50 && f.earlyStreamCloses() === 0; i++) {
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 10);
+    });
+  }
+  assert.equal(f.earlyStreamCloses(), 1, "cancellation must close the physical native HTTP stream");
+  assert.equal(f.forwarded.length, 1, "cancellation cannot replay inference");
+}
+void test(
+  "source HTTP: admitted quiet stream outlives ingress idle and completes",
+  { timeout: 5000 },
+  async () => {
+    const { f, submit } = await quietStreamFixture(400);
+    try {
+      const response = await submit();
+      assert.equal(response.status, 200);
+      assert.match(
+        await response.text(),
+        /response.completed/,
+        "authorized quiet stream must finish",
+      );
+      assert.equal(f.forwarded.length, 1);
+      assert.equal(f.requests.size, 1);
+      assert.equal([...f.requests.values()][0].effect, "completed");
+      assert.equal(f.earlyStreamCloses(), 0);
+    } finally {
+      await f.close();
+    }
+  },
+);
+void test(
+  "source HTTP: admitted quiet stream still expires at its saved deadline",
+  { timeout: 5000 },
+  async () => {
+    const { f, submit } = await quietStreamFixture(2600, 2000);
+    try {
+      const started = Date.now();
+      const response = await submit();
+      assert.equal(response.status, 200);
+      await assert.rejects(response.text());
+      assert.ok(Date.now() - started >= 1200, "ingress idle must not replace the saved deadline");
+      await assertNativeStreamCancelled(f);
+    } finally {
+      await f.close();
+    }
+  },
+);
+void test(
+  "source HTTP: caller cancellation still closes an admitted quiet stream",
+  { timeout: 5000 },
+  async () => {
+    const { f, submit } = await quietStreamFixture(800);
+    try {
+      const controller = new AbortController();
+      const response = await submit(controller.signal);
+      assert.equal(response.status, 200);
+      controller.abort();
+      await assert.rejects(response.text());
+      await assertNativeStreamCancelled(f);
+    } finally {
+      await f.close();
+    }
+  },
+);
+void test(
+  "source HTTP: unauthorized and stalled bodies retain ingress guards",
+  { timeout: 5000 },
+  async () => {
+    const { f, url, headers, payload } = await quietStreamFixture(400);
+    try {
+      const denied = await fetch(url, {
+        method: "POST",
+        headers: { ...headers, authorization: "Bearer wrong-fixture" },
+        body: payload,
+      });
+      assert.equal(denied.status, 401);
+      await denied.body?.cancel();
+      const error = await new Promise<NodeJS.ErrnoException>((resolve, reject) => {
+        const client = request(url, {
+          method: "POST",
+          headers: { ...headers, "content-length": "100" },
+        });
+        const timer = setTimeout(() => {
+          client.destroy();
+          reject(new Error("stalled body was not bounded"));
+        }, 2000);
+        client.once("error", (socketError) => {
+          clearTimeout(timer);
+          resolve(socketError);
+        });
+        client.once("response", () => {
+          clearTimeout(timer);
+          client.destroy();
+          reject(new Error("stalled body unexpectedly admitted"));
+        });
+        client.write("{");
+        client.flushHeaders();
+      });
+      assert.equal(error.code, "ECONNRESET");
+      assert.equal(f.forwarded.length, 0);
+      assert.equal(f.requests.size, 0);
+    } finally {
+      await f.close();
+    }
+  },
+);
 
 void test("source HTTP: consumer-scoped management isolates explicit owner lists and consumer custody while OAuth enrollment stays separate from execution policy", async () => {
   const f = await sourceHTTP(true);

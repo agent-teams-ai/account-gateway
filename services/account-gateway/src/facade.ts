@@ -1324,9 +1324,11 @@ export function createFacade(options: FacadeOptions): Server {
             const abortAt = setTimeout(() => {
               controller.abort();
             }, remainingMs);
-            // Validated execution streams use their saved absolute deadline. The
-            // ingress budget and socket inactivity bounds have distinct roles.
+            // The authorized body is complete. Quiet inference is bounded by the
+            // saved absolute deadline and peer cancellation, not ingress idle.
             clearTimeout(ingressTimer);
+            req.setTimeout(0);
+            res.setTimeout(0);
             const capture = new ResponsesUsageCapture(),
               occurredAt = new Date().toISOString();
             const factBase = executionUsageBase(
