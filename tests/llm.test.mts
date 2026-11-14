@@ -606,6 +606,28 @@ void test("Responses stream reduction is byte-split safe and never trusts an unf
       "completed",
     ],
     [
+      "completed envelope with incomplete body",
+      [
+        completed('{"title":"looks valid but truncated"}', {
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+        }),
+      ],
+      "output_truncated",
+      "completed",
+    ],
+    [
+      "empty completed envelope with incomplete body",
+      [
+        completed("", {
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+        }),
+      ],
+      "output_truncated",
+      "completed",
+    ],
+    [
       "failed",
       [event({ type: "response.failed", response: { status: "failed" } })],
       "provider_failed",
