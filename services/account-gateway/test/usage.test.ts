@@ -283,3 +283,62 @@ void test("fallback SSE discards contradictory cache and reasoning subdivisions 
     completeness: "partial",
   });
 });
+
+void test("journal reports non-SQL append failure once without leaking vendor details", async () => {
+  let attempts = 0;
+  const failure = new Error("private-provider-detail");
+  const pool = {
+    async connect() {
+      attempts++;
+      throw failure;
+    },
+  };
+  const journal = new PostgresUsageJournal(pool as never, Buffer.alloc(32, 7));
+  const diagnostics: string[] = [],
+    original = console.error;
+  console.error = (value: string) => {
+    diagnostics.push(value);
+  };
+  try {
+    await assert.rejects(
+      journal.append(
+        { consumerId: "one" },
+        {
+          schemaVersion: 1,
+          eventId: "event",
+          revision: 1,
+          executionRef: "00000000-0000-4000-8000-000000000001",
+          requestRef: "request",
+          invocationRef: "invocation",
+          attemptRef: "attempt",
+          accountRef: "account",
+          profileId: "profile",
+          model: "model",
+          occurredAt: "2026-10-21T00:00:00Z",
+          effect: "completed",
+          completeness: "partial",
+          inputTokens: null,
+          outputTokens: null,
+          cachedInputTokens: null,
+          reasoningTokens: null,
+          cost: null,
+        },
+      ),
+      { message: "unavailable" },
+    );
+  } finally {
+    console.error = original;
+  }
+  assert.equal(attempts, 1);
+  assert.deepEqual(
+    diagnostics.map((value) => JSON.parse(value) as unknown),
+    [
+      {
+        event: "gateway_usage_observation_failure",
+        phase: "fallback",
+        code: "kernel_unavailable",
+        attempt: 1,
+      },
+    ],
+  );
+});

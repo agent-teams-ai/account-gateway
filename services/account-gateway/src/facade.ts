@@ -1,6 +1,7 @@
 import { oauthProfileDefinition } from "./oauth-profiles.ts";
 import {
   executionUsageBase,
+  reportUsageObservationFailure,
   nativeUsage,
   nativeUsageFields,
   ResponsesUsageCapture,
@@ -1467,8 +1468,9 @@ export function createFacade(options: FacadeOptions): Server {
                     effect: status.effect,
                     ...capture.snapshot(),
                   });
-                } catch {
-                  /* retained initial observation explicitly remains partial */
+                } catch (error) {
+                  // Keep the initial partial observation, never fabricate usage.
+                  reportUsageObservationFailure("fallback_settlement", error);
                 }
               }
             }
