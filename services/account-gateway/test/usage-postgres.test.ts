@@ -144,6 +144,94 @@ void test("real PostgreSQL journal deduplicates concurrent writes and freezes bo
       ).size,
       82,
     );
+    // Actual PostgreSQL rollback errors must not silently lose an accepted
+    // terminal observation. The sequence survives rollback and counts attempts.
+    for (const [code, persistent] of [
+      ["40001", false],
+      ["40P01", false],
+      ["23514", true],
+      ["40001", true],
+    ] as const) {
+      const requestRef = `usage-retry-${code}-${persistent}`;
+      await pool.query("INSERT INTO ag_kernel.requests VALUES($1,$2,$3)", [
+        "one",
+        fact.executionRef,
+        requestRef,
+      ]);
+      await pool.query(`CREATE SEQUENCE ag_kernel.usage_retry_attempt;
+        CREATE FUNCTION ag_kernel.usage_retry_fault() RETURNS trigger LANGUAGE plpgsql AS $f$
+        DECLARE attempt bigint;
+        BEGIN
+          attempt := nextval('ag_kernel.usage_retry_attempt');
+          IF attempt=1 OR '${persistent}'='true' THEN
+            RAISE EXCEPTION 'private-provider-detail' USING ERRCODE='${code}';
+          END IF;
+          RETURN NEW;
+        END $f$;
+        CREATE TRIGGER usage_retry_fault BEFORE INSERT ON ag_kernel.usage_observations
+        FOR EACH ROW EXECUTE FUNCTION ag_kernel.usage_retry_fault()`);
+      const terminal = {
+        ...fact,
+        requestRef,
+        eventId: requestRef,
+        revision: 2,
+        effect: "completed" as const,
+        inputTokens: 13,
+        outputTokens: 7,
+      };
+      if (persistent) {
+        const diagnostics: string[] = [],
+          original = console.error;
+        console.error = (value: string) => {
+          diagnostics.push(value);
+        };
+        try {
+          await assert.rejects(journal.append({ consumerId: "one" }, terminal), { code });
+        } finally {
+          console.error = original;
+        }
+        assert.deepEqual(
+          diagnostics.map((value) => JSON.parse(value) as unknown),
+          Array.from({ length: code === "23514" ? 1 : 2 }, (_, index) => ({
+            event: "gateway_usage_observation_failure",
+            phase: "native",
+            code,
+            attempt: index + 1,
+          })),
+        );
+        assert.equal(
+          await journal.observe({ consumerId: "one" }, fact.executionRef, requestRef),
+          null,
+        );
+        assert.ok(!diagnostics.join("").includes("private-provider-detail"));
+      } else {
+        await journal.append({ consumerId: "one" }, terminal);
+        assert.deepEqual(
+          await journal.observe({ consumerId: "one" }, fact.executionRef, requestRef),
+          terminal,
+        );
+        assert.equal(
+          (
+            await pool.query<{ n: number }>(
+              "SELECT count(*)::int AS n FROM ag_kernel.usage_observations WHERE request_ref=$1",
+              [requestRef],
+            )
+          ).rows[0].n,
+          1,
+        );
+      }
+      assert.equal(
+        (
+          await pool.query<{ last_value: string }>(
+            "SELECT last_value FROM ag_kernel.usage_retry_attempt",
+          )
+        ).rows[0].last_value,
+        code === "23514" ? "1" : "2",
+      );
+      await pool.query(
+        "DROP TRIGGER usage_retry_fault ON ag_kernel.usage_observations; DROP FUNCTION ag_kernel.usage_retry_fault(); DROP SEQUENCE ag_kernel.usage_retry_attempt",
+      );
+    }
   } finally {
     await pool.end();
   }

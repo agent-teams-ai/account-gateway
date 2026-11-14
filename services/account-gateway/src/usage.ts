@@ -65,6 +65,68 @@ export interface UsageJournal {
   append(context: TrustedContext, fact: UsageObservation): Promise<void>;
   list(context: TrustedContext, query: UsageQuery): Promise<UsagePage>;
 }
+// Only transaction rollback codes qualify for one analytics-only retry.
+// Unknown commit outcomes, authority failures and invalid facts are not retried.
+const retryableUsageCodes = new Set(["40001", "40P01"]);
+function usageAppendCode(error: unknown): string {
+  try {
+    const code: unknown =
+      error !== null && typeof error === "object" && "code" in error ? error.code : undefined;
+    if (error instanceof KernelError) {
+      return typeof code === "string" &&
+        ["invalid", "unknown", "conflict", "denied", "unavailable"].includes(code)
+        ? `kernel_${code}`
+        : "UNKNOWN";
+    }
+    return typeof code === "string" &&
+      [
+        "40001",
+        "40P01",
+        "23514",
+        "23505",
+        "23503",
+        "42P01",
+        "42703",
+        "42501",
+        "22003",
+        "22P02",
+        "57014",
+        "53300",
+        "57P01",
+        "57P02",
+        "57P03",
+        "08006",
+      ].includes(code)
+      ? code
+      : "UNKNOWN";
+  } catch {
+    return "UNKNOWN";
+  }
+}
+function emitUsageAppendFailure(phase: string, code: string, attempt: number): void {
+  try {
+    console.error(
+      JSON.stringify({ event: "gateway_usage_observation_failure", phase, code, attempt }),
+    );
+  } catch {
+    /* Telemetry never changes effect or closure authority. */
+  }
+}
+/** Analytics failures never authorize provider replay or replace physical closure. */
+export function reportUsageObservationFailure(
+  phase:
+    | "native_unfinalized"
+    | "native_callback"
+    | "fallback_settlement"
+    | "claim_observation_unconfirmed",
+  error?: unknown,
+): void {
+  emitUsageAppendFailure(
+    phase,
+    phase === "native_unfinalized" ? "not_finalized" : usageAppendCode(error),
+    1,
+  );
+}
 // Every writer holds the counter lock through commit. A captured high water
 // therefore cannot hide an earlier uncommitted insert or late correction.
 export class PostgresUsageJournal implements UsageJournal {
@@ -102,8 +164,29 @@ export class PostgresUsageJournal implements UsageJournal {
     }
   }
   async append(context: TrustedContext, input: UsageObservation): Promise<void> {
-    const fact = usageObservation.parse(input),
-      db = await this.#checkout();
+    let fact: UsageObservation;
+    try {
+      fact = Object.freeze(usageObservation.parse(input));
+    } catch (error) {
+      emitUsageAppendFailure("parse", "invalid", 1);
+      throw error;
+    }
+    const phase = fact.revision === 0 ? "initial" : fact.revision === 1 ? "fallback" : "native";
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await this.#append(context, fact);
+        return;
+      } catch (error) {
+        const code = usageAppendCode(error);
+        emitUsageAppendFailure(phase, code, attempt);
+        if (attempt !== 1 || !retryableUsageCodes.has(code)) {
+          throw error;
+        }
+      }
+    }
+  }
+  async #append(context: TrustedContext, fact: UsageObservation): Promise<void> {
+    const db = await this.#checkout();
     let transaction = false;
     const health = { destroy: false };
     const destroy = (): boolean => health.destroy;

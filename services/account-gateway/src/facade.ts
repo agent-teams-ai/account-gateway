@@ -1,6 +1,7 @@
 import { oauthProfileDefinition } from "./oauth-profiles.ts";
 import {
   executionUsageBase,
+  reportUsageObservationFailure,
   nativeUsage,
   nativeUsageFields,
   ResponsesUsageCapture,
@@ -1456,6 +1457,9 @@ export function createFacade(options: FacadeOptions): Server {
               }
             } finally {
               clearTimeout(abortAt);
+              if (options.usage && !claimRecorded()) {
+                reportUsageObservationFailure("claim_observation_unconfirmed");
+              }
               if (claimRecorded() && !nativeUsageObserved() && options.usage) {
                 // Initial durable partial fact survives producer/network loss. A final
                 // observation failure never repeats inference or loses that fact.
@@ -1467,8 +1471,9 @@ export function createFacade(options: FacadeOptions): Server {
                     effect: status.effect,
                     ...capture.snapshot(),
                   });
-                } catch {
-                  /* retained initial observation explicitly remains partial */
+                } catch (error) {
+                  // Keep the initial partial observation, never fabricate usage.
+                  reportUsageObservationFailure("fallback_settlement", error);
                 }
               }
             }

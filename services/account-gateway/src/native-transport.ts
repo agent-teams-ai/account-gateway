@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { KernelError } from "./domain.ts";
+import { reportUsageObservationFailure } from "./usage.ts";
 import { inServiceLane } from "./service-admission.ts";
 import type { NativeControlAdmission } from "./service-admission.ts";
 import type { CleanupAuthority, NativeDispatchProof, TrustedContext } from "./domain.ts";
@@ -150,9 +151,16 @@ export class NativeHTTPTransport implements NativeTransport {
     } else {
       await this.#unknown(a);
     }
-    if (finalized(r.nativeUsage?.finalized) && a.callback.usage) {
-      // Analytics delivery failure cannot repeat provider entry or block closure.
-      await a.callback.usage(p, r.nativeUsage).catch(() => {});
+    if (a.callback.usage) {
+      // Analytics failure cannot repeat provider entry or block closure, but its
+      // exact missing stage must remain visible independently of journal append.
+      if (finalized(r.nativeUsage?.finalized)) {
+        await a.callback.usage(p, r.nativeUsage).catch((error: unknown) => {
+          reportUsageObservationFailure("native_callback", error);
+        });
+      } else {
+        reportUsageObservationFailure("native_unfinalized");
+      }
     }
     // The Go ack-owner performs the authenticated Node closure callback. Only
     // that callback durably releases SQL occupancy; EOF does not call closed().
