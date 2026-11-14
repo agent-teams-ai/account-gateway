@@ -1457,6 +1457,9 @@ export function createFacade(options: FacadeOptions): Server {
               }
             } finally {
               clearTimeout(abortAt);
+              if (options.usage && !claimRecorded()) {
+                reportUsageObservationFailure("claim_observation_unconfirmed");
+              }
               if (claimRecorded() && !nativeUsageObserved() && options.usage) {
                 // Initial durable partial fact survives producer/network loss. A final
                 // observation failure never repeats inference or loses that fact.

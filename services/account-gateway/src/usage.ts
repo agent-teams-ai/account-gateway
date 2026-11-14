@@ -114,7 +114,11 @@ function emitUsageAppendFailure(phase: string, code: string, attempt: number): v
 }
 /** Analytics failures never authorize provider replay or replace physical closure. */
 export function reportUsageObservationFailure(
-  phase: "native_unfinalized" | "native_callback" | "fallback_settlement",
+  phase:
+    | "native_unfinalized"
+    | "native_callback"
+    | "fallback_settlement"
+    | "claim_observation_unconfirmed",
   error?: unknown,
 ): void {
   emitUsageAppendFailure(
