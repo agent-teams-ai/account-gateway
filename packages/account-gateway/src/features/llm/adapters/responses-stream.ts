@@ -89,7 +89,9 @@ export function createResponsesDecoder(): GenerationDecoder {
         terminal = {
           status:
             event.type === "response.completed"
-              ? "completed"
+              ? response.status === "incomplete"
+                ? "incomplete"
+                : "completed"
               : event.type === "response.incomplete"
                 ? "incomplete"
                 : "failed",
