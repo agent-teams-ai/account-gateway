@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readCachedAccountLimits } from "../src/limits-port.ts";
 import { accountModelAdmission } from "../src/models-port.ts";
+import { accountModels } from "@agent-teams/account-gateway/contracts";
 import { KernelError } from "../src/domain.ts";
 
 const input = {
@@ -128,7 +129,7 @@ void test("GLM native catalogue admits only the anchor when the catalogue is una
   for (const status of ["unknown", "unsupported"] as const) {
     assert.deepEqual(accountModelAdmission({ status }, anchor, "native_catalog").modelIds, []);
   }
-  const catalogSnapshot = {
+  const catalogSnapshot = accountModels.parse({
     status: "snapshot",
     source: "native_catalog",
     physicalGeneration: "generation",
@@ -136,7 +137,7 @@ void test("GLM native catalogue admits only the anchor when the catalogue is una
     fetchedAt: "2026-10-25T00:00:00Z",
     expiresAt: "2026-10-25T00:01:00Z",
     models: [glmCatalogModel(anchor), glmCatalogModel("glm-5.3")],
-  } as const;
+  });
   const admitted = accountModelAdmission(catalogSnapshot, anchor, "native_catalog");
   assert.deepEqual(admitted.modelIds, [anchor, "glm-5.3"]);
   assert.equal(admitted.enforceCapabilities, true);
