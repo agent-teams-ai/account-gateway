@@ -108,3 +108,36 @@ void test("NVIDIA sandbox does not admit an unobserved anchor when model authori
   assert.deepEqual(accountModelAdmission(unavailable, anchor, "openrouter").modelIds, [anchor]);
   assert.deepEqual(accountModelAdmission({ status: "unknown" }, anchor, "nvidia").modelIds, []);
 });
+
+const glmCatalogModel = (modelId: string) =>
+  ({
+    modelId,
+    reasoning: null,
+    fast: null,
+    tools: { allowed: ["function"], default: "function" },
+  }) as const;
+
+void test("GLM native catalogue admits only the anchor when the catalogue is unavailable", () => {
+  const anchor = "glm-5.3-flash";
+  const unavailable = { status: "unavailable" } as const;
+  assert.deepEqual(accountModelAdmission(unavailable, anchor, "native_catalog"), {
+    modelIds: [anchor],
+    models: undefined,
+    enforceCapabilities: false,
+  });
+  for (const status of ["unknown", "unsupported"] as const) {
+    assert.deepEqual(accountModelAdmission({ status }, anchor, "native_catalog").modelIds, []);
+  }
+  const catalogSnapshot = {
+    status: "snapshot",
+    source: "native_catalog",
+    physicalGeneration: "generation",
+    principalVersion: "principal",
+    fetchedAt: "2026-10-25T00:00:00Z",
+    expiresAt: "2026-10-25T00:01:00Z",
+    models: [glmCatalogModel(anchor), glmCatalogModel("glm-5.3")],
+  } as const;
+  const admitted = accountModelAdmission(catalogSnapshot, anchor, "native_catalog");
+  assert.deepEqual(admitted.modelIds, [anchor, "glm-5.3"]);
+  assert.equal(admitted.enforceCapabilities, true);
+});
