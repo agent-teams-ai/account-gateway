@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readCachedAccountLimits } from "../src/limits-port.ts";
-import { accountModelAdmission } from "../src/models-port.ts";
+import { accountModelAdmission, configuredAccountModelSource } from "../src/models-port.ts";
 import { accountModels } from "@agent-teams/account-gateway/contracts";
 import { KernelError } from "../src/domain.ts";
 
@@ -141,4 +141,19 @@ void test("GLM native catalogue admits only the anchor when the catalogue is una
   const admitted = accountModelAdmission(catalogSnapshot, anchor, "native_catalog");
   assert.deepEqual(admitted.modelIds, [anchor, "glm-5.3"]);
   assert.equal(admitted.enforceCapabilities, true);
+});
+
+void test("only the GLM coding plan resolves to the native_catalog source through the registry", () => {
+  assert.equal(
+    configuredAccountModelSource("glm-coding-global-responses-apikey-v1"),
+    "native_catalog",
+  );
+  for (const profileId of [
+    "kimi-code-global-responses-apikey-v1",
+    "minimax-mplan-global-responses-apikey-v1",
+    "grok-subscription-responses-oauth-v1",
+  ]) {
+    assert.equal(configuredAccountModelSource(profileId), undefined, profileId);
+  }
+  assert.equal(configuredAccountModelSource("nvidia-build-chat-apikey-v1"), "nvidia");
 });

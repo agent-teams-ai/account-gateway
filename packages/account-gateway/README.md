@@ -60,8 +60,8 @@ read; use `accountModelDiscoverySource({profileId, protocol, authKind})` against
 trusted current profile metadata before treating a snapshot as model authority.
 The qualified sources are Codex OAuth over Responses, OpenRouter API keys
 over Responses, the NVIDIA Build sandbox model, and `native_catalog`, the
-Native-owned qualified catalogue of the GLM Coding Plan (anchor model plus
-`glm-5.3`; function tools, no reasoning or fast controls). Vendor labels and
+Native-owned qualified catalogue of the GLM Coding Plan (function tools, no
+reasoning or fast controls; Native owns the model list). Vendor labels and
 arbitrary profile IDs cannot enable discovery.
 
 An authoritative `snapshot` carries its source, physical generation, principal

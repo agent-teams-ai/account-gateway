@@ -919,7 +919,7 @@ const accountModelDiscoveryProfiles = Object.freeze([
     authKind: "api_key",
     source: "nvidia",
   } as const),
-  // Native owns the qualified GLM catalogue (anchor + glm-5.3); see ReviewRouter doc 64.
+  // Native owns the qualified GLM catalogue; the Gateway only carries its contract.
   Object.freeze({
     profileId: "glm-coding-global-responses-apikey-v1",
     protocol: "openai-responses",
@@ -927,7 +927,7 @@ const accountModelDiscoveryProfiles = Object.freeze([
     source: "native_catalog",
   } as const),
 ]);
-export type AccountModelSource = "codex" | "openrouter" | "nvidia" | "native_catalog";
+export type AccountModelSource = (typeof accountModelDiscoveryProfiles)[number]["source"];
 export function accountModelDiscoveryProfile(profileId: string) {
   return accountModelDiscoveryProfiles.find((candidate) => candidate.profileId === profileId);
 }
