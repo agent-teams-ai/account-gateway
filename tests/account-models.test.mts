@@ -216,6 +216,73 @@ void test("NVIDIA model discovery is a closed one-model, API-key-only account so
   );
 });
 
+void test("GLM native catalogue is a closed API-key source without reasoning or fast controls", () => {
+  const glm = accountModelDiscoveryProfile("glm-coding-global-responses-apikey-v1");
+  assert.ok(glm);
+  assert.equal(accountModelDiscoverySource(glm), "native_catalog");
+  assert.equal(accountModelDiscoverySource({ ...glm, protocol: "openai-chat" }), undefined);
+  assert.equal(accountModelDiscoverySource({ ...glm, authKind: "oauth" }), undefined);
+  // Kimi and MiniMax have no second qualified model, so they open no discovery path.
+  for (const profileId of [
+    "kimi-code-global-responses-apikey-v1",
+    "minimax-mplan-global-responses-apikey-v1",
+    "grok-subscription-responses-oauth-v1",
+  ]) {
+    assert.equal(accountModelDiscoveryProfile(profileId), undefined);
+  }
+  const models = ["glm-5.3-flash", "glm-5.3"].map((modelId) => ({
+    modelId,
+    reasoning: null,
+    fast: null,
+    tools: { allowed: ["function"], default: "function" },
+  }));
+  const snapshot = {
+    status: "snapshot",
+    source: "native_catalog",
+    physicalGeneration: "generation-a",
+    principalVersion: "principal-a",
+    fetchedAt: "2026-10-25T00:00:00Z",
+    expiresAt: "2026-10-25T00:01:00Z",
+    models,
+  };
+  assert.equal(accountModels.safeParse(snapshot).success, true);
+  assert.equal(accountModels.safeParse({ ...snapshot, models: [] }).success, false);
+  assert.equal(
+    accountModels.safeParse({ ...snapshot, models: [...models, models[0]] }).success,
+    false,
+  );
+  assert.equal(
+    accountModels.safeParse({
+      ...snapshot,
+      models: [{ ...models[0], reasoning: { allowed: ["high"], default: "high" } }],
+    }).success,
+    false,
+    "native rejects every reasoning setting for coding plans",
+  );
+  assert.equal(
+    accountModels.safeParse({
+      ...snapshot,
+      models: [{ ...models[0], fast: { allowed: ["balanced"], default: "balanced" } }],
+    }).success,
+    false,
+  );
+  assert.equal(
+    accountModels.safeParse({
+      ...snapshot,
+      models: [{ ...models[0], tools: { allowed: ["none", "function"], default: "function" } }],
+    }).success,
+    false,
+  );
+  assert.equal(
+    accountModels.safeParse({
+      ...snapshot,
+      models: Array.from({ length: 9 }, (_, i) => ({ ...models[0], modelId: `glm-x-${i}` })),
+    }).success,
+    false,
+  );
+  assert.equal(accountModels.safeParse({ ...snapshot, extra: true }).success, false);
+});
+
 void test("OpenRouter discovery supports bounded full catalogs without weakening Codex controls", () => {
   const model = {
     modelId: "future-vendor/review:model",

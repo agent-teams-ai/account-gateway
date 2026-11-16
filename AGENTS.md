@@ -34,5 +34,14 @@
   accounts at admission) and expose the result through the existing contract as
   a typed busy outcome with a retry-after. Consumers only list candidate
   accounts; they never keep their own copy of account health.
+- Provider logic is owned by the Sub2API fork, not by this repository or its
+  consumers: provider HTTP, parsers, codecs, model catalogs and
+  provider-specific request admission live in native. The Gateway keeps
+  contracts, identity, fences and policy, and its own admission checks stay.
+  Reuse an existing Sub2API capability before writing anything; if it is
+  missing, extend the fork. A model joins a catalog only with evidence it
+  belongs to the plan, and the catalog has exactly one source in native.
+  Design: `ai-docs/architecture/64-gateway-native-ownership-and-model-catalog.md`
+  in the ReviewRouter repository (777genius/review-router-ai).
 
 Use [docs/.agents/skills/docs-authoring/SKILL.md](docs/.agents/skills/docs-authoring/SKILL.md) for documentation.

@@ -1,3 +1,4 @@
+import type { AccountModelSource } from "@agent-teams/account-gateway/contracts";
 import { KernelError } from "./domain.ts";
 
 const bad = (): never => {
@@ -165,7 +166,7 @@ export function validateResponses(
     readonly reasoning: { readonly allowed: readonly string[] } | null;
   }[],
   enforceModelCapabilities = false,
-  modelSource?: "codex" | "openrouter" | "nvidia",
+  modelSource?: AccountModelSource,
 ): string {
   const input = strictJSON(bytes);
   if (input === null || typeof input !== "object" || Array.isArray(input)) {

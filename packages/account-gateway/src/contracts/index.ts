@@ -133,4 +133,5 @@ export type {
   AccountModelsRequest,
   AccountModels,
   AccountModelCapability,
+  AccountModelSource,
 } from "../features/facade-client/contracts/index.js";

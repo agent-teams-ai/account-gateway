@@ -58,8 +58,11 @@ submit an inference request or transfer a provider credential.
 profiles and their source, protocol and auth kind. A lookup can trigger a strict
 read; use `accountModelDiscoverySource({profileId, protocol, authKind})` against
 trusted current profile metadata before treating a snapshot as model authority.
-The qualified sources are Codex OAuth over Responses and OpenRouter API keys
-over Responses. Vendor labels and arbitrary profile IDs cannot enable discovery.
+The qualified sources are Codex OAuth over Responses, OpenRouter API keys
+over Responses, the NVIDIA Build sandbox model, and `native_catalog`, the
+Native-owned qualified catalogue of the GLM Coding Plan (function tools, no
+reasoning or fast controls; Native owns the model list). Vendor labels and
+arbitrary profile IDs cannot enable discovery.
 
 An authoritative `snapshot` carries its source, physical generation, principal
 version, fetch time, expiry and the complete model/capability set. Codex retains

@@ -919,7 +919,15 @@ const accountModelDiscoveryProfiles = Object.freeze([
     authKind: "api_key",
     source: "nvidia",
   } as const),
+  // Native owns the qualified GLM catalogue; the Gateway only carries its contract.
+  Object.freeze({
+    profileId: "glm-coding-global-responses-apikey-v1",
+    protocol: "openai-responses",
+    authKind: "api_key",
+    source: "native_catalog",
+  } as const),
 ]);
+export type AccountModelSource = (typeof accountModelDiscoveryProfiles)[number]["source"];
 export function accountModelDiscoveryProfile(profileId: string) {
   return accountModelDiscoveryProfiles.find((candidate) => candidate.profileId === profileId);
 }
@@ -928,7 +936,7 @@ export function accountModelDiscoverySource(candidate: {
   readonly profileId: string;
   readonly protocol: string;
   readonly authKind: string;
-}): "codex" | "openrouter" | "nvidia" | undefined {
+}): AccountModelSource | undefined {
   const qualified = accountModelDiscoveryProfile(candidate.profileId);
   return qualified &&
     candidate.protocol === qualified.protocol &&
@@ -949,6 +957,13 @@ const codexAccountModelCapability = qualifiedModelCapability.extend({
 const openRouterAccountModelCapability = qualifiedModelCapability.extend({
   fast: z.null(),
   tools: modelSetting(["none", "function"] as const),
+});
+// Native rejects any reasoning setting for the protected coding plans, so the
+// catalogue can only advertise function tools without reasoning or fast controls.
+const nativeCatalogAccountModelCapability = qualifiedModelCapability.extend({
+  reasoning: z.null(),
+  fast: z.null(),
+  tools: modelSetting(["function"] as const),
 });
 export const accountModelCapability = z.union([
   codexAccountModelCapability,
@@ -983,6 +998,12 @@ export const accountModels = z.union([
       source: z.literal("nvidia"),
       // One tested sandbox model; never claim entitlement to another NVIDIA model.
       models: z.array(openRouterAccountModelCapability).length(1).refine(distinctModels),
+    })
+    .refine(validSnapshotPeriod),
+  accountModelSnapshot
+    .extend({
+      source: z.literal("native_catalog"),
+      models: z.array(nativeCatalogAccountModelCapability).min(1).max(8).refine(distinctModels),
     })
     .refine(validSnapshotPeriod),
   z.strictObject({ status: z.literal("unknown") }),

@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readCachedAccountLimits } from "../src/limits-port.ts";
-import { accountModelAdmission } from "../src/models-port.ts";
+import { accountModelAdmission, configuredAccountModelSource } from "../src/models-port.ts";
+import { accountModels } from "@agent-teams/account-gateway/contracts";
 import { KernelError } from "../src/domain.ts";
 
 const input = {
@@ -107,4 +108,52 @@ void test("NVIDIA sandbox does not admit an unobserved anchor when model authori
   assert.deepEqual(accountModelAdmission(unavailable, anchor, "codex").modelIds, [anchor]);
   assert.deepEqual(accountModelAdmission(unavailable, anchor, "openrouter").modelIds, [anchor]);
   assert.deepEqual(accountModelAdmission({ status: "unknown" }, anchor, "nvidia").modelIds, []);
+});
+
+const glmCatalogModel = (modelId: string) =>
+  ({
+    modelId,
+    reasoning: null,
+    fast: null,
+    tools: { allowed: ["function"], default: "function" },
+  }) as const;
+
+void test("GLM native catalogue admits only the anchor when the catalogue is unavailable", () => {
+  const anchor = "glm-5.3-flash";
+  const unavailable = { status: "unavailable" } as const;
+  assert.deepEqual(accountModelAdmission(unavailable, anchor, "native_catalog"), {
+    modelIds: [anchor],
+    models: undefined,
+    enforceCapabilities: false,
+  });
+  for (const status of ["unknown", "unsupported"] as const) {
+    assert.deepEqual(accountModelAdmission({ status }, anchor, "native_catalog").modelIds, []);
+  }
+  const catalogSnapshot = accountModels.parse({
+    status: "snapshot",
+    source: "native_catalog",
+    physicalGeneration: "generation",
+    principalVersion: "principal",
+    fetchedAt: "2026-10-25T00:00:00Z",
+    expiresAt: "2026-10-25T00:01:00Z",
+    models: [glmCatalogModel(anchor), glmCatalogModel("glm-5.3")],
+  });
+  const admitted = accountModelAdmission(catalogSnapshot, anchor, "native_catalog");
+  assert.deepEqual(admitted.modelIds, [anchor, "glm-5.3"]);
+  assert.equal(admitted.enforceCapabilities, true);
+});
+
+void test("only the GLM coding plan resolves to the native_catalog source through the registry", () => {
+  assert.equal(
+    configuredAccountModelSource("glm-coding-global-responses-apikey-v1"),
+    "native_catalog",
+  );
+  for (const profileId of [
+    "kimi-code-global-responses-apikey-v1",
+    "minimax-mplan-global-responses-apikey-v1",
+    "grok-subscription-responses-oauth-v1",
+  ]) {
+    assert.equal(configuredAccountModelSource(profileId), undefined, profileId);
+  }
+  assert.equal(configuredAccountModelSource("nvidia-build-chat-apikey-v1"), "nvidia");
 });
