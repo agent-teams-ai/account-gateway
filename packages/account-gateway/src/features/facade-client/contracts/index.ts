@@ -839,7 +839,7 @@ const connectionIdentity = (
  * registry takes them from here, so a consumer can name the provider of a
  * recorded profile (usage, display) without keeping its own copy.
  */
-const providerConnectionIdentities = Object.freeze([
+export const providerConnectionIdentities: readonly ProviderConnectionIdentity[] = Object.freeze([
   connectionIdentity(
     "openai-responses-apikey-v1",
     { identity: "mimo", label: "MiMo" },

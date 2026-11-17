@@ -99,6 +99,7 @@ export {
   providerConnectionCapability,
   providerConnectionCapabilities,
   providerConnectionIdentity,
+  providerConnectionIdentities,
   providerIdentity,
   providerPlanIdentity,
   ACCOUNT_LIMITS_V2_CONTRACT,

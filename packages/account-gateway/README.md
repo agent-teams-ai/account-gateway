@@ -51,7 +51,8 @@ for current gate results and root documentation adoption prerequisites.
 
 `providerConnectionIdentity(profileId)` returns the public vendor
 (`providerIdentity`) and plan (`providerPlanIdentity`) of a qualified profile, or
-`undefined` for an unqualified one. The service connection registry and the
+`undefined` for an unqualified one; `providerConnectionIdentities` lists all of
+them. The service connection registry and the
 `provider-connections/v1` capabilities take these values from it, so a consumer
 can name the provider of a recorded profile (usage attribution, display) without
 its own copy. The `native_catalog` discovery source names the catalogue owner,

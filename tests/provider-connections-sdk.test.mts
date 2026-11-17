@@ -5,6 +5,7 @@ import { once } from "node:events";
 import {
   providerConnectionCapabilities,
   providerConnectionIdentity,
+  providerConnectionIdentities,
   providerIdentity,
   providerPlanIdentity,
   profile as legacyProfile,
@@ -424,18 +425,9 @@ void test("Grok plain code shares callback lexical bounds and strict completion 
 });
 
 void test("qualified profile identity names the vendor and plan for consumers", () => {
+  assert.ok(Object.isFrozen(providerConnectionIdentities));
   const vendors = Object.fromEntries(
-    [
-      "openai-responses-apikey-v1",
-      "openrouter-openai-responses-apikey-v1",
-      "nvidia-build-chat-apikey-v1",
-      "openai-codex-oauth-responses-v1",
-      "anthropic-claude-oauth-messages-v1",
-      "kimi-code-global-responses-apikey-v1",
-      "glm-coding-global-responses-apikey-v1",
-      "minimax-mplan-global-responses-apikey-v1",
-      "grok-subscription-responses-oauth-v1",
-    ].map((profileId) => {
+    providerConnectionIdentities.map(({ profileId }) => {
       const identity = providerConnectionIdentity(profileId);
       assert.ok(identity, profileId);
       assert.equal(providerIdentity.safeParse(identity.provider.identity).success, true);
