@@ -47,6 +47,22 @@ packages/account-gateway pack; run scripts/qualify-consumers.sh with the absolut
 archive and a new directory outside the source workspace. See docs/HANDOFF.md
 for current gate results and root documentation adoption prerequisites.
 
+## Provider identity and usage completeness
+
+`providerConnectionIdentity(profileId)` returns the public vendor
+(`providerIdentity`) and plan (`providerPlanIdentity`) of a qualified profile, or
+`undefined` for an unqualified one. The service connection registry and the
+`provider-connections/v1` capabilities take these values from it, so a consumer
+can name the provider of a recorded profile (usage attribution, display) without
+its own copy. The `native_catalog` discovery source names the catalogue owner,
+not the vendor; use this lookup for the vendor.
+
+A usage observation's `completeness` is `unknown` when no token counter was
+observed at all, `partial` when some counters arrived but not a final native
+snapshot, and `complete` for a final native snapshot. Observations stored before
+`unknown` existed keep `partial`; a consumer must accept all three values before
+the service that emits `unknown` is deployed.
+
 ## Account model discovery
 
 Management and consumer-control clients expose `readAccountModels`; execution

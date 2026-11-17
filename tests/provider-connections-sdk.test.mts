@@ -4,6 +4,9 @@ import { createServer } from "node:http";
 import { once } from "node:events";
 import {
   providerConnectionCapabilities,
+  providerConnectionIdentity,
+  providerIdentity,
+  providerPlanIdentity,
   profile as legacyProfile,
   accountLimitsV2,
   grokOAuthAuthorizationURL,
@@ -418,4 +421,39 @@ void test("Grok plain code shares callback lexical bounds and strict completion 
       .success,
     true,
   );
+});
+
+void test("qualified profile identity names the vendor and plan for consumers", () => {
+  const vendors = Object.fromEntries(
+    [
+      "openai-responses-apikey-v1",
+      "openrouter-openai-responses-apikey-v1",
+      "nvidia-build-chat-apikey-v1",
+      "openai-codex-oauth-responses-v1",
+      "anthropic-claude-oauth-messages-v1",
+      "kimi-code-global-responses-apikey-v1",
+      "glm-coding-global-responses-apikey-v1",
+      "minimax-mplan-global-responses-apikey-v1",
+      "grok-subscription-responses-oauth-v1",
+    ].map((profileId) => {
+      const identity = providerConnectionIdentity(profileId);
+      assert.ok(identity, profileId);
+      assert.equal(providerIdentity.safeParse(identity.provider.identity).success, true);
+      assert.equal(providerPlanIdentity.safeParse(identity.plan.identity).success, true);
+      assert.ok(Object.isFrozen(identity) && Object.isFrozen(identity.provider));
+      return [profileId, `${identity.provider.identity}/${identity.plan.identity}`];
+    }),
+  );
+  assert.deepEqual(vendors, {
+    "openai-responses-apikey-v1": "mimo/unknown",
+    "openrouter-openai-responses-apikey-v1": "openrouter/pay_as_you_go",
+    "nvidia-build-chat-apikey-v1": "nvidia/unknown",
+    "openai-codex-oauth-responses-v1": "openai/subscription",
+    "anthropic-claude-oauth-messages-v1": "anthropic/subscription",
+    "kimi-code-global-responses-apikey-v1": "kimi/coding_plan",
+    "glm-coding-global-responses-apikey-v1": "glm/coding_plan",
+    "minimax-mplan-global-responses-apikey-v1": "minimax/m_plan",
+    "grok-subscription-responses-oauth-v1": "grok/subscription",
+  });
+  assert.equal(providerConnectionIdentity("unqualified-profile"), undefined);
 });

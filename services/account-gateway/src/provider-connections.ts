@@ -1,3 +1,6 @@
+import { providerConnectionIdentity } from "@agent-teams/account-gateway/contracts";
+import type { ProviderConnectionIdentity } from "@agent-teams/account-gateway/contracts";
+
 type Setting<T> = { readonly allowed: readonly T[]; readonly default: T };
 type ModelCapability = {
   readonly modelId: string;
@@ -5,25 +8,7 @@ type ModelCapability = {
   readonly fast: Setting<"balanced" | "fast"> | null;
   readonly tools: Setting<"none" | "function" | "function_and_custom">;
 };
-export type ProviderConnectionDefinition = {
-  readonly profileId: string;
-  readonly provider: {
-    readonly identity:
-      | "mimo"
-      | "openrouter"
-      | "nvidia"
-      | "openai"
-      | "anthropic"
-      | "kimi"
-      | "glm"
-      | "minimax"
-      | "grok";
-    readonly label: string;
-  };
-  readonly plan: {
-    readonly identity: "subscription" | "coding_plan" | "m_plan" | "pay_as_you_go" | "unknown";
-    readonly label: string;
-  };
+export type ProviderConnectionDefinition = ProviderConnectionIdentity & {
   readonly region: { readonly identity: "global" | "unknown"; readonly label: string };
   readonly protocol: "openai-chat" | "openai-responses" | "anthropic-messages";
   readonly baseURL: string;
@@ -43,6 +28,14 @@ export type ProviderConnectionDefinition = {
   };
 };
 
+/** Vendor and plan come from the SDK, the one public owner of profile identity. */
+function qualifiedIdentity(profileId: string): ProviderConnectionIdentity {
+  const identity = providerConnectionIdentity(profileId);
+  if (!identity) {
+    throw new Error(`provider connection ${profileId} has no SDK identity`);
+  }
+  return identity;
+}
 const standard = {
   reasoning: { allowed: ["minimal", "low", "medium", "high"], default: "medium" },
   fast: { allowed: ["balanced"], default: "balanced" },
@@ -88,13 +81,12 @@ const definition = (input: ProviderConnectionDefinition): ProviderConnectionDefi
 /**
  * The only editable provider tuple source. Capability projection, service tuple
  * validation and OAuth route selection all consume these entries. Private URLs
- * remain here and are never copied into a public DTO.
+ * remain here and are never copied into a public DTO; the public vendor and plan
+ * are the SDK's `providerConnectionIdentity`.
  */
 export const providerConnectionRegistry: readonly ProviderConnectionDefinition[] = Object.freeze([
   definition({
-    profileId: "openai-responses-apikey-v1",
-    provider: { identity: "mimo", label: "MiMo" },
-    plan: { identity: "unknown", label: "MiMo" },
+    ...qualifiedIdentity("openai-responses-apikey-v1"),
     region: { identity: "unknown", label: "Default" },
     protocol: "openai-responses",
     baseURL: "",
@@ -107,9 +99,7 @@ export const providerConnectionRegistry: readonly ProviderConnectionDefinition[]
     availability: "enabled",
   }),
   definition({
-    profileId: "openrouter-openai-responses-apikey-v1",
-    provider: { identity: "openrouter", label: "OpenRouter" },
-    plan: { identity: "pay_as_you_go", label: "OpenRouter credits" },
+    ...qualifiedIdentity("openrouter-openai-responses-apikey-v1"),
     region: { identity: "global", label: "Global" },
     protocol: "openai-responses",
     baseURL: "https://openrouter.ai/api/v1",
@@ -123,9 +113,7 @@ export const providerConnectionRegistry: readonly ProviderConnectionDefinition[]
     availability: "enabled",
   }),
   definition({
-    profileId: "nvidia-build-chat-apikey-v1",
-    provider: { identity: "nvidia", label: "NVIDIA Build" },
-    plan: { identity: "unknown", label: "NVIDIA API trial (evaluation only)" },
+    ...qualifiedIdentity("nvidia-build-chat-apikey-v1"),
     region: { identity: "global", label: "Global" },
     // The consumer wire is Responses; native alone selects the fixed Chat backend.
     protocol: "openai-responses",
@@ -148,9 +136,7 @@ export const providerConnectionRegistry: readonly ProviderConnectionDefinition[]
     availability: "enabled",
   }),
   definition({
-    profileId: "openai-codex-oauth-responses-v1",
-    provider: { identity: "openai", label: "OpenAI Codex" },
-    plan: { identity: "subscription", label: "ChatGPT subscription" },
+    ...qualifiedIdentity("openai-codex-oauth-responses-v1"),
     region: { identity: "global", label: "Global" },
     protocol: "openai-responses",
     baseURL: "https://chatgpt.com/backend-api/codex",
@@ -176,9 +162,7 @@ export const providerConnectionRegistry: readonly ProviderConnectionDefinition[]
     },
   }),
   definition({
-    profileId: "anthropic-claude-oauth-messages-v1",
-    provider: { identity: "anthropic", label: "Anthropic Claude" },
-    plan: { identity: "subscription", label: "Claude subscription" },
+    ...qualifiedIdentity("anthropic-claude-oauth-messages-v1"),
     region: { identity: "global", label: "Global" },
     protocol: "openai-responses",
     baseURL: "https://api.anthropic.com",
@@ -198,9 +182,7 @@ export const providerConnectionRegistry: readonly ProviderConnectionDefinition[]
     },
   }),
   definition({
-    profileId: "kimi-code-global-responses-apikey-v1",
-    provider: { identity: "kimi", label: "Kimi Code" },
-    plan: { identity: "coding_plan", label: "Kimi Coding Plan" },
+    ...qualifiedIdentity("kimi-code-global-responses-apikey-v1"),
     region: { identity: "global", label: "Global" },
     protocol: "openai-responses",
     baseURL: "https://api.kimi.ai/coding/v1",
@@ -213,9 +195,7 @@ export const providerConnectionRegistry: readonly ProviderConnectionDefinition[]
     availability: "enabled",
   }),
   definition({
-    profileId: "glm-coding-global-responses-apikey-v1",
-    provider: { identity: "glm", label: "GLM Coding Plan" },
-    plan: { identity: "coding_plan", label: "GLM Coding Plan" },
+    ...qualifiedIdentity("glm-coding-global-responses-apikey-v1"),
     region: { identity: "global", label: "Global" },
     protocol: "openai-responses",
     baseURL: "https://api.z.ai/api/v1",
@@ -228,9 +208,7 @@ export const providerConnectionRegistry: readonly ProviderConnectionDefinition[]
     availability: "enabled",
   }),
   definition({
-    profileId: "minimax-mplan-global-responses-apikey-v1",
-    provider: { identity: "minimax", label: "MiniMax M Plan" },
-    plan: { identity: "m_plan", label: "MiniMax M Plan" },
+    ...qualifiedIdentity("minimax-mplan-global-responses-apikey-v1"),
     region: { identity: "global", label: "Global" },
     protocol: "openai-responses",
     baseURL: "https://api.minimax.io/v1",
@@ -243,9 +221,7 @@ export const providerConnectionRegistry: readonly ProviderConnectionDefinition[]
     availability: "enabled",
   }),
   definition({
-    profileId: "grok-subscription-responses-oauth-v1",
-    provider: { identity: "grok", label: "Grok Subscription" },
-    plan: { identity: "subscription", label: "Grok subscription" },
+    ...qualifiedIdentity("grok-subscription-responses-oauth-v1"),
     region: { identity: "global", label: "Global" },
     protocol: "openai-responses",
     baseURL: "https://cli-chat-proxy.grok.com",
