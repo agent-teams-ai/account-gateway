@@ -23,6 +23,11 @@ export type {
   AccountModelCapability,
 } from "./contracts/index.js";
 
-export { accountModelDiscoveryProfile, accountModelDiscoverySource } from "./contracts/index.js";
+export {
+  accountModelDiscoveryProfile,
+  accountModelDiscoverySource,
+  providerConnectionIdentity,
+} from "./contracts/index.js";
+export type { ProviderConnectionIdentity } from "./contracts/index.js";
 
 export type { AccountLimitsRefreshCapabilities } from "./contracts/index.js";

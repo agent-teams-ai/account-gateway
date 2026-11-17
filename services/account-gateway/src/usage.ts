@@ -40,19 +40,28 @@ export function executionUsageBase(
   };
 }
 
+type UsageCounters = Pick<
+  UsageObservation,
+  "inputTokens" | "outputTokens" | "cachedInputTokens" | "reasoningTokens"
+>;
+/** No observed counter is unknown usage, never a partial measurement. */
+function incompleteness(counters: UsageCounters): "unknown" | "partial" {
+  return Object.values(counters).every((value) => value === null) ? "unknown" : "partial";
+}
+
 /** Native counters are observations; absent values remain unknown in both paths. */
 export function nativeUsageFields(
   observed: NativeUsage | undefined,
-): Pick<
-  UsageObservation,
-  "completeness" | "inputTokens" | "outputTokens" | "cachedInputTokens" | "reasoningTokens"
-> {
-  return {
-    completeness: observed?.state === "complete" ? "complete" : "partial",
+): Pick<UsageObservation, "completeness"> & UsageCounters {
+  const counters = {
     inputTokens: observed?.inputTokens ?? null,
     outputTokens: observed?.outputTokens ?? null,
     cachedInputTokens: observed?.cachedInputTokens ?? null,
     reasoningTokens: observed?.reasoningOutputTokens ?? null,
+  };
+  return {
+    completeness: observed?.state === "complete" ? "complete" : incompleteness(counters),
+    ...counters,
   };
 }
 
@@ -373,10 +382,12 @@ export class ResponsesUsageCapture {
   #pending = "";
   readonly #decoder = new TextDecoder();
   #dropped = false;
-  #usage: Pick<
-    UsageObservation,
-    "inputTokens" | "outputTokens" | "cachedInputTokens" | "reasoningTokens"
-  > = { inputTokens: null, outputTokens: null, cachedInputTokens: null, reasoningTokens: null };
+  #usage: UsageCounters = {
+    inputTokens: null,
+    outputTokens: null,
+    cachedInputTokens: null,
+    reasoningTokens: null,
+  };
   push(bytes: Uint8Array): void {
     if (this.#dropped) {
       return;
@@ -435,7 +446,7 @@ export class ResponsesUsageCapture {
     }
   }
   snapshot() {
-    return { ...this.#usage, completeness: "partial" as const };
+    return { ...this.#usage, completeness: incompleteness(this.#usage) };
   }
 }
 

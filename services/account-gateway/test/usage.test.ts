@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ResponsesUsageCapture, PostgresUsageJournal } from "../src/usage.ts";
+import {
+  ResponsesUsageCapture,
+  PostgresUsageJournal,
+  nativeUsageFields,
+  type NativeUsage,
+} from "../src/usage.ts";
 import { usageObservation, usageQuery } from "@agent-teams/account-gateway/contracts";
 
 void test("terminal SSE usage survives chunk boundaries and keeps inclusive cache/reasoning subdivisions", () => {
@@ -34,8 +39,38 @@ void test("aborted stream and malformed metadata remain unknown instead of zeros
     outputTokens: null,
     cachedInputTokens: null,
     reasoningTokens: null,
-    completeness: "partial",
+    completeness: "unknown",
   });
+});
+const native = (fields: Partial<NativeUsage>): NativeUsage => ({
+  source: "native_provider_response",
+  state: "unknown",
+  costState: "unknown",
+  finalized: true,
+  ...fields,
+});
+void test("native counters keep unknown, partial and complete apart", () => {
+  assert.equal(nativeUsageFields(native({})).completeness, "unknown");
+  assert.equal(nativeUsageFields(native({ state: "partial" })).completeness, "unknown");
+  assert.deepEqual(nativeUsageFields(native({ state: "partial", outputTokens: 4 })), {
+    completeness: "partial",
+    inputTokens: null,
+    outputTokens: 4,
+    cachedInputTokens: null,
+    reasoningTokens: null,
+  });
+  assert.equal(
+    nativeUsageFields(native({ state: "complete", inputTokens: 3, outputTokens: 2 })).completeness,
+    "complete",
+  );
+  // The wire contract carries the new value; older facts stay valid.
+  for (const completeness of ["unknown", "partial", "complete"] as const) {
+    assert.equal(
+      usageObservation.shape.completeness.safeParse(completeness).success,
+      true,
+      completeness,
+    );
+  }
 });
 void test("oversized source frames stop parsing and never make telemetry complete", () => {
   const capture = new ResponsesUsageCapture();

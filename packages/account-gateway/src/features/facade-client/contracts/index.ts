@@ -707,7 +707,8 @@ export const usageObservation = z.strictObject({
   model: z.string().min(1).max(128),
   occurredAt: deadline,
   effect: effectState,
-  completeness: z.enum(["partial", "complete"]),
+  // unknown: native observed no counter at all; partial: some counters, not final.
+  completeness: z.enum(["unknown", "partial", "complete"]),
   inputTokens: revision.nullable(),
   outputTokens: revision.nullable(),
   cachedInputTokens: revision.nullable(),
@@ -813,6 +814,84 @@ export const providerIdentity = z.enum([
   "minimax",
   "grok",
 ]);
+export const providerPlanIdentity = z.enum([
+  "subscription",
+  "coding_plan",
+  "m_plan",
+  "pay_as_you_go",
+  "unknown",
+]);
+export type ProviderIdentity = z.infer<typeof providerIdentity>;
+export type ProviderPlanIdentity = z.infer<typeof providerPlanIdentity>;
+export type ProviderConnectionIdentity = {
+  readonly profileId: string;
+  readonly provider: { readonly identity: ProviderIdentity; readonly label: string };
+  readonly plan: { readonly identity: ProviderPlanIdentity; readonly label: string };
+};
+const connectionIdentity = (
+  profileId: string,
+  provider: ProviderConnectionIdentity["provider"],
+  plan: ProviderConnectionIdentity["plan"],
+): ProviderConnectionIdentity =>
+  Object.freeze({ profileId, provider: Object.freeze(provider), plan: Object.freeze(plan) });
+/**
+ * The public vendor and plan of every qualified profile. The service connection
+ * registry takes them from here, so a consumer can name the provider of a
+ * recorded profile (usage, display) without keeping its own copy.
+ */
+export const providerConnectionIdentities: readonly ProviderConnectionIdentity[] = Object.freeze([
+  connectionIdentity(
+    "openai-responses-apikey-v1",
+    { identity: "mimo", label: "MiMo" },
+    { identity: "unknown", label: "MiMo" },
+  ),
+  connectionIdentity(
+    "openrouter-openai-responses-apikey-v1",
+    { identity: "openrouter", label: "OpenRouter" },
+    { identity: "pay_as_you_go", label: "OpenRouter credits" },
+  ),
+  connectionIdentity(
+    "nvidia-build-chat-apikey-v1",
+    { identity: "nvidia", label: "NVIDIA Build" },
+    { identity: "unknown", label: "NVIDIA API trial (evaluation only)" },
+  ),
+  connectionIdentity(
+    "openai-codex-oauth-responses-v1",
+    { identity: "openai", label: "OpenAI Codex" },
+    { identity: "subscription", label: "ChatGPT subscription" },
+  ),
+  connectionIdentity(
+    "anthropic-claude-oauth-messages-v1",
+    { identity: "anthropic", label: "Anthropic Claude" },
+    { identity: "subscription", label: "Claude subscription" },
+  ),
+  connectionIdentity(
+    "kimi-code-global-responses-apikey-v1",
+    { identity: "kimi", label: "Kimi Code" },
+    { identity: "coding_plan", label: "Kimi Coding Plan" },
+  ),
+  connectionIdentity(
+    "glm-coding-global-responses-apikey-v1",
+    { identity: "glm", label: "GLM Coding Plan" },
+    { identity: "coding_plan", label: "GLM Coding Plan" },
+  ),
+  connectionIdentity(
+    "minimax-mplan-global-responses-apikey-v1",
+    { identity: "minimax", label: "MiniMax M Plan" },
+    { identity: "m_plan", label: "MiniMax M Plan" },
+  ),
+  connectionIdentity(
+    "grok-subscription-responses-oauth-v1",
+    { identity: "grok", label: "Grok Subscription" },
+    { identity: "subscription", label: "Grok subscription" },
+  ),
+]);
+/** Vendor and plan of a qualified profile; undefined for an unqualified profile. */
+export function providerConnectionIdentity(
+  profileId: string,
+): ProviderConnectionIdentity | undefined {
+  return providerConnectionIdentities.find((candidate) => candidate.profileId === profileId);
+}
 export const providerAuthMethod = z.enum([
   "api_key",
   "oauth_authorization_code",
@@ -856,7 +935,7 @@ export const providerConnectionCapability = z
     profileId: reference,
     provider: z.strictObject({ identity: providerIdentity, label: z.string().min(1).max(64) }),
     plan: z.strictObject({
-      identity: z.enum(["subscription", "coding_plan", "m_plan", "pay_as_you_go", "unknown"]),
+      identity: providerPlanIdentity,
       label: z.string().min(1).max(64),
     }),
     region: z.strictObject({
