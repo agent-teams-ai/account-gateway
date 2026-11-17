@@ -38,6 +38,9 @@ export type NativeFailurePhase =
 export interface NativeFailureContext {
   phase: NativeFailurePhase;
   requestRef?: string;
+  // One line per context: the first reported phase is the cause, and a later
+  // cleanup failure in the same request does not add a second line.
+  reported?: boolean;
 }
 export function emitNativeFailure(
   kind: "transport" | "callback",
@@ -45,6 +48,10 @@ export function emitNativeFailure(
   diagnostic: NativeFailureContext,
   httpStatus?: number,
 ): void {
+  if (diagnostic.reported === true) {
+    return;
+  }
+  diagnostic.reported = true;
   try {
     const code = error instanceof KernelError ? error.code : undefined;
     console.error(

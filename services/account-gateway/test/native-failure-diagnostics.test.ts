@@ -457,8 +457,9 @@ function stream(res: ServerResponse, requestRef: string) {
     "x-private-detail": "SECRET_SENTINEL",
   });
 }
-// A valid owner receipt whose native lifetime never reaches physical closure.
-function openReceipt(res: ServerResponse, proof: unknown) {
+// A valid owner receipt for an entered request that did not complete. Open
+// never reaches physical closure; closed is closed but never acknowledged.
+function ownerReceipt(res: ServerResponse, proof: unknown, closed: boolean) {
   const p = proof as { executionRef: string; requestRef: string; native: unknown };
   res.writeHead(202, { "content-type": "application/json" }).end(
     JSON.stringify({
@@ -467,19 +468,19 @@ function openReceipt(res: ServerResponse, proof: unknown) {
       requestRef: p.requestRef,
       native: p.native,
       proof,
-      phase: "entered",
+      phase: closed ? "closed" : "entered",
       effect: "effect_unknown",
-      sealed: false,
+      sealed: closed,
       acknowledged: false,
       lifetime: {
         entered: true,
-        contextDone: false,
-        forwardingReturned: false,
-        bodyKnown: false,
-        bodyClosed: false,
+        contextDone: closed,
+        forwardingReturned: closed,
+        bodyKnown: closed,
+        bodyClosed: closed,
         closeFailed: false,
         completed: false,
-        sealed: false,
+        sealed: closed,
       },
     }),
   );
@@ -514,7 +515,18 @@ for (const [name, phase, reply] of [
       if (req.url === transportPath) {
         stream(res, ref).end("data: SECRET_SENTINEL\n\n");
       } else {
-        openReceipt(res, proof);
+        ownerReceipt(res, proof, false);
+      }
+    },
+  ],
+  [
+    "a settlement that did not complete, then a failed acknowledgement (one line)",
+    "settle_not_completed",
+    (res: ServerResponse, req: IncomingMessage, ref: string, proof: unknown) => {
+      if (req.url === transportPath) {
+        stream(res, ref).end("data: SECRET_SENTINEL\n\n");
+      } else {
+        ownerReceipt(res, proof, true);
       }
     },
   ],
@@ -548,7 +560,9 @@ for (const [name, phase, reply] of [
           {
             event: "gateway_native_transport_failure",
             phase,
-            ...(phase === "stream_read" ? {} : { kernel_code: "denied" }),
+            ...(phase === "stream_read" || phase === "settle_not_completed"
+              ? {}
+              : { kernel_code: "denied" }),
             request_ref: f.input.requestId,
           },
         ],
