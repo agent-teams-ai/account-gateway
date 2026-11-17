@@ -1632,11 +1632,25 @@ void test(
     }
   },
 );
+function streamStopLines(records: readonly string[]) {
+  return records
+    .filter(
+      (record) =>
+        record.includes("gateway_facade_stream_failure") ||
+        record.includes("gateway_native_transport_failure"),
+    )
+    .map((record) => JSON.parse(record) as Record<string, unknown>);
+}
+// One stop, one line: the transport already names a stop in the body it
+// streams (its phase depends on timing at the deadline), so the facade adds no
+// second line for the same stop.
 void test(
   "source HTTP: admitted quiet stream still expires at its saved deadline",
   { timeout: 5000 },
-  async () => {
-    const { f, submit } = await quietStreamFixture(2600, 2000);
+  async (t) => {
+    const records: string[] = [];
+    t.mock.method(console, "error", (record: string) => records.push(record));
+    const { f, submit, headers } = await quietStreamFixture(2600, 2000);
     try {
       const started = Date.now();
       const response = await submit();
@@ -1644,6 +1658,10 @@ void test(
       await assert.rejects(response.text());
       assert.ok(Date.now() - started >= 1200, "ingress idle must not replace the saved deadline");
       await assertNativeStreamCancelled(f);
+      assert.deepEqual(
+        streamStopLines(records).map((line) => [line.event, line.request_ref]),
+        [["gateway_native_transport_failure", headers["x-gateway-request-id"]]],
+      );
     } finally {
       await f.close();
     }
@@ -1652,7 +1670,9 @@ void test(
 void test(
   "source HTTP: caller cancellation still closes an admitted quiet stream",
   { timeout: 5000 },
-  async () => {
+  async (t) => {
+    const records: string[] = [];
+    t.mock.method(console, "error", (record: string) => records.push(record));
     const { f, submit } = await quietStreamFixture(800);
     try {
       const controller = new AbortController();
@@ -1661,6 +1681,15 @@ void test(
       controller.abort();
       await assert.rejects(response.text());
       await assertNativeStreamCancelled(f);
+      // Let the facade finish its own catch path before checking for silence.
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 100);
+      });
+      assert.deepEqual(
+        streamStopLines(records),
+        [],
+        "the caller going away is not a Gateway failure",
+      );
     } finally {
       await f.close();
     }
