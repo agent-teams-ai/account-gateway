@@ -59,10 +59,12 @@ profiles and their source, protocol and auth kind. A lookup can trigger a strict
 read; use `accountModelDiscoverySource({profileId, protocol, authKind})` against
 trusted current profile metadata before treating a snapshot as model authority.
 The qualified sources are Codex OAuth over Responses, OpenRouter API keys
-over Responses, the NVIDIA Build sandbox model, and `native_catalog`, the
-Native-owned catalogue of the API-key coding plans (GLM, MiniMax, Kimi; function
-tools, no reasoning or fast controls; Native owns the model list). Vendor labels and
-arbitrary profile IDs cannot enable discovery.
+over Responses, `nvidia`, the Native-owned NVIDIA Build catalogue (the qualified
+anchor plus NVIDIA's public model list, filtered to models that can review code),
+and `native_catalog`, the Native-owned catalogue of the API-key coding plans (GLM,
+MiniMax, Kimi). Both Native catalogues carry function tools without reasoning or
+fast controls, hold at most 512 models, and Native owns their lists. Vendor labels
+and arbitrary profile IDs cannot enable discovery.
 
 An authoritative `snapshot` carries its source, physical generation, principal
 version, fetch time, expiry and the complete model/capability set. Codex retains
