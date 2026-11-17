@@ -94,6 +94,34 @@ function nonempty(value: string | undefined): value is string {
 function signalAborted(signal: AbortSignal): boolean {
   return signal.aborted;
 }
+// Where the facade was when it cut a stream after its 200 headers. The native
+// side of a stop has its own transport line; this one names the facade step.
+type StreamRelayPhase =
+  | "relay_read"
+  | "relay_chunk"
+  | "relay_write"
+  | "relay_terminal"
+  | "relay_not_completed";
+// Local on purpose: the facade boundary may not import transport diagnostics.
+// Only the closed phase, kernel code and request reference leave the process.
+function emitStreamRelayFailure(
+  phase: StreamRelayPhase,
+  error: unknown,
+  requestRef: string | undefined,
+): void {
+  try {
+    console.error(
+      JSON.stringify({
+        event: "gateway_facade_stream_failure",
+        phase,
+        ...(error instanceof KernelError ? { kernel_code: error.code } : {}),
+        ...(requestRef === undefined ? {} : { request_ref: requestRef }),
+      }),
+    );
+  } catch {
+    /* Diagnostics never replace the abort or the unknown effect. */
+  }
+}
 export interface NativeEnrollment {
   readonly originRef: string;
   readonly engineIncarnation: string;
@@ -599,6 +627,7 @@ export function createFacade(options: FacadeOptions): Server {
       });
       let enteredTransport = false,
         uncertain = false;
+      let relayPhase: StreamRelayPhase | undefined;
       let transportScope: { context: TrustedContext; ref: string; id: string } | undefined;
       const markUnknown = async (): Promise<void> => {
         if (transportScope && enrollment && enteredTransport) {
@@ -1424,7 +1453,9 @@ export function createFacade(options: FacadeOptions): Server {
                 });
                 res.flushHeaders();
                 let output = 0;
+                relayPhase = "relay_read";
                 for await (const chunk of result.body) {
+                  relayPhase = "relay_chunk";
                   capture.push(chunk);
                   output += chunk.byteLength;
                   if (
@@ -1435,15 +1466,19 @@ export function createFacade(options: FacadeOptions): Server {
                   ) {
                     throw new KernelError("unknown");
                   }
+                  relayPhase = "relay_write";
                   if (!res.write(chunk)) {
                     await once(res, "drain", { signal: controller.signal });
                   }
+                  relayPhase = "relay_read";
                 }
                 // New data admission cannot take EOF away from an accepted effect.
+                relayPhase = "relay_terminal";
                 const terminal = await inServiceLane("control", () =>
                   kernel.request(context, ref, identity.requestRef!),
                 );
                 if (terminal.effect !== "completed" || signalAborted(controller.signal)) {
+                  relayPhase = "relay_not_completed";
                   throw new KernelError("unknown");
                 }
                 finished = true;
@@ -2119,6 +2154,12 @@ export function createFacade(options: FacadeOptions): Server {
           throw new KernelError("invalid");
         })()
           .catch(async (error: unknown) => {
+            // The caller going away destroys the response first; that stop is not
+            // a Gateway failure (native records it). Only a started response that
+            // is still open when the facade cuts it gets a line.
+            if (relayPhase !== undefined && res.headersSent && !res.destroyed) {
+              emitStreamRelayFailure(relayPhase, error, identity.requestRef);
+            }
             await markUnknown();
             if (res.headersSent || res.destroyed) {
               controller.abort();

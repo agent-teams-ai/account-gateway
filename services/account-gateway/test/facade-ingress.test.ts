@@ -1632,11 +1632,19 @@ void test(
     }
   },
 );
+function facadeStreamFailures(records: readonly string[]) {
+  return records
+    .filter((record) => record.includes("gateway_facade_stream_failure"))
+    .map((record) => JSON.parse(record) as Record<string, unknown>);
+}
+// A started stream the Gateway cuts itself must leave one closed-phase line.
 void test(
   "source HTTP: admitted quiet stream still expires at its saved deadline",
   { timeout: 5000 },
-  async () => {
-    const { f, submit } = await quietStreamFixture(2600, 2000);
+  async (t) => {
+    const records: string[] = [];
+    t.mock.method(console, "error", (record: string) => records.push(record));
+    const { f, submit, headers } = await quietStreamFixture(2600, 2000);
     try {
       const started = Date.now();
       const response = await submit();
@@ -1644,6 +1652,14 @@ void test(
       await assert.rejects(response.text());
       assert.ok(Date.now() - started >= 1200, "ingress idle must not replace the saved deadline");
       await assertNativeStreamCancelled(f);
+      assert.deepEqual(facadeStreamFailures(records), [
+        {
+          event: "gateway_facade_stream_failure",
+          phase: "relay_read",
+          kernel_code: "unavailable",
+          request_ref: headers["x-gateway-request-id"],
+        },
+      ]);
     } finally {
       await f.close();
     }
@@ -1652,7 +1668,9 @@ void test(
 void test(
   "source HTTP: caller cancellation still closes an admitted quiet stream",
   { timeout: 5000 },
-  async () => {
+  async (t) => {
+    const records: string[] = [];
+    t.mock.method(console, "error", (record: string) => records.push(record));
     const { f, submit } = await quietStreamFixture(800);
     try {
       const controller = new AbortController();
@@ -1661,6 +1679,15 @@ void test(
       controller.abort();
       await assert.rejects(response.text());
       await assertNativeStreamCancelled(f);
+      // Let the facade finish its own catch path before checking for silence.
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 100);
+      });
+      assert.deepEqual(
+        facadeStreamFailures(records),
+        [],
+        "the caller going away is not a Gateway failure",
+      );
     } finally {
       await f.close();
     }
