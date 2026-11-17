@@ -20,7 +20,6 @@ export type NativeFailurePhase =
   | "settle_not_completed"
   | "settle_effect_conflict"
   | "settle_ack"
-  | "facade_terminal_not_completed"
   | "callback_input"
   | "callback_authentication"
   | "callback_body"

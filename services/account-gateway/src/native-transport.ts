@@ -152,6 +152,12 @@ export class NativeHTTPTransport implements NativeTransport {
     if (interrupted) {
       await this.#unknown(a);
     } else if (!r.lifetime.entered) {
+      // A settlement that is not completed is visible here, so the facade's
+      // later terminal check needs no line of its own.
+      if (diagnostic) {
+        diagnostic.phase = "settle_not_completed";
+        emitNativeFailure("transport", undefined, diagnostic);
+      }
       // An authenticated positive no-entry receipt spends the original claim;
       // neither HTTP failure nor missing readback is a non-entry fact.
       if (status.effect === "dispatch_started") {
@@ -333,7 +339,7 @@ export class NativeHTTPTransport implements NativeTransport {
           // readback; an uncertain first claim is conservatively fenced.
           await inServiceLane("control", () => authority.reclaimDenied(a));
         } else {
-          await inServiceLane("control", () => this.#settle(a, undefined, false, diagnostic));
+          await inServiceLane("control", () => this.#settle(a));
         }
         finished = true;
         hop.abort();
