@@ -109,15 +109,32 @@ export class NativeHTTPTransport implements NativeTransport {
     a.closeRef ??= randomUUID();
     await this.#authority.kernel.close(a.context, a.closeRef, a.saved.admission.executionRef);
   }
-  async #settle(a: Association, initial?: Receipt, interrupted = false): Promise<void> {
+  // `diagnostic` follows the settlement stage for the caller's failure line. A
+  // settlement that ends effect_unknown without throwing reports its own line.
+  // Cancellation (`interrupted`) is expected and passes no diagnostic.
+  async #settle(
+    a: Association,
+    initial?: Receipt,
+    interrupted = false,
+    diagnostic?: NativeFailureContext,
+  ): Promise<void> {
     const authority = this.#authority,
-      cfg = authority.configuration,
-      p = await this.#recover(a);
+      cfg = authority.configuration;
+    if (diagnostic) {
+      diagnostic.phase = "settle_recovery";
+    }
+    const p = await this.#recover(a);
     if (!p) {
       if (a.admitStarted) {
+        if (diagnostic) {
+          emitNativeFailure("transport", undefined, diagnostic);
+        }
         await this.#unknown(a);
       }
       return;
+    }
+    if (diagnostic) {
+      diagnostic.phase = "settle_closure_wait";
     }
     let r = initial;
     const deadline = Date.now() + cfg.closureWaitMs;
@@ -135,6 +152,12 @@ export class NativeHTTPTransport implements NativeTransport {
     if (interrupted) {
       await this.#unknown(a);
     } else if (!r.lifetime.entered) {
+      // A settlement that is not completed is visible here, so the facade's
+      // later terminal check needs no line of its own.
+      if (diagnostic) {
+        diagnostic.phase = "settle_not_completed";
+        emitNativeFailure("transport", undefined, diagnostic);
+      }
       // An authenticated positive no-entry receipt spends the original claim;
       // neither HTTP failure nor missing readback is a non-entry fact.
       if (status.effect === "dispatch_started") {
@@ -147,8 +170,16 @@ export class NativeHTTPTransport implements NativeTransport {
       const current = await authority.kernel.request(a.context, p.executionRef, p.requestRef);
       if (current.effect === "response_started") {
         await a.callback.effect(p, "completed");
+      } else if (current.effect !== "completed" && diagnostic) {
+        // Native completed, but the recorded effect moved elsewhere meanwhile.
+        diagnostic.phase = "settle_effect_conflict";
+        emitNativeFailure("transport", undefined, diagnostic);
       }
     } else {
+      if (diagnostic) {
+        diagnostic.phase = "settle_not_completed";
+        emitNativeFailure("transport", undefined, diagnostic);
+      }
       await this.#unknown(a);
     }
     if (a.callback.usage) {
@@ -164,6 +195,9 @@ export class NativeHTTPTransport implements NativeTransport {
     }
     // The Go ack-owner performs the authenticated Node closure callback. Only
     // that callback durably releases SQL occupancy; EOF does not call closed().
+    if (diagnostic) {
+      diagnostic.phase = "settle_ack";
+    }
     if (a.ackStarted ?? false) {
       return denied();
     } // No automatic replay of an uncertain ACK.
@@ -325,7 +359,7 @@ export class NativeHTTPTransport implements NativeTransport {
       ) {
         return denied();
       }
-      const settleStream = () => this.#settle(a);
+      const settleStream = () => this.#settle(a, undefined, false, diagnostic);
       const active = hop;
       const isCanceled = () => a.signal.aborted || cancellation !== undefined;
       return {
@@ -334,42 +368,65 @@ export class NativeHTTPTransport implements NativeTransport {
         body: (async function* () {
           let size = 0,
             started = false;
+          // Each early stop names its own closed phase; a body read error stays
+          // stream_read. No chunk, header or error text enters the line.
+          diagnostic.phase = "stream_read";
           try {
             for await (const chunk of response) {
               if (isCanceled()) {
+                diagnostic.phase = "stream_canceled";
                 return denied();
               }
               if (!(chunk instanceof Uint8Array)) {
+                diagnostic.phase = "stream_chunk";
                 return denied();
               }
               size += chunk.byteLength;
               if (size > a.saved.admission.limits.outputBytes) {
+                diagnostic.phase = "stream_output_limit";
                 return denied();
               }
               if (!started && chunk.byteLength) {
                 started = true;
+                diagnostic.phase = "stream_response_started";
                 const current = await inServiceLane("control", () =>
                   authority.kernel.request(a.context, a.saved.admission.executionRef, a.requestId),
                 );
                 if (current.effect === "dispatch_started") {
                   await a.callback.effect(a.proof!, "response_started");
                 }
+                diagnostic.phase = "stream_read";
               }
               // IncomingMessage iteration may coalesce reads beyond its high-water
               // mark. Deliver bounded copies only as the facade pulls each slice.
               for (let offset = 0; offset < chunk.byteLength; offset += streamChunkBytes) {
                 if (isCanceled()) {
+                  diagnostic.phase = "stream_canceled";
                   return denied();
                 }
                 yield new Uint8Array(chunk.subarray(offset, offset + streamChunkBytes));
               }
             }
-            if (!response.complete || isCanceled()) {
+            if (isCanceled()) {
+              diagnostic.phase = "stream_canceled";
+              return denied();
+            }
+            if (!response.complete) {
+              diagnostic.phase = "stream_incomplete";
               return denied();
             }
             await inServiceLane("control", settleStream);
             finished = true;
-          } catch {
+          } catch (error) {
+            // A stop after cancellation is the caller going away (native logs it
+            // as sse_read) unless the admitted absolute deadline has passed.
+            const canceled = diagnostic.phase === "stream_canceled" || isCanceled();
+            if (canceled && instant(a.saved.admission.expiresAt) <= now()) {
+              diagnostic.phase = "stream_deadline";
+            }
+            if (!canceled || diagnostic.phase === "stream_deadline") {
+              emitNativeFailure("transport", error, diagnostic);
+            }
             await uncertain().catch(() => {});
             throw new KernelError("unavailable");
           } finally {

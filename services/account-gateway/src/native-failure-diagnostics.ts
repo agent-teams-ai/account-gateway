@@ -7,6 +7,19 @@ export type NativeFailurePhase =
   | "native_post"
   | "native_response"
   | "receipt_recovery"
+  // Streaming body and its settlement: each early stop has its own phase.
+  | "stream_read"
+  | "stream_canceled"
+  | "stream_deadline"
+  | "stream_chunk"
+  | "stream_output_limit"
+  | "stream_response_started"
+  | "stream_incomplete"
+  | "settle_recovery"
+  | "settle_closure_wait"
+  | "settle_not_completed"
+  | "settle_effect_conflict"
+  | "settle_ack"
   | "callback_input"
   | "callback_authentication"
   | "callback_body"
@@ -25,6 +38,9 @@ export type NativeFailurePhase =
 export interface NativeFailureContext {
   phase: NativeFailurePhase;
   requestRef?: string;
+  // One line per context: the first reported phase is the cause, and a later
+  // cleanup failure in the same request does not add a second line.
+  reported?: boolean;
 }
 export function emitNativeFailure(
   kind: "transport" | "callback",
@@ -32,6 +48,10 @@ export function emitNativeFailure(
   diagnostic: NativeFailureContext,
   httpStatus?: number,
 ): void {
+  if (diagnostic.reported === true) {
+    return;
+  }
+  diagnostic.reported = true;
   try {
     const code = error instanceof KernelError ? error.code : undefined;
     console.error(
