@@ -919,9 +919,22 @@ const accountModelDiscoveryProfiles = Object.freeze([
     authKind: "api_key",
     source: "nvidia",
   } as const),
-  // Native owns the qualified GLM catalogue; the Gateway only carries its contract.
+  // Native owns the catalogue of the API-key coding plans (static documented lower
+  // bound plus the provider's live list); the Gateway only carries its contract.
   Object.freeze({
     profileId: "glm-coding-global-responses-apikey-v1",
+    protocol: "openai-responses",
+    authKind: "api_key",
+    source: "native_catalog",
+  } as const),
+  Object.freeze({
+    profileId: "minimax-mplan-global-responses-apikey-v1",
+    protocol: "openai-responses",
+    authKind: "api_key",
+    source: "native_catalog",
+  } as const),
+  Object.freeze({
+    profileId: "kimi-code-global-responses-apikey-v1",
     protocol: "openai-responses",
     authKind: "api_key",
     source: "native_catalog",

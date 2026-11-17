@@ -143,17 +143,14 @@ void test("GLM native catalogue admits only the anchor when the catalogue is una
   assert.equal(admitted.enforceCapabilities, true);
 });
 
-void test("only the GLM coding plan resolves to the native_catalog source through the registry", () => {
-  assert.equal(
-    configuredAccountModelSource("glm-coding-global-responses-apikey-v1"),
-    "native_catalog",
-  );
+void test("the API-key coding plans resolve to the native_catalog source through the registry", () => {
   for (const profileId of [
+    "glm-coding-global-responses-apikey-v1",
     "kimi-code-global-responses-apikey-v1",
     "minimax-mplan-global-responses-apikey-v1",
-    "grok-subscription-responses-oauth-v1",
   ]) {
-    assert.equal(configuredAccountModelSource(profileId), undefined, profileId);
+    assert.equal(configuredAccountModelSource(profileId), "native_catalog", profileId);
   }
+  assert.equal(configuredAccountModelSource("grok-subscription-responses-oauth-v1"), undefined);
   assert.equal(configuredAccountModelSource("nvidia-build-chat-apikey-v1"), "nvidia");
 });

@@ -216,20 +216,23 @@ void test("NVIDIA model discovery is a closed one-model, API-key-only account so
   );
 });
 
-void test("GLM native catalogue is a closed API-key source without reasoning or fast controls", () => {
+void test("coding plan native catalogue is a closed API-key source without reasoning or fast controls", () => {
   const glm = accountModelDiscoveryProfile("glm-coding-global-responses-apikey-v1");
   assert.ok(glm);
   assert.equal(accountModelDiscoverySource(glm), "native_catalog");
   assert.equal(accountModelDiscoverySource({ ...glm, protocol: "openai-chat" }), undefined);
   assert.equal(accountModelDiscoverySource({ ...glm, authKind: "oauth" }), undefined);
-  // Kimi and MiniMax have no second qualified model, so they open no discovery path.
+  // The other API-key coding plans use the same native catalogue source; Grok (OAuth)
+  // and unqualified profiles open no discovery path.
   for (const profileId of [
     "kimi-code-global-responses-apikey-v1",
     "minimax-mplan-global-responses-apikey-v1",
-    "grok-subscription-responses-oauth-v1",
   ]) {
-    assert.equal(accountModelDiscoveryProfile(profileId), undefined);
+    const plan = accountModelDiscoveryProfile(profileId);
+    assert.ok(plan);
+    assert.equal(accountModelDiscoverySource(plan), "native_catalog");
   }
+  assert.equal(accountModelDiscoveryProfile("grok-subscription-responses-oauth-v1"), undefined);
   const models = ["glm-5.3-flash", "glm-5.3"].map((modelId) => ({
     modelId,
     reasoning: null,
