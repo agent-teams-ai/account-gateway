@@ -1632,12 +1632,18 @@ void test(
     }
   },
 );
-function facadeStreamFailures(records: readonly string[]) {
+function streamStopLines(records: readonly string[]) {
   return records
-    .filter((record) => record.includes("gateway_facade_stream_failure"))
+    .filter(
+      (record) =>
+        record.includes("gateway_facade_stream_failure") ||
+        record.includes("gateway_native_transport_failure"),
+    )
     .map((record) => JSON.parse(record) as Record<string, unknown>);
 }
-// A started stream the Gateway cuts itself must leave one closed-phase line.
+// One stop, one line: the transport already names a stop in the body it
+// streams (its phase depends on timing at the deadline), so the facade adds no
+// second line for the same stop.
 void test(
   "source HTTP: admitted quiet stream still expires at its saved deadline",
   { timeout: 5000 },
@@ -1652,14 +1658,10 @@ void test(
       await assert.rejects(response.text());
       assert.ok(Date.now() - started >= 1200, "ingress idle must not replace the saved deadline");
       await assertNativeStreamCancelled(f);
-      assert.deepEqual(facadeStreamFailures(records), [
-        {
-          event: "gateway_facade_stream_failure",
-          phase: "relay_read",
-          kernel_code: "unavailable",
-          request_ref: headers["x-gateway-request-id"],
-        },
-      ]);
+      assert.deepEqual(
+        streamStopLines(records).map((line) => [line.event, line.request_ref]),
+        [["gateway_native_transport_failure", headers["x-gateway-request-id"]]],
+      );
     } finally {
       await f.close();
     }
@@ -1684,7 +1686,7 @@ void test(
         setTimeout(resolve, 100);
       });
       assert.deepEqual(
-        facadeStreamFailures(records),
+        streamStopLines(records),
         [],
         "the caller going away is not a Gateway failure",
       );

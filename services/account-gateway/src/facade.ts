@@ -94,14 +94,10 @@ function nonempty(value: string | undefined): value is string {
 function signalAborted(signal: AbortSignal): boolean {
   return signal.aborted;
 }
-// Where the facade was when it cut a stream after its 200 headers. The native
-// side of a stop has its own transport line; this one names the facade step.
-type StreamRelayPhase =
-  | "relay_read"
-  | "relay_chunk"
-  | "relay_write"
-  | "relay_terminal"
-  | "relay_not_completed";
+// The facade's own step when it cuts a stream after its 200 headers. A stop in
+// the transport body or settlement already has its transport line, so pulling
+// the next chunk and a settlement that is not completed get no phase here.
+type StreamRelayPhase = "relay_chunk" | "relay_write" | "relay_terminal";
 // Local on purpose: the facade boundary may not import transport diagnostics.
 // Only the closed phase, kernel code and request reference leave the process.
 function emitStreamRelayFailure(
@@ -1453,7 +1449,6 @@ export function createFacade(options: FacadeOptions): Server {
                 });
                 res.flushHeaders();
                 let output = 0;
-                relayPhase = "relay_read";
                 for await (const chunk of result.body) {
                   relayPhase = "relay_chunk";
                   capture.push(chunk);
@@ -1470,7 +1465,7 @@ export function createFacade(options: FacadeOptions): Server {
                   if (!res.write(chunk)) {
                     await once(res, "drain", { signal: controller.signal });
                   }
-                  relayPhase = "relay_read";
+                  relayPhase = undefined;
                 }
                 // New data admission cannot take EOF away from an accepted effect.
                 relayPhase = "relay_terminal";
@@ -1478,7 +1473,9 @@ export function createFacade(options: FacadeOptions): Server {
                   kernel.request(context, ref, identity.requestRef!),
                 );
                 if (terminal.effect !== "completed" || signalAborted(controller.signal)) {
-                  relayPhase = "relay_not_completed";
+                  if (terminal.effect !== "completed") {
+                    relayPhase = undefined;
+                  }
                   throw new KernelError("unknown");
                 }
                 finished = true;

@@ -1166,10 +1166,19 @@ void test("missing protected composition, expired worker, policy fence and resto
     await f.stop();
   }
 });
-void test("output byte cap and stream cancellation classify unknown and retain occupied native transport", async () => {
+// The overflow is the facade's own cut after its headers: one closed-phase
+// line with no error text. A caller cancellation stays silent.
+void test("output byte cap and stream cancellation classify unknown and retain occupied native transport", async (t) => {
+  const records: string[] = [];
+  t.mock.method(console, "error", (record: string) => records.push(record));
+  const facadeLines = () =>
+    records
+      .filter((record) => record.includes("gateway_facade_stream_failure"))
+      .map((record) => JSON.parse(record) as Record<string, unknown>);
   for (const mode of ["overflow", "held"] as const) {
     const f = await fixture(mode);
     try {
+      records.length = 0;
       const request = f.request(),
         result = await f.execution.request(f.executionRef, request);
       assert.equal(result.kind, "stream");
@@ -1203,6 +1212,19 @@ void test("output byte cap and stream cancellation classify unknown and retain o
         true,
       );
       assert.ok(f.stats().cancelled > 0);
+      assert.deepEqual(
+        facadeLines(),
+        mode === "overflow"
+          ? [
+              {
+                event: "gateway_facade_stream_failure",
+                phase: "relay_chunk",
+                kernel_code: "unknown",
+                request_ref: request.requestId,
+              },
+            ]
+          : [],
+      );
     } finally {
       await f.stop();
     }
