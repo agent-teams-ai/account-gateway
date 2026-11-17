@@ -194,6 +194,7 @@ async function fixture(reply: (res: ServerResponse, req: IncomingMessage) => voi
     recoveryFailure: () => {
       recoveryError = failure("unknown");
     },
+    proof: () => dispatchProof,
     // A recorded dispatch proof, so a 200 stream reaches the body and settlement.
     dispatched: () => {
       dispatchProof = {
@@ -456,6 +457,33 @@ function stream(res: ServerResponse, requestRef: string) {
     "x-private-detail": "SECRET_SENTINEL",
   });
 }
+// A valid owner receipt whose native lifetime never reaches physical closure.
+function openReceipt(res: ServerResponse, proof: unknown) {
+  const p = proof as { executionRef: string; requestRef: string; native: unknown };
+  res.writeHead(202, { "content-type": "application/json" }).end(
+    JSON.stringify({
+      consumerId: "fixture-consumer",
+      executionRef: p.executionRef,
+      requestRef: p.requestRef,
+      native: p.native,
+      proof,
+      phase: "entered",
+      effect: "effect_unknown",
+      sealed: false,
+      acknowledged: false,
+      lifetime: {
+        entered: true,
+        contextDone: false,
+        forwardingReturned: false,
+        bodyKnown: false,
+        bodyClosed: false,
+        closeFailed: false,
+        completed: false,
+        sealed: false,
+      },
+    }),
+  );
+}
 for (const [name, phase, reply] of [
   [
     "output over the admitted bytes",
@@ -482,11 +510,11 @@ for (const [name, phase, reply] of [
   [
     "a settlement whose closure never arrives",
     "settle_closure_wait",
-    (res: ServerResponse, req: IncomingMessage, ref: string) => {
+    (res: ServerResponse, req: IncomingMessage, ref: string, proof: unknown) => {
       if (req.url === transportPath) {
         stream(res, ref).end("data: SECRET_SENTINEL\n\n");
       } else {
-        res.writeHead(409).end("SECRET_SENTINEL");
+        openReceipt(res, proof);
       }
     },
   ],
@@ -495,12 +523,14 @@ for (const [name, phase, reply] of [
     const records: string[] = [];
     t.mock.method(console, "error", (record: string) => records.push(record));
     let requestRef = "";
+    let proof: unknown;
     const f = await fixture((res, req) => {
-      reply(res, req, requestRef);
+      reply(res, req, requestRef, proof);
     });
     try {
       requestRef = f.input.requestId;
       f.dispatched();
+      proof = f.proof();
       const result = await f.transport.request(f.input);
       assert.equal(result.kind, "stream");
       await assert.rejects(
