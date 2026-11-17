@@ -46,7 +46,24 @@ type UsageCounters = Pick<
 >;
 /** No observed counter is unknown usage, never a partial measurement. */
 function incompleteness(counters: UsageCounters): "unknown" | "partial" {
-  return Object.values(counters).every((value) => value === null) ? "unknown" : "partial";
+  return counters.inputTokens === null &&
+    counters.outputTokens === null &&
+    counters.cachedInputTokens === null &&
+    counters.reasoningTokens === null
+    ? "unknown"
+    : "partial";
+}
+/**
+ * Facts stored before `unknown` existed say `partial` without any counter. A
+ * replay of the same revision across that change is the same observation, not
+ * a conflict; the stored fact is kept as written.
+ */
+function sameObservation(stored: UsageObservation, fact: UsageObservation): boolean {
+  const current = (observation: UsageObservation): UsageObservation =>
+    observation.completeness === "partial"
+      ? { ...observation, completeness: incompleteness(observation) }
+      : observation;
+  return JSON.stringify(current(stored)) === JSON.stringify(current(fact));
 }
 
 /** Native counters are observations; absent values remain unknown in both paths. */
@@ -213,7 +230,7 @@ export class PostgresUsageJournal implements UsageJournal {
       );
       const previousRow = previous.rows.at(0);
       if (previousRow !== undefined) {
-        if (JSON.stringify(usageObservation.parse(previousRow.fact)) !== JSON.stringify(fact)) {
+        if (!sameObservation(usageObservation.parse(previousRow.fact), fact)) {
           throw new KernelError("conflict");
         }
       } else {
