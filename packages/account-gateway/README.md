@@ -62,9 +62,11 @@ The qualified sources are Codex OAuth over Responses, OpenRouter API keys
 over Responses, `nvidia`, the Native-owned NVIDIA Build catalogue (the qualified
 anchor plus NVIDIA's public model list, filtered to models that can review code),
 and `native_catalog`, the Native-owned catalogue of the API-key coding plans (GLM,
-MiniMax, Kimi). Both Native catalogues carry function tools without reasoning or
-fast controls, hold at most 512 models, and Native owns their lists. Vendor labels
-and arbitrary profile IDs cannot enable discovery.
+MiniMax, Kimi). Both Native catalogues hold at most 512 models and Native owns
+their lists. `native_catalog` admits only function tools without reasoning or
+fast controls; `nvidia` keeps the OpenRouter-shaped capability schema, and Native
+currently publishes it with function tools and no reasoning or fast controls.
+Vendor labels and arbitrary profile IDs cannot enable discovery.
 
 An authoritative `snapshot` carries its source, physical generation, principal
 version, fetch time, expiry and the complete model/capability set. Codex retains
