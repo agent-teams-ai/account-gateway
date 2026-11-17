@@ -187,6 +187,7 @@ import {
   executionState,
 } from "./facade-wire.ts";
 import { singleton, body, send } from "./facade-http-boundary.ts";
+import { emitNativeFailure } from "./native-failure-diagnostics.ts";
 export { cancelFacadeTransport } from "./facade-transport-cancel.ts";
 
 export function createFacade(options: FacadeOptions): Server {
@@ -1444,6 +1445,13 @@ export function createFacade(options: FacadeOptions): Server {
                   kernel.request(context, ref, identity.requestRef!),
                 );
                 if (terminal.effect !== "completed" || signalAborted(controller.signal)) {
+                  if (terminal.effect !== "completed") {
+                    // The body ended, but the recorded effect is not completed.
+                    emitNativeFailure("transport", undefined, {
+                      phase: "facade_terminal_not_completed",
+                      requestRef: identity.requestRef!,
+                    });
+                  }
                   throw new KernelError("unknown");
                 }
                 finished = true;

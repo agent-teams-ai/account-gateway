@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import type { Server, ServerResponse } from "node:http";
+import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { KernelError } from "../src/domain.ts";
 import type { SavedExecution } from "../src/domain.ts";
 import { NativeAuthority } from "../src/native-authority.ts";
@@ -31,18 +31,19 @@ function failure(code: KernelError["code"]) {
   error.message = "SECRET_SENTINEL";
   return error;
 }
-async function fixture(reply: (res: ServerResponse) => void) {
+async function fixture(reply: (res: ServerResponse, req: IncomingMessage) => void) {
   let posts = 0,
     claims = 0;
   const closeFences = new Set<string>();
   let prepareError: KernelError | undefined, recoveryError: KernelError | undefined;
+  let dispatchProof: unknown;
   const native = createServer((req, res) => {
     void (async () => {
       for await (const _ of req) {
         /* Drain fixture input. */
       }
       posts++;
-      reply(res);
+      reply(res, req);
     })();
   });
   const origin = await listen(native);
@@ -87,6 +88,10 @@ async function fixture(reply: (res: ServerResponse) => void) {
       if (recoveryError) {
         throw recoveryError;
       }
+      return dispatchProof;
+    },
+    async request() {
+      return { effect: "response_started" };
     },
     async close(_context: unknown, closeRef: string) {
       closeFences.add(closeRef);
@@ -188,6 +193,21 @@ async function fixture(reply: (res: ServerResponse) => void) {
     },
     recoveryFailure: () => {
       recoveryError = failure("unknown");
+    },
+    // A recorded dispatch proof, so a 200 stream reaches the body and settlement.
+    dispatched: () => {
+      dispatchProof = {
+        executionRef: saved.admission.executionRef,
+        requestRef: input.requestId,
+        worker,
+        token: "fixture-proof",
+        native: {
+          originRef: "fixture-origin",
+          engineIncarnation: "fixture-engine",
+          requestNonce: randomUUID(),
+          generation,
+        },
+      };
     },
     async unauthenticatedCallback() {
       return fetch(callbackOrigin + "/private/native/v1/admit", {
@@ -423,6 +443,123 @@ void test("public execution authority preserves its HTTP503 refusal without logg
     );
     assert.deepEqual(f.counts(), { posts: 0, closeFences: 0, claims: 0 });
     assert.equal(records.join("").includes("SECRET_SENTINEL"), false);
+  } finally {
+    await f.stop();
+  }
+});
+
+const transportPath = "/private/native/v1/transports";
+function stream(res: ServerResponse, requestRef: string) {
+  return res.writeHead(200, {
+    "content-type": "text/event-stream",
+    "x-gateway-request-ref": requestRef,
+    "x-private-detail": "SECRET_SENTINEL",
+  });
+}
+for (const [name, phase, reply] of [
+  [
+    "output over the admitted bytes",
+    "stream_output_limit",
+    (res: ServerResponse, req: IncomingMessage, ref: string) => {
+      if (req.url === transportPath) {
+        stream(res, ref).end("x".repeat(5000));
+      } else {
+        res.writeHead(409).end();
+      }
+    },
+  ],
+  [
+    "a body cut before its end",
+    "stream_read",
+    (res: ServerResponse, req: IncomingMessage, ref: string) => {
+      if (req.url === transportPath) {
+        stream(res, ref).write("data: SECRET_SENTINEL\n\n", () => res.socket?.destroy());
+      } else {
+        res.writeHead(409).end();
+      }
+    },
+  ],
+  [
+    "a settlement whose closure never arrives",
+    "settle_closure_wait",
+    (res: ServerResponse, req: IncomingMessage, ref: string) => {
+      if (req.url === transportPath) {
+        stream(res, ref).end("data: SECRET_SENTINEL\n\n");
+      } else {
+        res.writeHead(409).end("SECRET_SENTINEL");
+      }
+    },
+  ],
+] as const) {
+  void test("a stopped stream names its phase: " + name, async (t) => {
+    const records: string[] = [];
+    t.mock.method(console, "error", (record: string) => records.push(record));
+    let requestRef = "";
+    const f = await fixture((res, req) => {
+      reply(res, req, requestRef);
+    });
+    try {
+      requestRef = f.input.requestId;
+      f.dispatched();
+      const result = await f.transport.request(f.input);
+      assert.equal(result.kind, "stream");
+      await assert.rejects(
+        (async () => {
+          for await (const _ of result.body) {
+            /* Drain like the facade. */
+          }
+        })(),
+        { code: "unavailable", message: "unavailable" },
+      );
+      const rows = records.map((record) => JSON.parse(record) as Record<string, unknown>);
+      assert.deepEqual(
+        rows.filter((row) => row.event === "gateway_native_transport_failure"),
+        [
+          {
+            event: "gateway_native_transport_failure",
+            phase,
+            ...(phase === "stream_read" ? {} : { kernel_code: "denied" }),
+            request_ref: f.input.requestId,
+          },
+        ],
+      );
+      assert.equal(records.join("").includes("SECRET_SENTINEL"), false);
+    } finally {
+      await f.stop();
+    }
+  });
+}
+
+void test("a caller that cancels its stream is not logged as a transport failure", async (t) => {
+  const records: string[] = [];
+  t.mock.method(console, "error", (record: string) => records.push(record));
+  let requestRef = "";
+  const f = await fixture((res, req) => {
+    if (req.url === transportPath) {
+      stream(res, requestRef).end("data: SECRET_SENTINEL\n\n");
+    } else {
+      res.writeHead(409).end();
+    }
+  });
+  try {
+    requestRef = f.input.requestId;
+    f.dispatched();
+    const caller = new AbortController();
+    const result = await f.transport.request({ ...f.input, signal: caller.signal });
+    assert.equal(result.kind, "stream");
+    caller.abort();
+    await assert.rejects(
+      (async () => {
+        for await (const _ of result.body) {
+          /* Drain like the facade. */
+        }
+      })(),
+      { code: "unavailable" },
+    );
+    assert.deepEqual(
+      records.filter((record) => record.includes("gateway_native_transport_failure")),
+      [],
+    );
   } finally {
     await f.stop();
   }
