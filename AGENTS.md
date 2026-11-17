@@ -40,8 +40,10 @@
   contracts, identity, fences and policy, and its own admission checks stay.
   Reuse an existing Sub2API capability before writing anything; if it is
   missing, extend the fork. A model joins a catalog only with evidence it
-  belongs to the plan, and the catalog has exactly one source in native.
-  Design: `ai-docs/architecture/64-gateway-native-ownership-and-model-catalog.md`
+  belongs to the plan, except where the owner chose the provider's own list
+  (the coding plans and NVIDIA Build), and the catalog has exactly one source
+  in native. Design: `ai-docs/architecture/64-gateway-native-ownership-and-model-catalog.md`,
+  `65-live-coding-plan-model-catalog.md` and `68-nvidia-live-model-catalog.md`
   in the ReviewRouter repository (777genius/review-router-ai).
 
 Use [docs/.agents/skills/docs-authoring/SKILL.md](docs/.agents/skills/docs-authoring/SKILL.md) for documentation.

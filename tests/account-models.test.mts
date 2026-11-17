@@ -167,7 +167,7 @@ void test("model discovery recognizes only qualified protocol/auth identities", 
   assert.equal(accountModelDiscoverySource(codex), "codex");
 });
 
-void test("NVIDIA model discovery is a closed one-model, API-key-only account source", () => {
+void test("NVIDIA model discovery is a bounded, API-key-only Native catalogue source", () => {
   const nvidia = accountModelDiscoveryProfile("nvidia-build-chat-apikey-v1");
   assert.ok(nvidia);
   assert.equal(accountModelDiscoverySource(nvidia), "nvidia");
@@ -193,6 +193,12 @@ void test("NVIDIA model discovery is a closed one-model, API-key-only account so
     models,
   };
   assert.equal(accountModels.safeParse(snapshot).success, true);
+  // Native publishes the anchor plus NVIDIA's filtered public list, up to 512 models.
+  const listed = (count: number) =>
+    Array.from({ length: count }, (_, i) => ({ ...models[0], modelId: `vendor/model-${i}` }));
+  assert.equal(accountModels.safeParse({ ...snapshot, models: listed(512) }).success, true);
+  assert.equal(accountModels.safeParse({ ...snapshot, models: listed(513) }).success, false);
+  assert.equal(accountModels.safeParse({ ...snapshot, models: [] }).success, false);
   assert.equal(
     accountModels.safeParse({ ...snapshot, models: [...models, models[0]] }).success,
     false,
@@ -276,13 +282,12 @@ void test("coding plan native catalogue is a closed API-key source without reaso
     }).success,
     false,
   );
-  assert.equal(
-    accountModels.safeParse({
-      ...snapshot,
-      models: Array.from({ length: 9 }, (_, i) => ({ ...models[0], modelId: `glm-x-${i}` })),
-    }).success,
-    false,
-  );
+  // The former 8-model limit is gone; 512 is the technical bound.
+  const listed = (count: number) =>
+    Array.from({ length: count }, (_, i) => ({ ...models[0], modelId: `glm-x-${i}` }));
+  assert.equal(accountModels.safeParse({ ...snapshot, models: listed(9) }).success, true);
+  assert.equal(accountModels.safeParse({ ...snapshot, models: listed(512) }).success, true);
+  assert.equal(accountModels.safeParse({ ...snapshot, models: listed(513) }).success, false);
   assert.equal(accountModels.safeParse({ ...snapshot, extra: true }).success, false);
 });
 

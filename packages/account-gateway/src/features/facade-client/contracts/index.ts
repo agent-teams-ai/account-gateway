@@ -991,6 +991,10 @@ const accountModelSnapshot = z.strictObject({
 });
 const distinctModels = (models: readonly { modelId: string }[]) =>
   new Set(models.map((model) => model.modelId)).size === models.length;
+// Native owns the NVIDIA and coding plan catalogues: the anchor and static models
+// plus the provider's live list. This is a technical bound against abuse, not a
+// product limit on how many models a plan may offer.
+const NATIVE_ACCOUNT_MODELS_MAXIMUM = 512;
 const validSnapshotPeriod = (snapshot: { fetchedAt: string; expiresAt: string }) =>
   Date.parse(snapshot.fetchedAt) < Date.parse(snapshot.expiresAt);
 export const accountModels = z.union([
@@ -1009,14 +1013,23 @@ export const accountModels = z.union([
   accountModelSnapshot
     .extend({
       source: z.literal("nvidia"),
-      // One tested sandbox model; never claim entitlement to another NVIDIA model.
-      models: z.array(openRouterAccountModelCapability).length(1).refine(distinctModels),
+      // The qualified anchor first, then NVIDIA's public list filtered by Native to
+      // models that can review code. The list is not proof of trial entitlement.
+      models: z
+        .array(openRouterAccountModelCapability)
+        .min(1)
+        .max(NATIVE_ACCOUNT_MODELS_MAXIMUM)
+        .refine(distinctModels),
     })
     .refine(validSnapshotPeriod),
   accountModelSnapshot
     .extend({
       source: z.literal("native_catalog"),
-      models: z.array(nativeCatalogAccountModelCapability).min(1).max(8).refine(distinctModels),
+      models: z
+        .array(nativeCatalogAccountModelCapability)
+        .min(1)
+        .max(NATIVE_ACCOUNT_MODELS_MAXIMUM)
+        .refine(distinctModels),
     })
     .refine(validSnapshotPeriod),
   z.strictObject({ status: z.literal("unknown") }),
