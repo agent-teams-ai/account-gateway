@@ -432,7 +432,11 @@ void test("qualified profile identity names the vendor and plan for consumers", 
       assert.ok(identity, profileId);
       assert.equal(providerIdentity.safeParse(identity.provider.identity).success, true);
       assert.equal(providerPlanIdentity.safeParse(identity.plan.identity).success, true);
-      assert.ok(Object.isFrozen(identity) && Object.isFrozen(identity.provider));
+      assert.ok(
+        Object.isFrozen(identity) &&
+          Object.isFrozen(identity.provider) &&
+          Object.isFrozen(identity.plan),
+      );
       return [profileId, `${identity.provider.identity}/${identity.plan.identity}`];
     }),
   );

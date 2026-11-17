@@ -49,10 +49,12 @@ for current gate results and root documentation adoption prerequisites.
 
 ## Provider identity and usage completeness
 
-`providerConnectionIdentity(profileId)` returns the public vendor
-(`providerIdentity`) and plan (`providerPlanIdentity`) of a qualified profile, or
-`undefined` for an unqualified one; `providerConnectionIdentities` lists all of
-them. The service connection registry and the
+`providerConnectionIdentity(profileId)` from `/contracts` (also on the package
+root) returns `{ profileId, provider: { identity, label }, plan: { identity, label } }`
+for a qualified profile, or `undefined` for an unqualified one. The vendor is
+`provider.identity` (a `providerIdentity` value) and the plan is `plan.identity`
+(a `providerPlanIdentity` value). `providerConnectionIdentities`, exported from
+`/contracts` only, lists all of them. The service connection registry and the
 `provider-connections/v1` capabilities take these values from it, so a consumer
 can name the provider of a recorded profile (usage attribution, display) without
 its own copy. The `native_catalog` discovery source names the catalogue owner,
