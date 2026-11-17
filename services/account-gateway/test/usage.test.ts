@@ -319,6 +319,60 @@ void test("fallback SSE discards contradictory cache and reasoning subdivisions 
   });
 });
 
+void test("journal treats a legacy counter-less partial replay as the same unknown observation", async () => {
+  const stored = {
+    schemaVersion: 1,
+    eventId: "event",
+    revision: 2,
+    executionRef: "00000000-0000-4000-8000-000000000001",
+    requestRef: "request",
+    invocationRef: "invocation",
+    attemptRef: "attempt",
+    accountRef: "account",
+    profileId: "profile",
+    model: "model",
+    occurredAt: "2026-10-21T00:00:00Z",
+    effect: "completed",
+    completeness: "partial",
+    inputTokens: null,
+    outputTokens: null,
+    cachedInputTokens: null,
+    reasoningTokens: null,
+    cost: null,
+  } as const;
+  let inserts = 0;
+  const client = {
+    on() {},
+    removeListener() {},
+    release() {},
+    async query(text: string) {
+      if (text.startsWith("INSERT") || text.startsWith("UPDATE")) {
+        inserts++;
+      }
+      return {
+        rows: text.includes("SELECT fact FROM ag_kernel.usage_observations")
+          ? [{ fact: stored }]
+          : [{ value: "1" }],
+      };
+    },
+  };
+  const journal = new PostgresUsageJournal(
+    { connect: async () => client } as never,
+    Buffer.alloc(32, 9),
+  );
+  await journal.append({ consumerId: "one" }, { ...stored, completeness: "unknown" });
+  assert.equal(inserts, 0);
+  const original = console.error;
+  console.error = () => {};
+  try {
+    await assert.rejects(
+      journal.append({ consumerId: "one" }, { ...stored, completeness: "unknown", model: "other" }),
+      { message: "conflict" },
+    );
+  } finally {
+    console.error = original;
+  }
+});
 void test("journal reports non-SQL append failure once without leaking vendor details", async () => {
   let attempts = 0;
   const failure = new Error("private-provider-detail");
