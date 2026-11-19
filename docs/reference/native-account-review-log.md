@@ -195,10 +195,16 @@ Preflight и фактический Action используют один исх�
 
 ### Повторная проверка CI и доказательств всех профилей
 
-Gateway `7589675` завершил package, kernel, все семь full-stack/load lanes и CodeQL успешно. RR `80bf1ea7` завершил C1, P115 и 34/34 browser captures; manifest, SHA-проверенный artifact и шесть representative PNG дополнительно проверены. Точные run IDs и границы этих receipts указаны в qualification.
+Gateway `7589675` завершил package, kernel, все семь full-stack/load lanes и [CodeQL `44532709201`](https://github.com/agent-teams-ai/account-gateway/actions/runs/44532709201) успешно. У последнего exact head `7589675`, оба Analyze jobs — SUCCESS; workflow создан GitHub по пути `dynamic/github-code-scanning/codeql`, поэтому отдельного CodeQL YAML в checkout нет. RR `80bf1ea7` завершил C1, P115 и 34/34 browser captures; manifest, SHA-проверенный artifact и шесть representative PNG дополнительно проверены. Точные run IDs и границы этих receipts указаны в qualification.
 
 Обе Node lanes native run `44532723289` завершились отказом actual CLI sandbox preflight до первого provider call. Полная поставка CLI и предыдущие native/SQL/real-client этапы прошли; generic `child_nonzero_exit` не позволяет приписать отказ конкретному механизму. Узкое продолжение добавляет закрытое распознавание известных namespace-refusal сообщений bundled bubblewrap без экспорта stderr, путей и environment. Unknown failure остаётся отказом. Docker restrictions, backend, managed policy и положительные/отрицательные preflight controls не меняются.
 
 P2 к test receipt исправлен: сохранение proof проверяется для каждого из шести профилей; отсутствие proof у любого одного профиля отклоняется. Это проверка полноты evidence validator, а не замена отсутствующего успешного actual sandbox/review flow.
 
 Диагностика опубликована в RR [`de2b59bf`](https://github.com/777genius/review-router-ai/commit/de2b59bfd3bf27b56119e25090e8277f3075cb92) после 14/14 real-child regression cases, strict TS7, форматирования и независимого ревью. Gateway pin использует эту точную ревизию. Согласованный parser и P2 regression прошли 19/19 cases; произвольные сообщения и trailing whitespace по-прежнему отклоняются.
+
+### Фактический отказ namespace и актуализация источников
+
+Обе Node lanes [run `44536600086`](https://github.com/agent-teams-ai/account-gateway/actions/runs/44536600086) на Gateway `5c4f990b`, Native `2cc5862f`, RR `de2b59bf` завершились `child_namespace_refused` до provider review. Сам helper и его полный runtime присутствуют; это подтверждённый startup outcome, не гипотеза и не квалификация всех шести профилей. Существующие native/SQL/CLI проверки сохраняют отдельные успешные receipts. Поддерживаемый execution profile с теми же controls остаётся необходимым условием; ограничения не ослаблялись.
+
+RR объединил новые main commits с двумя additive index resolutions. Account metadata/import/reconnect и новые removal permissions сохранены независимым ревью; 86 affected cases прошли до недоступности executor. Локальный TS7 retry без результата не засчитан. Gateway pin приведён к RR `3feee2acebaa4c1df59abe05f005e97ae744e653`; runtime qualification нового tuple остаётся отдельным gate. Текущий RR impact использует уже описанный checks pool с прежним fork guard; provider Docker/E2E и release runner policy не изменены.
