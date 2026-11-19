@@ -18,7 +18,7 @@ jobs:
         node: ["26.11.1", "24.21.0"]
     env:
       NPM_CONFIG_ENGINE_STRICT: "true"
-      NATIVE_COMMIT: 2d28e360b51a50c9314dadb4460d55d5b64869c8
+      NATIVE_COMMIT: 79b0e866fa32c98691f8c72018367fce9ebafb7e
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
