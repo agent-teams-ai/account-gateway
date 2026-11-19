@@ -18,7 +18,7 @@ jobs:
         node: ['26.11.1', '24.21.0']
     env:
       NPM_CONFIG_ENGINE_STRICT: 'true'
-      NATIVE_COMMIT: a19cbcbedda8eccbe82bb24224052a1e9eaab309
+      NATIVE_COMMIT: 33509e53e950f99cd7891b1ea8ded0d483ea5bf8
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -85,6 +85,9 @@ jobs:
           cd "$GATEWAY_CLIENT_ROOT/native-source/backend"
           go test -tags unit,nativecli -c ./internal/gatewaytransport -o "$GATEWAY_CLIENT_ROOT/build/native-cli.test"
           go test -c ./internal/repository -o "$GATEWAY_CLIENT_ROOT/build/native-repository.test"
+          CGO_ENABLED=0 go test -tags unit -c -ldflags='-s -w' ./internal/service -o "$GATEWAY_CLIENT_ROOT/build/native-account-info-service.test"
+          CGO_ENABLED=0 go test -tags integration -c -ldflags='-s -w' ./internal/repository -o "$GATEWAY_CLIENT_ROOT/build/native-account-info-repository.test"
+          "$GATEWAY_CLIENT_ROOT/build/native-account-info-service.test" -test.run '^TestGateway(AccountInfo|QuotaAndInfo|CodexInfo|AccountCapabilities|GeminiContinuation|NativeOfficial|NativeAnthropicSchema|NativeOAuthImport)' -test.v -test.count=1
           git diff --exit-code -- go.mod go.sum
           cat > "$GATEWAY_CLIENT_ROOT/container/Dockerfile" <<'DOCKERFILE'
           ARG PG_IMAGE
@@ -168,6 +171,19 @@ jobs:
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/joined-clients/network.json
           if-no-files-found: warn
           retention-days: 14
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ matrix.node == '26.11.1' && always() && env.GATEWAY_CLIENT_ROOT != '' }}
+        with:
+          name: native-account-feature-fixtures
+          path: |
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/native-account-info-service.test
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/native-account-info-repository.test
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/joined/native-provider-joined/fixture
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/joined/native-device-joined/fixture
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/joined/native-claude-joined/fixture
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/joined/joined-build.json
+          if-no-files-found: error
+          retention-days: 3
   native_client_gate:
     needs: native_clients
     if: ${{ always() }}

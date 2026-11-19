@@ -1,4 +1,4 @@
-// Build the two disposable joined fixtures against one clean pinned Go tree.
+// Build disposable joined fixtures against one clean pinned Go tree.
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
@@ -81,6 +81,7 @@ try {
   for (const [client, fixture] of [
     ["claude", "native-claude-joined"],
     ["codex", "native-device-joined"],
+    ["provider", "native-provider-joined"],
   ] as const) {
     const relative = "backend/tmp/" + fixture,
       generated = join(native, relative),
@@ -96,7 +97,12 @@ try {
       writeFileSync(
         join(generated, "main.go"),
         readFileSync(
-          join(repo, joinedFiles[(client + "Fixture") as "claudeFixture" | "codexFixture"]),
+          join(
+            repo,
+            joinedFiles[
+              (client + "Fixture") as "claudeFixture" | "codexFixture" | "providerFixture"
+            ],
+          ),
         ),
         { mode: 0o600, flag: "wx" },
       );

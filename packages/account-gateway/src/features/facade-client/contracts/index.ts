@@ -1119,12 +1119,12 @@ const openRouterAccountModelCapability = qualifiedModelCapability.extend({
   fast: z.null(),
   tools: modelSetting(["none", "function"] as const),
 });
-// Native rejects any reasoning setting for the protected coding plans, so the
-// catalogue can only advertise function tools without reasoning or fast controls.
+// Native publishes the exact per-profile tools. Official API adapters also
+// qualify custom tools; the wire never invents reasoning or fast controls.
 const nativeCatalogAccountModelCapability = qualifiedModelCapability.extend({
   reasoning: z.null(),
   fast: z.null(),
-  tools: modelSetting(["function"] as const),
+  tools: modelSetting(["function", "function_and_custom"] as const),
 });
 export const accountModelCapability = z.union([
   codexAccountModelCapability,

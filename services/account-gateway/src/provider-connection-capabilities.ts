@@ -47,15 +47,15 @@ export function projectProviderConnectionsV1(
         return [];
       }
       const browser = methods.find((method) => method.kind === "browser");
-      const reconnect = entry.methods.some(
-        (method) => method.kind === "api_key" && method.reconnect,
-      )
-        ? "replace_api_key"
-        : entry.methods.some(
-              (method) => ["browser", "device_code"].includes(method.kind) && method.reconnect,
-            )
-          ? "oauth_reauthorize"
-          : "none";
+      // V1 has one reconnect mode for every exposed method. A reconnect-only
+      // method or asymmetric support cannot grant that permission to another.
+      const reconnect = !methods.every((method) => method.reconnect)
+        ? "none"
+        : methods.every((method) => method.kind === "api_key")
+          ? "replace_api_key"
+          : methods.every((method) => method.kind === "browser" || method.kind === "device_code")
+            ? "oauth_reauthorize"
+            : "none";
       return [
         {
           contract: c.PROVIDER_CONNECTIONS_CONTRACT,

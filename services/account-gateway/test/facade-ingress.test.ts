@@ -231,6 +231,59 @@ void test("capability projection omits new profiles without configuration and do
     },
   ]);
 });
+void test("v1 projection only advertises reconnect shared by every exposed method", () => {
+  const browser = {
+    kind: "browser" as const,
+    create: true,
+    reconnect: false,
+    completionInputKind: "callback_url" as const,
+    callbackMode: "automatic" as const,
+  };
+  const device = { kind: "device_code" as const, create: false, reconnect: true };
+  const entry: lifecycleWire.ProviderConnectionCapabilityV2 = {
+    profileId: "openai-codex-oauth-responses-v1",
+    provider: { id: "openai", label: "OpenAI" },
+    product: { id: "subscription", label: "Subscription" },
+    region: { id: "global", label: "Global" },
+    protocol: "openai-responses",
+    models: [nativeModel("fixture-model")],
+    methods: [browser, device],
+    accountInfo: true,
+    limitsContract: "account-limits/v1",
+    availability: "enabled",
+  };
+  const project = (methods: lifecycleWire.ProviderConnectionCapabilityV2["methods"]) =>
+    projectProviderConnectionsV1({
+      contract: "provider-connections/v2",
+      capabilities: [{ ...entry, methods }],
+    }).capabilities[0];
+  const asymmetric = project([browser, device]);
+  assert.deepEqual(asymmetric.authMethods, ["oauth_authorization_code"]);
+  assert.equal(asymmetric.reconnect, "none");
+  assert.equal(project([browser, { ...device, create: true }]).reconnect, "none");
+  assert.equal(
+    project([
+      { ...browser, reconnect: true },
+      { ...device, create: true },
+    ]).reconnect,
+    "oauth_reauthorize",
+  );
+  assert.equal(
+    project([{ kind: "api_key", create: true, reconnect: false }, device]).reconnect,
+    "none",
+  );
+  assert.equal(
+    project([{ kind: "api_key", create: true, reconnect: true }]).reconnect,
+    "replace_api_key",
+  );
+  assert.equal(
+    project([
+      { kind: "api_key", create: true, reconnect: true },
+      { ...browser, reconnect: true },
+    ]).reconnect,
+    "none",
+  );
+});
 void test("Grok manual callback grammar is profile-owned and cannot select another provider", () => {
   const state = "a".repeat(64);
   assert.deepEqual(

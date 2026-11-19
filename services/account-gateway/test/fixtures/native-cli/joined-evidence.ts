@@ -34,6 +34,8 @@ export const joinedFiles = Object.freeze({
   claudeFixture: "services/account-gateway/test/fixtures/native-claude-joined/main.go",
   codexHarness: "services/account-gateway/test/native-device-joined.ts",
   codexFixture: "services/account-gateway/test/fixtures/native-device-joined/main.go",
+  providerHarness: "services/account-gateway/test/native-provider-joined.ts",
+  providerFixture: "services/account-gateway/test/fixtures/native-provider-joined/main.go",
   sdkHTTP: "packages/account-gateway/dist/http/index.js",
 });
 export const digestFile = (path: string) =>

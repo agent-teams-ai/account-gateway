@@ -998,14 +998,12 @@ void test("credential import uses existing durable create and reconnect, binds e
     }
     await assert.rejects(f.foreign().connect({ ...connect, operationId: randomUUID() }), denied);
     await assert.rejects(
-      f
-        .client()
-        .completeOAuth({
-          operationId: command.operationId,
-          ownerRef: owner,
-          callbackURL:
-            "http://localhost:1455/auth/callback?state=" + "a".repeat(64) + "&code=fixture",
-        }),
+      f.client().completeOAuth({
+        operationId: command.operationId,
+        ownerRef: owner,
+        callbackURL:
+          "http://localhost:1455/auth/callback?state=" + "a".repeat(64) + "&code=fixture",
+      }),
       denied,
     );
     await assert.rejects(
