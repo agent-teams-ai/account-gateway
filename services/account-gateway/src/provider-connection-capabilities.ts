@@ -15,11 +15,15 @@ export function projectProviderConnections(
         (candidate) =>
           candidate.profileId === profile.profileId && candidate.protocol === profile.protocol,
       );
-      if (!found) return [];
+      if (!found) {
+        return [];
+      }
       const models = profile.modelIds.map((id) =>
         found.models.find((model) => model.modelId === id),
       );
-      if (!models.length || models.some((model) => model === undefined)) return [];
+      if (!models.length || models.some((model) => model === undefined)) {
+        return [];
+      }
       return [{ ...found, models }];
     }),
   });
@@ -33,11 +37,15 @@ export function projectProviderConnectionsV1(
     contract: c.PROVIDER_CONNECTIONS_CONTRACT,
     capabilities: snapshot.capabilities.flatMap((entry) => {
       const provider = c.providerIdentity.safeParse(entry.provider.id);
-      if (!provider.success) return [];
+      if (!provider.success) {
+        return [];
+      }
       const methods = entry.methods.filter(
         (method) => method.create && method.kind !== "credential_import",
       );
-      if (!methods.length) return [];
+      if (!methods.length) {
+        return [];
+      }
       const browser = methods.find((method) => method.kind === "browser");
       const reconnect = entry.methods.some(
         (method) => method.kind === "api_key" && method.reconnect,

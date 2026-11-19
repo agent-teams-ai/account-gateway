@@ -29,11 +29,14 @@ function bounded<T>(work: Promise<T>, milliseconds: number, signal: AbortSignal)
     };
     const timer = setTimeout(abort, Math.max(0, milliseconds));
     signal.addEventListener("abort", abort, { once: true });
-    if (signal.aborted) abort();
+    if (signal.aborted) {
+      abort();
+    }
     void work.then(
       (value) => {
         clean();
         resolve(value);
+        return value;
       },
       (error: unknown) => {
         clean();
@@ -61,9 +64,13 @@ export class AccountInfoReader {
       deadline = started + 2500,
       sourceDeadline = started + 2000;
     const controller = new AbortController();
-    const cancel = () => controller.abort();
+    const cancel = () => {
+      controller.abort();
+    };
     options.signal.addEventListener("abort", cancel, { once: true });
-    if (options.signal.aborted) cancel();
+    if (options.signal.aborted) {
+      cancel();
+    }
     const sourceTimer = setTimeout(cancel, Math.max(0, sourceDeadline - Date.now()));
     const ownerKey = JSON.stringify([options.consumerId, captured.ownerRef]);
     try {
@@ -87,11 +94,17 @@ export class AccountInfoReader {
       let next = 0;
       const worker = async () => {
         for (;;) {
+          if (next >= before.length || controller.signal.aborted || !this.#source) {
+            return;
+          }
           const index = next++,
             row = before[index];
-          if (!row || controller.signal.aborted || !this.#source) return;
-          if (!row.readable || !row.generation) continue;
-          if ((this.#active.get(ownerKey) ?? 0) >= 2) return;
+          if (!row.readable || row.generation === undefined) {
+            continue;
+          }
+          if ((this.#active.get(ownerKey) ?? 0) >= 2) {
+            return;
+          }
           this.#active.set(ownerKey, (this.#active.get(ownerKey) ?? 0) + 1);
           const source = this.#source;
           const work = Promise.resolve()
@@ -108,8 +121,11 @@ export class AccountInfoReader {
             )
             .finally(() => {
               const active = (this.#active.get(ownerKey) ?? 1) - 1;
-              if (active) this.#active.set(ownerKey, active);
-              else this.#active.delete(ownerKey);
+              if (active) {
+                this.#active.set(ownerKey, active);
+              } else {
+                this.#active.delete(ownerKey);
+              }
             });
           try {
             const observed = await bounded(work, sourceDeadline - Date.now(), controller.signal);

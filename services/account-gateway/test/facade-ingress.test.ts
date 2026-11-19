@@ -117,11 +117,11 @@ void test("source HTTP: metadata traverses SDK, facade, native adapter and indep
     );
     assert.equal(f.seen.length, reads, "foreign owner cannot enter native read");
     let entered!: () => void, release!: () => void;
-    const waiting = new Promise<void>((done) => {
-      entered = done;
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
     });
-    const gate = new Promise<void>((done) => {
-      release = done;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
     });
     f.accountInfoResult(info, async () => {
       entered();
@@ -150,15 +150,15 @@ const valid = {
 const invalid = (fn: () => unknown) => {
   assert.throws(fn, (e) => e instanceof KernelError && e.code === "invalid");
 };
+const nativeModel = (
+  modelId: string,
+): lifecycleWire.ProviderConnectionCapabilityV2["models"][number] => ({
+  modelId,
+  reasoning: null,
+  fast: null,
+  tools: { allowed: ["none"], default: "none" },
+});
 void test("capability projection omits new profiles without configuration and does not invent model settings", () => {
-  const nativeModel = (
-    modelId: string,
-  ): lifecycleWire.ProviderConnectionCapabilityV2["models"][number] => ({
-    modelId,
-    reasoning: null,
-    fast: null,
-    tools: { allowed: ["none"], default: "none" },
-  });
   const snapshot = lifecycleWire.providerConnectionCapabilitiesV2.parse({
     contract: "provider-connections/v2",
     capabilities: [
@@ -1088,6 +1088,37 @@ async function sourceHTTP(
         res.writeHead(status, { "content-type": "application/json" });
         res.end(JSON.stringify(body));
       };
+      if (req.method === "GET" && path === "/private/native/v1/account-capabilities") {
+        reply({
+          contract: "native-account-capabilities/v1",
+          profiles:
+            oauth === "grok"
+              ? [
+                  {
+                    profileId: "grok-subscription-responses-oauth-v1",
+                    provider: { id: "grok", label: "Grok" },
+                    product: { id: "subscription", label: "Subscription" },
+                    region: { id: "global", label: "Global" },
+                    protocol: "openai-responses",
+                    models: [nativeModel("grok-4.7")],
+                    methods: [
+                      {
+                        kind: "browser",
+                        create: true,
+                        reconnect: true,
+                        completionInputKind: "authorization_code",
+                        callbackMode: "manual_callback_url",
+                      },
+                    ],
+                    accountInfo: true,
+                    limitsContract: "account-limits/v2",
+                    availability: "enabled",
+                  },
+                ]
+              : [],
+        });
+        return;
+      }
       if (req.method === "POST" && path === "/private/native/v1/account-info/read") {
         assert.equal(req.headers.authorization, "Bearer " + consumer.managementCredential);
         const grant = await callback("account-info-authority", { consumerId, ...tuple });

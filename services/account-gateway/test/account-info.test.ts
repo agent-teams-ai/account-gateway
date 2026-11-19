@@ -39,11 +39,11 @@ const identity = (): AccountInfoIdentity => ({
 });
 const options = () => ({ consumerId: "consumer", signal: new AbortController().signal });
 function deferred() {
-  let resolve!: () => void;
-  const promise = new Promise<void>((done) => {
-    resolve = done;
+  let complete!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    complete = resolve;
   });
-  return { promise, resolve };
+  return { promise, resolve: complete };
 }
 
 void test("independent backend shares the safe contract without native/profile imports", async () => {
@@ -105,8 +105,12 @@ void test("wrong generation, backend failure and unavailable metadata preserve a
   const rows = [identity(), identity(), identity()];
   const source: AccountInfoSource = {
     async readAccountInfo(selector) {
-      if (selector.accountRef === rows[0].accountRef) return { info, generation: "old-generation" };
-      if (selector.accountRef === rows[1].accountRef) throw new Error("private-backend-body");
+      if (selector.accountRef === rows[0].accountRef) {
+        return { info, generation: "old-generation" };
+      }
+      if (selector.accountRef === rows[1].accountRef) {
+        throw new Error("private-backend-body");
+      }
       return { info: { status: "unsupported" } };
     },
   };
@@ -136,7 +140,9 @@ void test("owner source concurrency is bounded across concurrent batches and rel
       calls++;
       running++;
       peak = Math.max(peak, running);
-      if (running === 2) entered.resolve();
+      if (running === 2) {
+        entered.resolve();
+      }
       await release.promise;
       running--;
       return { info, generation: row.generation! };

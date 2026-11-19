@@ -14,11 +14,7 @@ const text = (maximum: number) =>
     .string()
     .min(1)
     .max(maximum * 2)
-    .refine(
-      (value) =>
-        Array.from(value).length <= maximum &&
-        !/[\u0000-\u001f\u007f-\u009f\uD800-\uDFFF]/u.test(value),
-    );
+    .refine((value) => Array.from(value).length <= maximum && !/[\p{Cc}\p{Cs}]/u.test(value));
 export const accountInfoSource = z.enum([
   "provider_api",
   "verified_claim",

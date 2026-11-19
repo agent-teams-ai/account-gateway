@@ -264,6 +264,9 @@ export function facadeBoundedReadRoute(
 ): boolean {
   return (
     facadeUsageReadRoute(method, path) ||
+    (method === "GET" &&
+      (path === "/v1/provider-connection-capabilities" ||
+        path === "/v2/provider-connection-capabilities")) ||
     (method === "POST" &&
       (path === "/v1/account-info/read" ||
         path === "/v1/account-limits/read" ||

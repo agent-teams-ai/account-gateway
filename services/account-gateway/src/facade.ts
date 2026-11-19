@@ -736,13 +736,16 @@ export function createFacade(options: FacadeOptions): Server {
             if (
               (grant.role !== "consumer-control" && grant.role !== "management") ||
               !permitsOwner(grant, input.ownerRef)
-            )
+            ) {
               throw new KernelError("denied");
+            }
             const result = await accountInfo.read(
               {
                 observe: async (selector) => {
                   requireCurrent(grant);
-                  if (!kernel.accountInfoIdentities) throw new KernelError("unavailable");
+                  if (!kernel.accountInfoIdentities) {
+                    throw new KernelError("unavailable");
+                  }
                   const rows = await kernel.accountInfoIdentities(context, selector.accountRefs);
                   requireCurrent(grant);
                   if (
@@ -1586,13 +1589,18 @@ export function createFacade(options: FacadeOptions): Server {
             const visible = [...profiles.values()]
               .filter((p) => permitsProfile(grant, p.dto.profileId))
               .map((p) => p.dto);
-            if (!options.providerConnections) throw new KernelError("unavailable");
+            if (!options.providerConnections) {
+              throw new KernelError("unavailable");
+            }
             const snapshot = projectProviderConnections(
               await options.providerConnections.getProviderConnectionCapabilities(),
               visible,
             );
-            if (path.startsWith("/v2/")) reply(c.providerConnectionCapabilitiesV2, snapshot);
-            else reply(c.providerConnectionCapabilities, projectProviderConnectionsV1(snapshot));
+            if (path.startsWith("/v2/")) {
+              reply(c.providerConnectionCapabilitiesV2, snapshot);
+            } else {
+              reply(c.providerConnectionCapabilities, projectProviderConnectionsV1(snapshot));
+            }
             return;
           }
           const lifecycleGate =

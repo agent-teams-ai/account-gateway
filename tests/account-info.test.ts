@@ -187,7 +187,7 @@ void test("both account clients read the same bounded metadata contract; identit
     assert.equal(req.method, "POST");
     res.setHeader("content-type", "application/json");
     res.end(
-      JSON.stringify(wrong ? { ...payload, accounts: [...payload.accounts].reverse() } : payload),
+      JSON.stringify(wrong ? { ...payload, accounts: payload.accounts.toReversed() } : payload),
     );
   });
   server.listen(0, "127.0.0.1");
@@ -197,7 +197,7 @@ void test("both account clients read the same bounded metadata contract; identit
     server.close();
   });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   const origin = `http://127.0.0.1:${address.port}`;
   const management = createManagementClient({ role: "management", origin, token: "fixture-token" });
   const consumer = createConsumerControlClient({

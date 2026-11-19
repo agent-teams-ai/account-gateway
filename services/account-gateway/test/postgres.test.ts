@@ -371,6 +371,72 @@ async function connected(ctx: TrustedContext, kernel = a): Promise<OperationStat
     profile: c.profile,
   });
 }
+void test("metadata identities preserve requested order and fence pending reconnects across real sessions", async () => {
+  const ctx = { consumerId: "info-" + randomUUID() };
+  const first = await connected(ctx),
+    second = await connected(ctx),
+    pending = await staged(ctx);
+  const refs = [second.accountRef!, pending.accountRef!, first.accountRef!];
+  const rows = await a.accountInfoIdentities(ctx, refs);
+  assert.deepEqual(
+    rows.map((row) => row.accountRef),
+    refs,
+  );
+  assert.deepEqual(
+    rows.map((row) => row.readable),
+    [true, false, true],
+  );
+  assert.notEqual(rows[0].generation, undefined);
+  assert.notEqual(rows[0].nativePhysicalIdentity, undefined);
+  assert.equal(rows[1].generation, undefined);
+  await assert.rejects(
+    a.accountInfoIdentities({ consumerId: "foreign-" + randomUUID() }, refs),
+    (error: unknown) => error instanceof KernelError && error.code === "denied",
+  );
+  await b.beginAccount(ctx, {
+    operationId: op(),
+    kind: "reconnect",
+    intentDigest: digest(),
+    accountRef: refs[2],
+    expectedRevision: rows[2].revision,
+  });
+  const after = await a.accountInfoIdentities(ctx, refs);
+  assert.deepEqual(
+    after.map((row) => row.readable),
+    [true, false, false],
+  );
+  assert.equal(after[2].generation, rows[2].generation);
+  assert.deepEqual(await a.accountInfoIdentities(ctx, [refs[0]]), [rows[0]]);
+});
+
+void test("metadata SQL deadline cancels a locked observation and returns the pooled connection", async () => {
+  const ctx = { consumerId: "info-deadline-" + randomUUID() };
+  const account = await connected(ctx);
+  const blocker = await admin.connect();
+  try {
+    await blocker.query("BEGIN");
+    await blocker.query("LOCK TABLE ag_kernel.accounts IN ACCESS EXCLUSIVE MODE");
+    const started = Date.now();
+    await assert.rejects(
+      a.accountInfoIdentities(ctx, [account.accountRef!]),
+      (error: unknown) => error instanceof KernelError && error.code === "unavailable",
+    );
+    assert.ok(Date.now() - started < 2500, "the DB read stops inside the public metadata budget");
+    assert.equal(poolA.waitingCount, 0);
+    assert.equal((await poolA.query<{ value: number }>("SELECT 1 AS value")).rows[0].value, 1);
+    assert.equal(
+      (await poolA.query<{ statement_timeout: string }>("SHOW statement_timeout")).rows[0]
+        .statement_timeout,
+      "0",
+      "transaction-local metadata timeout must not affect other operations",
+    );
+  } finally {
+    await blocker.query("ROLLBACK");
+    blocker.release();
+  }
+  assert.equal((await a.accountInfoIdentities(ctx, [account.accountRef!]))[0].readable, true);
+});
+
 async function approval(
   ctx: TrustedContext,
   accountRef: string,

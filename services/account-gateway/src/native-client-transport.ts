@@ -16,6 +16,10 @@ export interface NativeManagementOptions {
 }
 // One concrete bounded transport shared by the two private control adapters.
 // It carries no enrollment policy and never performs a second HTTP attempt.
+function signalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
+
 export class NativeControlHTTP {
   readonly #origin: URL;
   readonly #consumer: string;
@@ -94,7 +98,9 @@ export class NativeControlHTTP {
     deadlineMs = this.#deadlineMs,
     signal?: AbortSignal,
   ): Promise<Buffer> {
-    if (signal?.aborted) throw new NativeFailure("deadline");
+    if (signalAborted(signal)) {
+      throw new NativeFailure("deadline");
+    }
     const deadline = Date.now() + Math.min(deadlineMs, this.#deadlineMs);
     let body: Buffer | undefined;
     try {
@@ -111,7 +117,7 @@ export class NativeControlHTTP {
     } catch {
       throw new NativeFailure("unavailable");
     }
-    if (Date.now() >= deadline || signal?.aborted) {
+    if (Date.now() >= deadline || signalAborted(signal)) {
       release?.();
       throw new NativeFailure("deadline");
     }
@@ -134,7 +140,9 @@ export class NativeControlHTTP {
       };
       const send = this.#origin.protocol === "https:" ? httpsRequest : httpRequest;
       let req: ReturnType<typeof httpRequest>;
-      const abort = () => finish(new NativeFailure("deadline"));
+      const abort = () => {
+        finish(new NativeFailure("deadline"));
+      };
       try {
         req = send(this.#origin, {
           method,
@@ -167,7 +175,7 @@ export class NativeControlHTTP {
       });
       req.maxHeadersCount = 65;
       signal?.addEventListener("abort", abort, { once: true });
-      if (signal?.aborted) {
+      if (signalAborted(signal)) {
         abort();
         return;
       }

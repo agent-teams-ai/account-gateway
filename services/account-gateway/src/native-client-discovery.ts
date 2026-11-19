@@ -38,8 +38,9 @@ export class NativeAccountCapabilitiesClient extends NativeControlHTTP {
         decode(await this.call("GET", "/private/native/v1/account-capabilities"), 10),
         ["contract", "profiles"],
       );
-      if (wire.contract !== "native-account-capabilities/v1")
+      if (wire.contract !== "native-account-capabilities/v1") {
         throw new NativeFailure("invalid_readback");
+      }
       return providerConnectionCapabilitiesV2.parse({
         contract: PROVIDER_CONNECTIONS_V2_CONTRACT,
         capabilities: wire.profiles,

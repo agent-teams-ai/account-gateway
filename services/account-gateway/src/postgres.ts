@@ -290,11 +290,14 @@ export class PostgresKernel implements DurableKernel {
     }
     refs.forEach(uuid);
     return this.read(context, async (tx) => {
+      // Metadata must leave time for the final whole-batch authority fence.
+      // This transaction-local timeout also bounds independent kernel consumers.
+      await tx.db.query("SET LOCAL statement_timeout = '400ms'");
       const result = await tx.db.query<
         AccountRow & {
           active_generation: string | null;
           native_identity: string | null;
-          readable: boolean;
+          readable: boolean | null;
         }
       >(
         `SELECT a.*,c.native_identity,
@@ -308,12 +311,14 @@ export class PostgresKernel implements DurableKernel {
         ORDER BY array_position($2::uuid[],a.ref)`,
         [tx.consumer, refs],
       );
-      if (result.rows.length !== refs.length) throw new KernelError("denied");
+      if (result.rows.length !== refs.length) {
+        throw new KernelError("denied");
+      }
       return result.rows.map((row) => ({
         ...accountStatus(row),
         readable: row.readable === true,
-        ...(row.active_generation ? { generation: row.active_generation } : {}),
-        ...(row.native_identity ? { nativePhysicalIdentity: row.native_identity } : {}),
+        ...(row.active_generation !== null ? { generation: row.active_generation } : {}),
+        ...(row.native_identity !== null ? { nativePhysicalIdentity: row.native_identity } : {}),
       }));
     });
   }
