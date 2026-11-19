@@ -1,0 +1,113 @@
+{
+  "startedAt": "2026-11-19T21:47:38.018108+00:00",
+  "head": "79b0e866fa32c98691f8c72018367fce9ebafb7e",
+  "tree": "533d6b0ddf3faa52bd145639914640089e507ede",
+  "version": "go version go1.27.3 linux/amd64",
+  "cwd": "/workspace/scratch/2b8ebfcf82db/research/native-anthropic-id-roundtrip-20261119/backend",
+  "command": [
+    "/workspace/scratch/2b8ebfcf82db/toolchains/go1.27.3/bin/go",
+    "test",
+    "-p=1",
+    "-tags",
+    "unit",
+    "./internal/service",
+    "-run",
+    "^(TestForwardResponses_ForceChatCompletionsRoutesNonStreamingToChatCompletions|TestForwardResponses_ForceChatCompletionsRoutesStreamingToChatCompletions|TestForwardResponses_ChatFallbackRejectsInvalidToolArgumentsAtOutputLimit|TestForwardResponses_ChatFallbackCachesStreamedReasoning|TestForwardResponses_ChatFallbackRestoresReasoningFromCache|TestForwardResponsesChatCompletionsFallbackKeepsFunctionArgumentsSingle)$",
+    "-count=1",
+    "-timeout=120s",
+    "-json"
+  ],
+  "environment": {
+    "GOTOOLCHAIN": "local",
+    "GOPROXY": "off",
+    "GOSUMDB": "off",
+    "GOVCS": "*:off",
+    "GOMAXPROCS": "2",
+    "GOMEMLIMIT": "2048MiB",
+    "GOCACHE": "/workspace/scratch/2b8ebfcf82db/toolchains/go-build-cache",
+    "GOMODCACHE": "/workspace/scratch/2b8ebfcf82db/toolchains/go-mod-cache",
+    "GOFLAGS": "-mod=readonly"
+  },
+  "expectedTests": [
+    "TestForwardResponses_ForceChatCompletionsRoutesNonStreamingToChatCompletions",
+    "TestForwardResponses_ForceChatCompletionsRoutesStreamingToChatCompletions",
+    "TestForwardResponses_ChatFallbackRejectsInvalidToolArgumentsAtOutputLimit",
+    "TestForwardResponses_ChatFallbackCachesStreamedReasoning",
+    "TestForwardResponses_ChatFallbackRestoresReasoningFromCache",
+    "TestForwardResponsesChatCompletionsFallbackKeepsFunctionArgumentsSingle"
+  ],
+  "sources": [
+    {
+      "path": "backend/internal/service/openai_gateway_responses_chat_fallback_test.go",
+      "blob": "ffd25e296424cb9f9ffd114e5b320f6c412e28bd",
+      "sha256": "1a5f543c19cd148f74d91631790d2b3a1947b2c2c457bd95da2561608af9486f"
+    },
+    {
+      "path": "backend/internal/service/openai_gateway_passthrough_function_args_test.go",
+      "blob": "85de28143ddbe9833ae0d5d9c4f496555c5ceb76",
+      "sha256": "2fe3df57f76b366d3181865ea9841398b5db3ee1d1e7f7ae8ea75341df6f2e6a"
+    },
+    {
+      "path": "backend/internal/pkg/apicompat/types.go",
+      "blob": "9ff380d49f8fa922199eeffd06a021c8ac8fda23",
+      "sha256": "59fdd6a319e9dc0f1a61d32af64e8e6d5f132fb1a25e357b1a9ee3c660f25b63"
+    },
+    {
+      "path": "backend/internal/pkg/apicompat/chatcompletions_responses_bridge.go",
+      "blob": "388b6ac58a537ff457b326503761366d80087093",
+      "sha256": "079df2e0683d68efb5f29335a7359aedc006f47c9670578b552675d0e6d7dd08"
+    },
+    {
+      "path": ".github/workflows/account-gateway-native.yml",
+      "blob": "ee56188b41b7ed4c510f0c06a8a0215fd89aeda7",
+      "sha256": "e9468a2be5a2fe5ba34ac3506ab1ac221340f17c9873d3dfc30a2db416e6db4a"
+    },
+    {
+      "path": "backend/go.mod",
+      "blob": "9e5ec1fd484f66ef84238c41f130c4fa826279aa",
+      "sha256": "d54ee4964b3a17d9e32eee07dac08f5892af9203fb2ebd0a9fe00d786ff116ae"
+    },
+    {
+      "path": "backend/go.sum",
+      "blob": "5f62bf5c24acce49fa74e780ea394bdcd742e7ac",
+      "sha256": "03ce7cdece9b6cb01c685227c03c99af974d07bcb3b5c6ad38f278018516ddfe"
+    }
+  ],
+  "executionBoundary": "Only service composition tests with in-memory recorder/stub upstream; no PG/Redis/Docker/CLI/listener or external provider access",
+  "status": "PASS",
+  "exitCode": 0,
+  "elapsedSeconds": 322.806,
+  "completedAt": "2026-11-19T21:53:00.830793+00:00",
+  "run": [
+    "TestForwardResponsesChatCompletionsFallbackKeepsFunctionArgumentsSingle",
+    "TestForwardResponses_ForceChatCompletionsRoutesNonStreamingToChatCompletions",
+    "TestForwardResponses_ForceChatCompletionsRoutesStreamingToChatCompletions",
+    "TestForwardResponses_ChatFallbackRejectsInvalidToolArgumentsAtOutputLimit",
+    "TestForwardResponses_ChatFallbackCachesStreamedReasoning",
+    "TestForwardResponses_ChatFallbackRestoresReasoningFromCache"
+  ],
+  "passed": [
+    "TestForwardResponsesChatCompletionsFallbackKeepsFunctionArgumentsSingle",
+    "TestForwardResponses_ForceChatCompletionsRoutesNonStreamingToChatCompletions",
+    "TestForwardResponses_ForceChatCompletionsRoutesStreamingToChatCompletions",
+    "TestForwardResponses_ChatFallbackRejectsInvalidToolArgumentsAtOutputLimit",
+    "TestForwardResponses_ChatFallbackCachesStreamedReasoning",
+    "TestForwardResponses_ChatFallbackRestoresReasoningFromCache"
+  ],
+  "failed": [],
+  "skipped": [],
+  "invalidJsonLines": 0,
+  "sourceUnchanged": true,
+  "artifacts": [
+    {
+      "path": "service.jsonl",
+      "bytes": 7057,
+      "sha256": "4768a30a9cf5c2801bbe86402daeaa35dd117379260071d0727b445f1fa9c189"
+    },
+    {
+      "path": "service.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ]
+}
