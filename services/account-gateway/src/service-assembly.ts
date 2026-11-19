@@ -9,6 +9,7 @@ import {
   defaults,
   type Bounds,
   type CleanupClaim,
+  type CredentialImportMethod,
   type DurableKernel,
   type ExecutionRead,
   type TrustedContext,
@@ -25,7 +26,6 @@ import type {
   OAuthCleanupAction,
   OAuthMethod,
 } from "./management.ts";
-import type { CredentialImportMethod } from "./domain.ts";
 import { oauthProfileDefinition } from "./oauth-profiles.ts";
 import { providerConnectionDefinition } from "./provider-connections.ts";
 import {

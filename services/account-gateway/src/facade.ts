@@ -1943,15 +1943,15 @@ export function createFacade(options: FacadeOptions): Server {
               throw new KernelError("denied");
             }
             const auth = profiles.get(input.profileId)?.dto.authKinds[0];
-            if (input.credential.kind === "oauth") {
-              throw new KernelError("invalid");
-            }
             if (
               importing
                 ? auth !== "oauth" || !permitsOAuthProfile(grant, input.profileId)
                 : auth !== "api_key"
             ) {
               throw new KernelError("denied");
+            }
+            if (input.credential.kind === "oauth") {
+              throw new KernelError("invalid");
             }
             requireCurrent(grant);
             uncertain = true;

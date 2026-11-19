@@ -590,14 +590,14 @@ void test("credential import private HTTP bounds opaque escaped input and never 
     res.end(JSON.stringify(response));
   });
   try {
-    const client = new NativeOAuthEnrollmentClient({
+    const importClient = new NativeOAuthEnrollmentClient({
       origin: server.origin,
       consumerId: j.consumerId,
       ownerRef: j.ownerRef,
       controlCredential: "synthetic-control",
     });
     const value = "\0".repeat(65_536);
-    assert.equal((await client.importCredential(j, "oauth_auth_json", value)).state, "completed");
+    assert.equal((await importClient.importCredential(j, "oauth_auth_json", value)).state, "completed");
     assert.equal(seen[0].path, "/private/native/v1/oauth/connect/import");
     assert.deepEqual(seen[0].body, {
       operation: j.operationId,
@@ -608,14 +608,14 @@ void test("credential import private HTTP bounds opaque escaped input and never 
       input: value,
     });
     await assert.rejects(
-      client.importCredential(j, "refresh_token", "a".repeat(65_537)),
+      importClient.importCredential(j, "refresh_token", "a".repeat(65_537)),
       code("denied"),
     );
-    await assert.rejects(client.importCredential(j, "refresh_token", "\ud800"), code("denied"));
+    await assert.rejects(importClient.importCredential(j, "refresh_token", "\ud800"), code("denied"));
     assert.equal(seen.length, 1, "invalid import input never enters native HTTP");
     response = { ...response, access_token: "synthetic-private-token" };
     await assert.rejects(
-      client.importCredential(j, "refresh_token", "synthetic-rt"),
+      importClient.importCredential(j, "refresh_token", "synthetic-rt"),
       code("invalid_readback"),
     );
     const claude = new NativeOAuthEnrollmentClient({
