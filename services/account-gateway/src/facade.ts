@@ -904,8 +904,10 @@ export function createFacade(options: FacadeOptions): Server {
               throw new KernelError("denied");
             }
             requireCurrent(grant);
+            const limitsProvider = c.providerIdentity.safeParse(definition?.provider.identity);
             if (
               !definition ||
+              !limitsProvider.success ||
               definition.limitsContract !== contract ||
               (refresh && input.profileId !== "openai-codex-oauth-responses-v1")
             ) {
@@ -986,7 +988,7 @@ export function createFacade(options: FacadeOptions): Server {
                   };
             const result = await readCachedAccountLimits(authority, source, input, {
               contract,
-              provider: definition.provider.identity,
+              provider: limitsProvider.data,
             });
             requireCurrent(grant);
             if (
@@ -1930,30 +1932,44 @@ export function createFacade(options: FacadeOptions): Server {
             return;
           }
           if (path === "/v1/accounts" && method === "POST") {
-            const input = parse(
-              secretSubmission.connect,
-              strictJSON(await body(req, ingressBytes), true),
-            );
+            const bytes = await body(req, Math.max(ingressBytes, 400 * 1024));
+            const input = parse(secretSubmission.connect, strictJSON(bytes, true));
+            const importing = input.credential.kind === "credential_import";
+            if (bytes.length > (importing ? 400 * 1024 : ingressBytes)) {
+              throw new KernelError("invalid");
+            }
             identity = { operationRef: input.operationId };
+            if (!permitsOwner(grant, input.ownerRef) || !permitsProfile(grant, input.profileId)) {
+              throw new KernelError("denied");
+            }
+            const auth = profiles.get(input.profileId)?.dto.authKinds[0];
+            if (input.credential.kind === "oauth") {
+              throw new KernelError("invalid");
+            }
             if (
-              !permitsOwner(grant, input.ownerRef) ||
-              !permitsProfile(grant, input.profileId) ||
-              profiles.get(input.profileId)?.dto.authKinds[0] !== "api_key"
+              importing
+                ? auth !== "oauth" || !permitsOAuthProfile(grant, input.profileId)
+                : auth !== "api_key"
             ) {
               throw new KernelError("denied");
             }
-            if (input.credential.kind !== "api_key") {
-              throw new KernelError("invalid");
-            }
             requireCurrent(grant);
             uncertain = true;
-            const op = await management.create(context, {
+            const command = {
               operationId: input.operationId,
               ownerRef: input.ownerRef,
               profile: input.profileId,
               displayName: input.displayName,
-              apiKey: input.credential.value,
-            });
+            };
+            const op =
+              input.credential.kind === "credential_import"
+                ? await management.importAccount(context, {
+                    ...command,
+                    method: input.credential.method,
+                    value: input.credential.value,
+                  })
+                : await management.create(context, { ...command, apiKey: input.credential.value });
+            requireCurrent(grant);
             reply(
               c.accountOperation,
               await operationDTO(context, op),
@@ -2034,11 +2050,47 @@ export function createFacade(options: FacadeOptions): Server {
             }
             if (method === "POST" && accountMatch[2] === "reconnect") {
               const profile = profiles.get(account.profile);
-              if (profile?.dto.authKinds[0] === "oauth") {
-                const input = parse(
-                  c.oauthReconnect,
-                  strictJSON(await body(req, Math.min(ingressBytes, 16_384)), true),
+              const bytes = await body(req, Math.max(ingressBytes, 400 * 1024));
+              const raw = strictJSON(bytes, true);
+              const credentialInput = secretSubmission.reconnect.safeParse(raw);
+              if (
+                credentialInput.success &&
+                credentialInput.data.credential.kind === "credential_import"
+              ) {
+                const credential = credentialInput.data.credential,
+                  input = credentialInput.data;
+                if (bytes.length > 400 * 1024) {
+                  throw new KernelError("invalid");
+                }
+                if (
+                  profile?.dto.authKinds[0] !== "oauth" ||
+                  !permitsOAuthProfile(grant, account.profile)
+                ) {
+                  throw new KernelError("denied");
+                }
+                identity = { operationRef: input.operationId };
+                requireCurrent(grant);
+                uncertain = true;
+                const operation = await management.importReconnect(context, {
+                  operationId: input.operationId,
+                  accountRef: ref,
+                  expectedRevision: input.expectedMetadataRevision,
+                  method: credential.method,
+                  value: credential.value,
+                });
+                requireCurrent(grant);
+                reply(
+                  c.accountOperation,
+                  await operationDTO(context, operation),
+                  operation.state === "pending" ? 202 : 200,
                 );
+                return;
+              }
+              if (profile?.dto.authKinds[0] === "oauth") {
+                if (bytes.length > Math.min(ingressBytes, 16_384)) {
+                  throw new KernelError("invalid");
+                }
+                const input = parse(c.oauthReconnect, raw);
                 identity = { operationRef: input.operationId };
                 if (
                   !management.supportsOAuthProfile(account.profile) ||
@@ -2077,10 +2129,10 @@ export function createFacade(options: FacadeOptions): Server {
               if (profiles.get(account.profile)?.dto.authKinds[0] !== "api_key") {
                 throw new KernelError("denied");
               }
-              const input = parse(
-                secretSubmission.reconnect,
-                strictJSON(await body(req, ingressBytes), true),
-              );
+              if (bytes.length > ingressBytes) {
+                throw new KernelError("invalid");
+              }
+              const input = parse(secretSubmission.reconnect, raw);
               identity = { operationRef: input.operationId };
               if (input.credential.kind !== "api_key") {
                 throw new KernelError("invalid");

@@ -529,6 +529,112 @@ void test("server HMAC binds exact intent, submitted key, consumer and operation
   }
 });
 
+void test("credential import digest leaves legacy byte identity unchanged and binds method plus input", () => {
+  const custody = new IntentSecrets(Buffer.alloc(32, 1), Buffer.alloc(32, 2));
+  const legacy = {
+    context: { consumerId: "synthetic-consumer" },
+    intent: {
+      operationId: "op",
+      kind: "create" as const,
+      ownerRef: "owner",
+      profile: "profile",
+      displayName: "Name",
+      intentDigest: "",
+    },
+    apiKey: "fixture-key",
+  };
+  assert.equal(
+    custody.digest(legacy),
+    "ee982b01f9421793c96acaa670279645130e4ccedb6a48e1c55407aefee65e5a",
+  );
+  assert.equal(
+    custody.digest({ ...legacy, intent: { ...legacy.intent, oauthMethod: "device_code" } }),
+    "e844540f593d18d7875e1809297d2af13815cfe2f651744b4c7da5b464fb5a64",
+  );
+  const imported = {
+    context: legacy.context,
+    intent: { ...legacy.intent, credentialImportMethod: "refresh_token" as const },
+    credentialImportValue: "synthetic-import",
+  };
+  const digest = custody.digest(imported);
+  assert.notEqual(
+    digest,
+    custody.digest({ ...imported, credentialImportValue: "synthetic-other" }),
+  );
+  assert.notEqual(
+    digest,
+    custody.digest({
+      ...imported,
+      intent: { ...imported.intent, credentialImportMethod: "oauth_auth_json" },
+    }),
+  );
+});
+
+void test("credential import private HTTP bounds opaque escaped input and never admits it to other native routes", async () => {
+  const j = journal(),
+    seen: { path: string | undefined; body: Record<string, unknown> }[] = [];
+  let response: Record<string, unknown> = {
+    operation: j.operationId,
+    account_ref: j.accountRef,
+    state: "completed",
+  };
+  const server = await local(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(Buffer.from(chunk as Uint8Array));
+    }
+    seen.push({
+      path: req.url,
+      body: JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>,
+    });
+    res.end(JSON.stringify(response));
+  });
+  try {
+    const client = new NativeOAuthEnrollmentClient({
+      origin: server.origin,
+      consumerId: j.consumerId,
+      ownerRef: j.ownerRef,
+      controlCredential: "synthetic-control",
+    });
+    const value = "\0".repeat(65_536);
+    assert.equal((await client.importCredential(j, "oauth_auth_json", value)).state, "completed");
+    assert.equal(seen[0].path, "/private/native/v1/oauth/connect/import");
+    assert.deepEqual(seen[0].body, {
+      operation: j.operationId,
+      owner_ref: j.ownerRef,
+      account_ref: j.accountRef,
+      generation: j.generation,
+      method: "auth_json",
+      input: value,
+    });
+    await assert.rejects(
+      client.importCredential(j, "refresh_token", "a".repeat(65_537)),
+      code("denied"),
+    );
+    await assert.rejects(client.importCredential(j, "refresh_token", "\ud800"), code("denied"));
+    assert.equal(seen.length, 1, "invalid import input never enters native HTTP");
+    response = { ...response, access_token: "synthetic-private-token" };
+    await assert.rejects(
+      client.importCredential(j, "refresh_token", "synthetic-rt"),
+      code("invalid_readback"),
+    );
+    const claude = new NativeOAuthEnrollmentClient({
+      origin: server.origin,
+      consumerId: j.consumerId,
+      ownerRef: j.ownerRef,
+      controlCredential: "synthetic-control",
+      profileId: claudeOAuthProfile.profile,
+    });
+    await assert.rejects(
+      claude.importCredential(j, "refresh_token", "synthetic-rt"),
+      code("denied"),
+    );
+    assert.equal(seen.length, 2, "another profile cannot select the Codex import route");
+  } finally {
+    await server.close();
+  }
+});
+
 // Regression: a lost POST ACK must use generation-specific GET, without implicit HTTP retry or bearer forwarding.
 void test("real local HTTP lost create ACK is uncertain and readback preserves native birth precision", async () => {
   const j = journal(),

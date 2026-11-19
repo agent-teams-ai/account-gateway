@@ -1,4 +1,4 @@
-import { KernelError, identifier, uuid, revision } from "./domain.ts";
+import { KernelError, identifier, uuid, revision, credentialImportMethod } from "./domain.ts";
 import { oauthProfileDefinition } from "./oauth-profiles.ts";
 import { exactCandidate, sameCandidate, physicalCandidate } from "./candidate-identity.ts";
 import type {
@@ -35,6 +35,8 @@ import type {
   OAuthReconnectInput,
   OAuthPollInput,
   OAuthBeginResult,
+  CredentialImportCreateInput,
+  CredentialImportReconnectInput,
   ControlledProof,
   RetainedCustodyVerifier,
   AccountLifecycleReadback,
@@ -72,6 +74,16 @@ function deviceMethod(method: unknown): Pick<AccountIntent, "oauthMethod"> {
     throw new KernelError("invalid");
   }
   return method === "device_code" ? { oauthMethod: method } : {};
+}
+function importValue(value: unknown): asserts value is string {
+  if (
+    typeof value !== "string" ||
+    !value.isWellFormed() ||
+    value.length === 0 ||
+    Buffer.byteLength(value, "utf8") > 65_536
+  ) {
+    throw new KernelError("invalid");
+  }
 }
 function oauthScope(j: CandidateJournal): OAuthScope {
   return Object.freeze({
@@ -334,12 +346,64 @@ export class AccountManagement {
     }
     return this.beginOAuthIntent(ctx, intent);
   }
+  async importAccount(
+    context: TrustedContext,
+    input: CredentialImportCreateInput,
+  ): Promise<OperationStatus> {
+    const ctx = captureContext(context),
+      value = input.value;
+    const intent: AccountIntent = {
+      kind: "create",
+      operationId: input.operationId,
+      ownerRef: input.ownerRef,
+      profile: input.profile,
+      displayName: input.displayName,
+      intentDigest: "",
+      credentialImportMethod: input.method,
+    };
+    identifier(intent.operationId);
+    identifier(intent.ownerRef);
+    identifier(intent.profile, 64);
+    name(intent.displayName);
+    credentialImportMethod(intent.credentialImportMethod);
+    importValue(value);
+    if (!this.oauthProviders.get(intent.profile)?.credentialImport) {
+      throw new KernelError("denied");
+    }
+    return (await this.beginOAuthIntent(ctx, intent, value)).operation;
+  }
+  async importReconnect(
+    context: TrustedContext,
+    input: CredentialImportReconnectInput,
+  ): Promise<OperationStatus> {
+    const ctx = captureContext(context),
+      value = input.value;
+    const intent: AccountIntent = {
+      kind: "reconnect",
+      operationId: input.operationId,
+      accountRef: input.accountRef,
+      expectedRevision: input.expectedRevision,
+      intentDigest: "",
+      credentialImportMethod: input.method,
+    };
+    identifier(intent.operationId);
+    uuid(intent.accountRef);
+    revision(intent.expectedRevision);
+    credentialImportMethod(intent.credentialImportMethod);
+    importValue(value);
+    const account = await this.kernel.account(ctx, intent.accountRef);
+    if (!this.oauthProviders.get(account.profile)?.credentialImport) {
+      throw new KernelError("denied");
+    }
+    return (await this.beginOAuthIntent(ctx, intent, value)).operation;
+  }
   private async beginOAuthIntent(
     ctx: TrustedContext,
     intent: AccountIntent,
+    credentialImportValue?: string,
   ): Promise<OAuthBeginResult> {
-    // No secret is staged in TS SQL. Native owns PKCE/state and token custody.
-    intent.intentDigest = this.custody.digest({ context: ctx, intent });
+    // No secret is staged in TS SQL. Native owns exchange and token custody.
+    intent.intentDigest = this.custody.digest({ context: ctx, intent, credentialImportValue });
     const operation = await this.kernel.beginAccount(ctx, Object.freeze(intent));
     if (operation.state !== "pending") {
       return Object.freeze({ operation });
@@ -388,7 +452,18 @@ export class AccountManagement {
       const journal = await this.store.journal(scope, permit.candidate, this.worker, oauth.profile);
       let begun: OAuthBeginReadback;
       try {
-        begun = await oauth.native.begin(oauthScope(journal), intent.oauthMethod);
+        if (intent.credentialImportMethod !== undefined) {
+          if (!oauth.credentialImport || credentialImportValue === undefined) {
+            throw new KernelError("denied");
+          }
+          begun = await oauth.credentialImport.importCredential(
+            oauthScope(journal),
+            intent.credentialImportMethod,
+            credentialImportValue,
+          );
+        } else {
+          begun = await oauth.native.begin(oauthScope(journal), intent.oauthMethod);
+        }
       } catch {
         return Object.freeze({ operation: await this.oauthReadback(ctx, journal) });
       }
@@ -400,13 +475,15 @@ export class AccountManagement {
       // Return only an actually received Begin capability. It is never persisted
       // or reconstructed on duplicate Begin, GET, lost ACK or worker recovery.
       const handoff =
-        intent.oauthMethod === "device_code"
-          ? begun.deviceAuthorization === undefined
-            ? {}
-            : { deviceAuthorization: begun.deviceAuthorization }
-          : begun.authorizationURL === undefined
-            ? {}
-            : { authorizationURL: begun.authorizationURL };
+        intent.credentialImportMethod !== undefined
+          ? {}
+          : intent.oauthMethod === "device_code"
+            ? begun.deviceAuthorization === undefined
+              ? {}
+              : { deviceAuthorization: begun.deviceAuthorization }
+            : begun.authorizationURL === undefined
+              ? {}
+              : { authorizationURL: begun.authorizationURL };
       return Object.freeze({
         operation: current,
         ...(current.state === "pending" && begun.state === "prepared" ? handoff : {}),
@@ -438,7 +515,7 @@ export class AccountManagement {
       throw new KernelError("invalid");
     }
     const operation = await this.kernel.operation(ctx, operationId);
-    if (operation.oauthMethod === "device_code") {
+    if (operation.oauthMethod === "device_code" || operation.credentialImportMethod !== undefined) {
       throw new KernelError("denied");
     }
     const journal = await this.store.readJournal(ctx, operationId);

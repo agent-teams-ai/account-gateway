@@ -246,6 +246,7 @@ async function fixture(options: FixtureOptions = {}) {
     nativeIntents = new Map<string, ConnectWire>();
   const deviceOperations = new Set<string>(),
     pollRequests: ConnectWire[] = [];
+  const imports: { method: string; value: string }[] = [];
   let dropPollACK = false;
   const requests: { path: string; input: ConnectWire }[] = [],
     observedJournals: CandidateJournal[] = [];
@@ -362,6 +363,7 @@ async function fixture(options: FixtureOptions = {}) {
       if (
         req.method === "POST" &&
         (req.url === "/private/native/v1/oauth/connect" ||
+          req.url === "/private/native/v1/oauth/connect/import" ||
           req.url === "/private/native/v1/oauth/connect/read" ||
           req.url === "/private/native/v1/oauth/connect/poll")
       ) {
@@ -369,9 +371,14 @@ async function fixture(options: FixtureOptions = {}) {
         for await (const chunk of req) {
           chunks.push(chunk as Buffer);
         }
-        const { method, ...submitted } = JSON.parse(
-          Buffer.concat(chunks).toString(),
-        ) as ConnectWire & { method?: string };
+        const {
+          method,
+          input: importedValue,
+          ...submitted
+        } = JSON.parse(Buffer.concat(chunks).toString()) as ConnectWire & {
+          method?: string;
+          input?: string;
+        };
         assert.deepEqual(Object.keys(submitted).toSorted(), [
           "account_ref",
           "generation",
@@ -379,7 +386,15 @@ async function fixture(options: FixtureOptions = {}) {
           "owner_ref",
         ]);
         assert.equal(submitted.owner_ref, owner);
-        const isBegin = req.url === "/private/native/v1/oauth/connect";
+        const isImport = req.url === "/private/native/v1/oauth/connect/import";
+        const isBegin = req.url === "/private/native/v1/oauth/connect" || isImport;
+        if (isImport) {
+          assert.ok(method === "refresh_token" || method === "auth_json");
+          assert.equal(typeof importedValue, "string");
+          imports.push({ method, value: importedValue! });
+        } else {
+          assert.equal(importedValue, undefined, "reads never carry import material");
+        }
         const isPoll = req.url === "/private/native/v1/oauth/connect/poll";
         if (!isBegin) {
           assert.equal(method, undefined, "method cannot change on read/poll");
@@ -396,6 +411,12 @@ async function fixture(options: FixtureOptions = {}) {
           assert.ok(committed, "journal persisted before native Begin");
           assert.deepEqual(wire(scope(committed)), submitted);
           observedJournals.push(committed);
+          if (isImport) {
+            assert.equal(
+              (await kernel.operation(context, submitted.operation)).credentialImportMethod,
+              method === "auth_json" ? "oauth_auth_json" : "refresh_token",
+            );
+          }
           assert.equal(
             nativeIntents.has(submitted.operation),
             false,
@@ -443,7 +464,7 @@ async function fixture(options: FixtureOptions = {}) {
             state: connectState,
             ...(connectState === "completed" ? { outcome: "staged" } : {}),
             ...(device ? { method: "device_code" } : {}),
-            ...(isBegin && connectState === "prepared"
+            ...(isBegin && !isImport && connectState === "prepared"
               ? device
                 ? {
                     device_authorization: {
@@ -634,6 +655,7 @@ async function fixture(options: FixtureOptions = {}) {
       oauth: {
         profile: oauthProfile,
         native: oauth,
+        credentialImport: oauth,
         ...(withDescriptor ? { descriptor } : {}),
         lifecycle: new NativeOAuthLifecycleClient({
           origin: nativeOrigin,
@@ -753,6 +775,7 @@ async function fixture(options: FixtureOptions = {}) {
     observedJournals,
     descriptorScopes,
     pollRequests,
+    imports,
     client,
     callback,
     bearers,
@@ -945,6 +968,126 @@ function selectors(j: CandidateJournal): OAuthSelectors {
     generation: j.generation,
   };
 }
+
+void test("credential import uses existing durable create and reconnect, binds exact method and stores no secret", async () => {
+  const f = await fixture({ descriptor: "qualified" });
+  const command = input(),
+    credential = {
+      kind: "credential_import" as const,
+      method: "refresh_token" as const,
+      value: "synthetic-refresh-one",
+    };
+  const connect = { ...sdkInput(command), credential };
+  try {
+    f.state("completed");
+    const connected = await f.client().connect(connect);
+    assert.equal(connected.state, "applied");
+    assert.equal(connected.oauthMethod, undefined);
+    const j = await journal(f, command);
+    assert.equal(f.imports.length, 1);
+    assert.deepEqual(f.imports[0], { method: "refresh_token", value: credential.value });
+    assert.deepEqual(await f.client().connect(connect), connected);
+    for (const changed of [
+      { ...credential, method: "oauth_auth_json" as const },
+      { ...credential, value: "synthetic-refresh-two" },
+    ]) {
+      await assert.rejects(
+        f.client().connect({ ...connect, credential: changed }),
+        (error: unknown) => error instanceof GatewayError && error.diagnostic?.code === "conflict",
+      );
+    }
+    await assert.rejects(f.foreign().connect({ ...connect, operationId: randomUUID() }), denied);
+    await assert.rejects(
+      f
+        .client()
+        .completeOAuth({
+          operationId: command.operationId,
+          ownerRef: owner,
+          callbackURL:
+            "http://localhost:1455/auth/callback?state=" + "a".repeat(64) + "&code=fixture",
+        }),
+      denied,
+    );
+    await assert.rejects(
+      f.client().pollDeviceOAuth({ operationId: command.operationId, ownerRef: owner }),
+      denied,
+    );
+    assert.equal(f.imports.length, 1);
+    const account = await f.kernel.account(f.context, j.accountRef);
+    const replacement = {
+      operationId: randomUUID(),
+      expectedMetadataRevision: account.revision,
+      credential: {
+        kind: "credential_import" as const,
+        method: "oauth_auth_json" as const,
+        value: '{"tokens":{"access_token":"synthetic-at","refresh_token":"synthetic-rt"}}',
+      },
+    };
+    assert.equal((await f.client().reconnect(j.accountRef, replacement)).state, "applied");
+    const next = await f.store.readJournal(f.context, replacement.operationId);
+    assert.ok(next);
+    assert.equal(next.accountRef, j.accountRef);
+    assert.notEqual(next.generation, j.generation);
+    assert.equal((await f.kernel.account(f.context, j.accountRef)).revision, account.revision + 1);
+    await f.restart();
+    const readback = await f.client().readOAuth(replacement.operationId);
+    assert.equal(readback.state, "applied");
+    assert.equal(readback.oauthMethod, undefined);
+    assert.equal(f.imports.length, 2);
+    assert.equal(f.imports[1].method, "auth_json");
+    const persisted = await pool.query<{ intent: Record<string, unknown> }>(
+      "SELECT intent FROM ag_kernel.operations WHERE consumer=$1 ORDER BY id",
+      [f.context.consumerId],
+    );
+    const serialized = JSON.stringify(persisted.rows);
+    assert.equal(serialized.includes(credential.value), false);
+    assert.equal(serialized.includes("synthetic-at"), false);
+    assert.equal(
+      (
+        await pool.query<{ n: number }>(
+          "SELECT count(*)::int AS n FROM ag_management.transient_intents WHERE consumer=$1",
+          [f.context.consumerId],
+        )
+      ).rows[0].n,
+      0,
+    );
+    await f.assertHealthy();
+  } finally {
+    await f.close();
+  }
+});
+
+void test("credential import ambiguity retains original unknown receipt without replay after restart", async () => {
+  const f = await fixture({ descriptor: "qualified", lostACK: true });
+  const command = input(),
+    connect = {
+      ...sdkInput(command),
+      credential: {
+        kind: "credential_import" as const,
+        method: "refresh_token" as const,
+        value: "synthetic-lost-ack",
+      },
+    };
+  try {
+    f.state("unknown");
+    assert.equal((await f.client().connect(connect)).state, "unknown");
+    const j = await journal(f, command);
+    await f.restart();
+    f.state("completed");
+    assert.equal((await f.client().readOAuth(command.operationId)).state, "unknown");
+    assert.equal((await f.client().connect(connect)).state, "unknown");
+    assert.equal(
+      f.imports.length,
+      1,
+      "unknown authority cannot resubmit a one-shot credential import",
+    );
+    assert.deepEqual(await f.store.readJournal(f.context, command.operationId), j);
+    await assertInert(f, j, "unknown");
+    await f.assertHealthy();
+  } finally {
+    await f.close();
+  }
+});
 
 // Regression: implicit read polling, owner substitution, method switching or a
 // replayed handoff could consume another owner's intent or re-exchange tokens.

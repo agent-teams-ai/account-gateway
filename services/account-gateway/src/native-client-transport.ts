@@ -105,7 +105,13 @@ export class NativeControlHTTP {
     let body: Buffer | undefined;
     try {
       body = value === undefined ? undefined : Buffer.from(JSON.stringify(value));
-      if (body && body.length > (path.endsWith("/oauth/connect/complete") ? 32_768 : 16_384)) {
+      const requestBytes =
+        path === "/private/native/v1/oauth/connect/import"
+          ? 400 * 1024
+          : path.endsWith("/oauth/connect/complete")
+            ? 32_768
+            : 16_384;
+      if (body && body.length > requestBytes) {
         throw new NativeFailure("bounded");
       }
     } catch {

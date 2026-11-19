@@ -25,6 +25,7 @@ import type {
   OAuthCleanupAction,
   OAuthMethod,
 } from "./management.ts";
+import type { CredentialImportMethod } from "./domain.ts";
 import { oauthProfileDefinition } from "./oauth-profiles.ts";
 import { providerConnectionDefinition } from "./provider-connections.ts";
 import {
@@ -218,6 +219,17 @@ export function composeServiceControl(
           complete: (scope: OAuthScope, callback: OAuthCallback) =>
             forScope(scope).complete(scope, callback),
         },
+        ...(oauthProfileDefinition(profile.profile)?.family === "codex"
+          ? {
+              credentialImport: {
+                importCredential: (
+                  scope: OAuthScope,
+                  method: CredentialImportMethod,
+                  value: string,
+                ) => forScope(scope).importCredential(scope, method, value),
+              },
+            }
+          : {}),
         descriptor: { describe: (scope: OAuthScope) => forScope(scope).describe(scope) },
         lifecycle: {
           cleanup: (

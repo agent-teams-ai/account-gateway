@@ -8,7 +8,8 @@ type ModelCapability = {
   readonly fast: Setting<"balanced" | "fast"> | null;
   readonly tools: Setting<"none" | "function" | "function_and_custom">;
 };
-export type ProviderConnectionDefinition = ProviderConnectionIdentity & {
+export type ProviderConnectionDefinition = Omit<ProviderConnectionIdentity, "provider"> & {
+  readonly provider: { readonly identity: string; readonly label: string };
   readonly region: { readonly identity: "global" | "unknown"; readonly label: string };
   readonly protocol: "openai-chat" | "openai-responses" | "anthropic-messages";
   readonly baseURL: string;
@@ -41,8 +42,11 @@ const standard = {
   fast: { allowed: ["balanced"], default: "balanced" },
   tools: { allowed: ["function"], default: "function" },
 } as const;
-const definition = (input: ProviderConnectionDefinition): ProviderConnectionDefinition =>
-  Object.freeze({
+const definition = (input: ProviderConnectionDefinition): ProviderConnectionDefinition => {
+  if (!/^[a-z][a-z0-9_-]{0,63}$/.test(input.provider.identity)) {
+    throw new Error("invalid registered provider identity");
+  }
+  return Object.freeze({
     ...input,
     provider: Object.freeze({ ...input.provider }),
     plan: Object.freeze({ ...input.plan }),
@@ -77,12 +81,12 @@ const definition = (input: ProviderConnectionDefinition): ProviderConnectionDefi
         }
       : {}),
   });
+};
 
 /**
- * The only editable provider tuple source. Capability projection, service tuple
- * validation and OAuth route selection all consume these entries. Private URLs
- * remain here and are never copied into a public DTO; the public vendor and plan
- * are the SDK's `providerConnectionIdentity`.
+ * Deployment-owned endpoint and enrollment-anchor policy. Native owns the
+ * public capability catalog; these entries only restrict its deployed view.
+ * Legacy identity labels remain for existing safe profile references.
  */
 export const providerConnectionRegistry: readonly ProviderConnectionDefinition[] = Object.freeze([
   definition({
@@ -125,6 +129,50 @@ export const providerConnectionRegistry: readonly ProviderConnectionDefinition[]
         reasoning: null,
         fast: null,
         // Qualified by a real two-turn NVIDIA Build function-call canary.
+        tools: { allowed: ["function"], default: "function" },
+      },
+    ],
+    authMethods: ["api_key"],
+    completionInputKind: "none",
+    oauthCallbackMode: null,
+    reconnect: "replace_api_key",
+    limitsContract: "none",
+    availability: "enabled",
+  }),
+  definition({
+    profileId: "anthropic-messages-apikey-v1",
+    provider: { identity: "anthropic", label: "Anthropic" },
+    plan: { identity: "pay_as_you_go", label: "API billing" },
+    region: { identity: "global", label: "Global" },
+    protocol: "openai-responses",
+    baseURL: "https://api.anthropic.com/v1",
+    models: [
+      {
+        modelId: "claude-sonnet-4-6",
+        reasoning: null,
+        fast: null,
+        tools: { allowed: ["function"], default: "function" },
+      },
+    ],
+    authMethods: ["api_key"],
+    completionInputKind: "none",
+    oauthCallbackMode: null,
+    reconnect: "replace_api_key",
+    limitsContract: "none",
+    availability: "enabled",
+  }),
+  definition({
+    profileId: "gemini-openai-chat-apikey-v1",
+    provider: { identity: "gemini", label: "Gemini" },
+    plan: { identity: "pay_as_you_go", label: "API billing" },
+    region: { identity: "global", label: "Global" },
+    protocol: "openai-responses",
+    baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+    models: [
+      {
+        modelId: "gemini-3.1-pro-preview",
+        reasoning: null,
+        fast: null,
         tools: { allowed: ["function"], default: "function" },
       },
     ],

@@ -979,6 +979,7 @@ export type ProviderConnectionCapability = z.infer<typeof providerConnectionCapa
 export type ProviderConnectionCapabilities = z.infer<typeof providerConnectionCapabilities>;
 
 export const PROVIDER_CONNECTIONS_V2_CONTRACT = "provider-connections/v2" as const;
+export const credentialImportMethod = z.enum(["refresh_token", "oauth_auth_json"]);
 const connectionMethodSupport = { create: z.boolean(), reconnect: z.boolean() };
 export const providerConnectionMethod = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("api_key"), ...connectionMethodSupport }),
@@ -992,7 +993,7 @@ export const providerConnectionMethod = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("credential_import"),
     ...connectionMethodSupport,
-    method: z.enum(["refresh_token", "oauth_auth_json"]),
+    method: credentialImportMethod,
     maxBytes: z.literal(65_536),
   }),
 ]);
@@ -1053,6 +1054,18 @@ const accountModelDiscoveryProfiles = Object.freeze([
     protocol: "openai-responses",
     authKind: "api_key",
     source: "nvidia",
+  } as const),
+  Object.freeze({
+    profileId: "anthropic-messages-apikey-v1",
+    protocol: "openai-responses",
+    authKind: "api_key",
+    source: "native_catalog",
+  } as const),
+  Object.freeze({
+    profileId: "gemini-openai-chat-apikey-v1",
+    protocol: "openai-responses",
+    authKind: "api_key",
+    source: "native_catalog",
   } as const),
   // Native owns the catalogue of the API-key coding plans (static documented lower
   // bound plus the provider's live list); the Gateway only carries its contract.

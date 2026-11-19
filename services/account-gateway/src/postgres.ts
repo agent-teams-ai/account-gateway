@@ -10,6 +10,7 @@ import {
   defaults,
   factDefaults,
   identifier,
+  credentialImportMethod,
   integer,
   revision as authorityRevision,
   uuid,
@@ -468,6 +469,7 @@ export class PostgresKernel implements DurableKernel {
       profile: input.profile,
       displayName: input.displayName,
       oauthMethod: input.oauthMethod,
+      credentialImportMethod: input.credentialImportMethod,
     };
     identifier(input.operationId);
     identifier(input.intentDigest);
@@ -475,7 +477,16 @@ export class PostgresKernel implements DurableKernel {
       throw new KernelError("invalid");
     }
     validateOAuthMethod(input.oauthMethod);
-    if (input.oauthMethod !== undefined && !["create", "reconnect"].includes(input.kind)) {
+    if (input.credentialImportMethod !== undefined) {
+      credentialImportMethod(input.credentialImportMethod);
+      if (input.oauthMethod !== undefined) {
+        throw new KernelError("invalid");
+      }
+    }
+    if (
+      (input.oauthMethod !== undefined || input.credentialImportMethod !== undefined) &&
+      !["create", "reconnect"].includes(input.kind)
+    ) {
       throw new KernelError("invalid");
     }
     if (input.kind === "create") {
@@ -507,6 +518,9 @@ export class PostgresKernel implements DurableKernel {
       profile: input.profile ?? null,
       name: input.displayName ?? null,
       ...(input.oauthMethod === undefined ? {} : { oauthMethod: input.oauthMethod }),
+      ...(input.credentialImportMethod === undefined
+        ? {}
+        : { credentialImportMethod: input.credentialImportMethod }),
     };
     return this.transaction(context, async (tx) => {
       const old = await this.existing(tx, input.operationId, intent);

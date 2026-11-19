@@ -6,6 +6,7 @@ import {
 } from "@agent-teams/account-gateway/contracts";
 import { secretSubmission } from "@agent-teams/account-gateway/http";
 import { KernelError, identifier, uuid } from "./domain.ts";
+import type { CredentialImportMethod } from "./domain.ts";
 import {
   codexOAuthProfile,
   oauthProfileDefinition,
@@ -14,6 +15,7 @@ import {
 import type {
   OAuthScope,
   OAuthEnrollmentNative,
+  CredentialImportNative,
   OAuthReadback,
   OAuthBeginReadback,
   OAuthCallback,
@@ -39,7 +41,11 @@ import {
 
 export class NativeOAuthEnrollmentClient
   extends NativeControlHTTP
-  implements OAuthEnrollmentNative, OAuthDescriptorBoundary, OAuthRefreshNative
+  implements
+    OAuthEnrollmentNative,
+    OAuthDescriptorBoundary,
+    OAuthRefreshNative,
+    CredentialImportNative
 {
   readonly #owner: string;
   readonly #definition: OAuthProfileDefinition;
@@ -208,6 +214,30 @@ export class NativeOAuthEnrollmentClient
       throw new NativeFailure("invalid_readback");
     }
     return result;
+  }
+  async importCredential(
+    input: OAuthScope,
+    method: CredentialImportMethod,
+    value: string,
+  ): Promise<OAuthReadback> {
+    const scope = this.capture(input);
+    const parsed = secretSubmission.credentialImport.safeParse({
+      kind: "credential_import",
+      method,
+      value,
+    });
+    if (this.#definition.family !== "codex" || !parsed.success) {
+      throw new NativeFailure("denied");
+    }
+    return this.ack(
+      await this.call("POST", "/private/native/v1/oauth/connect/import", {
+        ...this.wire(scope),
+        method: parsed.data.method === "oauth_auth_json" ? "auth_json" : "refresh_token",
+        input: parsed.data.value,
+      }),
+      scope,
+      false,
+    );
   }
   async poll(input: OAuthScope): Promise<OAuthReadback> {
     if (!this.#definition.deviceCode) {

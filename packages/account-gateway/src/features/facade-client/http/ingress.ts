@@ -10,7 +10,20 @@ const hasControl = (value: string): boolean => {
   return false;
 };
 // Secret ingress is deliberately absent from the browser-safe contracts entry.
+// The source backend owns the content grammar; this boundary only bounds opaque text.
+export const credentialImport = z.strictObject({
+  kind: z.literal("credential_import"),
+  method: c.credentialImportMethod,
+  value: z
+    .string()
+    .min(1)
+    .max(65_536)
+    .refine(
+      (value) => !/\p{Cs}/u.test(value) && new TextEncoder().encode(value).byteLength <= 65_536,
+    ),
+});
 export const credential = z.discriminatedUnion("kind", [
+  credentialImport,
   z.strictObject({ kind: z.literal("api_key"), value: z.string().min(1).max(16384) }),
   z.strictObject({
     kind: z.literal("oauth"),
