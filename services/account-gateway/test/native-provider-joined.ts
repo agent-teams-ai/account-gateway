@@ -706,6 +706,7 @@ async function run(): Promise<void> {
         assert.match(output, /response.completed/);
         return output;
       };
+      phase = provider + "-native-tool-request";
       const first = await request("Controlled disposable fixture", [
         {
           type: "function",
@@ -752,6 +753,7 @@ async function run(): Promise<void> {
         const reasoning = output.find((item) => item.type === "reasoning");
         assert.deepEqual(reasoning?.content, [{ type: "reasoning_text", text: "fixture thought" }]);
       }
+      phase = provider + "-native-tool-continuation";
       const second = await request([
         { role: "user", content: "Controlled disposable fixture" },
         ...output,
@@ -761,6 +763,7 @@ async function run(): Promise<void> {
       assert.match(second, /revalidations/);
       await execution.close(executionRef, { operationId: randomUUID(), reason: "completed" });
     }
+    phase = provider + "-native-tool-roundtrip";
     const after = await stats();
     assert.equal(after[provider].dispatches - before[provider].dispatches, 2);
     assert.equal(after[provider].functionCalls - before[provider].functionCalls, 1);

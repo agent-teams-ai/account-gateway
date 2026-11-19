@@ -420,6 +420,82 @@ void test("provider evidence keeps native-only proofs separate from six real RR 
   );
 });
 
+void test("native failure diagnostics retain only closed SDK fields and known request phases", () => {
+  const value = {
+    phase: "failed",
+    at: "anthropic-native-tool-continuation",
+    frame: "native-provider-joined.ts:663:24",
+    code: "qualification_failed",
+    failureName: "GatewayError",
+    failureCode: "safe_error",
+    diagnosticCode: "upstream_failure",
+    httpStatus: 502,
+    message: "private-provider-message",
+    body: "private-provider-body",
+    traceRef: "private-reference",
+    url: "https://private.invalid",
+  };
+  const safe = joinedFailure(JSON.stringify(value));
+  assert.deepEqual(safe, {
+    code: "joined-driver-failed",
+    at: value.at,
+    frame: value.frame,
+    driverCode: "qualification_failed",
+    failureName: "GatewayError",
+    gatewayCode: "safe_error",
+    diagnosticCode: "upstream_failure",
+    httpStatus: 502,
+  });
+  assert.equal(JSON.stringify(safe).includes("private"), false);
+  for (const [provider] of joinedProviderProfiles) {
+    for (const stage of ["native-tool-request", "native-tool-continuation"]) {
+      const at = provider + "-" + stage;
+      assert.equal(joinedFailure(JSON.stringify({ ...value, at })).at, at);
+    }
+  }
+  for (const at of [
+    "unknown-native-tool-request",
+    "anthropic-native-tool-request-private",
+    "anthropic-native-tool-request\n",
+  ]) {
+    assert.equal(joinedFailure(JSON.stringify({ ...value, at })).at, "driver");
+  }
+  for (const [field, replacement, omitted] of [
+    ["code", "private-driver-code", "driverCode"],
+    ["failureName", "GatewayError\nprivate-class", "failureName"],
+    ["failureCode", "safe_error\nprivate-code", "gatewayCode"],
+    ["diagnosticCode", "upstream_failure\nprivate-code", "diagnosticCode"],
+  ] as const) {
+    const sanitized = joinedFailure(JSON.stringify({ ...value, [field]: replacement }));
+    assert.equal(Object.hasOwn(sanitized, omitted), false);
+    assert.equal(JSON.stringify(sanitized).includes("private"), false);
+  }
+  for (const httpStatus of [99, 600, 502.5, "502", null]) {
+    assert.equal(
+      Object.hasOwn(joinedFailure(JSON.stringify({ ...value, httpStatus })), "httpStatus"),
+      false,
+    );
+  }
+  const otherClass = joinedFailure(JSON.stringify({ ...value, failureName: "Error" }));
+  for (const field of ["gatewayCode", "diagnosticCode", "httpStatus"]) {
+    assert.equal(Object.hasOwn(otherClass, field), false);
+  }
+  const oversized = joinedFailure(JSON.stringify({ ...value, body: "private".repeat(3000) }));
+  assert.deepEqual(oversized, { code: "joined-driver-failed", at: "driver" });
+  const replaced = joinedFailure(
+    JSON.stringify(value) + "\n" + JSON.stringify({ phase: "failed", at: "guard" }),
+  );
+  for (const field of [
+    "driverCode",
+    "failureName",
+    "gatewayCode",
+    "diagnosticCode",
+    "httpStatus",
+  ]) {
+    assert.equal(Object.hasOwn(replaced, field), false);
+  }
+});
+
 void test("sandbox preflight failure exports only its fixed diagnostic code", () => {
   const failed = {
     phase: "failed",

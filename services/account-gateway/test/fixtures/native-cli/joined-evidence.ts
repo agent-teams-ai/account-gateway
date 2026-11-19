@@ -419,6 +419,8 @@ export function joinedFailure(raw: string) {
         "inert-reads",
         "unsupported-settings-zero-entry",
         "native-tool-roundtrip",
+        "native-tool-request",
+        "native-tool-continuation",
         "read-only-quota-collector",
         "reconnect-and-canonical-erasure",
       ].map((step) => provider + "-" + step),
@@ -427,6 +429,38 @@ export function joinedFailure(raw: string) {
   let at = "driver",
     frame: string | undefined,
     failureCode: string | undefined;
+  const failureNames = new Set([
+    "GatewayError",
+    "AssertionError",
+    "Error",
+    "TypeError",
+    "RangeError",
+    "SyntaxError",
+  ]);
+  const gatewayCodes = new Set([
+    "invalid_input",
+    "transport",
+    "invalid_response",
+    "cancelled",
+    "safe_error",
+  ]);
+  const diagnosticCodes = new Set([
+    "invalid_request",
+    "unauthenticated",
+    "forbidden",
+    "not_found",
+    "conflict",
+    "admission_limited",
+    "upstream_failure",
+    "internal_error",
+  ]);
+  let details: {
+    driverCode?: "assertion_failed" | "qualification_failed";
+    failureName?: string;
+    gatewayCode?: string;
+    diagnosticCode?: string;
+    httpStatus?: number;
+  } = {};
   for (const line of raw.split(/\r?\n/)) {
     if (line.length > 16_384) {
       continue;
@@ -435,6 +469,30 @@ export function joinedFailure(raw: string) {
       const value = record(JSON.parse(line) as unknown);
       if (value?.phase !== "failed") {
         continue;
+      }
+      // Export only closed driver/SDK classifications, never messages or references.
+      details = {};
+      if (value.code === "assertion_failed" || value.code === "qualification_failed") {
+        details.driverCode = value.code;
+      }
+      if (typeof value.failureName === "string" && failureNames.has(value.failureName)) {
+        details.failureName = value.failureName;
+      }
+      if (value.failureName === "GatewayError") {
+        if (typeof value.failureCode === "string" && gatewayCodes.has(value.failureCode)) {
+          details.gatewayCode = value.failureCode;
+        }
+        if (typeof value.diagnosticCode === "string" && diagnosticCodes.has(value.diagnosticCode)) {
+          details.diagnosticCode = value.diagnosticCode;
+        }
+        if (
+          typeof value.httpStatus === "number" &&
+          Number.isInteger(value.httpStatus) &&
+          value.httpStatus >= 100 &&
+          value.httpStatus <= 599
+        ) {
+          details.httpStatus = value.httpStatus;
+        }
       }
       if (typeof value.at === "string" && phases.has(value.at)) {
         at = value.at;
@@ -461,6 +519,7 @@ export function joinedFailure(raw: string) {
   return {
     code: "joined-driver-failed",
     at,
+    ...details,
     ...(isNonemptyString(frame) ? { frame } : {}),
     ...(isNonemptyString(failureCode) ? { failureCode } : {}),
   };
