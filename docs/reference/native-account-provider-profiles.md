@@ -127,7 +127,7 @@ Native definition хранит фактическую protocol/model/auth под
 
 ## 7. Тесты и Definition of Done
 
-Полный pure apicompat suite проверен локально до последнего checkpoint. Native/SQL/joined результаты дляdc4 публикуются в qualification; старые runs не засчитываются за изменённый head.
+Полный pure apicompat suite проверен на Native `fd759624`, production-эквивалентном текущему `2cc5862f`. Точные Native/SQL/joined результаты публикуются в qualification; старые runs не засчитываются за изменённый код.
 
 Общий fixture scenario переиспользуется для обоих профилей; независимые ожидаемые payload/terminal values не генерируются тем же converter, который тестируется.
 
@@ -138,7 +138,7 @@ Native definition хранит фактическую protocol/model/auth под
 - Metadata unavailable/unsupported не ломает корректный inference; key profile не изображается подпиской.
 - Exact profile passes existing native/Gateway qualification и real RR joined harness с pinned runner/model.
 
-Текущий прогон использует signed/encrypted synthetic fixtures, actual native HTTP/SQL и pinned review runner. Live availability/entitlement подтверждаются только отдельно разрешёнными реальными credentials; они не подменяются тестовыми. Production deployment не выполняется, дополнительного probe при открытии UI нет.
+Уже получены synthetic native HTTP/SQL evidence и узкий CLI carrier probe. Полный Native → Gateway → Review Router joined flow с pinned runner остаётся отдельным acceptance gate до его успешного завершения; наличие подготовленного harness не является его результатом. Live availability/entitlement подтверждаются только отдельно разрешёнными реальными credentials; они не подменяются тестовыми. Production deployment не выполняется, дополнительного probe при открытии UI нет.
 
 Канонический бюджет D находится в [основном плане, §9](native-account-integration-plan.md); он уже включает выявленные protected header/target policy и bounded signature codec. Gateway registration и RR shared key form учитываются в B/C и повторно сюда не прибавляются. Диапазон предполагает успешный D0 без нового durable continuation service/runner redesign. Existing plaintext/fail-open reasoning cache не является готовой signature authority: его нельзя переиспользовать без проверки scope/turn и fail-closed semantics. Если minimal carrier не работает, дополнительный scope пересчитывается до объявления full M2 срока.
 

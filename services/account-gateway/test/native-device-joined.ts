@@ -1119,6 +1119,7 @@ async function run(): Promise<void> {
   const ambiguousReplay = await client.connect(ambiguousImport);
   assert.ok(ambiguousReplay.state === "unknown" && ambiguousReplay.error);
   // Safe-error traces identify each HTTP response, not the durable operation.
+  assert.notEqual(ambiguousReplay.error.traceRef, ambiguousResult.error.traceRef);
   assert.deepEqual(ambiguousReplay, {
     ...ambiguousResult,
     error: { ...ambiguousResult.error, traceRef: ambiguousReplay.error.traceRef },

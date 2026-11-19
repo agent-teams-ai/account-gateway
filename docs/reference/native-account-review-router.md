@@ -12,7 +12,7 @@ summary: Потребление SDK, видимость метаданных, ф
 
 Этот пакет добавляет в Review Router сведения о подключённом аккаунте и приоритетные способы входа через публичный SDK Account Gateway. Sub2API остаётся владельцем исходных фактов и протоколов провайдеров; Gateway предоставляет заменяемую границу backend; RR отвечает за права пользователя, подключение к workspace, выбор для ревью и отображение. RR не обращается в административный API Sub2API и не повторяет его обработчики OAuth, разбор токенов, определения тарифа или проверки доступности.
 
-M1 и выбранная M2 реализованы в RR PR #914. Текущая точка интеграции — `d4d39a2b4f0efdd40c5953f463b12349c98b2db4`, SDK собран из Gateway `f2690a3c9cfd0cf61bfb7ca31b802d249105d751`. На предшествующем UI commit `597450b474c6f80e338249019a2454d2f876ad48` успешно завершены все34 actual browser captures; новый SDK pin и source identity проверяются текущими CI отдельно. Active conversation identity теперь ссылается на тот же native-account-info archive; штатные source-stamp/verifier generators выполнены в canonical dependency layout, их два независимых запуска дали одинаковые bytes,29 focused identity/stale-qualification cases прошли. Historical NVIDIA receipt не переписан; bundler behavior не менялся. Это реализация и синтетическая квалификация, не production release. Историческая planning база — RR f1cde67; ссылки на планы76/77/79 остаются историческими.
+M1 и выбранная M2 реализованы в [RR PR #914](https://github.com/777genius/review-router-ai/pull/914). Текущая точка интеграции — `43e475d455e2931b39adef2652c5b8fe921c693e`, SDK собран из Gateway `f2690a3c9cfd0cf61bfb7ca31b802d249105d751`. Этот commit добавляет SQL budget, catalogue-independent recovery и последние исправления ревью; его CI учитывается отдельно. На предыдущем `f9e5055c` browser, C1 и P115 завершены успешно. Source identity была согласована в `d4d39a2b`: штатные generators дали одинаковые bytes в двух fresh запусках, 29 identity/stale-qualification cases прошли. Historical NVIDIA receipt и bundler behavior сохранены. Это реализация и синтетическая квалификация, не production release. Историческая planning база — RR `f1cde67`; ссылки на планы 76/77/79 остаются историческими.
 
 Общие схемы, версии, состояния импорта, ограничения payload и инварианты определены в [каноническом контракте](native-account-contracts.md). Этот документ их использует и не вводит конкурирующие определения. Зависимости и порядок выпуска описаны в [основном плане](native-account-integration-plan.md), нативная сторона — в [пакете A](native-account-sub2api.md), SDK и backend-абстракция — в [пакете B](native-account-gateway.md), новые профили — в [пакете D](native-account-provider-profiles.md), сквозные доказательства — в [квалификации](native-account-qualification.md).
 
@@ -72,7 +72,7 @@ M1 и выбранная M2 реализованы в RR PR #914. Текущая
 
 Metadata использует единую read policy [contracts](native-account-contracts.md): группировка разрешённых refs по owner, ограниченные batches и общий page deadline с резервом final fence. Не переносить limits refresh-discovery 250 ms как новый provider запрос metadata. Несвоевременная или непроверенная metadata не задерживает всю страницу и не выдаётся из старого cache после смены viewer scope.
 
-Фактическая page policy: до200 unique connection IDs, batch50 refs одного owner, concurrency4; до2.5s на начальную authorization/SDK reads, общий deadline3s с final fence. Deadline ограничивает ожидание страницы и новые reads; AbortSignal передаётся SDK. Уже выполняющиеся Prisma authorization queries он не отменяет. Shared SQL resolver сохраняет прежние limits semantics; runtime statement_timeout в этот scope не добавлен. Поэтому bounded UI response не означает DB query cancellation или release connection за тот же срок.
+Фактическая page policy: до 200 unique connection IDs, batch 50 refs одного owner, concurrency 4; до 2,5 s на начальную authorization/SDK reads, общий deadline 3 s с final fence. AbortSignal передаётся SDK. Проверка прав и разрешение source rows выполняются в одной короткой Prisma transaction с прежними authorization predicates. Пул ожидается не более 250 ms; transaction-local `statement_timeout` и `lock_timeout` — не более 500 ms, с учётом оставшегося page budget и резерва на rollback. SDK/provider HTTP остаётся снаружи transaction. В application port передаётся только абсолютный deadline; SQL-настройки принадлежат host adapter. Shared resolver сохраняет прежние limits semantics, лимиты применяются только к metadata calls. При истечении бюджета приватные сведения не выдаются. Реальные PostgreSQL tests блокируют source и membership rows, проверяют server cancellation, повторное использование того же соединения и восстановление session settings.
 
 | Наблюдатель | Identity/plan metadata | Поведение существующих limits |
 | --- | --- | --- |
@@ -176,19 +176,13 @@ RR использует tracked `vendor/account-gateway/agent-teams-account-gate
 
 ### Состояние квалификации реализации
 
-Точные results для head6c490c0 фиксируются отдельно:
+Текущая матрица результатов, точных source revisions и оставшихся gates ведётся в одном месте: [qualification §8](native-account-qualification.md). Старый receipt не переносит свой статус на новый head.
 
-| Группа | Наблюдённый результат |
-| --- | --- |
-| C1 integration/architecture | Run44454251528 success:676files architecture, Foundation, metadata scoped profile/layout, provider-accounts source/test typechecks/build |
-| C1 behavioral/PG |48/48 и26/26 actual PostgreSQL |
-| P115 controlled HTTP | Run44454251536 success, real Gateway HTTP1/1 |
-| Historical focused M2/UI и installed SDK |132 cases плюс34 installed-SDK/catalog cases; не подменяют full Web checks |
-| Migration compatibility |359/359; fresh165 migration replay+C2b1/1; opt-in authority suite skipped |
-| Pending metadata variant types | Strict TS7 against actual three object expressions passes; прежний вариант rejects TS2322 |
-| Browser597450 | Run44457361015 success:34/34 actual captures, exact source receipt, ноль page/console/network ошибок и overflow; representative PNG просмотрены |
-| Новый SDK и identityd4d39a2b | Frozen install,50 archive files во всех3 consumers и36 focused cases PASS; full Web/C1/P115/browser CI этого commit отслеживаются отдельно |
-| Full Web TS | Требуется завершение штатного CI; локальные broad attempts terminated и не засчитаны |
+Исторические результаты для RR `6c490c0`: C1 [44454251528](https://github.com/777genius/review-router-ai/actions/runs/44454251528) прошёл architecture/Foundation/layout и provider-accounts type/build gates; behavioral/PG части — 48/48 и 26/26. P115 [44454251536](https://github.com/777genius/review-router-ai/actions/runs/44454251536) подтвердил controlled Gateway HTTP. Это отдельная исходная ревизия.
+
+Последующие независимые receipts: browser `597450b4` дал 34/34 captures в [44457361015](https://github.com/777genius/review-router-ai/actions/runs/44457361015); SDK pin `b9551099` проверен frozen install, сравнением всех 50 файлов в трёх consumers и 36 focused cases; source identity `d4d39a2b` прошла штатные generators и 29 связанных tests. C1, P115 и browser для `d4d39a2b` также завершены успешно, с run links в общей матрице. Эти результаты не заменяют full Web gate последующих review fixes.
+
+Строгий metadata TS project охватывает feature, fixed adapters, общий metadata UI и их собственные tests. Широкий `dashboard-gateway-accounts.test.ts` остаётся в существующих full Web typecheck и runtime suites: он также проверяет lifecycle, auth и model catalog. Он не расширяет scoped adoption метаданных на весь Web host. `skipLibCheck: false` и mandatory binding `metadata:typecheck` в `architecture:check` сохранены; дополнительных auth dependencies или declaration shims не требуется.
 
 Browser workflow использует existing provider-setup-visual harness: actual Next/sessions/PostgreSQL migrations, loopback Gateway fixtures и запрет внешних requests. Требуются34 scenario/width/theme captures, exact head, sourceBefore=sourceAfter, no page/network errors/overflow. Source proof исключает только Next-generated next-env.d.ts, не SDK/lock/product code. Synthetic upstream не равен live provider access.
 
@@ -208,26 +202,26 @@ Migration tree содержит165files. Exact165→164 reducer проверяе
 
 Gemini API key успешно сохранён и metadata endpoint доступен, но pinned Codex объявляет custom tool, который адаптер пока не обрабатывает. Подключение может существовать; выбрать его для ревью пока нельзя. После доказанной совместимости реального tool roundtrip и итогового результата capability разрешает нужный профиль. Такой gate не блокирует выпуск metadata для уже квалифицированного Codex.
 
-[rr-profile]: https://github.com/777genius/review-router-ai/blob/d4d39a2b4f0efdd40c5953f463b12349c98b2db4/architecture/account-metadata/consumer-module-profile.json
-[rr-foundation]: https://github.com/777genius/review-router-ai/blob/d4d39a2b4f0efdd40c5953f463b12349c98b2db4/architecture/foundation/provider-seams.yaml
-[rr-limits-composition]: https://github.com/777genius/review-router-ai/blob/d4d39a2b4f0efdd40c5953f463b12349c98b2db4/apps/web/src/server/account-limits-composition.ts
+[rr-profile]: https://github.com/777genius/review-router-ai/blob/43e475d455e2931b39adef2652c5b8fe921c693e/architecture/account-metadata/consumer-module-profile.json
+[rr-foundation]: https://github.com/777genius/review-router-ai/blob/43e475d455e2931b39adef2652c5b8fe921c693e/architecture/foundation/provider-seams.yaml
+[rr-limits-composition]: https://github.com/777genius/review-router-ai/blob/43e475d455e2931b39adef2652c5b8fe921c693e/apps/web/src/server/account-limits-composition.ts
 [fms]: https://github.com/agent-teams-ai/.github/blob/f5653f5630057524a4ee44e50c16e138442a9b42/docs/architecture/feature-module-standard/v1.1.md
-[rr-limits-service]: https://github.com/777genius/review-router-ai/blob/d4d39a2b4f0efdd40c5953f463b12349c98b2db4/apps/web/src/server/account-limits-service.ts
-[rr-limits-tests]: https://github.com/777genius/review-router-ai/blob/d4d39a2b4f0efdd40c5953f463b12349c98b2db4/apps/web/src/server/account-limits-service.test.ts
-[rr-hydration]: https://github.com/777genius/review-router-ai/blob/d4d39a2b4f0efdd40c5953f463b12349c98b2db4/apps/web/src/server/dashboard-gateway-accounts.ts
-[rr-identity]: https://github.com/777genius/review-router-ai/blob/d4d39a2b4f0efdd40c5953f463b12349c98b2db4/apps/web/app/dashboard/account-identity.tsx
-[rr-dialog]: https://github.com/777genius/review-router-ai/blob/d4d39a2b4f0efdd40c5953f463b12349c98b2db4/apps/web/app/dashboard/accounts-add-dialog.tsx
-[rr-personal]: https://github.com/777genius/review-router-ai/blob/d4d39a2b4f0efdd40c5953f463b12349c98b2db4/apps/web/src/server/personal-canonical-accounts.ts
-[rr-runner]: https://github.com/777genius/review-router-ai/blob/d4d39a2b4f0efdd40c5953f463b12349c98b2db4/packages/features/codex-oauth-rotating/src/action/github-action.ts
-[rr-joined]: https://github.com/777genius/review-router-ai/blob/d4d39a2b4f0efdd40c5953f463b12349c98b2db4/scripts/review-investigation-paired-e2e/support/provider-subscriptions-joined.ts
+[rr-limits-service]: https://github.com/777genius/review-router-ai/blob/43e475d455e2931b39adef2652c5b8fe921c693e/apps/web/src/server/account-limits-service.ts
+[rr-limits-tests]: https://github.com/777genius/review-router-ai/blob/43e475d455e2931b39adef2652c5b8fe921c693e/apps/web/src/server/account-limits-service.test.ts
+[rr-hydration]: https://github.com/777genius/review-router-ai/blob/43e475d455e2931b39adef2652c5b8fe921c693e/apps/web/src/server/dashboard-gateway-accounts.ts
+[rr-identity]: https://github.com/777genius/review-router-ai/blob/43e475d455e2931b39adef2652c5b8fe921c693e/apps/web/app/dashboard/account-identity.tsx
+[rr-dialog]: https://github.com/777genius/review-router-ai/blob/43e475d455e2931b39adef2652c5b8fe921c693e/apps/web/app/dashboard/accounts-add-dialog.tsx
+[rr-personal]: https://github.com/777genius/review-router-ai/blob/43e475d455e2931b39adef2652c5b8fe921c693e/apps/web/src/server/personal-canonical-accounts.ts
+[rr-runner]: https://github.com/777genius/review-router-ai/blob/43e475d455e2931b39adef2652c5b8fe921c693e/packages/features/codex-oauth-rotating/src/action/github-action.ts
+[rr-joined]: https://github.com/777genius/review-router-ai/blob/43e475d455e2931b39adef2652c5b8fe921c693e/scripts/review-investigation-paired-e2e/support/provider-subscriptions-joined.ts
 [rr-plan76]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/ai-docs/architecture/76-single-connections-list.md
 [rr-plan77]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/ai-docs/architecture/77-single-account-stack.md
 [rr-plan79]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/ai-docs/architecture/79-one-step-add-provider.md
-[rr-sdk]: https://github.com/777genius/review-router-ai/blob/d4d39a2b4f0efdd40c5953f463b12349c98b2db4/apps/web/package.json
-[rr-workspace]: https://github.com/777genius/review-router-ai/blob/d4d39a2b4f0efdd40c5953f463b12349c98b2db4/apps/web/src/server/account-gateway-accounts.ts
-[rr-overview]: https://github.com/777genius/review-router-ai/blob/d4d39a2b4f0efdd40c5953f463b12349c98b2db4/apps/web/src/server/accounts-overview.ts
-[rr-model-detail]: https://github.com/777genius/review-router-ai/blob/d4d39a2b4f0efdd40c5953f463b12349c98b2db4/apps/web/src/server/gateway-model-account-options.ts
-[rr-personal-composition]: https://github.com/777genius/review-router-ai/blob/d4d39a2b4f0efdd40c5953f463b12349c98b2db4/apps/web/src/server/personal-account-composition.ts
+[rr-sdk]: https://github.com/777genius/review-router-ai/blob/43e475d455e2931b39adef2652c5b8fe921c693e/apps/web/package.json
+[rr-workspace]: https://github.com/777genius/review-router-ai/blob/43e475d455e2931b39adef2652c5b8fe921c693e/apps/web/src/server/account-gateway-accounts.ts
+[rr-overview]: https://github.com/777genius/review-router-ai/blob/43e475d455e2931b39adef2652c5b8fe921c693e/apps/web/src/server/accounts-overview.ts
+[rr-model-detail]: https://github.com/777genius/review-router-ai/blob/43e475d455e2931b39adef2652c5b8fe921c693e/apps/web/src/server/gateway-model-account-options.ts
+[rr-personal-composition]: https://github.com/777genius/review-router-ai/blob/43e475d455e2931b39adef2652c5b8fe921c693e/apps/web/src/server/personal-account-composition.ts
 [cms]: https://github.com/agent-teams-ai/get-modular/blob/7a7c4c54add9ccc06509423d7b89bcfc037227b1/docs/architecture/common-assembly.md
 [authoring]: https://github.com/agent-teams-ai/get-modular/blob/7a7c4c54add9ccc06509423d7b89bcfc037227b1/docs/guides/module-authoring.md
 [eqs]: https://github.com/agent-teams-ai/.github/blob/c8f3e7ba220241f79292c84c72712653019aa1df/docs/engineering-quality-standard.md
