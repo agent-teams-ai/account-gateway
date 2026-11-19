@@ -1,4 +1,4 @@
-name: Native provider stages without Review Router acceptance
+name: Native clients and provider stages without Review Router acceptance
 on:
   push:
     branches: [test/native-provider-stage-20261119]
@@ -8,8 +8,8 @@ concurrency:
   group: native-provider-stage-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  native_provider_stages:
-    name: native provider stages (Node ${{ matrix.node }})
+  native_client_provider_stages:
+    name: native clients and providers (Node ${{ matrix.node }}, no RR acceptance)
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
@@ -40,7 +40,7 @@ jobs:
         with:
           go-version: "1.27.3"
           cache: false
-      - name: Prepare exact native source
+      - name: Prepare exact source and pinned real clients
         run: |
           test "$(node --version)" = "v${{ matrix.node }}"
           cli_root="$RUNNER_TEMP/gateway-native-clients"
@@ -63,6 +63,7 @@ jobs:
           git -C "$cli_root/native-source" checkout --detach "$NATIVE_COMMIT"
           test "$(git -C "$cli_root/native-source" rev-parse HEAD)" = "$NATIVE_COMMIT"
           test -z "$(git -C "$cli_root/native-source" status --porcelain)"
+          python3 services/account-gateway/test/fixtures/native-cli/install.py --destination "$cli_root/clients"
       - name: Install frozen TypeScript dependencies and build the real SDK
         run: |
           test "$(pnpm --version)" = 11.28.2
@@ -75,9 +76,15 @@ jobs:
           pnpm --dir services/account-gateway run typecheck
           node --test services/account-gateway/test/fixtures/native-cli/joined-evidence.test.ts
           git diff --exit-code -- pnpm-lock.yaml
-      - name: Build the existing isolated PostgreSQL runtime
+      - name: Build isolated real-client and PostgreSQL lifecycle test binaries
         run: |
           cd "$GATEWAY_CLIENT_ROOT/native-source/backend"
+          go test -tags unit,nativecli -c ./internal/gatewaytransport -o "$GATEWAY_CLIENT_ROOT/build/native-cli.test"
+          go test -c ./internal/repository -o "$GATEWAY_CLIENT_ROOT/build/native-repository.test"
+          CGO_ENABLED=0 go test -tags unit -c -ldflags='-s -w' ./internal/service -o "$GATEWAY_CLIENT_ROOT/build/native-account-info-service.test"
+          CGO_ENABLED=0 go test -tags gatewaycustody -c -ldflags='-s -w' ./internal/repository -o "$GATEWAY_CLIENT_ROOT/build/native-account-info-repository.test"
+          CGO_ENABLED=0 go test -tags unit -c -ldflags='-s -w' ./internal/gatewaybootstrap -o "$GATEWAY_CLIENT_ROOT/build/native-account-info-bootstrap.test"
+          CGO_ENABLED=0 go test -tags unit -c -ldflags='-s -w' ./internal/handler/admin -o "$GATEWAY_CLIENT_ROOT/build/native-account-info-handler.test"
           git diff --exit-code -- go.mod go.sum
           cat > "$GATEWAY_CLIENT_ROOT/container/Dockerfile" <<'DOCKERFILE'
           ARG PG_IMAGE
@@ -89,11 +96,92 @@ jobs:
             && rm -rf /var/lib/apt/lists/*
           DOCKERFILE
           docker build --pull --build-arg "PG_IMAGE=$PG_IMAGE" --tag gateway-native-clients:qualified "$GATEWAY_CLIENT_ROOT/container"
+      - name: Native metadata and provider boundary unit qualification
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { spawnSync } from 'node:child_process';
+          import { writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { goTestEvidence } from './services/account-gateway/test/fixtures/native-cli/evidence.ts';
+          const suites = [
+            ['service', '^TestGateway(AccountInfo|QuotaAndInfo|Codex(Info|RetainedInfo|Maintenance)|ClaudeInfo|GrokInfo|OAuthInfo|AccountCapabilities|GeminiContinuation|NativeGemini|NativeOfficial|NativeAnthropicSchema|NativeOAuthImport)', [
+              'TestGatewayAccountInfoReaderUsesCurrentSnapshotAndFinalAuthority',
+              'TestGatewayCodexMaintenanceHydratesOnceWithoutProviderHTTP',
+              'TestGatewayNativeOfficialAnthropicOriginalSchemaBeforeSuccess',
+              'TestGatewayNativeOfficialGeminiActualTLSContinuationAndSchema',
+              'TestGatewayNativeOAuthImportStrictEscapedIngressAndSeparateCodec',
+            ]],
+            ['bootstrap', '^Test(NativeAccountCapabilities|NativeOfficialAPIConfig|GatewayAccountLimitsAuthorityHTTP)', [
+              'TestNativeAccountCapabilitiesExposeImportsOnlyWithComposedCodex',
+              'TestNativeOfficialAPIConfigUsesExistingClosedFD6Profiles',
+              'TestGatewayAccountLimitsAuthorityHTTP',
+            ]],
+            ['handler', '^TestGateway(AccountInfoPrivateHTTPContract|NativeOAuthConnectHTTPImportStrictIngress)', [
+              'TestGatewayAccountInfoPrivateHTTPContract',
+              'TestGatewayNativeOAuthConnectHTTPImportStrictIngress',
+            ]],
+          ];
+          for (const [suite, pattern, required] of suites) {
+            const binary = join(process.env.GATEWAY_CLIENT_ROOT, 'build', 'native-account-info-' + suite + '.test');
+            const options = { encoding: 'utf8', timeout: 120000, maxBuffer: 2 * 1024 * 1024 };
+            const listed = spawnSync(binary, ['-test.list', pattern], options);
+            assert.equal(listed.status, 0, suite + ' test listing');
+            const names = listed.stdout.split(/\r?\n/).filter(name => /^Test[A-Za-z0-9_]{1,160}$/.test(name));
+            assert.ok(required.every(name => names.includes(name)), suite + ' required tests must exist');
+            const executed = spawnSync(binary, ['-test.run', pattern, '-test.v', '-test.count=1', '-test.timeout=110s'], options);
+            const evidence = goTestEvidence(executed.stdout ?? '', names);
+            writeFileSync(join(process.env.GATEWAY_CLIENT_ROOT, 'build', 'native-' + suite + '-unit.json'), JSON.stringify(evidence) + '\n');
+            console.log(JSON.stringify({ suite, ...evidence }));
+            assert.equal(executed.status, 0, suite + ' unit execution');
+            assert.equal(evidence.tests.length, names.length, suite + ' no missing test results');
+            assert.ok(names.every(name => evidence.tests.some(test => test.name === name && test.outcome === 'PASS')), suite + ' every selected test must pass without skip');
+          }
+          NODE
       - name: Build source-pinned fixtures with the existing builder
         run: |
           node services/account-gateway/test/fixtures/native-cli/build-joined.ts \
             --repo "$GITHUB_WORKSPACE" --native-source "$GATEWAY_CLIENT_ROOT/native-source" \
             --output "$GATEWAY_CLIENT_ROOT/build/joined" --go "$GATEWAY_CLIENT_GO" \
+            --native-commit "$NATIVE_COMMIT" --gateway-commit "$(git rev-parse HEAD)"
+      - name: Race-check the actual public ingress and bounded bootstrap
+        run: |
+          node --test services/account-gateway/test/fixtures/native-cli/evidence.test.ts
+          node services/account-gateway/test/fixtures/native-cli/race.ts \
+            "$GATEWAY_CLIENT_ROOT/native-source/backend" "$GATEWAY_CLIENT_ROOT/build"
+      - name: Real Codex and Claude Code through Go, OAuth and PostgreSQL without egress
+        run: |
+          docker run --rm --network none --user 0:0 --cpus 2 --memory 4g --pids-limit 256 --ulimit nofile=4096:4096 \
+            --mount "type=bind,source=$GATEWAY_CLIENT_NODE_HOME,target=$GATEWAY_CLIENT_NODE_HOME,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=$GITHUB_WORKSPACE,readonly" \
+            --mount "type=bind,source=$GATEWAY_CLIENT_ROOT,target=$GATEWAY_CLIENT_ROOT,readonly" \
+            --mount "type=bind,source=$GATEWAY_CLIENT_ROOT/artifacts,target=$GATEWAY_CLIENT_ROOT/artifacts" \
+            --entrypoint "$GATEWAY_CLIENT_NODE" gateway-native-clients:qualified \
+            "$GITHUB_WORKSPACE/services/account-gateway/test/fixtures/native-cli/run.ts" \
+            --pg-bin /usr/lib/postgresql/17/bin \
+            --test-binary "$GATEWAY_CLIENT_ROOT/build/native-cli.test" \
+            --repository-test-binary "$GATEWAY_CLIENT_ROOT/build/native-repository.test" \
+            --account-info-test-binary "$GATEWAY_CLIENT_ROOT/build/native-account-info-repository.test" \
+            --clients "$GATEWAY_CLIENT_ROOT/clients/clients.json" \
+            --artifacts "$GATEWAY_CLIENT_ROOT/artifacts/native-clients" \
+            --native-commit "$NATIVE_COMMIT" --gateway-commit "$(git rev-parse HEAD)"
+      - name: Join real Codex and Claude Code to TypeScript authority without Review Router acceptance
+        run: |
+          docker run --rm --network none --user 0:0 --cpus 2 --memory 4g --pids-limit 256 --ulimit nofile=4096:4096 \
+            --mount "type=bind,source=$GATEWAY_CLIENT_NODE_HOME,target=$GATEWAY_CLIENT_NODE_HOME,readonly" \
+            --mount "type=bind,source=$GATEWAY_CLIENT_GO_HOME,target=$GATEWAY_CLIENT_GO_HOME,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=$GITHUB_WORKSPACE,readonly" \
+            --mount "type=bind,source=$GATEWAY_CLIENT_ROOT,target=$GATEWAY_CLIENT_ROOT,readonly" \
+            --mount "type=bind,source=$GATEWAY_CLIENT_ROOT/build/joined/native-claude-joined,target=/tmp/native-claude-joined,readonly" \
+            --mount "type=bind,source=$GATEWAY_CLIENT_ROOT/build/joined/native-device-joined,target=/tmp/native-device-joined,readonly" \
+            --mount "type=bind,source=$GATEWAY_CLIENT_ROOT/artifacts,target=$GATEWAY_CLIENT_ROOT/artifacts" \
+            --entrypoint "$GATEWAY_CLIENT_NODE" gateway-native-clients:qualified \
+            "$GITHUB_WORKSPACE/services/account-gateway/test/fixtures/native-cli/joined.ts" \
+            --repo "$GITHUB_WORKSPACE" --pg-bin /usr/lib/postgresql/17/bin --go "$GATEWAY_CLIENT_GO" \
+            --claude-binary /tmp/native-claude-joined/fixture --codex-binary /tmp/native-device-joined/fixture \
+            --clients "$GATEWAY_CLIENT_ROOT/clients/clients.json" \
+            --build-receipt "$GATEWAY_CLIENT_ROOT/build/joined/joined-build.json" \
+            --artifacts "$GATEWAY_CLIENT_ROOT/artifacts/joined-clients" \
             --native-commit "$NATIVE_COMMIT" --gateway-commit "$(git rev-parse HEAD)"
       - name: Qualify six native providers through the facade and SDK without a CLI
         run: |
@@ -109,35 +197,52 @@ jobs:
             --repo "$GITHUB_WORKSPACE" --pg-bin /usr/lib/postgresql/17/bin --go "$GATEWAY_CLIENT_GO" \
             --provider-binary /tmp/native-provider-joined/fixture --scope native-providers \
             --build-receipt "$GATEWAY_CLIENT_ROOT/build/joined/joined-build.json" \
-            --artifacts "$GATEWAY_CLIENT_ROOT/artifacts/joined-clients" \
+            --artifacts "$GATEWAY_CLIENT_ROOT/artifacts/native-providers" \
             --native-commit "$NATIVE_COMMIT" --gateway-commit "$(git rev-parse HEAD)"
-      - name: Expose bounded native provider stage evidence
+      - name: Expose bounded native client and provider evidence without Review Router acceptance
         if: ${{ always() && env.GATEWAY_CLIENT_ROOT != '' }}
         run: |
           sudo chown -R "$(id -u):$(id -g)" "$GATEWAY_CLIENT_ROOT/artifacts"
           node --input-type=module -e '
             import { readFileSync, existsSync } from "node:fs";
             import { join } from "node:path";
-            const path = join(process.env.GATEWAY_CLIENT_ROOT, "artifacts", "joined-clients", "result.json");
-            if (existsSync(path)) process.stdout.write(readFileSync(path, "utf8"));
+            for (const stage of ["native-clients", "joined-clients", "native-providers"]) {
+              const path = join(process.env.GATEWAY_CLIENT_ROOT, "artifacts", stage, "result.json");
+              if (existsSync(path)) process.stdout.write(stage + "\n" + readFileSync(path, "utf8") + "\n");
+            }
           '
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() && env.GATEWAY_CLIENT_ROOT != '' }}
         with:
-          name: native-provider-stages-${{ matrix.node }}
+          name: native-client-provider-stages-no-rr-${{ matrix.node }}
           path: |
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-clients/result.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-clients/network.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-clients/test.log
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-clients/repository-test.log
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-clients/account-info-test.log
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/public-race.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/reservation-race.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/bootstrap-race.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/upstream-race.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/diagnostics-race.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/joined/joined-build.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/native-service-unit.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/native-bootstrap-unit.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/native-handler-unit.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/joined-clients/result.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/joined-clients/network.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-providers/result.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-providers/network.json
           if-no-files-found: error
           retention-days: 14
-  native_provider_stage_gate:
-    name: native provider stage gate
-    needs: native_provider_stages
+  native_partial_stage_gate:
+    name: native clients and providers partial gate (no Review Router acceptance)
+    needs: native_client_provider_stages
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Require both independent native provider stage lanes
+      - name: Require both partial native client and provider lanes
         env:
-          LANE_RESULT: ${{ needs.native_provider_stages.result }}
+          LANE_RESULT: ${{ needs.native_client_provider_stages.result }}
         run: test "$LANE_RESULT" = success
