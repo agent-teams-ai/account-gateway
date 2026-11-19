@@ -192,3 +192,13 @@ Metadata authorization использует одну короткую transactio
 Preflight и фактический Action используют один исходный bubblewrap backend и прежний read-only режим. Managed policy, safe environment, workspace, запрет записи и TCP, NoNewPrivs, Docker network и privilege settings сохранены. Автоматического переключения backend после отказа нет. Старое успешное доказательство другого backend не принимается. Закрытые диагностические коды отклоняют произвольный текст, включая лишние CR/LF; stderr и provider content не экспортируются.
 
 Проверены platform layout, права executable, hashes и синтаксис всех 12 shell steps workflow. Фактический local preflight с полной поставкой под действующими ограничениями завершился `child_nonzero_exit`, provider calls 0; это FAIL, не qualification. Окружение не ослаблялось. Положительное доказательство требует штатного CI на точных новых ревизиях.
+
+### Повторная проверка CI и доказательств всех профилей
+
+Gateway `7589675` завершил package, kernel, все семь full-stack/load lanes и CodeQL успешно. RR `80bf1ea7` завершил C1, P115 и 34/34 browser captures; manifest, SHA-проверенный artifact и шесть representative PNG дополнительно проверены. Точные run IDs и границы этих receipts указаны в qualification.
+
+Обе Node lanes native run `44532723289` завершились отказом actual CLI sandbox preflight до первого provider call. Полная поставка CLI и предыдущие native/SQL/real-client этапы прошли; generic `child_nonzero_exit` не позволяет приписать отказ конкретному механизму. Узкое продолжение добавляет закрытое распознавание известных namespace-refusal сообщений bundled bubblewrap без экспорта stderr, путей и environment. Unknown failure остаётся отказом. Docker restrictions, backend, managed policy и положительные/отрицательные preflight controls не меняются.
+
+P2 к test receipt исправлен: сохранение proof проверяется для каждого из шести профилей; отсутствие proof у любого одного профиля отклоняется. Это проверка полноты evidence validator, а не замена отсутствующего успешного actual sandbox/review flow.
+
+Диагностика опубликована в RR [`de2b59bf`](https://github.com/777genius/review-router-ai/commit/de2b59bfd3bf27b56119e25090e8277f3075cb92) после 14/14 real-child regression cases, strict TS7, форматирования и независимого ревью. Gateway pin использует эту точную ревизию. Согласованный parser и P2 regression прошли 19/19 cases; произвольные сообщения и trailing whitespace по-прежнему отклоняются.

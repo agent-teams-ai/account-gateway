@@ -296,8 +296,25 @@ void test("provider evidence requires six real RR tool/schema receipts and remov
   const safe = joinedProviderReceipt(diagnostic + shape + proof, expected);
   assert.equal(safe.rrReceipts.length, 6);
   assert.equal(safe.rrReceipts[5]?.structuredOutputRequests, 2);
-  assert.deepEqual(safe.rrReceipts[5]?.sandboxQualification, sandboxQualification);
+  for (const receipt of safe.rrReceipts) {
+    assert.deepEqual(receipt.sandboxQualification, sandboxQualification);
+  }
   assert.equal(JSON.stringify(safe).includes("private-"), false);
+  for (let omitted = 0; omitted < value.rrReceipts.length; omitted++) {
+    assert.throws(
+      () =>
+        joinedProviderReceipt(
+          JSON.stringify({
+            ...value,
+            rrReceipts: value.rrReceipts.map((receipt, index) =>
+              index === omitted ? { ...receipt, sandboxQualification: undefined } : receipt,
+            ),
+          }),
+          expected,
+        ),
+      /joined-proof-invalid/,
+    );
+  }
   for (const patch of [
     { rrAcceptance: false },
     { nativeHead: "0".repeat(40) },
@@ -328,7 +345,6 @@ void test("provider evidence requires six real RR tool/schema receipts and remov
     { declaredFunctionTools: 129 },
     { executionClosureAcknowledged: false },
     { reasoningOmitted: false },
-    { sandboxQualification: undefined },
     { sandboxQualification: { ...sandboxQualification, childExecuted: false } },
     { sandboxQualification: { ...sandboxQualification, workspaceWriteDenied: false } },
     { sandboxQualification: { ...sandboxQualification, loopbackTCPDenied: false } },
@@ -394,6 +410,7 @@ void test("sandbox preflight failure exports only its fixed diagnostic code", ()
     "child_timeout",
     "child_output_limit",
     "policy_refused",
+    "child_namespace_refused",
     "child_usage_exit",
     "child_panic_exit",
     "child_nonzero_exit",
