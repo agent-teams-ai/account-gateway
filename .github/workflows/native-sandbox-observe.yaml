@@ -1,0 +1,55 @@
+name: Read-only native runtime environment observation
+on:
+  push:
+    branches: [test/native-sandbox-observe-20261119]
+    paths:
+      - .github/workflows/native-sandbox-observe.yaml
+      - services/account-gateway/test/fixtures/native-cli/observe-runtime.ts
+permissions:
+  contents: read
+concurrency:
+  group: native-sandbox-observe-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  observe_environment:
+    name: Observe runner and container policy without a sandbox probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '26.11.1'
+      - name: Read host metadata and the pinned base image
+        run: |
+          test "$(node --version)" = v26.11.1
+          observe_root="$RUNNER_TEMP/native-sandbox-observe"
+          mkdir -m 700 "$observe_root" "$observe_root/artifacts"
+          echo "GATEWAY_OBSERVE_ROOT=$observe_root" >> "$GITHUB_ENV"
+          docker pull "$PG_IMAGE"
+          node services/account-gateway/test/fixtures/native-cli/observe-runtime.ts host > "$observe_root/artifacts/host.json"
+      - name: Read container metadata with the existing outer controls
+        run: |
+          observe_node="$(command -v node)"
+          observe_node_home="$(dirname "$(dirname "$observe_node")")"
+          docker run --rm --network none --user 0:0 --cpus 2 --memory 4g --pids-limit 256 --ulimit nofile=4096:4096 \
+            --mount "type=bind,source=$observe_node_home,target=$observe_node_home,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=$GITHUB_WORKSPACE,readonly" \
+            --mount "type=bind,source=$GATEWAY_OBSERVE_ROOT,target=$GATEWAY_OBSERVE_ROOT,readonly" \
+            --mount "type=bind,source=$GATEWAY_OBSERVE_ROOT/artifacts,target=$GATEWAY_OBSERVE_ROOT/artifacts" \
+            --env "GITHUB_SHA=$GITHUB_SHA" \
+            --entrypoint "$observe_node" "$PG_IMAGE" \
+            "$GITHUB_WORKSPACE/services/account-gateway/test/fixtures/native-cli/observe-runtime.ts" container \
+            > "$GATEWAY_OBSERVE_ROOT/artifacts/container.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() && env.GATEWAY_OBSERVE_ROOT != '' }}
+        with:
+          name: native-runtime-observation-${{ github.sha }}
+          path: ${{ env.GATEWAY_OBSERVE_ROOT }}/artifacts/*.json
+          if-no-files-found: error
+          retention-days: 7
