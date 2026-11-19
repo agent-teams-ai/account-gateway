@@ -22,6 +22,11 @@ import { isNonemptyString } from "./joined-evidence.ts";
 import type { ClientPins, InstalledClients } from "./joined-evidence.ts";
 import { clientTests, goTestEvidence, repositoryTests as repositoryTestNames } from "./evidence.ts";
 
+const accountInfoTests = [
+  "TestGatewayAccountInfoPostgresOrderingAtomicityAndReplacement",
+  "TestGatewayAccountInfoCodexPostgresHydrationAndRefresh",
+  "TestGatewayNativeOAuthImportPostgresClaimsReplayAndLostACK",
+] as const;
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 function check(condition: unknown, code: string): asserts condition {
   const accepted = Boolean(condition);
@@ -115,7 +120,8 @@ async function main() {
     binary = args.get("--test-binary"),
     clientsFile = args.get("--clients"),
     artifacts = args.get("--artifacts");
-  const repositoryTests = args.get("--repository-test-binary");
+  const repositoryTests = args.get("--repository-test-binary"),
+    accountInfoBinary = args.get("--account-info-test-binary");
   check(
     isNonemptyString(pgBin) &&
       isNonemptyString(binary) &&
@@ -127,6 +133,10 @@ async function main() {
   check(
     repositoryTests === undefined || isAbsolute(repositoryTests),
     "absolute-repository-test-binary",
+  );
+  check(
+    accountInfoBinary === undefined || isAbsolute(accountInfoBinary),
+    "absolute-account-info-test-binary",
   );
   check(!existsSync(artifacts), "fresh-artifact-directory-required");
   mkdirSync(artifacts, { recursive: true, mode: 0o700 });
@@ -202,7 +212,8 @@ async function main() {
     success = false,
     stopped = false,
     testLog = "",
-    repositoryLog = "";
+    repositoryLog = "",
+    accountInfoLog = "";
   try {
     await command(
       join(pgBin, "initdb"),
@@ -271,6 +282,52 @@ async function main() {
         "both-claude-postgres-tests-required",
       );
     }
+    if (isNonemptyString(accountInfoBinary)) {
+      for (const [variable, prefix] of [
+        ["GATEWAY_NATIVE_INFO_TEST_DSN", "gateway_info_test_"],
+        ["GATEWAY_NATIVE_CODEX_INFO_TEST_DSN", "gateway_info_test_codex_"],
+        ["GATEWAY_NATIVE_IMPORT_TEST_DSN", "gateway_import_test_"],
+      ]) {
+        const name = prefix + randomUUID().replaceAll("-", "");
+        await command(
+          join(pgBin, "createdb"),
+          ["-h", "127.0.0.1", "-p", String(pgPort), "-U", "postgres", name],
+          env,
+        );
+        env[variable] = `postgresql://postgres@127.0.0.1:${pgPort}/${name}?sslmode=disable`;
+      }
+      try {
+        accountInfoLog = await command(
+          accountInfoBinary,
+          [
+            "-test.v",
+            "-test.run",
+            "^(" + accountInfoTests.join("|") + ")$",
+            "-test.count=1",
+            "-test.timeout",
+            "300s",
+          ],
+          env,
+          { timeout: 320_000 },
+        );
+      } catch (error) {
+        if (error instanceof CommandFailure) {
+          accountInfoLog = error.output;
+        }
+        throw error;
+      }
+      const outcomes = goTestEvidence(accountInfoLog, accountInfoTests).tests;
+      check(
+        !accountInfoLog.includes("SKIP") &&
+          !accountInfoLog.includes("no tests to run") &&
+          outcomes.length === accountInfoTests.length &&
+          accountInfoTests.every(
+            (name) =>
+              outcomes.some((entry) => entry.name === name && entry.outcome === "PASS"),
+          ),
+        "all-account-info-postgres-tests-required",
+      );
+    }
     try {
       testLog = await command(
         binary,
@@ -325,6 +382,13 @@ async function main() {
         { mode: 0o600 },
       );
     }
+    if (isNonemptyString(accountInfoBinary)) {
+      writeFileSync(
+        join(artifacts, "account-info-test.log"),
+        JSON.stringify(goTestEvidence(accountInfoLog, accountInfoTests), null, 2) + "\n",
+        { mode: 0o600 },
+      );
+    }
     const result = {
       kind: "gateway-native-client-qualification/v1",
       outcome: success && stopped ? "pass" : "fail",
@@ -334,6 +398,9 @@ async function main() {
       testBinarySHA256: sha256(readFileSync(binary)),
       repositoryTestBinarySHA256: isNonemptyString(repositoryTests)
         ? sha256(readFileSync(repositoryTests))
+        : undefined,
+      accountInfoTestBinarySHA256: isNonemptyString(accountInfoBinary)
+        ? sha256(readFileSync(accountInfoBinary))
         : undefined,
       pinsSHA256: sha256(pinnedBytes),
       clients: pins.clients.map(

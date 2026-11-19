@@ -23,6 +23,11 @@ function command(binary: string, args: string[], cwd: string) {
     timeout: 600_000,
     maxBuffer: 4_194_304,
   });
+  // This phase compiles checked-in synthetic source only; no fixture is run and
+  // no credential is available. Keep compiler diagnostics visible on failure.
+  if (args[0] === "build" && child.status !== 0 && child.stderr) {
+    process.stderr.write(child.stderr.slice(0, 65_536));
+  }
   check(child.status === 0 && !child.error, "joined-build-command-failed");
   return child.stdout.trim();
 }

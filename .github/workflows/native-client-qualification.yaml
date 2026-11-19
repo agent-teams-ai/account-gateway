@@ -18,7 +18,7 @@ jobs:
         node: ['26.11.1', '24.21.0']
     env:
       NPM_CONFIG_ENGINE_STRICT: 'true'
-      NATIVE_COMMIT: 1e10c0560437bb3326088a7a4722fa6687d3b707
+      NATIVE_COMMIT: dc4ea4491945856c900418c8627c7bac593a62ce
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -95,17 +95,17 @@ jobs:
             && rm -rf /var/lib/apt/lists/*
           DOCKERFILE
           docker build --pull --build-arg "PG_IMAGE=$PG_IMAGE" --tag gateway-native-clients:qualified "$GATEWAY_CLIENT_ROOT/container"
+      - name: Native metadata and provider boundary unit qualification
+        run: |
+          "$GATEWAY_CLIENT_ROOT/build/native-account-info-service.test" -test.run '^TestGateway(AccountInfo|QuotaAndInfo|Codex(Info|RetainedInfo|Maintenance)|ClaudeInfo|GrokInfo|OAuthInfo|AccountCapabilities|GeminiContinuation|NativeGemini|NativeOfficial|NativeAnthropicSchema|NativeOAuthImport)' -test.v -test.count=1
+          "$GATEWAY_CLIENT_ROOT/build/native-account-info-bootstrap.test" -test.run '^Test(NativeAccountCapabilities|NativeOfficialAPIConfig|GatewayAccountLimitsAuthorityHTTP)' -test.v -test.count=1
+          "$GATEWAY_CLIENT_ROOT/build/native-account-info-handler.test" -test.run '^TestGateway(AccountInfoPrivateHTTPContract|NativeOAuthConnectHTTPImportStrictIngress)' -test.v -test.count=1
       - name: Build source-pinned fixtures for real clients through TypeScript authority
         run: |
           node services/account-gateway/test/fixtures/native-cli/build-joined.ts \
             --repo "$GITHUB_WORKSPACE" --native-source "$GATEWAY_CLIENT_ROOT/native-source" \
             --output "$GATEWAY_CLIENT_ROOT/build/joined" --go "$GATEWAY_CLIENT_GO" \
             --native-commit "$NATIVE_COMMIT" --gateway-commit "$(git rev-parse HEAD)"
-      - name: Native metadata and provider boundary unit qualification
-        run: |
-          "$GATEWAY_CLIENT_ROOT/build/native-account-info-service.test" -test.run '^TestGateway(AccountInfo|QuotaAndInfo|Codex(Info|RetainedInfo|Maintenance)|ClaudeInfo|GrokInfo|OAuthInfo|AccountCapabilities|GeminiContinuation|NativeGemini|NativeOfficial|NativeAnthropicSchema|NativeOAuthImport)' -test.v -test.count=1
-          "$GATEWAY_CLIENT_ROOT/build/native-account-info-bootstrap.test" -test.run '^Test(NativeAccountCapabilities|NativeOfficialAPIConfig|GatewayAccountLimitsAuthorityHTTP)' -test.v -test.count=1
-          "$GATEWAY_CLIENT_ROOT/build/native-account-info-handler.test" -test.run '^TestGateway(AccountInfoPrivateHTTPContract|NativeOAuthConnectHTTPImportStrictIngress)' -test.v -test.count=1
       - name: Race-check the actual public ingress and bounded bootstrap
         run: |
           node --test services/account-gateway/test/fixtures/native-cli/evidence.test.ts
@@ -123,6 +123,7 @@ jobs:
             --pg-bin /usr/lib/postgresql/17/bin \
             --test-binary "$GATEWAY_CLIENT_ROOT/build/native-cli.test" \
             --repository-test-binary "$GATEWAY_CLIENT_ROOT/build/native-repository.test" \
+            --account-info-test-binary "$GATEWAY_CLIENT_ROOT/build/native-account-info-repository.test" \
             --clients "$GATEWAY_CLIENT_ROOT/clients/clients.json" \
             --artifacts "$GATEWAY_CLIENT_ROOT/artifacts/native-clients" \
             --native-commit "$NATIVE_COMMIT" --gateway-commit "$(git rev-parse HEAD)"
@@ -152,7 +153,7 @@ jobs:
             import { readFileSync, existsSync } from "node:fs";
             import { join } from "node:path";
             const root = join(process.env.GATEWAY_CLIENT_ROOT, "artifacts", "native-clients");
-            for (const file of ["result.json", "test.log", "repository-test.log"]) {
+            for (const file of ["result.json", "test.log", "repository-test.log", "account-info-test.log"]) {
               if (existsSync(join(root, file))) process.stdout.write(file + "\n" + readFileSync(join(root, file), "utf8") + "\n");
             }
             const joined = join(process.env.GATEWAY_CLIENT_ROOT, "artifacts", "joined-clients", "result.json");
@@ -167,6 +168,7 @@ jobs:
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-clients/network.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-clients/test.log
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-clients/repository-test.log
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-clients/account-info-test.log
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/public-race.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/reservation-race.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/bootstrap-race.json

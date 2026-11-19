@@ -934,7 +934,10 @@ func run() error {
 	if gateway.SetGatewayOpenRouterModels(service.NewGatewayOpenRouterModels(providerTransport)) != nil {
 		return deny
 	}
-	cache := repository.NewGatewayAccountLimitsRepositoryV2(db)
+	cache, ok := repository.NewGatewayAccountLimitsRepositoryV2(db).(service.GatewayAccountQuotaInfoRepository)
+	if !ok {
+		return deny
+	}
 	collector := service.NewGatewayProviderQuotaCollector(providerTransport)
 	var callback atomic.Value
 	callback.Store("")
