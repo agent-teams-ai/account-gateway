@@ -6,6 +6,7 @@ import {
   joinedReceipt,
   joinedProviderProfiles,
   joinedProviderReceipt,
+  joinedNativeProviderReceipt,
   joinedSandboxQualification,
 } from "./joined-evidence.ts";
 import { CommandFailure, command } from "./joined-command.ts";
@@ -210,7 +211,7 @@ void test("joined client evidence requires real terminal proofs and discards arb
   });
 });
 
-void test("provider evidence requires six real RR tool/schema receipts and removes private diagnostics", () => {
+void test("provider evidence keeps native-only proofs separate from six real RR tool/schema receipts", () => {
   const expected = {
     nativeCommit: "a".repeat(40),
     gatewayCommit: "b".repeat(40),
@@ -293,6 +294,34 @@ void test("provider evidence requires six real RR tool/schema receipts and remov
       extra: "private-request",
     }) + "\n";
   const proof = JSON.stringify(value) + "\n";
+  const native = { ...value, rrAcceptance: false, rrReceipts: [] };
+  const nativeProof = JSON.stringify(native) + "\n";
+  const nativeSafe = joinedNativeProviderReceipt(diagnostic + nativeProof, expected);
+  assert.equal(nativeSafe.rrAcceptance, false);
+  assert.deepEqual(nativeSafe.rrReceipts, []);
+  assert.equal(nativeSafe.providers.length, 6);
+  assert.equal(JSON.stringify(nativeSafe).includes("private-"), false);
+  assert.throws(() => joinedProviderReceipt(nativeProof, expected), /joined-proof-invalid/);
+  assert.throws(() => joinedNativeProviderReceipt(proof, expected), /joined-proof-invalid/);
+  for (const patch of [
+    { rrReceipts: [value.rrReceipts[0]] },
+    { nativeHead: "0".repeat(40) },
+    { gatewayBaseHead: "0".repeat(40) },
+    { nativeBinarySHA256: "0".repeat(64) },
+    { sourceHashes: null },
+    { providers: native.providers.slice(0, 5) },
+    { actualPostgreSQL: false },
+    { controlledTextAndFunctionToolRoundTrip: false },
+    { nativeAccountInfoObservedAtAndProvenance: false },
+    { dynamicOpenRouterAuthoritativeRemoval: false },
+    { grokRefresh: false },
+    { canonicalErasure: false },
+  ]) {
+    assert.throws(
+      () => joinedNativeProviderReceipt(JSON.stringify({ ...native, ...patch }), expected),
+      /joined-proof-invalid/,
+    );
+  }
   const safe = joinedProviderReceipt(diagnostic + shape + proof, expected);
   assert.equal(safe.rrReceipts.length, 6);
   assert.equal(safe.rrReceipts[5]?.structuredOutputRequests, 2);

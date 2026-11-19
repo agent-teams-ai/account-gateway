@@ -1,5 +1,6 @@
 // Actual CLI -> TypeScript authority/usage -> Go OAuth -> controlled TLS/PG.
 // Build/install happen before this disposable, explicitly egress-free process.
+// The explicit native-providers scope exercises only the existing SDK/native driver.
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
@@ -21,6 +22,7 @@ import {
   joinedFiles,
   joinedReceipt,
   joinedProviderReceipt,
+  joinedNativeProviderReceipt,
   joinedSourceHashes,
 } from "./joined-evidence.ts";
 import type { ClientPins, InstalledClients, JoinedBuildReceipt } from "./joined-evidence.ts";
@@ -67,7 +69,7 @@ async function main() {
     "--native-commit",
     "--gateway-commit",
   ];
-  const optionalKeys = ["--provider-binary", "--provider-preload"];
+  const optionalKeys = ["--provider-binary", "--provider-preload", "--scope"];
   for (let i = 2; i < process.argv.length; i += 2) {
     const key = process.argv[i],
       value = process.argv[i + 1];
@@ -77,17 +79,26 @@ async function main() {
     );
     options.set(key, value);
   }
+  const scope = options.get("--scope") ?? "full";
+  check(scope === "full" || scope === "native-providers", "joined-scope");
+  const required =
+    scope === "full"
+      ? keys
+      : keys.filter((key) => !["--claude-binary", "--codex-binary", "--clients"].includes(key));
   check(
-    keys.every((key) => options.has(key)),
+    required.every((key) => options.has(key)),
     "joined-arguments",
   );
   check(
-    options.has("--provider-binary") === options.has("--provider-preload"),
+    scope === "full"
+      ? options.has("--provider-binary") === options.has("--provider-preload")
+      : options.has("--provider-binary") && !options.has("--provider-preload"),
     "joined-provider-inputs",
   );
   const get = (key: string) => options.get(key)!;
   for (const key of [...keys, ...optionalKeys].filter(
-    (candidate) => options.has(candidate) && !candidate.endsWith("-commit"),
+    (candidate) =>
+      options.has(candidate) && candidate !== "--scope" && !candidate.endsWith("-commit"),
   )) {
     check(isAbsolute(get(key)), "joined-absolute-path");
   }
@@ -142,11 +153,6 @@ async function main() {
   writeFileSync(networkFile, JSON.stringify(network), { mode: 0o600 });
   const pinsPath = fileURLToPath(new URL("./pins.json", import.meta.url)),
     pins = JSON.parse(readFileSync(pinsPath, "utf8")) as ClientPins;
-  const installed = JSON.parse(readFileSync(get("--clients"), "utf8")) as InstalledClients;
-  check(
-    installed.pinsSHA256 === digestFile(pinsPath) && installed.clients.length === 2,
-    "joined-client-receipt",
-  );
   const build = JSON.parse(readFileSync(get("--build-receipt"), "utf8")) as JoinedBuildReceipt,
     sourceHashes = joinedSourceHashes(repo);
   check(
@@ -159,24 +165,38 @@ async function main() {
   );
   const binaries = build.binaries;
   check(binaries !== null && binaries !== undefined, "joined-build-receipt");
-  const clients = (["claude", "codex"] as const).map((id) => {
-    const pin = pins.clients.find((p: { id: string }) => p.id === id),
-      client = installed.clients.find((p: { id: string }) => p.id === id);
-    const binary = get("--" + id + "-binary");
+  const clients = (() => {
+    if (scope === "native-providers") {
+      return [];
+    }
+    const installed = JSON.parse(readFileSync(get("--clients"), "utf8")) as InstalledClients;
     check(
-      pin &&
-        client &&
-        isAbsolute(client.executable) &&
-        digestFile(client.executable) === pin.binarySHA256 &&
-        digestFile(binary) === binaries[id],
-      "joined-binary-pin",
+      installed.pinsSHA256 === digestFile(pinsPath) && installed.clients.length === 2,
+      "joined-client-receipt",
     );
-    return { id, pin, executable: client.executable, binary };
-  });
+    return (["claude", "codex"] as const).map((id) => {
+      const pin = pins.clients.find((p: { id: string }) => p.id === id),
+        client = installed.clients.find((p: { id: string }) => p.id === id);
+      const binary = get("--" + id + "-binary");
+      check(
+        pin &&
+          client &&
+          isAbsolute(client.executable) &&
+          digestFile(client.executable) === pin.binarySHA256 &&
+          digestFile(binary) === binaries[id],
+        "joined-binary-pin",
+      );
+      return { id, pin, executable: client.executable, binary };
+    });
+  })();
   const provider = (() => {
     const binary = options.get("--provider-binary");
     if (binary === undefined) {
       return;
+    }
+    check(digestFile(binary) === binaries.provider, "joined-provider-binary-pin");
+    if (scope === "native-providers") {
+      return { kind: "native" as const, binary };
     }
     const preload = get("--provider-preload");
     const inputPath = (name: string) => {
@@ -199,8 +219,8 @@ async function main() {
         /^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$/.test(version),
       "joined-provider-source-pins",
     );
-    check(digestFile(binary) === binaries.provider, "joined-provider-binary-pin");
     return {
+      kind: "review-router" as const,
       binary,
       preload,
       actionArchive,
@@ -235,7 +255,10 @@ async function main() {
     success = false;
   let failure: { code: string; at?: string; frame?: string } | undefined;
   const receipts: ReturnType<typeof joinedReceipt>[] = [];
-  let providerResult: ReturnType<typeof joinedProviderReceipt> | undefined;
+  let providerResult:
+    | ReturnType<typeof joinedProviderReceipt>
+    | ReturnType<typeof joinedNativeProviderReceipt>
+    | undefined;
   try {
     await command(
       join(pgBin, "initdb"),
@@ -325,37 +348,52 @@ async function main() {
         AG_NATIVE_PROVIDER_JOINED_GATEWAY_BASE_SHA: gatewayCommit,
         AG_NATIVE_PROVIDER_JOINED_GO: go,
         AG_NATIVE_PROVIDER_JOINED_SCRATCH_ROOT: scratch,
-        RR_PROVIDER_JOINED_ACTION_ARCHIVE: provider.actionArchive,
-        RR_PROVIDER_JOINED_CODEX_BINARY: provider.codexBinary,
-        RR_PROVIDER_JOINED_RELAY_ADAPTER: provider.relayAdapter,
-        RR_PROVIDER_JOINED_SDK_HTTP: join(repo, joinedFiles.sdkHTTP),
-        RR_PROVIDER_JOINED_WORK_ROOT: scratch,
       });
+      if (provider.kind === "review-router") {
+        Object.assign(childEnv, {
+          RR_PROVIDER_JOINED_ACTION_ARCHIVE: provider.actionArchive,
+          RR_PROVIDER_JOINED_CODEX_BINARY: provider.codexBinary,
+          RR_PROVIDER_JOINED_RELAY_ADAPTER: provider.relayAdapter,
+          RR_PROVIDER_JOINED_SDK_HTTP: join(repo, joinedFiles.sdkHTTP),
+          RR_PROVIDER_JOINED_WORK_ROOT: scratch,
+        });
+      }
       const stdout = await command(
         process.execPath,
-        ["--import", provider.preload, join(repo, joinedFiles.providerHarness)],
+        [
+          ...(provider.kind === "review-router" ? ["--import", provider.preload] : []),
+          join(repo, joinedFiles.providerHarness),
+        ],
         childEnv,
         { cwd: repo, timeout: 480_000 },
       );
-      providerResult = joinedProviderReceipt(stdout, {
+      const expected = {
         nativeCommit,
         gatewayCommit,
         binarySHA256: binaries.provider,
         sourceHashes,
-        reviewRouterCommit: provider.sourceCommit,
-        preloadSHA256: provider.preloadSHA256,
-        relayAdapterSHA256: provider.relayAdapterSHA256,
-        actionRef: provider.actionRef,
-        actionArchiveSHA256: provider.actionArchiveSHA256,
-        clientSHA256: provider.clientSHA256,
-        version: provider.version,
-      });
+      };
+      providerResult =
+        provider.kind === "native"
+          ? joinedNativeProviderReceipt(stdout, expected)
+          : joinedProviderReceipt(stdout, {
+              ...expected,
+              reviewRouterCommit: provider.sourceCommit,
+              preloadSHA256: provider.preloadSHA256,
+              relayAdapterSHA256: provider.relayAdapterSHA256,
+              actionRef: provider.actionRef,
+              actionArchiveSHA256: provider.actionArchiveSHA256,
+              clientSHA256: provider.clientSHA256,
+              version: provider.version,
+            });
     }
     check(
       JSON.stringify(joinedSourceHashes(repo)) === JSON.stringify(sourceHashes),
       "joined-runtime-source-changed",
     );
-    success = receipts.length === 2 && (provider === undefined || providerResult !== undefined);
+    success =
+      receipts.length === (scope === "full" ? 2 : 0) &&
+      (provider === undefined || providerResult !== undefined);
   } catch (error) {
     failure =
       error instanceof CommandFailure
@@ -382,7 +420,11 @@ async function main() {
       }
     }
     const result = {
-      kind: "gateway-joined-client-qualification/v1",
+      kind:
+        scope === "full"
+          ? "gateway-joined-client-qualification/v1"
+          : "gateway-native-provider-stage-qualification/v1",
+      scope,
       outcome: success && stopped ? "pass" : "fail",
       node: process.version,
       nativeCommit,

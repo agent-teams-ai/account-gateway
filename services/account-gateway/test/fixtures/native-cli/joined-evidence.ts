@@ -196,23 +196,15 @@ export function joinedSandboxQualification(value: unknown) {
   return expected;
 }
 
-/** This third case uses the real RR Action pin, independently of the two CLI lanes. */
-export function joinedProviderReceipt(
-  raw: string,
-  expected: {
-    nativeCommit: string;
-    gatewayCommit: string;
-    binarySHA256: string;
-    sourceHashes: Record<string, string>;
-    reviewRouterCommit: string;
-    preloadSHA256: string;
-    relayAdapterSHA256: string;
-    actionRef: string;
-    actionArchiveSHA256: string;
-    clientSHA256: string;
-    version: string;
-  },
-) {
+/** Both provider paths must prove the same native, SDK and fixture source. */
+type JoinedProviderSource = {
+  nativeCommit: string;
+  gatewayCommit: string;
+  binarySHA256: string;
+  sourceHashes: Record<string, string>;
+};
+
+function providerEvidence(raw: string, expected: JoinedProviderSource) {
   check(Buffer.byteLength(raw) <= 131_072);
   const lines = raw.trim().split(/\r?\n/);
   check(lines.length <= 64 && lines.every((line) => Buffer.byteLength(line) <= 32_768));
@@ -248,7 +240,6 @@ export function joinedProviderReceipt(
   const proofs = [
     "nativeHTTP",
     "gatewayFacadeAndSDK",
-    "rrAcceptance",
     "actualPostgreSQL",
     "providerShapedFixture",
     "controlledTextAndFunctionToolRoundTrip",
@@ -278,6 +269,49 @@ export function joinedProviderReceipt(
   );
   const providers = joinedProviderProfiles.map(([provider]) => provider);
   check(JSON.stringify(r.providers) === JSON.stringify(providers));
+  return {
+    value: r,
+    safe: {
+      phase: "completed",
+      contract: "gateway-native-provider-joined/v1",
+      nativeHead: expected.nativeCommit,
+      gatewayBaseHead: expected.gatewayCommit,
+      nativeBinarySHA256: expected.binarySHA256,
+      sourceHashes: sources,
+      providers,
+      liveProviderAccount: false,
+      inertReadProviderCalls: 0,
+      ...Object.fromEntries(proofs.map((name) => [name, true])),
+    },
+  };
+}
+
+/** Direct SDK/native evidence cannot qualify a Review Router or CLI execution. */
+export function joinedNativeProviderReceipt(raw: string, expected: JoinedProviderSource) {
+  const { value, safe } = providerEvidence(raw, expected);
+  check(
+    value.rrAcceptance === false &&
+      Array.isArray(value.rrReceipts) &&
+      value.rrReceipts.length === 0,
+  );
+  return { ...safe, rrAcceptance: false, rrReceipts: [] };
+}
+
+/** Full acceptance additionally requires the pinned RR Action and actual CLI proofs. */
+export function joinedProviderReceipt(
+  raw: string,
+  expected: JoinedProviderSource & {
+    reviewRouterCommit: string;
+    preloadSHA256: string;
+    relayAdapterSHA256: string;
+    actionRef: string;
+    actionArchiveSHA256: string;
+    clientSHA256: string;
+    version: string;
+  },
+) {
+  const { value: r, safe } = providerEvidence(raw, expected);
+  check(r.rrAcceptance === true);
   check(Array.isArray(r.rrReceipts) && r.rrReceipts.length === joinedProviderProfiles.length);
   const observedReceipts: unknown[] = r.rrReceipts;
   const rrReceipts = joinedProviderProfiles.map(([, profileId, model], index) => {
@@ -332,20 +366,12 @@ export function joinedProviderReceipt(
     };
   });
   return {
-    phase: "completed",
-    contract: "gateway-native-provider-joined/v1",
-    nativeHead: expected.nativeCommit,
-    gatewayBaseHead: expected.gatewayCommit,
-    nativeBinarySHA256: expected.binarySHA256,
-    sourceHashes: sources,
+    ...safe,
+    rrAcceptance: true,
     reviewRouterCommit: expected.reviewRouterCommit,
     preloadSHA256: expected.preloadSHA256,
     relayAdapterSHA256: expected.relayAdapterSHA256,
-    providers,
     rrReceipts,
-    liveProviderAccount: false,
-    inertReadProviderCalls: 0,
-    ...Object.fromEntries(proofs.map((name) => [name, true])),
   };
 }
 
