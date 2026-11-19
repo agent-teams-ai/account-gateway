@@ -1113,10 +1113,16 @@ async function run(): Promise<void> {
   phase = "codex-import-ambiguous-provider-response";
   const ambiguousImport = importCommand("refresh_token", "joined-import-refresh-ambiguous");
   const ambiguousResult = await client.connect(ambiguousImport);
-  assert.equal(ambiguousResult.state, "unknown");
+  assert.ok(ambiguousResult.state === "unknown" && ambiguousResult.error);
   const countsAfterAmbiguity = await stats();
   assert.equal((await client.readOAuth(ambiguousImport.operationId)).state, "unknown");
-  assert.deepEqual(await client.connect(ambiguousImport), ambiguousResult);
+  const ambiguousReplay = await client.connect(ambiguousImport);
+  assert.ok(ambiguousReplay.state === "unknown" && ambiguousReplay.error);
+  // Safe-error traces identify each HTTP response, not the durable operation.
+  assert.deepEqual(ambiguousReplay, {
+    ...ambiguousResult,
+    error: { ...ambiguousResult.error, traceRef: ambiguousReplay.error.traceRef },
+  });
   assert.deepEqual(
     await stats(),
     countsAfterAmbiguity,
