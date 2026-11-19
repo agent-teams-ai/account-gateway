@@ -141,6 +141,22 @@ V2 discovery не fallback-ится по HTTP status; новый producer вып
 
 ## 8. Журнал исполнения — 19 ноября 2026 года
 
+### Контрольная точка продолжения
+
+При восстановлении работы 19 ноября удалённые heads были Sub2API `2cc5862f`, Gateway `7294787f`, RR `519e9913`. Все три PR открыты; merge и production rollout ещё не выполнялись. Ранние строки ниже сохраняют исходные ревизии и не считаются проверкой последующих изменений.
+
+| Текущая граница | Фактический результат |
+| --- | --- |
+| Sub2API `2cc5862f` | Независимое повторное ревью storage/import/refresh/protocol не выявило нового блокирующего дефекта; 63/63 inline threads resolved. Native head не изменялся. Собственный CodeQL `44461445834` остаётся queued, не PASS. |
+| Gateway `7294787f` | [Kernel `44470869227`](https://github.com/agent-teams-ai/account-gateway/actions/runs/44470869227) и [full-stack/load `44470869300`](https://github.com/agent-teams-ai/account-gateway/actions/runs/44470869300) PASS. [Package `44470869236`](https://github.com/agent-teams-ai/account-gateway/actions/runs/44470869236) FAIL: shared evidence validator не был объявлен entrypoint тестовой boundary. Подготовлен узкий dependency fix с отрицательными проверками private commands и domain imports. |
+| Native через Gateway | В [run `44470869379`](https://github.com/agent-teams-ai/account-gateway/actions/runs/44470869379) на обеих Node lanes прошли 24 service, 3 bootstrap, 2 HTTP roots, все три обязательных PostgreSQL roots, public-ingress race и actual Codex/Claude native receipts. Native SHA точно `2cc5862f`; внешняя сеть отсутствует. Весь run FAIL: RR joined path остановлен до provider review на `rr_provider_joined_failed_cli_sandbox_preflight_none`. |
+| RR `519e9913` | Уже опубликованы uncached final authorization, сохранение product reconnect bounds и отображение разрешённого existing account при недоступном capability. Все inline threads resolved. C1, P115, operator-grants, memory, Skills и statistics browser прошли. [Основной CI `44472024327`](https://github.com/777genius/review-router-ai/actions/runs/44472024327) FAIL на lint/test/generated-artifact drift; обязательные PG17 и self-hosted lanes PASS, aggregate Quality Gates FAIL. |
+| RR browser `519e9913` | [Native browser `44472024187`](https://github.com/777genius/review-router-ai/actions/runs/44472024187) остановлен до запуска приложения: apt не скачал pinned Chromium dependency с Ubuntu mirror. 34 captures на этом head не выполнены. Unified OCR acceptance отдельно выявил четыре устаревших ожидания account label. |
+
+Текущий Engineering Quality Standard требует TypeScript не ниже 7.0.2, включая embedded parser APIs. Изолированный RR compiler 7.0.2 установлен; полный Web typecheck им проходит. Legacy `typescript-eslint@8.59.1`, прямые AST consumers и `compiler-cli --legacy` разрешают root `typescript@6.0.3`. Эти локальные gates не запускаются и не обозначаются пройденными. Их owning upgrade route отделён от account feature: обновление одного пакета не решает совместимость parser/Next/compiler APIs. Это остаётся явным ограничением квалификации, без ослабления gates, смены immutable inputs или молчаливой миграции всего toolchain.
+
+Продолжение опубликовано в RR [`80bf1ea7`](https://github.com/777genius/review-router-ai/commit/80bf1ea7f406ddca043651cadef60c89b6d37d3d): исправлены перечисленные CI fixtures и generated runtime, сохранены исторические migration digests, добавлена безопасная диагностика preflight. Локально прошли 101 CMS, 3 limits, 18 hydration и 152 migration/handoff cases, полный Web и release-rollout typecheck на TS 7.0.2, authoritative conflict-runtime parity. Группы не суммируются с прежними проверками. Sandbox helper — 10/10 отрицательных cases и strict TS7; Gateway evidence parser — 19/19 на Node 24/26, source-policy mutants — 12/12. Полная официальная поставка CLI сохранена с hashes; preflight и Action требуют одного bubblewrap backend. Local actual preflight завершился отказом до provider calls; положительный joined outcome ожидается только от нового штатного CI.
+
 ### Точные входы текущего межрепозиторного прогона
 
 | Компонент | Ревизия и назначение |
@@ -148,7 +164,7 @@ V2 discovery не fallback-ится по HTTP status; новый producer вып
 | Sub2API | [`2cc5862f`](https://github.com/agent-teams-ai/sub2api/commit/2cc5862f79aa56a5dd76e399241e828f32064f5b). Production-код совпадает с `fd759624`; последующие изменения исправляют ожидание HTTP-теста и включают четыре PostgreSQL test files в существующий `gatewaycustody` suite. |
 | Gateway | Production runtime/SDK source — [`f2690a3c`](https://github.com/agent-teams-ai/account-gateway/commit/f2690a3c9cfd0cf61bfb7ca31b802d249105d751). Qualification wrapper находится в [PR #116](https://github.com/agent-teams-ai/account-gateway/pull/116); exact source SHA записывается каждым CI run отдельно. Последующие правки wrapper/tests/docs не меняют SDK runtime. |
 | SDK | Source [`f2690a3c`](https://github.com/agent-teams-ai/account-gateway/commit/f2690a3c9cfd0cf61bfb7ca31b802d249105d751). Архив: 60 680 bytes, 50 files; SHA-256 `34562d43668a1ca09e95666da3237206b3744d0d0766039fd2b8acbce241483f`. Последующие Gateway commits не меняют SDK runtime. |
-| Review Router | [`43e475d4`](https://github.com/777genius/review-router-ai/commit/43e475d455e2931b39adef2652c5b8fe921c693e). Один SDK pin во всех трёх потребителях; metadata SQL deadline, lazy recovery, product method bounds и strict scoped gate. |
+| Review Router | [`80bf1ea7`](https://github.com/777genius/review-router-ai/commit/80bf1ea7f406ddca043651cadef60c89b6d37d3d). Один SDK pin во всех трёх потребителях; metadata SQL deadline, uncached final authorization, lazy recovery, product method bounds, existing-account visibility, CI fixture corrections и default sandbox qualification. |
 | Review Action | Source [`0454fc0a`](https://github.com/777genius/review-router/commit/0454fc0a3af15f94522c7c31cce59c0c62af6567); archive SHA-256 `42e8d844bd451655ff171dc4093a872fc471675c90b3997697261ba4153807b4`. |
 | Codex CLI | `0.133.0`; Linux x64 binary SHA-256 `524396258c974948334eabe6f2c6b1d8e1979dfd048d67d535ad9e4550fa5b26`. |
 
@@ -176,7 +192,7 @@ Action и CLI — проверенные входы полного joined test, 
 
 ### Проверки, которые ещё должны закрыть текущие PR
 
-1. Завершить native-client qualification на обеих Node lanes с Native `2cc5862f` и RR `43e475d4`. Предыдущий [run 44464809350](https://github.com/agent-teams-ai/account-gateway/actions/runs/44464809350) закреплял RR `d4d39a2b` и сам по себе не доказывает новые review fixes. Он требует явных PASS selected service/bootstrap/HTTP tests и трёх PostgreSQL root cases; binary compilation или успешный выход без тестов недостаточны.
+1. Завершить native-client qualification на обеих Node lanes с Native `2cc5862f` и RR `80bf1ea7`. Предыдущий [run 44470869379](https://github.com/agent-teams-ai/account-gateway/actions/runs/44470869379) закреплял RR `acbec348` и сам по себе не доказывает новые review fixes. Он требует явных PASS selected service/bootstrap/HTTP tests и трёх PostgreSQL root cases; binary compilation или успешный выход без тестов недостаточны.
 2. Выполнить existing device joined path: RT/auth.json create, reconnect, metadata provenance, потеря native ACK, ambiguous provider response, сохранение unresolved claim и отсутствие plaintext в обоих SQL stores.
 3. Выполнить existing provider joined path для всех шести профилей: actual RR `CodexProvider.review`, закреплённые Action/CLI, production relay, function/custom tools, schema в обоих запросах, continuation, stream completion и execution closure. SDK-only fallback не принимается.
 4. Завершить RR main CI на окончательном head, включая required `Quality Gates` и `Dedicated Release Authority PG17 contract`. Новые исправления внешнего ревью получают новые проверки; отменённый при следующем push run или прежние receipts не объявляются проверкой изменённого кода.

@@ -177,7 +177,7 @@ export const joinedProviderProfiles = [
 export function joinedSandboxQualification(value: unknown) {
   const expected = {
     contract: "codex-read-only-sandbox/v1",
-    backend: "legacy-landlock",
+    backend: "bubblewrap",
     childExecuted: true,
     readSucceeded: true,
     workspaceWriteDenied: true,
@@ -419,7 +419,13 @@ export function joinedFailure(raw: string) {
       ) {
         frame = value.frame;
       }
-      if (value.failureCode === "rr_provider_joined_failed_cli_sandbox_preflight_none") {
+      if (
+        typeof value.failureCode === "string" &&
+        value.failureCode === value.failureCode.trim() &&
+        /^rr_provider_joined_failed_cli_sandbox_preflight_(?:(?:positive_controls|child_spawn|child_timeout|child_output_limit|policy_refused|child_usage_exit|child_panic_exit|child_nonzero_exit|proof|postconditions|cleanup)_)?none$/.test(
+          value.failureCode,
+        )
+      ) {
         failureCode = value.failureCode;
       }
     } catch {

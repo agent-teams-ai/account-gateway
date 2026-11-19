@@ -19,7 +19,7 @@ jobs:
     env:
       NPM_CONFIG_ENGINE_STRICT: 'true'
       NATIVE_COMMIT: 2cc5862f79aa56a5dd76e399241e828f32064f5b
-      REVIEW_ROUTER_COMMIT: acbec3485e4ac48b1431647c9155b590b07092d8
+      REVIEW_ROUTER_COMMIT: 80bf1ea7f406ddca043651cadef60c89b6d37d3d
       REVIEW_ACTION_COMMIT: 0454fc0a3af15f94522c7c31cce59c0c62af6567
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
     steps:
@@ -96,10 +96,14 @@ jobs:
             https://github.com/openai/codex/releases/download/rust-v0.133.0/codex-npm-linux-x64-0.133.0.tgz \
             --output "$rr_assets/codex.tgz"
           printf '%s  %s\n' 298519feb7655b4bc0ffb17f15378d9e6365fb65c30f23ab00ab1e99eee3191d "$rr_assets/codex.tgz" | sha256sum --check --strict
-          tar -xzf "$rr_assets/codex.tgz" -C "$rr_assets" --strip-components=4 package/vendor/x86_64-unknown-linux-musl/bin/codex
-          printf '%s  %s\n' 524396258c974948334eabe6f2c6b1d8e1979dfd048d67d535ad9e4550fa5b26 "$rr_assets/codex" | sha256sum --check --strict
-          chmod 755 "$rr_assets/codex"
-          test "$("$rr_assets/codex" --version)" = 'codex-cli 0.133.0'
+          mkdir "$rr_assets/codex-runtime"
+          tar -xzf "$rr_assets/codex.tgz" -C "$rr_assets/codex-runtime" --strip-components=3 package/vendor/x86_64-unknown-linux-musl
+          printf '%s  %s\n' 524396258c974948334eabe6f2c6b1d8e1979dfd048d67d535ad9e4550fa5b26 "$rr_assets/codex-runtime/bin/codex" | sha256sum --check --strict
+          printf '%s  %s\n' 90604f553d1fc200c6b23f53ef80a58f952e9b50e2716cb590f7e1bfa0f27b27 "$rr_assets/codex-runtime/codex-resources/bwrap" | sha256sum --check --strict
+          test -x "$rr_assets/codex-runtime/codex-resources/bwrap"
+          test -x "$rr_assets/codex-runtime/codex-path/rg"
+          test -f "$rr_assets/codex-runtime/codex-package.json"
+          test "$("$rr_assets/codex-runtime/bin/codex" --version)" = 'codex-cli 0.133.0'
           printf '#!/bin/sh\nexec "%s" "%s" pnpm "$@"\n' "$GATEWAY_CLIENT_RR_NODE" "$GATEWAY_CLIENT_COREPACK" > "$rr_assets/shim/pnpm"
           chmod 755 "$rr_assets/shim/pnpm"
           (
@@ -228,7 +232,7 @@ jobs:
             --env "RR_PROVIDER_JOINED_ACTION_REF=$REVIEW_ACTION_COMMIT" \
             --env RR_PROVIDER_JOINED_CODEX_VERSION=0.133.0 \
             --env "RR_PROVIDER_JOINED_ACTION_ARCHIVE=$GATEWAY_CLIENT_ROOT/review-router-assets/action.tar" \
-            --env "RR_PROVIDER_JOINED_CODEX_BINARY=$GATEWAY_CLIENT_ROOT/review-router-assets/codex" \
+            --env "RR_PROVIDER_JOINED_CODEX_BINARY=$GATEWAY_CLIENT_ROOT/review-router-assets/codex-runtime/bin/codex" \
             --env "RR_PROVIDER_JOINED_RELAY_ADAPTER=$GATEWAY_CLIENT_ROOT/review-router-source/apps/api/src/review-run-gateway-relay.ts" \
             --mount "type=bind,source=$GATEWAY_CLIENT_ROOT/artifacts,target=$GATEWAY_CLIENT_ROOT/artifacts" \
             --entrypoint "$GATEWAY_CLIENT_NODE" gateway-native-clients:qualified \

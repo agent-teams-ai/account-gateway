@@ -59,6 +59,29 @@ const violates = (result) => {
   assert.equal(result.status, 1, result.stdout + result.stderr);
   assert.equal(JSON.parse(result.stdout).outcome, "violations");
 };
+
+test("joined harness shares declared evidence without exposing private fixture commands or domain dependencies", () =>
+  fixture((root) => {
+    passes(check(root));
+    const harness = join(root, "services/account-gateway/test/native-provider-joined.ts");
+    const original = readFileSync(harness, "utf8");
+    writeFileSync(
+      harness,
+      original +
+        "\nimport { command } from './fixtures/native-cli/joined-command.ts';\nexport const forbidden = command;\n",
+    );
+    violates(check(root));
+    writeFileSync(harness, original);
+    passes(check(root));
+    const domain = join(root, "services/account-gateway/src/domain.ts");
+    writeFileSync(
+      domain,
+      readFileSync(domain, "utf8") +
+        "\nimport { joinedSandboxQualification } from '../test/fixtures/native-cli/joined-evidence.ts';\nexport const forbidden = joinedSandboxQualification;\n",
+    );
+    violates(check(root));
+  }));
+
 // Regression: type-only SDK/framework imports bypass the actual installed source policy.
 test("valid source profile passes and prohibited type-only import fails", () =>
   fixture((root) => {

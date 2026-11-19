@@ -12,7 +12,7 @@ import { CommandFailure, command } from "./joined-command.ts";
 
 const sandboxQualification = {
   contract: "codex-read-only-sandbox/v1",
-  backend: "legacy-landlock",
+  backend: "bubblewrap",
   childExecuted: true,
   readSucceeded: true,
   workspaceWriteDenied: true,
@@ -388,11 +388,37 @@ void test("sandbox preflight failure exports only its fixed diagnostic code", ()
     at: "kimi-native-tool-roundtrip",
     failureCode: "rr_provider_joined_failed_cli_sandbox_preflight_none",
   });
-  assert.deepEqual(
-    joinedFailure(JSON.stringify({ ...failed, failureCode: "private-child-error" })),
-    {
+  for (const reason of [
+    "positive_controls",
+    "child_spawn",
+    "child_timeout",
+    "child_output_limit",
+    "policy_refused",
+    "child_usage_exit",
+    "child_panic_exit",
+    "child_nonzero_exit",
+    "proof",
+    "postconditions",
+    "cleanup",
+  ]) {
+    const failureCode = "rr_provider_joined_failed_cli_sandbox_preflight_" + reason + "_none";
+    assert.deepEqual(joinedFailure(JSON.stringify({ ...failed, failureCode })), {
       code: "joined-driver-failed",
       at: "kimi-native-tool-roundtrip",
-    },
-  );
+      failureCode,
+    });
+  }
+  for (const failureCode of [
+    "private-child-error",
+    "rr_provider_joined_failed_cli_sandbox_preflight_private_child_error_none",
+    "rr_provider_joined_failed_cli_sandbox_preflight_policy_refused_private",
+    "rr_provider_joined_failed_cli_sandbox_preflight_policy_refused_none\n",
+    "rr_provider_joined_failed_cli_sandbox_preflight_policy_refused_none\r",
+    "rr_provider_joined_failed_cli_sandbox_preflight_policy_refused_none\nprivate",
+  ]) {
+    assert.deepEqual(joinedFailure(JSON.stringify({ ...failed, failureCode })), {
+      code: "joined-driver-failed",
+      at: "kimi-native-tool-roundtrip",
+    });
+  }
 });
