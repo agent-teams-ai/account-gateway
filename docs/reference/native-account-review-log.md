@@ -131,3 +131,26 @@ Public burst test получил детерминированный выбор q
 Собранные fixture binaries разделены от execution outcome: наличие бинаря не считается PASS. Existing native-client harness запускает три metadata/import PG cases в отдельных disposable databases. Новый actual RR provider case использует тот же PG runner и no-network контейнер, без второго orchestrator; его шесть profile receipts требуют tool/schema/closure proofs и не принимают SDK-only fallback. Source/binary/archive hashes записываются, а stdout evidence строится по положительному списку полей.
 
 Browser33/34 исследован по исходному manifest, серверному логу и PNG: причина — штатный Next memory restart, а не ошибка metadata/theme. Исправлен лимит тестового сервера на имеющемся runner; assertions/таймаут/число снимков не ослаблены. Атомарный generator каталога теперь сохраняет прежний target при ошибке и устанавливает0644 перед rename.
+
+### Последняя проверка SDK и реального окружения
+
+Пять небольших runtime исправлений Gateway вf2690a3 сохраняют caller response cap, проверяют account-info identity после HTTP, используют уже существующий native_catalog model union и передают AbortSignal в admission, проверяя отмену до authority reads. Нового provider registry, middleware framework или storage не добавлено. Targeted27 cases прошли наNode24/26, public SDK14/14 — на обеих версиях; PostgreSQL enrollment76/76 и joined evidence7/7 прошли отдельно. Эти локальные результаты не заменяют actual six-provider runner gate.
+
+SDK из committedf2690a3 упакован с source/archive provenance и закреплён в RRb9551099. Сравнены все50 файлов каждого из трёх installed consumers; frozen install и36 focused tests прошли без supply-chain исключений и без изменения dependency versions. Новый archive не опубликован в registry. CI preparation устанавливает только уже закреплённые Prisma engines до перехода в существующий offline контейнер; изоляция сети не ослаблена.
+
+Browser597450 завершил34/34 сценария, zero page/console/blocked-request errors и zero memory restarts. Все6 сценариев дополнительно просмотрены на representative viewport/theme; длинныйemail переносится, даты подписки и credential expiry различимы. Receipt относится к597450; проверки последующего SDK commit отслеживаются отдельно. Package/kernel/full-stack Gateway2bee успешны; strict-import HTTP test расширенного native-client gate обнаружил следующий конкретный дефект и не объявлен PASS.
+
+
+### Разделение staging и qualification в HTTP regression
+
+Exact compiled Nativefd759624 handler binary воспроизвёл оба failing import subtests: только ожидание одного account-check после ImportConnect было неверным. ImportConnect сохраняет проверенную signed identity и staged receipt; account-check выполняет существующий Descriptor. В Native39b77c38 тест требует zero check на staging, сохраняя one token exchange, one enrollment, same receipt replay, auth/strict-input и no-secret assertions. Это исправление oracle, без изменения provider behavior или обхода qualification. Следующий joined CI закрепляет Native39b77c38 и RRb9551099 одновременно.
+
+
+### Существующий dedicated PostgreSQL test path
+
+Проверка собранного integration binary выявила запуск Docker/Redis TestMain до selected tests. Для трёх новых metadata/import PG cases используется уже существующий `gatewaycustody` build tag и explicit isolated DSN: четыре testfile добавляют этот alias, одна CI compiler option выбирает его. TestMain и остальные integration suites не изменены. Source selection подтверждён `go list` наGo1.27.3, no-skip и exact-root PASS gates остаются обязательными; compile/selection не считаются execution PASS.
+
+
+### Согласованная source identity после SDK repin
+
+Обязательный RR static gate обнаружил старый active NVIDIA provenance при новом SDK manifest. В d4d39a2b только active identity указывает на native-account-info receipt и соответствующее строгое имя архива; negative test отвергает старую identity, manifest mismatch и изменение archive bytes. Штатные generators выполнены в canonical node_modules/.pnpm: два fresh запуска побайтно одинаковы;29 tests прошли. Историческая qualification не переписана, новая ей не приписана. Временная идея менять preserveSymlinks отклонена: bundler остался прежним, особенности локального external store не стали новым runtime поведением. Итоговые pins для следующего joined gate — Native2cc5862f и RRd4d39a2b, SDKsourcef2690a3.

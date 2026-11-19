@@ -18,8 +18,8 @@ jobs:
         node: ['26.11.1', '24.21.0']
     env:
       NPM_CONFIG_ENGINE_STRICT: 'true'
-      NATIVE_COMMIT: fd759624d1c01028a3aba204a5e793f141bfe0f1
-      REVIEW_ROUTER_COMMIT: 597450b474c6f80e338249019a2454d2f876ad48
+      NATIVE_COMMIT: 2cc5862f79aa56a5dd76e399241e828f32064f5b
+      REVIEW_ROUTER_COMMIT: d4d39a2b4f0efdd40c5953f463b12349c98b2db4
       REVIEW_ACTION_COMMIT: 0454fc0a3af15f94522c7c31cce59c0c62af6567
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
     steps:
@@ -131,7 +131,7 @@ jobs:
           go test -tags unit,nativecli -c ./internal/gatewaytransport -o "$GATEWAY_CLIENT_ROOT/build/native-cli.test"
           go test -c ./internal/repository -o "$GATEWAY_CLIENT_ROOT/build/native-repository.test"
           CGO_ENABLED=0 go test -tags unit -c -ldflags='-s -w' ./internal/service -o "$GATEWAY_CLIENT_ROOT/build/native-account-info-service.test"
-          CGO_ENABLED=0 go test -tags integration -c -ldflags='-s -w' ./internal/repository -o "$GATEWAY_CLIENT_ROOT/build/native-account-info-repository.test"
+          CGO_ENABLED=0 go test -tags gatewaycustody -c -ldflags='-s -w' ./internal/repository -o "$GATEWAY_CLIENT_ROOT/build/native-account-info-repository.test"
           CGO_ENABLED=0 go test -tags unit -c -ldflags='-s -w' ./internal/gatewaybootstrap -o "$GATEWAY_CLIENT_ROOT/build/native-account-info-bootstrap.test"
           CGO_ENABLED=0 go test -tags unit -c -ldflags='-s -w' ./internal/handler/admin -o "$GATEWAY_CLIENT_ROOT/build/native-account-info-handler.test"
           git diff --exit-code -- go.mod go.sum
