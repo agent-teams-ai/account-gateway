@@ -3,8 +3,9 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const image =
+const baseImage =
   "postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317";
+const runtimeImage = "gateway-native-clients:qualified";
 type Kind =
   | "bit"
   | "integer"
@@ -129,7 +130,8 @@ function main() {
     qualification: "not_evaluated",
     sourceCommit: process.env.GITHUB_SHA,
     phase,
-    image,
+    baseImage,
+    runtimeImage,
     processStatus: {
       effectiveCapabilities: read("/proc/self/status", "capabilities", "CapEff"),
       noNewPrivileges: read("/proc/self/status", "bit", "NoNewPrivs"),
@@ -159,7 +161,7 @@ function main() {
             ),
             imageId: scalar(
               "digest",
-              docker(["image", "inspect", "--format", "{{json .Id}}", image]),
+              docker(["image", "inspect", "--format", "{{json .Id}}", runtimeImage]),
             ),
           },
         }
