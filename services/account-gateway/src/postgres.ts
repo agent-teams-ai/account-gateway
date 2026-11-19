@@ -28,6 +28,7 @@ import type {
   ResumeCustodyAuthority,
   AccountCustodyIdentity,
   AccountLimitsIdentity,
+  AccountInfoIdentity,
   ApprovedPreparation,
   ExecutionStatus,
   NativeDescriptor,
@@ -278,6 +279,42 @@ export class PostgresKernel implements DurableKernel {
         [tx.consumer, ref],
       );
       return accountStatus(r);
+    });
+  }
+  async accountInfoIdentities(
+    context: TrustedContext,
+    refs: readonly string[],
+  ): Promise<readonly AccountInfoIdentity[]> {
+    if (refs.length < 1 || refs.length > 50 || new Set(refs).size !== refs.length) {
+      throw new KernelError("invalid");
+    }
+    refs.forEach(uuid);
+    return this.read(context, async (tx) => {
+      const result = await tx.db.query<
+        AccountRow & {
+          active_generation: string | null;
+          native_identity: string | null;
+          readable: boolean;
+        }
+      >(
+        `SELECT a.*,c.native_identity,
+          (a.state IN ('active','suspended') AND c.state='ready'
+          AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.consumer=a.consumer
+            AND o.account_ref=a.ref AND o.state IN ('pending','unknown')
+            AND o.intent->>'kind' IN ('reconnect','disable'))) AS readable
+        FROM accounts a LEFT JOIN candidates c ON c.consumer=a.consumer
+          AND c.generation=a.active_generation AND c.account_ref=a.ref
+        WHERE a.consumer=$1 AND a.ref=ANY($2::uuid[])
+        ORDER BY array_position($2::uuid[],a.ref)`,
+        [tx.consumer, refs],
+      );
+      if (result.rows.length !== refs.length) throw new KernelError("denied");
+      return result.rows.map((row) => ({
+        ...accountStatus(row),
+        readable: row.readable === true,
+        ...(row.active_generation ? { generation: row.active_generation } : {}),
+        ...(row.native_identity ? { nativePhysicalIdentity: row.native_identity } : {}),
+      }));
     });
   }
   // One SQL observation fences pending reconnect/delete before exposing quota.

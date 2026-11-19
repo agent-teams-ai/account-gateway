@@ -1,9 +1,9 @@
 import { z } from "zod";
+import { deadline, reference, revision } from "./primitives.js";
+export { deadline, reference, revision } from "./primitives.js";
+export * from "./account-info.js";
 /** Single facade v1 authority: positive allowlists; no native/product models. */
-export const reference = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/);
-export const revision = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 export const oauthMethod = z.enum(["device_code", "browser"]);
-export const deadline = z.iso.datetime({ offset: true }).max(64);
 export const protocol = z.enum(["openai-chat", "openai-responses", "anthropic-messages"]);
 export const accountState = z.enum([
   "staging",
@@ -977,6 +977,62 @@ export const providerConnectionCapabilities = z.strictObject({
 });
 export type ProviderConnectionCapability = z.infer<typeof providerConnectionCapability>;
 export type ProviderConnectionCapabilities = z.infer<typeof providerConnectionCapabilities>;
+
+export const PROVIDER_CONNECTIONS_V2_CONTRACT = "provider-connections/v2" as const;
+const connectionMethodSupport = { create: z.boolean(), reconnect: z.boolean() };
+export const providerConnectionMethod = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("api_key"), ...connectionMethodSupport }),
+  z.strictObject({
+    kind: z.literal("browser"),
+    ...connectionMethodSupport,
+    completionInputKind: z.enum(["callback_url", "authorization_code"]),
+    callbackMode: z.enum(["automatic", "manual_callback_url"]),
+  }),
+  z.strictObject({ kind: z.literal("device_code"), ...connectionMethodSupport }),
+  z.strictObject({
+    kind: z.literal("credential_import"),
+    ...connectionMethodSupport,
+    method: z.enum(["refresh_token", "oauth_auth_json"]),
+    maxBytes: z.literal(65_536),
+  }),
+]);
+export const providerConnectionCapabilityV2 = z.strictObject({
+  profileId: reference,
+  provider: z.strictObject({
+    id: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
+    label: z.string().min(1).max(64),
+  }),
+  product: z.strictObject({ id: providerPlanIdentity, label: z.string().min(1).max(64) }),
+  region: z.strictObject({ id: z.enum(["global", "unknown"]), label: z.string().min(1).max(64) }),
+  protocol,
+  models: z
+    .array(qualifiedModelCapability)
+    .min(1)
+    .max(128)
+    .refine((values) => new Set(values.map((value) => value.modelId)).size === values.length),
+  methods: z
+    .array(providerConnectionMethod)
+    .max(5)
+    .refine((values) => {
+      const ids = values.map((value) =>
+        value.kind === "credential_import" ? value.method : value.kind,
+      );
+      return new Set(ids).size === ids.length;
+    }),
+  accountInfo: z.boolean(),
+  limitsContract,
+  availability: z.enum(["enabled", "deployment_configuration_required"]),
+});
+export const providerConnectionCapabilitiesV2 = z.strictObject({
+  contract: z.literal(PROVIDER_CONNECTIONS_V2_CONTRACT),
+  capabilities: z
+    .array(providerConnectionCapabilityV2)
+    .max(128)
+    .refine((values) => new Set(values.map((value) => value.profileId)).size === values.length),
+});
+export type ProviderConnectionMethod = z.infer<typeof providerConnectionMethod>;
+export type ProviderConnectionCapabilityV2 = z.infer<typeof providerConnectionCapabilityV2>;
+export type ProviderConnectionCapabilitiesV2 = z.infer<typeof providerConnectionCapabilitiesV2>;
 
 /** One qualified profile identity authority for discovery triggers and full guards. */
 const accountModelDiscoveryProfiles = Object.freeze([

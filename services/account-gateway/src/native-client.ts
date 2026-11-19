@@ -10,4 +10,6 @@ export {
   NativeAccountLimitsRefreshClient,
   NativeAccountLimitsV2Client,
   NativeAccountModelsClient,
+  NativeAccountInfoClient,
+  NativeAccountCapabilitiesClient,
 } from "./native-client-discovery.ts";

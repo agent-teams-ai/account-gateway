@@ -42,6 +42,31 @@ function accountClient(
   return {
     json,
     client: Object.freeze({
+      readAccountInfo: async (
+        input: c.AccountInfoReadRequest,
+        options?: CallOptions,
+      ): Promise<c.AccountInfoReadResponse> => {
+        const captured = valid(c.accountInfoReadRequest, input);
+        const result = await json(
+          "/v1/account-info/read",
+          c.accountInfoReadResponse,
+          "POST",
+          captured,
+          options,
+          {},
+          {},
+          c.ACCOUNT_INFO_RESPONSE_BYTES,
+        );
+        if (
+          result.accounts.some(
+            (value, index) => value.accountRef !== captured.accountRefs[index],
+          ) ||
+          result.accounts.length !== captured.accountRefs.length
+        ) {
+          throw new GatewayError("invalid_response", "not_dispatched");
+        }
+        return result;
+      },
       readAccountModels: (
         input: c.AccountModelsRequest,
         options?: CallOptions,
@@ -65,6 +90,16 @@ function accountClient(
         ),
       profiles: (options?: CallOptions) =>
         json("/v1/profiles", c.profiles, "GET", undefined, options),
+      getProviderConnectionCapabilitiesV2: (
+        options?: CallOptions,
+      ): Promise<c.ProviderConnectionCapabilitiesV2> =>
+        json(
+          "/v2/provider-connection-capabilities",
+          c.providerConnectionCapabilitiesV2,
+          "GET",
+          undefined,
+          options,
+        ),
       list: (input: c.ListQuery = {}, options?: CallOptions) => {
         const entries: [string, c.ListQuery[keyof c.ListQuery]][] = Object.entries(
           valid(c.listQuery, input),

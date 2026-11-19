@@ -171,6 +171,7 @@ export function transport(
     options: CallOptions = {},
     identity: Identity = {},
     extraHeaders: Record<string, string> = {},
+    responseBytes = settings.responseBytes,
   ): Promise<T> {
     const handle = await enter(
       path,
@@ -188,7 +189,7 @@ export function transport(
       ) {
         throw handle.failure("invalid_response");
       }
-      const parsed = await bounded(response, settings.responseBytes);
+      const parsed = await bounded(response, responseBytes);
       if (!response.ok) {
         const error = c.safeError.safeParse(parsed);
         if (

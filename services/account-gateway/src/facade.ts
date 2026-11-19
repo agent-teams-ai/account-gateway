@@ -51,9 +51,14 @@ import {
   type PhysicalCandidate,
 } from "./management.ts";
 import { providerConnectionDefinition } from "./provider-connections.ts";
-import { projectProviderConnections } from "./provider-connection-capabilities.ts";
+import {
+  projectProviderConnections,
+  projectProviderConnectionsV1,
+} from "./provider-connection-capabilities.ts";
+import type { ProviderConnectionSource } from "./provider-connection-capabilities.ts";
 import { strictJSON, validateResponses } from "./facade-ingress.ts";
 import { readCachedAccountLimits } from "./limits-port.ts";
+import { AccountInfoReader } from "./account-info-port.ts";
 import type { AdmissionLimits, AdmissionLimitsScreen } from "./admission-limits.ts";
 import {
   configuredAccountModelSource,
@@ -162,6 +167,8 @@ export interface NativeTransport {
   ): Promise<void>;
 }
 export interface FacadeOptions {
+  readonly accountInfo?: AccountInfoReader;
+  readonly providerConnections?: ProviderConnectionSource;
   readonly accountModels?: AccountModelsSource;
   readonly accountLimits?: {
     getAccountLimitsCapabilities(): Promise<c.AccountLimitsCapabilities>;
@@ -214,6 +221,7 @@ import { singleton, body, send } from "./facade-http-boundary.ts";
 export { cancelFacadeTransport } from "./facade-transport-cancel.ts";
 
 export function createFacade(options: FacadeOptions): Server {
+  const accountInfo = options.accountInfo ?? new AccountInfoReader();
   const admission = options.admission,
     controlOnly = options.controlOnly === true;
   const kernel = options.kernel,
@@ -716,6 +724,45 @@ export function createFacade(options: FacadeOptions): Server {
             )
           ) {
             throw new KernelError("invalid");
+          }
+          if (path === "/v1/account-info/read" && method === "POST") {
+            const input = parse(
+              c.accountInfoReadRequest,
+              strictJSON(
+                await body(req, Math.min(ingressBytes, c.ACCOUNT_INFO_REQUEST_BYTES)),
+                true,
+              ),
+            );
+            if (
+              (grant.role !== "consumer-control" && grant.role !== "management") ||
+              !permitsOwner(grant, input.ownerRef)
+            )
+              throw new KernelError("denied");
+            const result = await accountInfo.read(
+              {
+                observe: async (selector) => {
+                  requireCurrent(grant);
+                  if (!kernel.accountInfoIdentities) throw new KernelError("unavailable");
+                  const rows = await kernel.accountInfoIdentities(context, selector.accountRefs);
+                  requireCurrent(grant);
+                  if (
+                    !permitsOwner(grant, selector.ownerRef) ||
+                    rows.some(
+                      (row) =>
+                        row.ownerRef !== selector.ownerRef || !permitsProfile(grant, row.profile),
+                    )
+                  ) {
+                    throw new KernelError("denied");
+                  }
+                  return rows;
+                },
+              },
+              input,
+              { consumerId: context.consumerId, signal: controller.signal },
+            );
+            requireCurrent(grant);
+            send(res, c.accountInfoReadResponse, result, 200, true, c.ACCOUNT_INFO_RESPONSE_BYTES);
+            return;
           }
           if (path === "/v1/capabilities/account-limits-refresh" && method === "GET") {
             if (grant.role !== "consumer-control" && grant.role !== "management") {
@@ -1531,11 +1578,21 @@ export function createFacade(options: FacadeOptions): Server {
             });
             return;
           }
-          if (path === "/v1/provider-connection-capabilities" && method === "GET") {
+          if (
+            (path === "/v1/provider-connection-capabilities" ||
+              path === "/v2/provider-connection-capabilities") &&
+            method === "GET"
+          ) {
             const visible = [...profiles.values()]
               .filter((p) => permitsProfile(grant, p.dto.profileId))
               .map((p) => p.dto);
-            reply(c.providerConnectionCapabilities, projectProviderConnections(visible));
+            if (!options.providerConnections) throw new KernelError("unavailable");
+            const snapshot = projectProviderConnections(
+              await options.providerConnections.getProviderConnectionCapabilities(),
+              visible,
+            );
+            if (path.startsWith("/v2/")) reply(c.providerConnectionCapabilitiesV2, snapshot);
+            else reply(c.providerConnectionCapabilities, projectProviderConnectionsV1(snapshot));
             return;
           }
           const lifecycleGate =

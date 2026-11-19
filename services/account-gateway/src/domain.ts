@@ -111,6 +111,11 @@ export interface AccountLimitsIdentity extends AccountStatus {
   generation: string;
   nativePhysicalIdentity: string;
 }
+export interface AccountInfoIdentity extends AccountStatus {
+  readonly readable: boolean;
+  readonly generation?: string;
+  readonly nativePhysicalIdentity?: string;
+}
 export interface AccountCustodyIdentity {
   generation: string;
   nativePhysicalIdentity: string;
@@ -501,6 +506,10 @@ export function uuid(value: unknown): asserts value is string {
 export interface DurableKernel {
   issuer(context: TrustedContext): Promise<string>;
   account(context: TrustedContext, accountRef: string): Promise<AccountStatus>;
+  accountInfoIdentities?(
+    context: TrustedContext,
+    accountRefs: readonly string[],
+  ): Promise<readonly AccountInfoIdentity[]>;
   // Atomic current birth/epoch read; pending reconnect/delete is unavailable.
   accountLimitsIdentity?(
     context: TrustedContext,
