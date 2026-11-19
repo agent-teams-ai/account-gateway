@@ -173,6 +173,29 @@ export const joinedProviderProfiles = [
   ["gemini", "gemini-openai-chat-apikey-v1", "gemini-3.1-pro-preview"],
 ] as const;
 
+/** Only a completed real child probe qualifies this test-only sandbox backend. */
+export function joinedSandboxQualification(value: unknown) {
+  const expected = {
+    contract: "codex-read-only-sandbox/v1",
+    backend: "legacy-landlock",
+    childExecuted: true,
+    readSucceeded: true,
+    workspaceWriteDenied: true,
+    outsideWriteDenied: true,
+    loopbackTCPDenied: true,
+    noNewPrivileges: true,
+  } as const;
+  const observed = record(value);
+  check(
+    observed !== undefined &&
+      Object.keys(observed).length === Object.keys(expected).length &&
+      Object.entries(expected).every(
+        ([key, required]) => Object.hasOwn(observed, key) && observed[key] === required,
+      ),
+  );
+  return expected;
+}
+
 /** This third case uses the real RR Action pin, independently of the two CLI lanes. */
 export function joinedProviderReceipt(
   raw: string,
@@ -305,6 +328,7 @@ export function joinedProviderReceipt(
       reasoningOmitted: true,
       fastOmitted: true,
       executionClosureAcknowledged: true,
+      sandboxQualification: joinedSandboxQualification(observed.sandboxQualification),
     };
   });
   return {
@@ -375,7 +399,8 @@ export function joinedFailure(raw: string) {
     ),
   ]);
   let at = "driver",
-    frame: string | undefined;
+    frame: string | undefined,
+    failureCode: string | undefined;
   for (const line of raw.split(/\r?\n/)) {
     if (line.length > 16_384) {
       continue;
@@ -394,9 +419,17 @@ export function joinedFailure(raw: string) {
       ) {
         frame = value.frame;
       }
+      if (value.failureCode === "rr_provider_joined_failed_cli_sandbox_preflight_none") {
+        failureCode = value.failureCode;
+      }
     } catch {
       /* Never reflect arbitrary child output. */
     }
   }
-  return { code: "joined-driver-failed", at, ...(isNonemptyString(frame) ? { frame } : {}) };
+  return {
+    code: "joined-driver-failed",
+    at,
+    ...(isNonemptyString(frame) ? { frame } : {}),
+    ...(isNonemptyString(failureCode) ? { failureCode } : {}),
+  };
 }

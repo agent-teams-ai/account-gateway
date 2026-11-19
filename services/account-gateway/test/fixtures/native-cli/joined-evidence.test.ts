@@ -6,8 +6,40 @@ import {
   joinedReceipt,
   joinedProviderProfiles,
   joinedProviderReceipt,
+  joinedSandboxQualification,
 } from "./joined-evidence.ts";
 import { CommandFailure, command } from "./joined-command.ts";
+
+const sandboxQualification = {
+  contract: "codex-read-only-sandbox/v1",
+  backend: "legacy-landlock",
+  childExecuted: true,
+  readSucceeded: true,
+  workspaceWriteDenied: true,
+  outsideWriteDenied: true,
+  loopbackTCPDenied: true,
+  noNewPrivileges: true,
+};
+
+void test("sandbox evidence requires actual read and denial proofs, not child startup failure", async (t) => {
+  assert.deepEqual(joinedSandboxQualification(sandboxQualification), sandboxQualification);
+  for (const [name, value] of [
+    ["missing proof", undefined],
+    ["unsupported backend", { ...sandboxQualification, backend: "none" }],
+    ["child never started", { ...sandboxQualification, childExecuted: false }],
+    ["child read failed", { ...sandboxQualification, readSucceeded: false }],
+    ["workspace write succeeded", { ...sandboxQualification, workspaceWriteDenied: false }],
+    ["outside write succeeded", { ...sandboxQualification, outsideWriteDenied: false }],
+    ["network access succeeded", { ...sandboxQualification, loopbackTCPDenied: false }],
+    ["missing no_new_privs", { ...sandboxQualification, noNewPrivileges: false }],
+    ["string is not a denial", { ...sandboxQualification, loopbackTCPDenied: "true" }],
+    ["unapproved diagnostic", { ...sandboxQualification, stdout: "private-child-output" }],
+  ] as const) {
+    await t.test(name, () => {
+      assert.throws(() => joinedSandboxQualification(value), { message: "joined-proof-invalid" });
+    });
+  }
+});
 
 void test("joined client evidence requires real terminal proofs and discards arbitrary assertion and client values", async (t) => {
   const expected = {
@@ -246,6 +278,7 @@ void test("provider evidence requires six real RR tool/schema receipts and remov
       reasoningOmitted: true,
       fastOmitted: true,
       executionClosureAcknowledged: true,
+      sandboxQualification,
       assertion: "private-action-output",
     })),
   };
@@ -263,6 +296,7 @@ void test("provider evidence requires six real RR tool/schema receipts and remov
   const safe = joinedProviderReceipt(diagnostic + shape + proof, expected);
   assert.equal(safe.rrReceipts.length, 6);
   assert.equal(safe.rrReceipts[5]?.structuredOutputRequests, 2);
+  assert.deepEqual(safe.rrReceipts[5]?.sandboxQualification, sandboxQualification);
   assert.equal(JSON.stringify(safe).includes("private-"), false);
   for (const patch of [
     { rrAcceptance: false },
@@ -294,6 +328,11 @@ void test("provider evidence requires six real RR tool/schema receipts and remov
     { declaredFunctionTools: 129 },
     { executionClosureAcknowledged: false },
     { reasoningOmitted: false },
+    { sandboxQualification: undefined },
+    { sandboxQualification: { ...sandboxQualification, childExecuted: false } },
+    { sandboxQualification: { ...sandboxQualification, workspaceWriteDenied: false } },
+    { sandboxQualification: { ...sandboxQualification, loopbackTCPDenied: false } },
+    { sandboxQualification: { ...sandboxQualification, diagnostic: "private-output" } },
   ]) {
     assert.throws(
       () =>
@@ -332,6 +371,28 @@ void test("provider evidence requires six real RR tool/schema receipts and remov
       code: "joined-driver-failed",
       at: "gemini-native-tool-roundtrip",
       frame: "native-provider-joined.ts:634:11",
+    },
+  );
+});
+
+void test("sandbox preflight failure exports only its fixed diagnostic code", () => {
+  const failed = {
+    phase: "failed",
+    at: "kimi-native-tool-roundtrip",
+    failureCode: "rr_provider_joined_failed_cli_sandbox_preflight_none",
+    stderr: "private-child-output",
+    assertion: "private-managed-requirement",
+  };
+  assert.deepEqual(joinedFailure(JSON.stringify(failed)), {
+    code: "joined-driver-failed",
+    at: "kimi-native-tool-roundtrip",
+    failureCode: "rr_provider_joined_failed_cli_sandbox_preflight_none",
+  });
+  assert.deepEqual(
+    joinedFailure(JSON.stringify({ ...failed, failureCode: "private-child-error" })),
+    {
+      code: "joined-driver-failed",
+      at: "kimi-native-tool-roundtrip",
     },
   );
 });

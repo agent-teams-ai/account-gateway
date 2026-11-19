@@ -35,6 +35,7 @@ import {
 import { createFacade, cancelFacadeTransport } from "../src/facade.ts";
 import type { FacadeOptions } from "../src/facade.ts";
 import type { ServiceConfig } from "../src/service-config.ts";
+import { joinedSandboxQualification } from "./fixtures/native-cli/joined-evidence.ts";
 
 const report = (value: object): void => {
   process.stdout.write(JSON.stringify(value) + "\n");
@@ -1117,8 +1118,8 @@ async function run(): Promise<void> {
       assert.equal(observed.executionClosureAcknowledged, true);
       assert.equal(observed.reasoningOmitted, true);
       assert.equal(observed.fastOmitted, true);
-      rrReceipts.push(
-        Object.fromEntries(
+      rrReceipts.push({
+        ...Object.fromEntries(
           [
             "profileId",
             "model",
@@ -1138,7 +1139,8 @@ async function run(): Promise<void> {
             "executionClosureAcknowledged",
           ].map((name) => [name, observed[name]]),
         ),
-      );
+        sandboxQualification: joinedSandboxQualification(observed.sandboxQualification),
+      });
     }
     assert.equal(new Set(rrReceipts.map((item) => item.profileId)).size, tuples.length);
   }
