@@ -18,7 +18,7 @@ jobs:
         node: ['26.11.1', '24.21.0']
     env:
       NPM_CONFIG_ENGINE_STRICT: 'true'
-      NATIVE_COMMIT: 33509e53e950f99cd7891b1ea8ded0d483ea5bf8
+      NATIVE_COMMIT: 49cfbac933f38fd490510b2aa7e4275d1d84ee47
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -75,11 +75,6 @@ jobs:
           pnpm --dir services/account-gateway run typecheck
           node --test services/account-gateway/test/fixtures/native-cli/joined-evidence.test.ts
           git diff --exit-code -- pnpm-lock.yaml
-      - name: Race-check the actual public ingress and bounded bootstrap
-        run: |
-          node --test services/account-gateway/test/fixtures/native-cli/evidence.test.ts
-          node services/account-gateway/test/fixtures/native-cli/race.ts \
-            "$GATEWAY_CLIENT_ROOT/native-source/backend" "$GATEWAY_CLIENT_ROOT/build"
       - name: Build isolated real-client and PostgreSQL lifecycle test binaries
         run: |
           cd "$GATEWAY_CLIENT_ROOT/native-source/backend"
@@ -87,7 +82,8 @@ jobs:
           go test -c ./internal/repository -o "$GATEWAY_CLIENT_ROOT/build/native-repository.test"
           CGO_ENABLED=0 go test -tags unit -c -ldflags='-s -w' ./internal/service -o "$GATEWAY_CLIENT_ROOT/build/native-account-info-service.test"
           CGO_ENABLED=0 go test -tags integration -c -ldflags='-s -w' ./internal/repository -o "$GATEWAY_CLIENT_ROOT/build/native-account-info-repository.test"
-          "$GATEWAY_CLIENT_ROOT/build/native-account-info-service.test" -test.run '^TestGateway(AccountInfo|QuotaAndInfo|CodexInfo|AccountCapabilities|GeminiContinuation|NativeOfficial|NativeAnthropicSchema|NativeOAuthImport)' -test.v -test.count=1
+          CGO_ENABLED=0 go test -tags unit -c -ldflags='-s -w' ./internal/gatewaybootstrap -o "$GATEWAY_CLIENT_ROOT/build/native-account-info-bootstrap.test"
+          CGO_ENABLED=0 go test -tags unit -c -ldflags='-s -w' ./internal/handler/admin -o "$GATEWAY_CLIENT_ROOT/build/native-account-info-handler.test"
           git diff --exit-code -- go.mod go.sum
           cat > "$GATEWAY_CLIENT_ROOT/container/Dockerfile" <<'DOCKERFILE'
           ARG PG_IMAGE
@@ -105,6 +101,16 @@ jobs:
             --repo "$GITHUB_WORKSPACE" --native-source "$GATEWAY_CLIENT_ROOT/native-source" \
             --output "$GATEWAY_CLIENT_ROOT/build/joined" --go "$GATEWAY_CLIENT_GO" \
             --native-commit "$NATIVE_COMMIT" --gateway-commit "$(git rev-parse HEAD)"
+      - name: Native metadata and provider boundary unit qualification
+        run: |
+          "$GATEWAY_CLIENT_ROOT/build/native-account-info-service.test" -test.run '^TestGateway(AccountInfo|QuotaAndInfo|Codex(Info|RetainedInfo|Maintenance)|ClaudeInfo|GrokInfo|OAuthInfo|AccountCapabilities|GeminiContinuation|NativeGemini|NativeOfficial|NativeAnthropicSchema|NativeOAuthImport)' -test.v -test.count=1
+          "$GATEWAY_CLIENT_ROOT/build/native-account-info-bootstrap.test" -test.run '^Test(NativeAccountCapabilities|NativeOfficialAPIConfig|GatewayAccountLimitsAuthorityHTTP)' -test.v -test.count=1
+          "$GATEWAY_CLIENT_ROOT/build/native-account-info-handler.test" -test.run '^TestGateway(AccountInfoPrivateHTTPContract|NativeOAuthConnectHTTPImportStrictIngress)' -test.v -test.count=1
+      - name: Race-check the actual public ingress and bounded bootstrap
+        run: |
+          node --test services/account-gateway/test/fixtures/native-cli/evidence.test.ts
+          node services/account-gateway/test/fixtures/native-cli/race.ts \
+            "$GATEWAY_CLIENT_ROOT/native-source/backend" "$GATEWAY_CLIENT_ROOT/build"
       - name: Real Codex and Claude Code through Go, OAuth and PostgreSQL without egress
         run: |
           docker run --rm --network none --user 0:0 --cpus 2 --memory 4g --pids-limit 256 --ulimit nofile=4096:4096 \
@@ -178,6 +184,8 @@ jobs:
           path: |
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/native-account-info-service.test
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/native-account-info-repository.test
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/native-account-info-bootstrap.test
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/native-account-info-handler.test
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/joined/native-provider-joined/fixture
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/joined/native-device-joined/fixture
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/joined/native-claude-joined/fixture

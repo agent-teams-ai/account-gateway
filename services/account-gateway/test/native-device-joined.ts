@@ -21,7 +21,11 @@ import {
 import { PostgresKernel } from "../src/postgres.ts";
 import { IntentSecrets, PostgresManagementStore } from "../src/management-store.ts";
 import { codexOAuthProfile } from "../src/management.ts";
-import { composeServiceControl, composeServiceNative } from "../src/service.ts";
+import {
+  composeServiceControl,
+  composeServiceNative,
+  composeServiceCachedLimits,
+} from "../src/service.ts";
 import { createFacade } from "../src/facade.ts";
 import { PostgresUsageJournal } from "../src/usage.ts";
 import type { UsageJournal } from "../src/usage.ts";
@@ -392,7 +396,7 @@ async function run(): Promise<void> {
       profiles: control.catalog,
       enrollment,
       transport,
-      accountLimits: control.accountLimits,
+      ...composeServiceCachedLimits(control),
       intentHmacKey: randomBytes(32),
       ...(cliBinary !== undefined ? { usage } : {}),
     }),
@@ -477,6 +481,41 @@ async function run(): Promise<void> {
   assert.deepEqual(await client.beginOAuth(command), { operation: applied });
   const final = await stats();
   assert.deepEqual(final, { starts: 1, polls: 2, exchanges: 1, checks: 1, unexpected: 0 });
+  const metadata = async (accountRef: string, email: string) => {
+    const before = await stats();
+    const snapshot = await client.readAccountInfo({ ownerRef, accountRefs: [accountRef] });
+    const row = snapshot.accounts[0];
+    assert.equal(row.accountRef, accountRef);
+    assert.equal(row.info.status, "available");
+    const fields = row.info.fields;
+    assert.equal(fields.email.status, "known");
+    assert.equal(fields.subscription.status, "known");
+    assert.equal(fields.credentialExpiresAt.status, "known");
+    assert.equal(fields.accountLabel.status, "known");
+    assert.equal(fields.email.value, email);
+    assert.equal(fields.email.source, "verified_claim");
+    assert.equal(fields.accountLabel.value, "Provider reviewer");
+    assert.equal(fields.accountLabel.source, "provider_api");
+    assert.equal(
+      fields.subscription.value.code,
+      "pro",
+      "account check overrides the signed plan claim",
+    );
+    assert.equal(fields.subscription.value.scope, "personal");
+    assert.equal(fields.subscription.source, "provider_api");
+    assert.equal(fields.subscription.value.endsAt?.kind, "instant");
+    assert.ok(
+      Date.parse(fields.subscription.value.endsAt.value) >
+        Date.parse(fields.credentialExpiresAt.value),
+      "subscription end and credential expiry keep distinct meanings",
+    );
+    assert.ok(Date.parse(fields.email.observedAt) <= Date.now());
+    assert.ok(Date.parse(fields.credentialExpiresAt.value) > Date.now());
+    await assert.rejects(foreign.readAccountInfo({ ownerRef, accountRefs: [accountRef] }), denied);
+    assert.deepEqual(await stats(), before, "metadata read never asks the provider");
+    return row;
+  };
+  await metadata(journal.accountRef, "joined-device@example.test");
   assert.equal(
     (
       await pool.query<{ n: number }>(
@@ -958,14 +997,182 @@ async function run(): Promise<void> {
     "native tombstone cannot resurrect cached values",
   );
   assert.deepEqual(await stats(), final, "all cached reads made zero provider requests");
+  phase = "codex-native-imports";
+  const discovered = await client.getProviderConnectionCapabilitiesV2();
+  const importCapability = discovered.capabilities.find(
+    (value) => value.profileId === codexOAuthProfile.profile,
+  );
+  assert.ok(importCapability);
+  assert.deepEqual(
+    importCapability.methods.filter((method) => method.kind === "credential_import"),
+    [
+      {
+        kind: "credential_import",
+        method: "refresh_token",
+        maxBytes: 65_536,
+        create: true,
+        reconnect: true,
+      },
+      {
+        kind: "credential_import",
+        method: "oauth_auth_json",
+        maxBytes: 65_536,
+        create: true,
+        reconnect: true,
+      },
+    ],
+  );
+  const importCommand = (method: "refresh_token" | "oauth_auth_json", value: string) => ({
+    operationId: randomUUID(),
+    ownerRef,
+    profileId: codexOAuthProfile.profile,
+    displayName: "Controlled Codex import",
+    credential: { kind: "credential_import" as const, method, value },
+  });
+  const rawImport = importCommand("refresh_token", "joined-import-refresh-one");
+  const rawResult = await client.connect(rawImport);
+  assert.equal(rawResult.state, "applied");
+  assert.ok(rawResult.result?.kind === "account");
+  const importedRef = rawResult.result.accountRef;
+  const importedBefore = await metadata(importedRef, "joined-raw@example.test");
+  const countsAfterRaw = await stats();
+  for (const result of await Promise.all(
+    Array.from({ length: 4 }, () => client.connect(rawImport)),
+  )) {
+    assert.deepEqual(result, rawResult);
+  }
+  assert.equal((await client.readOAuth(rawImport.operationId)).oauthMethod, undefined);
+  await assert.rejects(
+    client.connect({
+      ...rawImport,
+      credential: { ...rawImport.credential, method: "oauth_auth_json" },
+    }),
+    (error: unknown) => error instanceof GatewayError && error.diagnostic?.code === "conflict",
+  );
+  await assert.rejects(foreign.connect({ ...rawImport, operationId: randomUUID() }), denied);
+  assert.deepEqual(
+    await stats(),
+    countsAfterRaw,
+    "duplicates and rejected changes never exchange again",
+  );
+  const authJSON = JSON.stringify({
+    auth_mode: "chatgpt",
+    OPENAI_API_KEY: null,
+    last_refresh: "2020-01-01T00:00:00Z",
+    tokens: {
+      refresh_token: "joined-import-refresh-two",
+      access_token: "untrusted-import-access",
+      id_token: "untrusted-import-id",
+      account_id: "untrusted-account-hint",
+    },
+  });
+  const jsonResult = await client.connect(importCommand("oauth_auth_json", authJSON));
+  assert.equal(jsonResult.state, "applied");
+  assert.ok(jsonResult.result?.kind === "account");
+  await metadata(jsonResult.result.accountRef, "joined-json@example.test");
+  const previousAccount = await client.get(importedRef);
+  const replacement = {
+    operationId: randomUUID(),
+    expectedMetadataRevision: previousAccount.metadataRevision,
+    credential: {
+      kind: "credential_import" as const,
+      method: "refresh_token" as const,
+      value: "joined-import-refresh-three",
+    },
+  };
+  const replaced = await client.reconnect(importedRef, replacement);
+  assert.equal(replaced.state, "applied");
+  const importedAfter = await metadata(importedRef, "joined-raw@example.test");
+  assert.equal(importedAfter.metadataRevision, importedBefore.metadataRevision + 1);
+  assert.ok(importedAfter.authorizationEpoch > importedBefore.authorizationEpoch);
+  const beforeJournal = await store.readJournal(context, rawImport.operationId);
+  const afterJournal = await store.readJournal(context, replacement.operationId);
+  assert.ok(beforeJournal && afterJournal);
+  assert.notEqual(afterJournal.generation, beforeJournal.generation);
+  assert.equal(afterJournal.accountRef, beforeJournal.accountRef);
+  phase = "codex-import-lost-native-ack";
+  const armed = await fetch(ready.controllerOrigin + "/imports/drop-next-ack", {
+    method: "POST",
+    headers: { authorization: "Bearer " + managementCredential },
+  });
+  assert.equal(armed.status, 204);
+  await armed.arrayBuffer();
+  const ackImport = importCommand("refresh_token", "joined-import-refresh-ack");
+  const ackResult = await client.connect(ackImport);
+  assert.equal(
+    ackResult.state,
+    "applied",
+    "readback recovers committed native success after ACK loss",
+  );
+  assert.ok(ackResult.result?.kind === "account");
+  await metadata(ackResult.result.accountRef, "joined-ack@example.test");
+  const countsAfterACK = await stats();
+  assert.deepEqual(await client.connect(ackImport), ackResult);
+  assert.equal((await client.readOAuth(ackImport.operationId)).state, "applied");
+  assert.deepEqual(await stats(), countsAfterACK);
+  phase = "codex-import-ambiguous-provider-response";
+  const ambiguousImport = importCommand("refresh_token", "joined-import-refresh-ambiguous");
+  const ambiguousResult = await client.connect(ambiguousImport);
+  assert.equal(ambiguousResult.state, "unknown");
+  const countsAfterAmbiguity = await stats();
+  assert.equal((await client.readOAuth(ambiguousImport.operationId)).state, "unknown");
+  assert.deepEqual(await client.connect(ambiguousImport), ambiguousResult);
+  assert.deepEqual(
+    await stats(),
+    countsAfterAmbiguity,
+    "uncertain upstream token consumption never retries",
+  );
+  const completedCounts = await stats();
+  assert.deepEqual(completedCounts, {
+    starts: 1,
+    polls: 2,
+    exchanges: 6,
+    checks: 5,
+    unexpected: 0,
+  });
+  const serializedOperations = JSON.stringify(
+    (await pool.query("SELECT intent FROM ag_kernel.operations WHERE consumer=$1", [consumerId]))
+      .rows,
+  );
+  for (const secret of [
+    "joined-import-refresh-one",
+    "joined-import-refresh-two",
+    "joined-import-refresh-three",
+    "joined-import-refresh-ack",
+    "joined-import-refresh-ambiguous",
+    "untrusted-import-access",
+    "untrusted-import-id",
+  ]) {
+    assert.equal(serializedOperations.includes(secret), false);
+    assert.equal(diagnostic.includes(secret), false);
+  }
+  assert.equal(
+    (
+      await pool.query<{ n: number }>(
+        "SELECT count(*)::int AS n FROM ag_management.transient_intents WHERE consumer=$1",
+        [consumerId],
+      )
+    ).rows[0].n,
+    0,
+  );
   child.stdin!.end("stop\n");
   stopped = true;
   const closed = await next("closed");
   assert.equal(closed.plaintextCredentials, 0);
+  assert.equal(closed.plaintextTransientImports, 0);
   assert.equal(closed.retainedDeviceMaterial, 0);
+  assert.equal(closed.droppedImportACKs, 1);
+  assert.equal(closed.unresolvedImportClaims, 1);
   assert.equal(await bounded(childExit), 0);
   if (cliBinary === undefined) {
-    assert.equal(diagnostic, "");
+    const events = diagnostic
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].event, "gateway_native_oauth_connect_failure");
+    assert.equal(events[0].phase, "exchange_transport");
   }
   phase = "completed";
   const receipt = {
@@ -992,7 +1199,17 @@ async function run(): Promise<void> {
       renamePreserved: true,
       upstreamCalls: 0,
     },
-    provider: final,
+    provider: completedCounts,
+    codexCredentialImports: {
+      refreshToken: true,
+      ordinaryAuthJSON: true,
+      reconnect: true,
+      nativeMetadata: true,
+      lostNativeACKRecovered: true,
+      ambiguousProviderResponseNotReplayed: true,
+      unresolvedNativeClaimRetained: true,
+      plaintextTransientImports: 0,
+    },
     plaintextCredentials: 0,
     retainedDeviceMaterial: 0,
     inferenceRequests: cliBinary !== undefined ? 1 : 0,
