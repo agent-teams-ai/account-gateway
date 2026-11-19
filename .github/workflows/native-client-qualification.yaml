@@ -108,6 +108,7 @@ jobs:
             test "$(node --version)" = v24.21.0
             test "$(pnpm --version)" = 11.28.7
             node scripts/install-private-dependencies.mjs --ignore-scripts --frozen-lockfile
+            pnpm rebuild @prisma/engines
             node scripts/prepare-pinned-subscription-runtime.ts
             REVIEW_ROUTER_REQUIRE_OFFLINE_PRISMA=1 node scripts/generate-prisma-offline.mjs
             git diff --exit-code -- package.json pnpm-lock.yaml
