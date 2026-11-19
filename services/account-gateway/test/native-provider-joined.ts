@@ -674,7 +674,7 @@ async function run(): Promise<void> {
                     text: {
                       format: {
                         type: "json_schema",
-                        name: "joined_review",
+                        name: "codex_output_schema",
                         strict: true,
                         schema: {
                           type: "object",
