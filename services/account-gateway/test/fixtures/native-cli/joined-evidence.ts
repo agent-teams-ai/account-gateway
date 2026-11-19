@@ -164,6 +164,167 @@ export function joinedReceipt(
     },
   };
 }
+export const joinedProviderProfiles = [
+  ["kimi", "kimi-code-global-responses-apikey-v1", "k3-256k"],
+  ["glm", "glm-coding-global-responses-apikey-v1", "glm-5.3-flash"],
+  ["minimax", "minimax-mplan-global-responses-apikey-v1", "MiniMax-M3.1-Flash"],
+  ["grok", "grok-subscription-responses-oauth-v1", "grok-4.7"],
+  ["anthropic", "anthropic-messages-apikey-v1", "claude-sonnet-4-6"],
+  ["gemini", "gemini-openai-chat-apikey-v1", "gemini-3.1-pro-preview"],
+] as const;
+
+/** This third case uses the real RR Action pin, independently of the two CLI lanes. */
+export function joinedProviderReceipt(
+  raw: string,
+  expected: {
+    nativeCommit: string;
+    gatewayCommit: string;
+    binarySHA256: string;
+    sourceHashes: Record<string, string>;
+    reviewRouterCommit: string;
+    preloadSHA256: string;
+    relayAdapterSHA256: string;
+    actionRef: string;
+    actionArchiveSHA256: string;
+    clientSHA256: string;
+    version: string;
+  },
+) {
+  check(Buffer.byteLength(raw) <= 131_072);
+  const lines = raw.trim().split(/\r?\n/);
+  check(lines.length <= 64 && lines.every((line) => Buffer.byteLength(line) <= 32_768));
+  let result: Record<string, unknown> | undefined;
+  for (const line of lines) {
+    check(result === undefined);
+    let value: Record<string, unknown> | undefined;
+    try {
+      value = record(JSON.parse(line) as unknown);
+    } catch {
+      throw new Error("joined-proof-invalid");
+    }
+    check(value !== undefined);
+    if (value.phase === "completed") {
+      result = value;
+    } else {
+      // Existing safe diagnostic events are deliberately not exported.
+      check(
+        value.phase === "enrollment-safe-counters" || value.phase === "actual-cli-request-shape",
+      );
+    }
+  }
+  const r = result;
+  check(
+    r !== undefined &&
+      r.contract === "gateway-native-provider-joined/v1" &&
+      r.nativeHead === expected.nativeCommit &&
+      r.gatewayBaseHead === expected.gatewayCommit &&
+      r.nativeBinarySHA256 === expected.binarySHA256 &&
+      r.liveProviderAccount === false &&
+      r.inertReadProviderCalls === 0,
+  );
+  const proofs = [
+    "nativeHTTP",
+    "gatewayFacadeAndSDK",
+    "rrAcceptance",
+    "actualPostgreSQL",
+    "providerShapedFixture",
+    "controlledTextAndFunctionToolRoundTrip",
+    "officialAnthropicMessagesAndSchema",
+    "officialGeminiChatSchemaAndAuthenticatedContinuation",
+    "nativeAccountInfoObservedAtAndProvenance",
+    "dynamicOpenRouterDiscoveryAndDispatch",
+    "dynamicOpenRouterAuthoritativeRemoval",
+    "dynamicOpenRouterQualifiedReasoning",
+    "dynamicOpenRouterImmutableAnchor",
+    "minimaxReasoningContentRoundTrip",
+    "reconnectRetainsAccount",
+    "canonicalErasure",
+    "grokRefresh",
+    "wrongOwnerDenied",
+  ] as const;
+  check(proofs.every((name) => r[name] === true));
+  const sources = {
+    harness: expected.sourceHashes.providerHarness,
+    nativeFixture: expected.sourceHashes.providerFixture,
+    sdkHTTP: expected.sourceHashes.sdkHTTP,
+  };
+  const observedSources = record(r.sourceHashes);
+  check(
+    observedSources !== undefined &&
+      Object.entries(sources).every(([key, value]) => observedSources[key] === value),
+  );
+  const providers = joinedProviderProfiles.map(([provider]) => provider);
+  check(JSON.stringify(r.providers) === JSON.stringify(providers));
+  check(Array.isArray(r.rrReceipts) && r.rrReceipts.length === joinedProviderProfiles.length);
+  const observedReceipts: unknown[] = r.rrReceipts;
+  const rrReceipts = joinedProviderProfiles.map(([, profileId, model], index) => {
+    const observed = record(observedReceipts[index]);
+    check(
+      observed !== undefined &&
+        observed.profileId === profileId &&
+        observed.model === model &&
+        observed.actionRef === expected.actionRef &&
+        observed.actionArchiveSHA256 === expected.actionArchiveSHA256 &&
+        observed.codexBinarySHA256 === expected.clientSHA256 &&
+        observed.codexVersion === expected.version &&
+        observed.providerEntries === 2 &&
+        observed.streamCompletions === 2 &&
+        observed.structuredOutputRequests === 2 &&
+        observed.executionClosureAcknowledged === true &&
+        observed.reasoningOmitted === true &&
+        observed.fastOmitted === true,
+    );
+    const functions = observed.declaredFunctionTools,
+      custom = observed.declaredCustomTools;
+    check(
+      typeof functions === "number" &&
+        Number.isSafeInteger(functions) &&
+        functions > 0 &&
+        functions <= 128 &&
+        typeof custom === "number" &&
+        Number.isSafeInteger(custom) &&
+        custom >= 0 &&
+        custom <= 128 &&
+        observed.returnedFunctionTools === 1 &&
+        observed.returnedCustomTools === (custom > 0 ? 1 : 0),
+    );
+    return {
+      profileId,
+      model,
+      actionRef: expected.actionRef,
+      actionArchiveSHA256: expected.actionArchiveSHA256,
+      codexBinarySHA256: expected.clientSHA256,
+      codexVersion: expected.version,
+      providerEntries: 2,
+      streamCompletions: 2,
+      structuredOutputRequests: 2,
+      declaredFunctionTools: functions,
+      declaredCustomTools: custom,
+      returnedFunctionTools: 1,
+      returnedCustomTools: custom > 0 ? 1 : 0,
+      reasoningOmitted: true,
+      fastOmitted: true,
+      executionClosureAcknowledged: true,
+    };
+  });
+  return {
+    phase: "completed",
+    contract: "gateway-native-provider-joined/v1",
+    nativeHead: expected.nativeCommit,
+    gatewayBaseHead: expected.gatewayCommit,
+    nativeBinarySHA256: expected.binarySHA256,
+    sourceHashes: sources,
+    reviewRouterCommit: expected.reviewRouterCommit,
+    preloadSHA256: expected.preloadSHA256,
+    relayAdapterSHA256: expected.relayAdapterSHA256,
+    providers,
+    rrReceipts,
+    liveProviderAccount: false,
+    inertReadProviderCalls: 0,
+    ...Object.fromEntries(proofs.map((name) => [name, true])),
+  };
+}
+
 export function joinedFailure(raw: string) {
   const phases = new Set([
     "guard",
@@ -194,6 +355,24 @@ export function joinedFailure(raw: string) {
     "cached-native-account-limits",
     "actual-codex-cli-through-real-authority",
     "actual-codex-cli-cleanup",
+    "gateway-control-composition",
+    "gateway-native-composition",
+    "safe-source-capabilities",
+    "openrouter-dynamic-enrollment",
+    "openrouter-dynamic-real-native-dispatch",
+    "openrouter-dynamic-authoritative-removal",
+    "grok-source-refresh",
+    "canonical-generation-and-execution-cleanup",
+    ...joinedProviderProfiles.flatMap(([provider]) =>
+      [
+        "protected-enrollment",
+        "inert-reads",
+        "unsupported-settings-zero-entry",
+        "native-tool-roundtrip",
+        "read-only-quota-collector",
+        "reconnect-and-canonical-erasure",
+      ].map((step) => provider + "-" + step),
+    ),
   ]);
   let at = "driver",
     frame: string | undefined;
@@ -211,7 +390,7 @@ export function joinedFailure(raw: string) {
       }
       if (
         typeof value.frame === "string" &&
-        /^native-(claude|device)-joined\.ts:[0-9]{1,6}:[0-9]{1,6}$/.test(value.frame)
+        /^native-(claude|device|provider)-joined\.ts:[0-9]{1,6}:[0-9]{1,6}$/.test(value.frame)
       ) {
         frame = value.frame;
       }

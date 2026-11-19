@@ -119,7 +119,7 @@ export class NativeControlHTTP {
     }
     let release: (() => void) | undefined;
     try {
-      release = await this.#admission?.acquire(deadline);
+      release = await this.#admission?.acquire(deadline, signal);
     } catch {
       throw new NativeFailure("unavailable");
     }

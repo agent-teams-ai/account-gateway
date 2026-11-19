@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { joinedFailure, joinedReceipt } from "./joined-evidence.ts";
+import {
+  joinedFailure,
+  joinedReceipt,
+  joinedProviderProfiles,
+  joinedProviderReceipt,
+} from "./joined-evidence.ts";
 import { CommandFailure, command } from "./joined-command.ts";
 
 void test("joined client evidence requires real terminal proofs and discards arbitrary assertion and client values", async (t) => {
@@ -171,4 +176,162 @@ void test("joined client evidence requires real terminal proofs and discards arb
   await t.test("child timeout still terminates the detached command", async () => {
     await assert.rejects(runChild("wait", "", "", 100), CommandFailure);
   });
+});
+
+void test("provider evidence requires six real RR tool/schema receipts and removes private diagnostics", () => {
+  const expected = {
+    nativeCommit: "a".repeat(40),
+    gatewayCommit: "b".repeat(40),
+    binarySHA256: "c".repeat(64),
+    sourceHashes: {
+      providerHarness: "d".repeat(64),
+      providerFixture: "e".repeat(64),
+      sdkHTTP: "f".repeat(64),
+    },
+    reviewRouterCommit: "1".repeat(40),
+    preloadSHA256: "2".repeat(64),
+    relayAdapterSHA256: "3".repeat(64),
+    actionRef: "4".repeat(40),
+    actionArchiveSHA256: "5".repeat(64),
+    clientSHA256: "6".repeat(64),
+    version: "0.133.0",
+  };
+  const value = {
+    phase: "completed",
+    contract: "gateway-native-provider-joined/v1",
+    nativeHead: expected.nativeCommit,
+    gatewayBaseHead: expected.gatewayCommit,
+    nativeBinarySHA256: expected.binarySHA256,
+    sourceHashes: {
+      harness: expected.sourceHashes.providerHarness,
+      nativeFixture: expected.sourceHashes.providerFixture,
+      sdkHTTP: expected.sourceHashes.sdkHTTP,
+    },
+    nativeHTTP: true,
+    gatewayFacadeAndSDK: true,
+    rrAcceptance: true,
+    actualPostgreSQL: true,
+    providerShapedFixture: true,
+    liveProviderAccount: false,
+    providers: joinedProviderProfiles.map(([provider]) => provider),
+    controlledTextAndFunctionToolRoundTrip: true,
+    officialAnthropicMessagesAndSchema: true,
+    officialGeminiChatSchemaAndAuthenticatedContinuation: true,
+    nativeAccountInfoObservedAtAndProvenance: true,
+    dynamicOpenRouterDiscoveryAndDispatch: true,
+    dynamicOpenRouterAuthoritativeRemoval: true,
+    dynamicOpenRouterQualifiedReasoning: true,
+    dynamicOpenRouterImmutableAnchor: true,
+    minimaxReasoningContentRoundTrip: true,
+    reconnectRetainsAccount: true,
+    canonicalErasure: true,
+    grokRefresh: true,
+    inertReadProviderCalls: 0,
+    wrongOwnerDenied: true,
+    receiptPath: "/private-receipt-path",
+    rrReceipts: joinedProviderProfiles.map(([, profileId, model]) => ({
+      profileId,
+      model,
+      actionRef: expected.actionRef,
+      actionArchiveSHA256: expected.actionArchiveSHA256,
+      codexBinarySHA256: expected.clientSHA256,
+      codexVersion: expected.version,
+      providerEntries: 2,
+      streamCompletions: 2,
+      structuredOutputRequests: 2,
+      declaredFunctionTools: 3,
+      declaredCustomTools: 1,
+      returnedFunctionTools: 1,
+      returnedCustomTools: 1,
+      reasoningOmitted: true,
+      fastOmitted: true,
+      executionClosureAcknowledged: true,
+      assertion: "private-action-output",
+    })),
+  };
+  const diagnostic =
+    JSON.stringify({
+      phase: "enrollment-safe-counters",
+      extra: "private-diagnostic",
+    }) + "\n";
+  const shape =
+    JSON.stringify({
+      phase: "actual-cli-request-shape",
+      extra: "private-request",
+    }) + "\n";
+  const proof = JSON.stringify(value) + "\n";
+  const safe = joinedProviderReceipt(diagnostic + shape + proof, expected);
+  assert.equal(safe.rrReceipts.length, 6);
+  assert.equal(safe.rrReceipts[5]?.structuredOutputRequests, 2);
+  assert.equal(JSON.stringify(safe).includes("private-"), false);
+  for (const patch of [
+    { rrAcceptance: false },
+    { nativeHead: "0".repeat(40) },
+    { gatewayBaseHead: "0".repeat(40) },
+    { sourceHashes: null },
+    { liveProviderAccount: true },
+    { inertReadProviderCalls: 1 },
+    { providers: value.providers.slice(0, 5) },
+    { rrReceipts: value.rrReceipts.slice(0, 5) },
+    { rrReceipts: [...value.rrReceipts.slice(0, 5), value.rrReceipts[0]] },
+  ]) {
+    assert.throws(
+      () => joinedProviderReceipt(JSON.stringify({ ...value, ...patch }), expected),
+      /joined-proof-invalid/,
+    );
+  }
+  for (const patch of [
+    { model: "unqualified-model" },
+    { actionRef: "0".repeat(40) },
+    { actionArchiveSHA256: "0".repeat(64) },
+    { codexBinarySHA256: "0".repeat(64) },
+    { codexVersion: "0.164.0" },
+    { providerEntries: 1 },
+    { streamCompletions: 1 },
+    { structuredOutputRequests: 0 },
+    { returnedFunctionTools: 0 },
+    { returnedCustomTools: 0 },
+    { declaredFunctionTools: 129 },
+    { executionClosureAcknowledged: false },
+    { reasoningOmitted: false },
+  ]) {
+    assert.throws(
+      () =>
+        joinedProviderReceipt(
+          JSON.stringify({
+            ...value,
+            rrReceipts: value.rrReceipts.map((receipt, index) =>
+              index === 5 ? { ...receipt, ...patch } : receipt,
+            ),
+          }),
+          expected,
+        ),
+      /joined-proof-invalid/,
+    );
+  }
+  for (const raw of [
+    proof + proof,
+    proof + shape,
+    diagnostic,
+    "private-plaintext\n" + proof,
+    JSON.stringify({ phase: "unapproved-phase" }) + "\n" + proof,
+    " ".repeat(131_073),
+  ]) {
+    assert.throws(() => joinedProviderReceipt(raw, expected), /joined-proof-invalid/);
+  }
+  assert.deepEqual(
+    joinedFailure(
+      JSON.stringify({
+        phase: "failed",
+        at: "gemini-native-tool-roundtrip",
+        frame: "native-provider-joined.ts:634:11",
+        assertion: "private-provider-output",
+      }),
+    ),
+    {
+      code: "joined-driver-failed",
+      at: "gemini-native-tool-roundtrip",
+      frame: "native-provider-joined.ts:634:11",
+    },
+  );
 });

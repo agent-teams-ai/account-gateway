@@ -1129,6 +1129,7 @@ const nativeCatalogAccountModelCapability = qualifiedModelCapability.extend({
 export const accountModelCapability = z.union([
   codexAccountModelCapability,
   openRouterAccountModelCapability,
+  nativeCatalogAccountModelCapability,
 ]);
 const accountModelSnapshot = z.strictObject({
   status: z.literal("snapshot"),

@@ -10,7 +10,7 @@ summary: Объём, владение и параллельная реализа
 
 ## 1. Решение и границы документа
 
-Дата исследования: **19 ноября 2026 года**. Статус: **план реализации**, не реализованная функциональность и не разрешение на production rollout. Каноническое место комплекта — Account Gateway: именно он владеет переиспользуемым контрактом управления аккаунтами. Пакеты для других репозиториев ссылаются на этот контракт, а не создают его копии.
+Дата исследования: **19 ноября 2026 года**. Статус: **M1/M2 реализованы в открытых PR, текущая сквозная квалификация и ревью продолжаются**. Production rollout не входит в задачу. Каноническое место комплекта — Account Gateway, владелец переиспользуемого контракта. Пакеты других репозиториев ссылаются на этот контракт.
 
 Реализуем два последовательных результата:
 
@@ -20,6 +20,12 @@ summary: Объём, владение и параллельная реализа
 Sub2API остаётся единственным владельцем provider facts, credentials, provider HTTP, refresh, quota/cooldown и native scheduling. Account Gateway владеет публичным контрактом, логической идентичностью, областью владельца, операциями create/reconnect/delete и адаптером к текущему backend. Review Router владеет членством, привязками к workspace, политикой использования для ревью и видимостью информации пользователю.
 
 Заменяемость означает: **другой account backend можно подключить к узким портам Gateway, сохранив SDK, пользовательские сценарии и общую машину account operations**. В этой работе не строится второй production backend и не обещается перенос уже выданных credentials между системами без отдельной миграции.
+
+### Текущее исполнение
+
+Работа опубликована в [Sub2API PR103](https://github.com/agent-teams-ai/sub2api/pull/103), [Gateway PR116](https://github.com/agent-teams-ai/account-gateway/pull/116) и [Review Router PR914](https://github.com/777genius/review-router-ai/pull/914). PR начинались как Draft и переведены в ready для финального review/fix. Merge ожидает обязательные проверки; production deployment и public SDK publication не выполняются.
+
+M1 включает native snapshot/lifecycle, bounded SDK read, четыре RR-проекции и общий UI. M2 включает Codex RT/refreshable auth.json/reconnect и два exact API profiles с native tools/schema/Gemini continuation. Implementation сама по себе не равна synthetic-qualified: текущие native service/PG, actual review runner и browser результаты фиксируются отдельно в [qualification](native-account-qualification.md). Нет второй БД фактов в Gateway/RR, нового scheduler или второго account FSM.
 
 ## 2. Как читать и распределять работу
 
@@ -103,7 +109,7 @@ flowchart TD
 | --- | --- | --- |
 | Clean Architecture / DIP | Узкие consumer-owned ports, concrete backend выбран на краю | Новый fake backend не импортирует Sub2API; inner layers не импортируют HTTP/Prisma/provider DTO |
 | SRP | Native интерпретирует факты, Gateway управляет аккаунтом, RR определяет viewer scope | Нет plan parsing в JSX/SDK, нет workspace roles в native |
-| OCP | Добавление выбранного профиля меняет native adapter/catalog и qualification, а не provider switch во всех слоях | Новый профиль проходит общий контракт без новой карточки/operations engine |
+| OCP | Provider parsing/codecs остаются native; native composition и явная GW/RR policy допускают профиль | Forms, metadata renderer и operation FSM общие; exact security/product allowlists сохраняются |
 | LSP | Fixture и native adapter имеют одинаковые unknown/error/fence гарантии | Общий conformance scenario; unsupported не маскируется под success |
 | ISP | AccountInfo read, выбранный credential import, existing lifecycle capability | Нет мегапорта со всеми provider endpoints |
 | DDD | Account operation — существующая транзакционная модель Gateway; native fact snapshot — read model | Нет второго Account aggregate/AccountRepository и дублирующей lifecycle таблицы |
@@ -204,4 +210,4 @@ RT и full JSON считаются **вместе**, поскольку испо
 6. Независимый backend fixture проходит тот же management contract; новый consumer использует packed SDK без RR/native imports.
 7. Exact artifacts и migrations квалифицированы; release evidence различает source checks, synthetic E2E, live-provider test и production observation.
 
-Все пункты — будущие acceptance criteria. Этот комплект документов сам по себе не доказывает выполнение ни одного runtime пункта.
+Это acceptance criteria реализации. Точные прогоны и source revisions ведутся в qualification; текст плана не заменяет runtime evidence.

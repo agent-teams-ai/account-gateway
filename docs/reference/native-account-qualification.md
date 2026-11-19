@@ -10,7 +10,7 @@ summary: Значимые проверки контрактов, миграци�
 
 ## 1. Что должна доказать квалификация
 
-Этот документ задаёт будущие проверки [M1/M2](native-account-integration-plan.md). Он не является отчётом об уже пройденных runtime tests. Документационные проверки, выполненные при подготовке плана, записаны отдельно в [журнале ревью](native-account-review-log.md).
+Этот документ задаёт проверки [M1/M2](native-account-integration-plan.md) и отдельно фиксирует реальные результаты в §8. Матрица рисков не означает, что все её строки уже пройдены. Документационные проверки и принятые исправления записаны в [журнале ревью](native-account-review-log.md).
 
 Проверяем реальные обещания: provider facts не дублируются, owner isolation сохраняется при гонке, import не повторяет неизвестный внешний effect, новый backend заменяем на management boundary, exact SDK работает в независимом consumer, новые API-профили подходят фактическому review runner.
 
@@ -93,10 +93,10 @@ G0 фиксирует contract fixtures. Отдельные worktrees/ветки
 ### R1. Native metadata, затем Gateway, затем RR — M1
 
 1. Sub2API: additive metadata storage/endpoint; старые API и accounts работают; new safe projection read-only.
-2. Gateway: AccountInfo adapter/authority/SDK и первоначальный capabilities v2 с `accountInfo`; selected imports/new profiles пока не advertised. Допуск только при нужной native capability; old native даёт unsupported. Запись provider facts в Gateway не появляется.
+2. Gateway: AccountInfo adapter/authority/SDK и первоначальный capabilities v2 с `accountInfo`; selected imports/new profiles пока не advertised. Допуск только при нужной native capability. Явный typed unsupported сохраняется; отсутствующий route старого native даёт unavailable, а404 не становится capability negotiation. Запись provider facts в Gateway не появляется.
 3. Собрать SDK archive из committed source, проверить exact archive и provenance.
 4. RR: обновить все потребители того же SDK archive/lockfile, затем включить capability-driven metadata read и UI. Старый producer показывает существующий account без новых facts.
-5. Однократная bounded native hydration существующих аккаунтов по contracts, вне DB migration/UI. Scoped smoke: owner visibility, restricted borrower, missing/stale metadata, existing review unchanged. Сохранить точные SHAs/artifact hash и фактический outcome.
+5. Existing native maintenance инициализирует отсутствующий snapshot из проверенного retained observation; отдельного rollout-скрипта/endpoint/worker нет. Scoped smoke проверяет owner visibility, borrower restrictions, missing/stale facts и прежний review flow. Сохраняются exact sources и outcome.
 
 ### R2. Imports и API profiles — M2
 
@@ -138,3 +138,51 @@ V2 discovery не fallback-ится по HTTP status; новый producer вып
 Логи/metrics используют existing bounded diagnostics: operation status, snapshot age/state, safe error code, duration, admission rejection. Не писать email, тариф пользователя, account subject, token fingerprint или raw provider response в telemetry. Никакой новой analytics/event-bus/observability платформы в этой работе.
 
 Финальный статус различает: **planned**, **implemented**, **synthetic-qualified**, **live-qualified**, **deployed-and-observed**. Переходы подтверждаются evidence соответствующего уровня, а не количеством строк, принятым plan PR или названием выбранной архитектуры.
+
+## 8. Журнал исполнения — checkpoint 19.11.2026
+
+### Точные входы
+
+| Компонент | Проверяемая ревизия |
+| --- | --- |
+| Sub2API | [fd759624](https://github.com/agent-teams-ai/sub2api/commit/fd759624d1c01028a3aba204a5e793f141bfe0f1): SQL262, атомарная legacy hydration, UTC expiry, optional metadata SAVEPOINT и сохранение credential provenance |
+| Gateway | [8aa44988](https://github.com/agent-teams-ai/account-gateway/commit/8aa44988bf37d1f0a608ffc5ddb1d3e332af3479): проверен full-stack pin dc4; следующий qualification commit закрепляет fd759624 и actual RR hook |
+| SDK | Source [6c1350e2](https://github.com/agent-teams-ai/account-gateway/commit/6c1350e296aef36cdeb4a73c6438fc321885732b); SHA-256 архива `de516c3f0aef8dd783a2e184f42e8a3fa7d10cc772d1af40b2654e4d7d140029` |
+| RR | [597450b4](https://github.com/777genius/review-router-ai/commit/597450b474c6f80e338249019a2454d2f876ad48): SDK6c1350, journal160, совместимость migration tree165, displayToken и browser heap fix после анализа артефакта |
+| Actual review Action | Source [0454fc0a](https://github.com/777genius/review-router/commit/0454fc0a3af15f94522c7c31cce59c0c62af6567); source archive SHA-256 `42e8d844bd451655ff171dc4093a872fc471675c90b3997697261ba4153807b4` |
+| Actual Codex CLI | `0.133.0`, Linux x64 binary SHA-256 `524396258c974948334eabe6f2c6b1d8e1979dfd048d67d535ad9e4550fa5b26` |
+
+Последние два артефакта — входы joined qualification, а не подтверждение её успешного завершения. Локальные probes actual Codex подтвердили сохранение opaque reasoning и порядок `output_item.done` между двумя запросами. Эти probes проверяют CLI protocol, но не подменяют полный native/Gateway/Review Router путь.
+
+### Уже полученные результаты
+
+| Проверка | Результат и предел доказательства |
+| --- | --- |
+| Gateway package / kernel | [Package44451604637](https://github.com/agent-teams-ai/account-gateway/actions/runs/44451604637) и [kernel44451604697](https://github.com/agent-teams-ai/account-gateway/actions/runs/44451604697) — success наbcb8360. Включены существующие contract/consumer/Foundation gates. На8aa [kernel44454480012](https://github.com/agent-teams-ai/account-gateway/actions/runs/44454480012) также success; package44454480030 обнаружил единственное форматирование нового run.ts, исправление включено в следующий commit |
+| Gateway full-stack / bounded load | [44451604670](https://github.com/agent-teams-ai/account-gateway/actions/runs/44451604670) — все семь выбранных lanes success, Node24/26. Этот прогон использовал прежний nativea19cbc; исторический результат не переименован. Новый [44454480031](https://github.com/agent-teams-ai/account-gateway/actions/runs/44454480031) на Gateway8aa / Native dc4 прошёл все семь lanes; после новой замены pin наfd759624 требуется отдельное завершение |
+| Gateway OAuth PostgreSQL |76/76, настоящая disposable PostgreSQL; покрыты existing lifecycle и новые операции, исправлен порядок legacy denial |
+| Gateway domain и management |152 domain tests;22 management PASS и один прежний opt-in joined skip. Skip не считается выполненным joined сценарием |
+| RR architecture / C1 / P115 |На6c490 [C1 44454251528](https://github.com/777genius/review-router-ai/actions/runs/44454251528) success:676files architecture, Foundation/module profile,48 application и26 PostgreSQL tests. [P115 44454251536](https://github.com/777genius/review-router-ai/actions/runs/44454251536) success через настоящий Gateway HTTP. Новые commits проверяются отдельно |
+| RR focused account contracts/UI |132 сценария в восьми affected test files; отдельно34 installed-SDK/catalog/consumer сценария |
+| RR PostgreSQL metadata/projections |15/15 в пяти файлах, реальные authority/selection/overview paths; это не браузерный smoke |
+| RR migration compatibility |359/359 в шести файлах; чистая PG17.10 воспроизвела165 migrations и C2b CAS; historical164/managed92/historical96 manifests не переписаны |
+| Native SQL guards |321 migration SQL применены на чистой PG17.10; две точные official API tuples приняты; неверные origin/model/auth mode/passthrough/plaintext и mutation отклонены |
+| Native converters |Полный affected `internal/pkg/apicompat` PASS наGo1.27.3; покрыты Gemini proof/history/signatures и Anthropic output format |
+| Native plan labels |Два targeted Go tests PASS; actual frontend TS module и generated JSON —13 assertions PASS. Это не полный frontend Vitest/typecheck |
+| Native public race |Обе lanes на6c1350 Gateway/49cf Native прошли public ingress после исправления queued-cancellation fixture. Весь native-client workflow тогда не прошёл из-за следующего unit compile error |
+
+### Проверки, которые ещё должны закрыть текущие PR
+
+1. Текущий native service/admin/bootstrap unit binary и PG repository cases, включая multi-source transaction rollback, import claims и official-profile SQL lifecycle. На8aa/dc4 все четыре бинаря скомпилированы. Service unit выявил только отсутствие обязательного имени `codex_output_schema` в трёх новых Anthropic fixtures; исправлено в16c8274 без ослабления entered/request/terminal assertions. Последующие91 изменения требуют свежей сборки и execution, включая stale-credential PG regression. До завершения они не считаются PASS.
+2. Existing device joined harness: RT/auth.json create, reconnect, metadata provenance, lost native ACK, ambiguous provider response, retained unresolved claim и отсутствие plaintext в обоих SQL stores.
+3. Existing provider joined harness: шесть профилей, official auth headers, schema/tool/custom-tool round trips; затем actual Review Router `CodexProvider.review` и actual CLI на замкнутом synthetic upstream. Это не live provider access.
+4. [RR browser workflow](https://github.com/777genius/review-router-ai/actions/runs/44454251509):33 из34 captures actual Next/session/PostgreSQL/Chromium; narrow/medium/wide viewport, обе темы, metadata и четыре формы. Проверяются source receipt, overflow, внешние requests и непустые screenshots; изображения дополнительно просматриваются человеком/агентом. Артефакт14497667011 (SHA-256 `0e70c93576d811d52fe0dc711aec074faaa41a0e06cb67c39267f9f89f66dca3`) подтвердил Next memory restart при2ГБ и navigation timeout единственного кадра. Для следующего прогона только heap увеличен до4ГБ на существующем16ГБ runner;180s и требование34 сохранены. Все33 полученные кадра без page/console errors и blocked requests;29 применимых overflow checks=false. Это частичный результат, до34/34 не PASS.
+5. Обязательные проверки последних commit каждого PR, disposition внешнего code review, merge в dependency order и проверка фактического merged состояния.
+
+Во время временной недоступности локальной среды работу продолжили через обычные GitHub PR и штатные CI; артефакты после восстановления скачаны и проверены. Никакой внешний service/runtime вместо production dependency не подставлен.
+
+Локальный полный Go service compile и полный RR Web TypeScript были прерваны средой без завершённого результата; локальный Next отвечал health200, но не завершил страницу. Они не записаны как PASS. Для них сохранены штатные CI gates; исходные assertions/engine/strictness не ослабляются ради запуска. CI queue — состояние ожидания, не доказательство сбоя.
+
+Live provider login на реальном платном аккаунте, production deployment, массовая миграция аккаунтов и публикация SDK в публичный registry не входят в разрешённый итог этой работы. Их отсутствие не скрывается за synthetic evidence.
+
+Последующая bounded generator-проверка нашла ошибку escaping shell dollars в Makefile91: замена через строковый JS replacement превратила `$$` в `$`. Исправлено вfd759624; повтор фактического make target на Go1.27.3 подтвердил сохранение прежнего JSON при forced failure, content SHA,0644 при umask0077 и cleanup временного файла.

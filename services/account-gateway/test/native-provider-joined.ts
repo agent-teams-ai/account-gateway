@@ -153,7 +153,10 @@ async function run(): Promise<void> {
   const managementCredential = randomBytes(32).toString("base64url"),
     callbackCredential = randomBytes(32).toString("base64url");
   phase = "gateway-scratch";
-  const scratchRoot = resolvePath(dirname(fileURLToPath(import.meta.url)), "../../../tmp");
+  const scratchRoot =
+    process.env.AG_NATIVE_PROVIDER_JOINED_SCRATCH_ROOT ??
+    resolvePath(dirname(fileURLToPath(import.meta.url)), "../../../tmp");
+  assert.ok(isAbsolute(scratchRoot));
   await mkdir(scratchRoot, { recursive: true });
   const scratch = await mkdtemp(join(scratchRoot, "native-provider-joined-"));
   const configFile = join(scratch, "native-config.json");
@@ -772,7 +775,7 @@ async function run(): Promise<void> {
     );
     assert.equal(after.unexpected, 0);
     if (official) {
-      assert.ok(after[provider].schemaRequests - before[provider].schemaRequests >= 1);
+      assert.equal(after[provider].schemaRequests - before[provider].schemaRequests, 2);
       assert.equal(after[provider].quotaGets, before[provider].quotaGets);
       if (provider === "gemini") {
         assert.equal(after.gemini.signatureChecks - before.gemini.signatureChecks, 1);
@@ -1095,6 +1098,7 @@ async function run(): Promise<void> {
       assert.match(String(observed.codexVersion), /^\d+\.\d+\.\d+$/);
       assert.equal(observed.providerEntries, 2);
       assert.equal(observed.streamCompletions, 2);
+      assert.equal(observed.structuredOutputRequests, 2);
       for (const name of [
         "declaredFunctionTools",
         "declaredCustomTools",
@@ -1124,6 +1128,7 @@ async function run(): Promise<void> {
             "codexVersion",
             "providerEntries",
             "streamCompletions",
+            "structuredOutputRequests",
             "declaredFunctionTools",
             "declaredCustomTools",
             "returnedFunctionTools",

@@ -78,7 +78,7 @@ Reviewer может подтвердить отсутствие нового д�
 
 ### Историческая проверка исходного комплекта
 
-Production код и миграции в этой работе не реализовывались; runtime/provider tests не заявлены как выполненные. Финальные результаты документных проверок ниже относятся только к этим Markdown-файлам.
+На завершении исходного этапа планирования production код и миграции ещё не реализовывались; runtime/provider tests тогда не заявлялись как выполненные. Финальные результаты документных проверок ниже относятся только к этим Markdown-файлам.
 
 - R10 closure: native reviewer повторно прочитал исправленные cached-hydration/source-priority пункты и подтвердил устранение замечания.
 - Итоговый SHA-256 семи содержательных документов: `064e9a321e7c927a7801cfa10787ba1e0b21e37d1c37597a3d614cc81964a002`.
@@ -89,4 +89,45 @@ Production код и миграции в этой работе не реализ
 - Арифметика M1/M2 и группировки по репозиториям проверена отдельно; дополнительные archive/verification суммы не прибавлены повторно.
 - Документные CLI выполнены через pnpm 11.28.2 / Docs Protocol 0.6.2 на Node 24.22.3; это не квалификация production runtime/Node 26 lane.
 
-Комплект сохранён как самостоятельные Markdown-планы. Его содержимое подготовлено для `account-gateway/docs/reference`; публикация репозиторного PR, production deployment и реализация не являются выполненными результатами этой задачи.
+Исходный комплект сохранён как Markdown-планы и опубликован в Gateway PR. После отдельного разрешения владельца началась implementation; её результаты записаны в qualification. Production deployment остаётся вне scope.
+
+## Реализационные проверки после плановых кругов
+
+Это отдельный журнал фактических исправлений; он не добавляет вымышленные planning rounds к десяти исходным.
+
+### Владение и совместимость
+
+Сопоставлены production вызовы всех трёх проектов. Native владеет единственным snapshot и provider extraction, Gateway — schema/identity/operations, RR — viewer policy/проекцией. Подтверждён public `oauth_auth_json` → private `auth_json` перевод в одном adapter. Отвергнуто предложение бота переименовать public method в native spelling: оно нарушало бы frozen contract. В Gateway сохранён существующий provider-family admission; нового policy framework и обещания полностью vendor-free legacy tree нет. V1 capability projection исправлена для create/reconnect асимметрии; runtime v2→v1 fallback в RR удалён.
+
+### Даты, source order и legacy initialization
+
+Ревью уточнило initialize-if-untouched и отсутствие durable pending reservations. Source order выделяется до HTTP; committed authoritative omission не позволяет legacy facts вернуться. Legacy Codex claims и credential expiry теперь фиксируются одной транзакцией: ошибка второго source откатывает первый. Existing maintenance получает indexed initialized hint; отдельная hydration-команда и scheduler не создаются. Errors проходят existing deferred route без изменения health/credentials. Проверка expiry перенесена после UTC normalization, включая year1→0 и9999→10000; корректный тариф не теряется из-за некорректной даты.
+
+### Durable imports и custody
+
+Новые методы проходят existing native/Gateway state machines. Незавершённый same-secret claim не зависит от owner/method/operation; HMAC материал отделён domain derivation от AEAD key. Per-intent key commitment запрещает вход с новым ключом при старых entered/unknown claims; prepared не блокирует смену ключа, отдельного key-epoch row нет. Документы явно фиксируют trade-off: ошибка основной транзакции после внешнего эффекта остаётся uncertain/no-replay. При этом recoverable ошибка optional metadata изолируется SAVEPOINT, как уточнено ниже; она не должна выбрасывать уже обновлённый RT. Browser/device codec и legacy operation hash не изменены. Joined fixture расширена lost-ACK и настоящим обрывом synthetic provider response, а не только mock-return `unknown`.
+
+### Official API protocol и реальный CLI
+
+Проверка actual Codex0.133 выявила, что continuation history строится по `output_item.done`, а message IDs могут исчезать. Gemini carrier получил зарезервированный output index и согласованный completed output; proof связывает semantic payload, позицию и credential/account scope. Добавлены string-user barriers, duplicate/proof/orphan/tamper случаи и поздние signatures. Shared signature rule и target URL удалили конкретное дублирование. Anthropic schema сохраняет исходный контракт, unsupported bounds опускаются только в protected native request с итоговой проверкой исходной schema. Exact-key duplicate validation допускает `Foo` и `foo`; typed client format error возвращает400 во всех затронутых forwarders.
+
+### SQL и rollout compatibility
+
+При чтении полного trigger chain обнаружено, что одного native catalog недостаточно: опубликованный SQL259 guard не принимал два новых official profiles. Additive262 расширяет только две exact tuples; прямой PG replay321 и negative guards подтверждены. В RR migration160 учитывается только после проверки полной tree165, затем сохранены прежние164/92/96 manifests и hashes;359 regression tests и чистыйPG replay прошли. Старые production migration checksums не заменяются новыми.
+
+### Проверяемость без ослабления gates
+
+Public burst test получил детерминированный выбор queued request и cleanup release до закрытия server; assertions и limits сохранены. Go service unit compile error обнаружен штатным CI и исправлен в тесте, не исключением suite. Native fixtures собираются с source receipts; RR browser workflow сохраняет34 actual screenshots. Локальные resource interruptions не считаются успешными проверками. Точные завершённые и ожидаемые результаты — в qualification §8; внешние review threads разрешаются по отдельному disposition с source/test evidence.
+
+
+### Пересмотр атомарности refresh после независимого P1 review
+
+Первоначальное возражение на замечание о потере уже обновлённого RT пересмотрено по реальному пути. Connect, multi-source hydration и quota+facts сохраняют полную атомарность. В существующей refresh transaction только optional metadata batch помещён в один SAVEPOINT; ошибка любого source откатывает весь batch, а credentials и completed receipt могут фиксироваться. Custody/owner/physical identity/version guards остаются снаружи. Ошибка rollback/release/основного commit не превращается в success и не разрешает повторный exchange.
+
+Настоящий PG regression искусственно ломает второй source после первого, затем проверяет credential3, completed receipt3, прежний metadata snapshot, unknown старой credential expiry и same-operation replay без HTTP. Дополнительное ревью удалило переназначение revision в helper: stale observation с новым source order должна отклоняться своей исходной revision, а не превращаться в факт о новом credential. Этот сценарий использует ту же DB и существующие guards. Native91 содержит исправление и проверку; execution фиксируется отдельно.
+
+### Воспроизводимость и диагностика
+
+Собранные fixture binaries разделены от execution outcome: наличие бинаря не считается PASS. Existing native-client harness запускает три metadata/import PG cases в отдельных disposable databases. Новый actual RR provider case использует тот же PG runner и no-network контейнер, без второго orchestrator; его шесть profile receipts требуют tool/schema/closure proofs и не принимают SDK-only fallback. Source/binary/archive hashes записываются, а stdout evidence строится по положительному списку полей.
+
+Browser33/34 исследован по исходному manifest, серверному логу и PNG: причина — штатный Next memory restart, а не ошибка metadata/theme. Исправлен лимит тестового сервера на имеющемся runner; assertions/таймаут/число снимков не ослаблены. Атомарный generator каталога теперь сохраняет прежний target при ошибке и устанавливает0644 перед rename.

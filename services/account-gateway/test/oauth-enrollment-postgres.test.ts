@@ -1032,7 +1032,7 @@ void test("credential import uses existing durable create and reconnect, binds e
     assert.equal(readback.state, "applied");
     assert.equal(readback.oauthMethod, undefined);
     assert.equal(f.imports.length, 2);
-    assert.equal(f.imports[1].method, "auth_json");
+    assert.deepEqual(f.imports[1], { method: "auth_json", value: replacement.credential.value });
     const persisted = await pool.query<{ intent: Record<string, unknown> }>(
       "SELECT intent FROM ag_kernel.operations WHERE consumer=$1 ORDER BY id",
       [f.context.consumerId],
@@ -1040,6 +1040,7 @@ void test("credential import uses existing durable create and reconnect, binds e
     const serialized = JSON.stringify(persisted.rows);
     assert.equal(serialized.includes(credential.value), false);
     assert.equal(serialized.includes("synthetic-at"), false);
+    assert.equal(serialized.includes("synthetic-rt"), false);
     assert.equal(
       (
         await pool.query<{ n: number }>(

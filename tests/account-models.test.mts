@@ -317,6 +317,7 @@ void test("native catalogue preserves qualified official API custom tools withou
       ],
     };
     assert.deepEqual(accountModels.parse(snapshot), snapshot);
+    assert.deepEqual(accountModelCapability.parse(snapshot.models[0]), snapshot.models[0]);
     for (const source of ["codex", "openrouter", "nvidia"]) {
       assert.equal(accountModels.safeParse({ ...snapshot, source }).success, false);
     }

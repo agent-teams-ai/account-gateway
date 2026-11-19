@@ -211,7 +211,10 @@ void test("both account clients read the same bounded metadata contract; identit
   wrong = true;
   await assert.rejects(
     management.readAccountInfo(input),
-    (error: unknown) => error instanceof GatewayError && error.code === "invalid_response",
+    (error: unknown) =>
+      error instanceof GatewayError &&
+      error.code === "invalid_response" &&
+      error.effect === "effect_unknown",
   );
   await assert.rejects(
     management.readAccountInfo({ ...input, accountRefs: [refs[0], refs[0]] }),
@@ -219,3 +222,67 @@ void test("both account clients read the same bounded metadata contract; identit
   );
   assert.equal(requests, 3, "no hidden retry and invalid request never enters HTTP");
 });
+
+void test(
+  "account info enforces endpoint and explicit caller byte limits and closes oversized streams",
+  { timeout: 10_000 },
+  async (t) => {
+    for (const responseBytes of [undefined, 1024, 2 * 1024 * 1024]) {
+      await t.test(
+        responseBytes === undefined ? "endpoint default" : `caller limit ${responseBytes}`,
+        async (subtest) => {
+          const payload = { contract: "account-info/v1", accounts: [row("account-overflow")] };
+          const serialized = JSON.stringify(payload);
+          assert.ok(Buffer.byteLength(serialized) < 1024);
+          const limit = Math.min(
+            responseBytes ?? c.ACCOUNT_INFO_RESPONSE_BYTES,
+            c.ACCOUNT_INFO_RESPONSE_BYTES,
+          );
+          const closed = Promise.withResolvers<void>();
+          let requests = 0;
+          const server = createServer((req, res) => {
+            req.resume();
+            requests++;
+            res.writeHead(200, { "content-type": "application/json", connection: "close" });
+            if (requests === 1) {
+              res.once("close", () => {
+                closed.resolve();
+              });
+              // Valid JSON plus whitespace exceeds the limit while the peer keeps
+              // streaming. Rejection must cancel the body, not await its end.
+              res.write(serialized);
+              res.write(" ".repeat(limit + 1));
+            } else {
+              res.end(serialized);
+            }
+          });
+          subtest.after(() => {
+            server.closeAllConnections();
+            server.close();
+          });
+          server.listen(0, "127.0.0.1");
+          await once(server, "listening");
+          const address = server.address();
+          assert.ok(address !== null && typeof address === "object");
+          const client = createManagementClient({
+            role: "management",
+            origin: `http://127.0.0.1:${address.port}`,
+            token: "fixture-token",
+            ...(responseBytes === undefined ? {} : { responseBytes }),
+          });
+          const input = { ownerRef: "owner", accountRefs: ["account-overflow"] };
+          await assert.rejects(
+            client.readAccountInfo(input),
+            (error: unknown) =>
+              error instanceof GatewayError &&
+              error.code === "invalid_response" &&
+              error.effect === "effect_unknown",
+          );
+          await closed.promise;
+          assert.deepEqual(await client.readAccountInfo(input), payload);
+          assert.equal(requests, 2, "one rejected stream and one new read; no retry");
+        },
+      );
+    }
+  },
+);

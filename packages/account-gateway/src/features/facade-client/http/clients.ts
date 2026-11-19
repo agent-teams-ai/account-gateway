@@ -63,7 +63,7 @@ function accountClient(
           ) ||
           result.accounts.length !== captured.accountRefs.length
         ) {
-          throw new GatewayError("invalid_response", "not_dispatched");
+          throw new GatewayError("invalid_response", "effect_unknown");
         }
         return result;
       },

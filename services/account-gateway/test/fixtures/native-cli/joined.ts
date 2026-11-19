@@ -20,6 +20,7 @@ import {
   joinedFailure,
   joinedFiles,
   joinedReceipt,
+  joinedProviderReceipt,
   joinedSourceHashes,
 } from "./joined-evidence.ts";
 import type { ClientPins, InstalledClients, JoinedBuildReceipt } from "./joined-evidence.ts";
@@ -66,18 +67,28 @@ async function main() {
     "--native-commit",
     "--gateway-commit",
   ];
+  const optionalKeys = ["--provider-binary", "--provider-preload"];
   for (let i = 2; i < process.argv.length; i += 2) {
     const key = process.argv[i],
       value = process.argv[i + 1];
-    check(keys.includes(key) && value && !options.has(key), "joined-arguments");
+    check(
+      (keys.includes(key) || optionalKeys.includes(key)) && value && !options.has(key),
+      "joined-arguments",
+    );
     options.set(key, value);
   }
   check(
     keys.every((key) => options.has(key)),
     "joined-arguments",
   );
+  check(
+    options.has("--provider-binary") === options.has("--provider-preload"),
+    "joined-provider-inputs",
+  );
   const get = (key: string) => options.get(key)!;
-  for (const key of keys.filter((candidate) => !candidate.endsWith("-commit"))) {
+  for (const key of [...keys, ...optionalKeys].filter(
+    (candidate) => options.has(candidate) && !candidate.endsWith("-commit"),
+  )) {
     check(isAbsolute(get(key)), "joined-absolute-path");
   }
   const repo = get("--repo"),
@@ -162,6 +173,48 @@ async function main() {
     );
     return { id, pin, executable: client.executable, binary };
   });
+  const provider = (() => {
+    const binary = options.get("--provider-binary");
+    if (binary === undefined) {
+      return;
+    }
+    const preload = get("--provider-preload");
+    const inputPath = (name: string) => {
+      const value = process.env[name];
+      check(typeof value === "string" && isAbsolute(value), "joined-provider-inputs");
+      return value;
+    };
+    const actionArchive = inputPath("RR_PROVIDER_JOINED_ACTION_ARCHIVE"),
+      codexBinary = inputPath("RR_PROVIDER_JOINED_CODEX_BINARY"),
+      relayAdapter = inputPath("RR_PROVIDER_JOINED_RELAY_ADAPTER"),
+      sourceCommit = process.env.RR_PROVIDER_JOINED_SOURCE_COMMIT,
+      actionRef = process.env.RR_PROVIDER_JOINED_ACTION_REF,
+      version = process.env.RR_PROVIDER_JOINED_CODEX_VERSION;
+    check(
+      typeof sourceCommit === "string" &&
+        /^[a-f0-9]{40}$/.test(sourceCommit) &&
+        typeof actionRef === "string" &&
+        /^[a-f0-9]{40}$/.test(actionRef) &&
+        typeof version === "string" &&
+        /^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$/.test(version),
+      "joined-provider-source-pins",
+    );
+    check(digestFile(binary) === binaries.provider, "joined-provider-binary-pin");
+    return {
+      binary,
+      preload,
+      actionArchive,
+      codexBinary,
+      relayAdapter,
+      sourceCommit,
+      actionRef,
+      version,
+      preloadSHA256: digestFile(preload),
+      actionArchiveSHA256: digestFile(actionArchive),
+      clientSHA256: digestFile(codexBinary),
+      relayAdapterSHA256: digestFile(relayAdapter),
+    };
+  })();
   const owned = mkdtempSync(join(tmpdir(), "gateway-joined-clients-"));
   chmodSync(owned, 0o755);
   const data = join(owned, "pg");
@@ -182,6 +235,7 @@ async function main() {
     success = false;
   let failure: { code: string; at?: string; frame?: string } | undefined;
   const receipts: ReturnType<typeof joinedReceipt>[] = [];
+  let providerResult: ReturnType<typeof joinedProviderReceipt> | undefined;
   try {
     await command(
       join(pgBin, "initdb"),
@@ -248,11 +302,60 @@ async function main() {
         }),
       );
     }
+    if (provider !== undefined) {
+      const childEnv = { ...env };
+      for (const [key, dbPrefix] of [
+        ["NATIVE_DSN", "native_provider_joined_"],
+        ["KERNEL_DSN", "ag_kernel_test_provider_joined_"],
+      ]) {
+        const name = dbPrefix + randomUUID().replaceAll("-", "");
+        await command(
+          join(pgBin, "createdb"),
+          ["-h", "127.0.0.1", "-p", String(port), "-U", "postgres", name],
+          env,
+        );
+        childEnv["AG_NATIVE_PROVIDER_JOINED_" + key] =
+          "postgresql://postgres@127.0.0.1:" + port + "/" + name + "?sslmode=disable";
+      }
+      const scratch = join(owned, "provider");
+      mkdirSync(scratch, { mode: 0o700 });
+      Object.assign(childEnv, {
+        AG_NATIVE_PROVIDER_JOINED_ALLOW: "disposable_pg17_10",
+        AG_NATIVE_PROVIDER_JOINED_BINARY: provider.binary,
+        AG_NATIVE_PROVIDER_JOINED_GATEWAY_BASE_SHA: gatewayCommit,
+        AG_NATIVE_PROVIDER_JOINED_GO: go,
+        AG_NATIVE_PROVIDER_JOINED_SCRATCH_ROOT: scratch,
+        RR_PROVIDER_JOINED_ACTION_ARCHIVE: provider.actionArchive,
+        RR_PROVIDER_JOINED_CODEX_BINARY: provider.codexBinary,
+        RR_PROVIDER_JOINED_RELAY_ADAPTER: provider.relayAdapter,
+        RR_PROVIDER_JOINED_SDK_HTTP: join(repo, joinedFiles.sdkHTTP),
+        RR_PROVIDER_JOINED_WORK_ROOT: scratch,
+      });
+      const stdout = await command(
+        process.execPath,
+        ["--import", provider.preload, join(repo, joinedFiles.providerHarness)],
+        childEnv,
+        { cwd: repo, timeout: 480_000 },
+      );
+      providerResult = joinedProviderReceipt(stdout, {
+        nativeCommit,
+        gatewayCommit,
+        binarySHA256: binaries.provider,
+        sourceHashes,
+        reviewRouterCommit: provider.sourceCommit,
+        preloadSHA256: provider.preloadSHA256,
+        relayAdapterSHA256: provider.relayAdapterSHA256,
+        actionRef: provider.actionRef,
+        actionArchiveSHA256: provider.actionArchiveSHA256,
+        clientSHA256: provider.clientSHA256,
+        version: provider.version,
+      });
+    }
     check(
       JSON.stringify(joinedSourceHashes(repo)) === JSON.stringify(sourceHashes),
       "joined-runtime-source-changed",
     );
-    success = receipts.length === 2;
+    success = receipts.length === 2 && (provider === undefined || providerResult !== undefined);
   } catch (error) {
     failure =
       error instanceof CommandFailure
@@ -292,6 +395,7 @@ async function main() {
         "real TypeScript execution capability, admission, usage, ACK and cleanup; real Go OAuth and PostgreSQL",
       providerScope: "controlled loopback TLS; no live provider",
       clients: receipts,
+      ...(providerResult ? { provider: providerResult } : {}),
       ...(failure ? { failure } : {}),
     };
     const safe = JSON.stringify(result, null, 2) + "\n";

@@ -18,12 +18,15 @@ jobs:
         node: ['26.11.1', '24.21.0']
     env:
       NPM_CONFIG_ENGINE_STRICT: 'true'
-      NATIVE_COMMIT: dc4ea4491945856c900418c8627c7bac593a62ce
+      NATIVE_COMMIT: fd759624d1c01028a3aba204a5e793f141bfe0f1
+      REVIEW_ROUTER_COMMIT: 597450b474c6f80e338249019a2454d2f876ad48
+      REVIEW_ACTION_COMMIT: 0454fc0a3af15f94522c7c31cce59c0c62af6567
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24.21.0'
@@ -32,6 +35,7 @@ jobs:
           corepack_entry="$(dirname "$(dirname "$(command -v node)")")/lib/node_modules/corepack/dist/corepack.js"
           test -f "$corepack_entry"
           echo "GATEWAY_CLIENT_COREPACK=$corepack_entry" >> "$GITHUB_ENV"
+          echo "GATEWAY_CLIENT_RR_NODE=$(command -v node)" >> "$GITHUB_ENV"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
@@ -75,6 +79,51 @@ jobs:
           pnpm --dir services/account-gateway run typecheck
           node --test services/account-gateway/test/fixtures/native-cli/joined-evidence.test.ts
           git diff --exit-code -- pnpm-lock.yaml
+      - name: Prepare exact Review Router source, real Action and its pinned Codex CLI
+        run: |
+          rr_source="$GATEWAY_CLIENT_ROOT/review-router-source"
+          action_source="$GATEWAY_CLIENT_ROOT/review-action-source"
+          rr_assets="$GATEWAY_CLIENT_ROOT/review-router-assets"
+          mkdir -m 700 "$rr_assets" "$rr_assets/shim"
+          git clone --no-checkout --filter=blob:none https://github.com/777genius/review-router-ai.git "$rr_source"
+          git -C "$rr_source" checkout --detach "$REVIEW_ROUTER_COMMIT"
+          test "$(git -C "$rr_source" rev-parse HEAD)" = "$REVIEW_ROUTER_COMMIT"
+          git clone --no-checkout --filter=blob:none https://github.com/777genius/review-router.git "$action_source"
+          git -C "$action_source" checkout --detach "$REVIEW_ACTION_COMMIT"
+          git -C "$action_source" archive --format=tar "$REVIEW_ACTION_COMMIT" > "$rr_assets/action.tar"
+          printf '%s  %s\n' 42e8d844bd451655ff171dc4093a872fc471675c90b3997697261ba4153807b4 "$rr_assets/action.tar" | sha256sum --check --strict
+          curl --fail --location --proto '=https' --tlsv1.2 --max-time 180 \
+            https://github.com/openai/codex/releases/download/rust-v0.133.0/codex-npm-linux-x64-0.133.0.tgz \
+            --output "$rr_assets/codex.tgz"
+          printf '%s  %s\n' 298519feb7655b4bc0ffb17f15378d9e6365fb65c30f23ab00ab1e99eee3191d "$rr_assets/codex.tgz" | sha256sum --check --strict
+          tar -xzf "$rr_assets/codex.tgz" -C "$rr_assets" --strip-components=4 package/vendor/x86_64-unknown-linux-musl/bin/codex
+          printf '%s  %s\n' 524396258c974948334eabe6f2c6b1d8e1979dfd048d67d535ad9e4550fa5b26 "$rr_assets/codex" | sha256sum --check --strict
+          chmod 755 "$rr_assets/codex"
+          test "$("$rr_assets/codex" --version)" = 'codex-cli 0.133.0'
+          printf '#!/bin/sh\nexec "%s" "%s" pnpm "$@"\n' "$GATEWAY_CLIENT_RR_NODE" "$GATEWAY_CLIENT_COREPACK" > "$rr_assets/shim/pnpm"
+          chmod 755 "$rr_assets/shim/pnpm"
+          (
+            cd "$rr_source"
+            export PATH="$rr_assets/shim:$(dirname "$GATEWAY_CLIENT_RR_NODE"):$PATH"
+            test "$(node --version)" = v24.21.0
+            test "$(pnpm --version)" = 11.28.7
+            node scripts/install-private-dependencies.mjs --ignore-scripts --frozen-lockfile
+            node scripts/prepare-pinned-subscription-runtime.ts
+            REVIEW_ROUTER_REQUIRE_OFFLINE_PRISMA=1 node scripts/generate-prisma-offline.mjs
+            git diff --exit-code -- package.json pnpm-lock.yaml
+          )
+          node --input-type=module <<'NODE'
+          import { writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const root = process.env.GATEWAY_CLIENT_ROOT;
+          const source = join(root, 'review-router-source');
+          const lines = [
+            'import { pathToFileURL } from "node:url";',
+            'await import(pathToFileURL(' + JSON.stringify(join(source, 'node_modules/tsx/dist/loader.mjs')) + ').href);',
+            'await import(pathToFileURL(' + JSON.stringify(join(source, 'scripts/review-investigation-paired-e2e/support/provider-subscriptions-joined.ts')) + ').href);',
+          ];
+          writeFileSync(join(root, 'review-router-assets', 'preload.mjs'), lines.join('\n') + '\n', { mode: 0o600 });
+          NODE
       - name: Build isolated real-client and PostgreSQL lifecycle test binaries
         run: |
           cd "$GATEWAY_CLIENT_ROOT/native-source/backend"
@@ -91,15 +140,52 @@ jobs:
           RUN . /etc/os-release && test "$VERSION_CODENAME" = trixie \
             && apt-get update \
             && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends --no-upgrade \
-              libatomic1=14.2.0-19 ca-certificates=20250419+deb13u1 \
+              libatomic1=14.2.0-19 ca-certificates=20250419+deb13u1 git=1:2.47.3-0+deb13u1 \
             && rm -rf /var/lib/apt/lists/*
           DOCKERFILE
           docker build --pull --build-arg "PG_IMAGE=$PG_IMAGE" --tag gateway-native-clients:qualified "$GATEWAY_CLIENT_ROOT/container"
       - name: Native metadata and provider boundary unit qualification
         run: |
-          "$GATEWAY_CLIENT_ROOT/build/native-account-info-service.test" -test.run '^TestGateway(AccountInfo|QuotaAndInfo|Codex(Info|RetainedInfo|Maintenance)|ClaudeInfo|GrokInfo|OAuthInfo|AccountCapabilities|GeminiContinuation|NativeGemini|NativeOfficial|NativeAnthropicSchema|NativeOAuthImport)' -test.v -test.count=1
-          "$GATEWAY_CLIENT_ROOT/build/native-account-info-bootstrap.test" -test.run '^Test(NativeAccountCapabilities|NativeOfficialAPIConfig|GatewayAccountLimitsAuthorityHTTP)' -test.v -test.count=1
-          "$GATEWAY_CLIENT_ROOT/build/native-account-info-handler.test" -test.run '^TestGateway(AccountInfoPrivateHTTPContract|NativeOAuthConnectHTTPImportStrictIngress)' -test.v -test.count=1
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { spawnSync } from 'node:child_process';
+          import { writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { goTestEvidence } from './services/account-gateway/test/fixtures/native-cli/evidence.ts';
+          const suites = [
+            ['service', '^TestGateway(AccountInfo|QuotaAndInfo|Codex(Info|RetainedInfo|Maintenance)|ClaudeInfo|GrokInfo|OAuthInfo|AccountCapabilities|GeminiContinuation|NativeGemini|NativeOfficial|NativeAnthropicSchema|NativeOAuthImport)', [
+              'TestGatewayAccountInfoReaderUsesCurrentSnapshotAndFinalAuthority',
+              'TestGatewayCodexMaintenanceHydratesOnceWithoutProviderHTTP',
+              'TestGatewayNativeOfficialAnthropicOriginalSchemaBeforeSuccess',
+              'TestGatewayNativeOfficialGeminiActualTLSContinuationAndSchema',
+              'TestGatewayNativeOAuthImportStrictEscapedIngressAndSeparateCodec',
+            ]],
+            ['bootstrap', '^Test(NativeAccountCapabilities|NativeOfficialAPIConfig|GatewayAccountLimitsAuthorityHTTP)', [
+              'TestNativeAccountCapabilitiesExposeImportsOnlyWithComposedCodex',
+              'TestNativeOfficialAPIConfigUsesExistingClosedFD6Profiles',
+              'TestGatewayAccountLimitsAuthorityHTTP',
+            ]],
+            ['handler', '^TestGateway(AccountInfoPrivateHTTPContract|NativeOAuthConnectHTTPImportStrictIngress)', [
+              'TestGatewayAccountInfoPrivateHTTPContract',
+              'TestGatewayNativeOAuthConnectHTTPImportStrictIngress',
+            ]],
+          ];
+          for (const [suite, pattern, required] of suites) {
+            const binary = join(process.env.GATEWAY_CLIENT_ROOT, 'build', 'native-account-info-' + suite + '.test');
+            const options = { encoding: 'utf8', timeout: 120000, maxBuffer: 2 * 1024 * 1024 };
+            const listed = spawnSync(binary, ['-test.list', pattern], options);
+            assert.equal(listed.status, 0, suite + ' test listing');
+            const names = listed.stdout.split(/\r?\n/).filter(name => /^Test[A-Za-z0-9_]{1,160}$/.test(name));
+            assert.ok(required.every(name => names.includes(name)), suite + ' required tests must exist');
+            const executed = spawnSync(binary, ['-test.run', pattern, '-test.v', '-test.count=1', '-test.timeout=110s'], options);
+            const evidence = goTestEvidence(executed.stdout ?? '', names);
+            writeFileSync(join(process.env.GATEWAY_CLIENT_ROOT, 'build', 'native-' + suite + '-unit.json'), JSON.stringify(evidence) + '\n');
+            console.log(JSON.stringify({ suite, ...evidence }));
+            assert.equal(executed.status, 0, suite + ' unit execution');
+            assert.equal(evidence.tests.length, names.length, suite + ' no missing test results');
+            assert.ok(names.every(name => evidence.tests.some(test => test.name === name && test.outcome === 'PASS')), suite + ' every selected test must pass without skip');
+          }
+          NODE
       - name: Build source-pinned fixtures for real clients through TypeScript authority
         run: |
           node services/account-gateway/test/fixtures/native-cli/build-joined.ts \
@@ -127,7 +213,7 @@ jobs:
             --clients "$GATEWAY_CLIENT_ROOT/clients/clients.json" \
             --artifacts "$GATEWAY_CLIENT_ROOT/artifacts/native-clients" \
             --native-commit "$NATIVE_COMMIT" --gateway-commit "$(git rev-parse HEAD)"
-      - name: Join both actual clients to real TypeScript capability, usage and cleanup authority
+      - name: Join real clients and six Review Router providers to TypeScript authority
         run: |
           docker run --rm --network none --user 0:0 --cpus 2 --memory 4g --pids-limit 256 --ulimit nofile=4096:4096 \
             --mount "type=bind,source=$GATEWAY_CLIENT_NODE_HOME,target=$GATEWAY_CLIENT_NODE_HOME,readonly" \
@@ -136,11 +222,20 @@ jobs:
             --mount "type=bind,source=$GATEWAY_CLIENT_ROOT,target=$GATEWAY_CLIENT_ROOT,readonly" \
             --mount "type=bind,source=$GATEWAY_CLIENT_ROOT/build/joined/native-claude-joined,target=/tmp/native-claude-joined,readonly" \
             --mount "type=bind,source=$GATEWAY_CLIENT_ROOT/build/joined/native-device-joined,target=/tmp/native-device-joined,readonly" \
+            --mount "type=bind,source=$GATEWAY_CLIENT_ROOT/build/joined/native-provider-joined,target=/tmp/native-provider-joined,readonly" \
+            --env "RR_PROVIDER_JOINED_SOURCE_COMMIT=$REVIEW_ROUTER_COMMIT" \
+            --env "RR_PROVIDER_JOINED_ACTION_REF=$REVIEW_ACTION_COMMIT" \
+            --env RR_PROVIDER_JOINED_CODEX_VERSION=0.133.0 \
+            --env "RR_PROVIDER_JOINED_ACTION_ARCHIVE=$GATEWAY_CLIENT_ROOT/review-router-assets/action.tar" \
+            --env "RR_PROVIDER_JOINED_CODEX_BINARY=$GATEWAY_CLIENT_ROOT/review-router-assets/codex" \
+            --env "RR_PROVIDER_JOINED_RELAY_ADAPTER=$GATEWAY_CLIENT_ROOT/review-router-source/apps/api/src/review-run-gateway-relay.ts" \
             --mount "type=bind,source=$GATEWAY_CLIENT_ROOT/artifacts,target=$GATEWAY_CLIENT_ROOT/artifacts" \
             --entrypoint "$GATEWAY_CLIENT_NODE" gateway-native-clients:qualified \
             "$GITHUB_WORKSPACE/services/account-gateway/test/fixtures/native-cli/joined.ts" \
             --repo "$GITHUB_WORKSPACE" --pg-bin /usr/lib/postgresql/17/bin --go "$GATEWAY_CLIENT_GO" \
             --claude-binary /tmp/native-claude-joined/fixture --codex-binary /tmp/native-device-joined/fixture \
+            --provider-binary /tmp/native-provider-joined/fixture \
+            --provider-preload "$GATEWAY_CLIENT_ROOT/review-router-assets/preload.mjs" \
             --clients "$GATEWAY_CLIENT_ROOT/clients/clients.json" \
             --build-receipt "$GATEWAY_CLIENT_ROOT/build/joined/joined-build.json" \
             --artifacts "$GATEWAY_CLIENT_ROOT/artifacts/joined-clients" \
@@ -175,6 +270,9 @@ jobs:
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/upstream-race.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/diagnostics-race.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/joined/joined-build.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/native-service-unit.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/native-bootstrap-unit.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/native-handler-unit.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/joined-clients/result.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/joined-clients/network.json
           if-no-files-found: warn

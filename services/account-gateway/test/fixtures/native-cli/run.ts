@@ -321,9 +321,8 @@ async function main() {
         !accountInfoLog.includes("SKIP") &&
           !accountInfoLog.includes("no tests to run") &&
           outcomes.length === accountInfoTests.length &&
-          accountInfoTests.every(
-            (name) =>
-              outcomes.some((entry) => entry.name === name && entry.outcome === "PASS"),
+          accountInfoTests.every((name) =>
+            outcomes.some((entry) => entry.name === name && entry.outcome === "PASS"),
           ),
         "all-account-info-postgres-tests-required",
       );

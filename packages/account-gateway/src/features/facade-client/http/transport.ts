@@ -86,6 +86,8 @@ export function transport(
     throw new GatewayError("invalid_input", "not_dispatched");
   }
   const settings = valid(config, input);
+  const explicitResponseBytes =
+    input.responseBytes === undefined ? undefined : settings.responseBytes;
   if (settings.role !== role) {
     throw new GatewayError("invalid_input", "not_dispatched");
   }
@@ -189,7 +191,10 @@ export function transport(
       ) {
         throw handle.failure("invalid_response");
       }
-      const parsed = await bounded(response, responseBytes);
+      const parsed = await bounded(
+        response,
+        Math.min(responseBytes, explicitResponseBytes ?? responseBytes),
+      );
       if (!response.ok) {
         const error = c.safeError.safeParse(parsed);
         if (

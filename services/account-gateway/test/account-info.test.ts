@@ -161,3 +161,65 @@ void test("owner source concurrency is bounded across concurrent batches and rel
   assert.equal(peak, 2);
   assert.equal(calls, 3);
 });
+
+void test("cancelled account info reads do not start an authority observation", async () => {
+  const row = identity();
+  const abort = new AbortController();
+  let observations = 0,
+    reads = 0;
+  const reader = new AccountInfoReader({
+    async readAccountInfo() {
+      reads++;
+      return { info, generation: row.generation! };
+    },
+  });
+  abort.abort();
+  await assert.rejects(
+    reader.read(
+      {
+        async observe() {
+          observations++;
+          return [row];
+        },
+      },
+      { ownerRef: row.ownerRef, accountRefs: [row.accountRef] },
+      { consumerId: "consumer", signal: abort.signal },
+    ),
+    (error: unknown) => error instanceof KernelError && error.code === "unavailable",
+  );
+  assert.equal(observations, 0);
+  assert.equal(reads, 0);
+});
+
+void test("cancellation during source work skips final authority read and returns no stale facts", async () => {
+  const row = identity(),
+    entered = deferred(),
+    release = deferred();
+  const abort = new AbortController();
+  let observations = 0;
+  const reader = new AccountInfoReader({
+    async readAccountInfo() {
+      entered.resolve();
+      await release.promise;
+      return { info, generation: row.generation! };
+    },
+  });
+  const work = reader.read(
+    {
+      async observe() {
+        observations++;
+        return [row];
+      },
+    },
+    { ownerRef: row.ownerRef, accountRefs: [row.accountRef] },
+    { consumerId: "consumer", signal: abort.signal },
+  );
+  await entered.promise;
+  abort.abort();
+  release.resolve();
+  await assert.rejects(
+    work,
+    (error: unknown) => error instanceof KernelError && error.code === "unavailable",
+  );
+  assert.equal(observations, 1, "only the initial authorized observation ran");
+});

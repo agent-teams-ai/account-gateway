@@ -60,6 +60,7 @@ export class AccountInfoReader {
     options: { readonly consumerId: string; readonly signal: AbortSignal },
   ): Promise<c.AccountInfoReadResponse> {
     const captured = c.accountInfoReadRequest.parse(input);
+    const callerAborted = () => options.signal.aborted;
     const started = Date.now(),
       deadline = started + 2500,
       sourceDeadline = started + 2000;
@@ -74,6 +75,9 @@ export class AccountInfoReader {
     const sourceTimer = setTimeout(cancel, Math.max(0, sourceDeadline - Date.now()));
     const ownerKey = JSON.stringify([options.consumerId, captured.ownerRef]);
     try {
+      if (callerAborted() || Date.now() >= deadline) {
+        throw new KernelError("unavailable");
+      }
       const before = await bounded(
         authority.observe(captured),
         deadline - Date.now(),
@@ -144,12 +148,15 @@ export class AccountInfoReader {
       };
       await Promise.all([worker(), worker()]);
       // The complete batch is fenced after the slowest backend read, not per row.
+      if (callerAborted() || Date.now() >= deadline) {
+        throw new KernelError("unavailable");
+      }
       const after = await bounded(
         authority.observe(captured),
         deadline - Date.now(),
         options.signal,
       );
-      if (!isDeepStrictEqual(before, after) || options.signal.aborted || Date.now() >= deadline) {
+      if (!isDeepStrictEqual(before, after) || callerAborted() || Date.now() >= deadline) {
         throw new KernelError("denied");
       }
       return c.accountInfoReadResponse.parse({

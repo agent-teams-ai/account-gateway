@@ -12,7 +12,7 @@ summary: Потребление SDK, видимость метаданных, ф
 
 Этот пакет добавляет в Review Router сведения о подключённом аккаунте и приоритетные способы входа через публичный SDK Account Gateway. Sub2API остаётся владельцем исходных фактов и протоколов провайдеров; Gateway предоставляет заменяемую границу backend; RR отвечает за права пользователя, подключение к workspace, выбор для ревью и отображение. RR не обращается в административный API Sub2API и не повторяет его обработчики OAuth, разбор токенов, определения тарифа или проверки доступности.
 
-Документ описывает предлагаемую реализацию, а не выполненные изменения. Проверенная основа RR — `f1cde67a2baf7416ea1d2341f6c9a98e64750aa4`; Gateway — `1dce5c327d14e9c0e5466da91441faa0d0ae38a5`; Sub2API — `cfe50b7fd2aef08a7a17f11132cae73293804389`. Наличие кода на этих ревизиях не подтверждает поддержку новых возможностей работающим окружением.
+M1 и выбранная M2 реализованы в RR PR #914. Ссылки implementation фиксируют `597450b474c6f80e338249019a2454d2f876ad48` и SDK из Gateway `6c1350e296aef36cdeb4a73c6438fc321885732b`; текущий RR head `6c490c0a3db02ad8eb11b4bdf3bec0cf122f68b9` дополнительно использует maintained browser build runner с прежней fork isolation. Это состояние реализации и ограниченной квалификации, не production release. Полный Web CI и34 actual browser captures ещё проверяются. Историческая planning база — RR f1cde67; ссылки на планы76/77/79 остаются историческими.
 
 Общие схемы, версии, состояния импорта, ограничения payload и инварианты определены в [каноническом контракте](native-account-contracts.md). Этот документ их использует и не вводит конкурирующие определения. Зависимости и порядок выпуска описаны в [основном плане](native-account-integration-plan.md), нативная сторона — в [пакете A](native-account-sub2api.md), SDK и backend-абстракция — в [пакете B](native-account-gateway.md), новые профили — в [пакете D](native-account-provider-profiles.md), сквозные доказательства — в [квалификации](native-account-qualification.md).
 
@@ -38,9 +38,9 @@ summary: Потребление SDK, видимость метаданных, ф
 
 ### 2. Один модуль чтения, точное принятие стандартов
 
-Создать узкий срез `packages/features/provider-accounts/src/account-metadata`. У него одна прикладная операция чтения, небольшой порт reader, адаптер публичного SDK и одна составленная feature API. Нет основания создавать aggregate аккаунта заново или добавлять пустой `domain/`: здесь не появляются новые бизнес-переходы. Внутренние helpers, DTO, React-компоненты и каждый провайдер не становятся отдельными узлами Get Modular.
+Реализован узкий срез `packages/features/provider-accounts/src/account-metadata`: `application/ports/account-metadata.ts`, `account-metadata-reader.ts`, `application/use-cases/read-account-metadata.ts`. Одна операция readMetadata и borrowed reader составлены через contracts/declarations/module/group/root в composition. Нового Account aggregate, пустого domain и модулей на каждого provider нет.
 
-Для этого среза оформить scoped profile и repository decision. В качестве проверенной основы использовать те же зафиксированные стандарты, что уже приняты для Review History, явно указав новый scope. Профиль History сам по себе на аккаунты не распространяется. Core и Assembly остаются `0.7.0`; обновление framework не входит в задачу. Foundation остаётся инструментом разработки, а не production dependency. [Профиль принятия History][rr-profile].
+Для среза зафиксированы собственный scoped profile и ADR-035 на уже принятых стандартах. History scope автоматически не расширяется. Core/Assembly остаются0.7.0, conformance0.5.0; Foundation — development tool. [Профиль нового среза][rr-profile].
 
 | Стандарт | Зафиксированная версия |
 | --- | --- |
@@ -50,11 +50,11 @@ summary: Потребление SDK, видимость метаданных, ф
 | FMS v1.1 | `agent-teams-ai/.github@f5653f5630057524a4ee44e50c16e138442a9b42`, SHA-256 `cfa088ef7396139554fe5e3bcc839271b23299c6b60c569a3a7f1cd7c9f0bc6c` |
 | Engineering Quality Standard | `agent-teams-ai/.github@c8f3e7ba220241f79292c84c72712653019aa1df` |
 
-Профиль фиксирует физические пути, public/composition surfaces, host adapters, dependency rules и команды проверки. Добавить новый scope в Foundation manifest и modular qualification. Текущий manifest охватывает внутри provider-accounts только `account-limits`, исключая старый lifecycle; нельзя назвать весь пакет соответствующим стандарту после проверки нового среза. [Действующая граница][rr-foundation].
+Фактический профиль — `architecture/account-metadata/consumer-module-profile.json`, решение — `ai-docs/decisions/035-native-account-metadata.md`. Foundation в `architecture/foundation/provider-seams.yaml` охватывает account-metadata.application/.composition/.authorization/.tests. Host service и SDK reader проверяет existing TypeScript AST checker `scripts/check-architecture-boundaries.mjs`: exact public/type/re-exports/dynamic imports и direct fetch. В его tests шесть fixtures: одна положительная, пять отвергаемых. Foundation schema v1 сама не доказывает exact runtime export внутри mixed runtime/test package. Runtime не объявлен development, весь Web/lifecycle не переведён на новый scope.
 
 Композиция следует [CMS][cms] и [Module Authoring][authoring]: descriptor в `composition/account-metadata.contracts.ts`, отдельные declaration через `declareModule`, тонкий module через `implement`, group и один root. Заимствованный reader передаётся как объявленный input. Нет собственного сетевого клиента в домене, polling-процесса, lifecycle manager или второго способа сборки. Host вызывает полученную `readMetadata` API. Не повторять частичный подход limits, где Web после сборки извлекает `.reader`, а затем вызывает use case напрямую. Переписывать ради этого весь старый limits необязательно. [Текущая сборка limits][rr-limits-composition].
 
-Доказательства нового scoped CMS используют уже установленный `@get-modular/conformance@0.5.0`: `checkModuleLayout` по реальным файлам, `checkWiring` с **независимым oracle** и wrong-root/wrong-binding mutant, isolate/smoke реального module/root. Spy-тест подтверждает, что `prepare/run` не вызывают SDK, authorization callback или SQL: эффект начинается только при `readMetadata`. Включить именно эти пути в `architecture:check`, `modular:qualify` и strict TS 7.0.2 project с `skipLibCheck: false`. Успешный тест injected reader отдельно от layout/wiring/passive construction не заменяет весь набор. Переиспользовать owning pattern `scripts/review-history-tooling/check.ts` и `review-history.root.test.ts`, без нового validation framework.
+Доказательства нового scoped CMS используют уже установленный `@get-modular/conformance@0.5.0`: `checkModuleLayout` по реальным файлам, `checkWiring` с **независимым oracle** и wrong-root/wrong-binding mutant, isolate/smoke реального module/root. Spy-тест подтверждает, что `prepare/run` не вызывают SDK, authorization callback или SQL: эффект начинается только при `readMetadata`. Эти пути включены в `architecture:check`, `modular:qualify` и strict TS 7.0.2 project с `skipLibCheck: false`. Успешный тест injected reader отдельно от layout/wiring/passive construction не заменяет весь набор. Переиспользовать owning pattern `scripts/review-history-tooling/check.ts` и `review-history.root.test.ts`, без нового validation framework.
 
 ### 3. Минимальная модель без механических копий
 
@@ -66,11 +66,13 @@ summary: Потребление SDK, видимость метаданных, ф
 
 ### 4. Узкое извлечение живой авторизации
 
-У metadata появляется второй реальный потребитель разрешения источника из `apps/web/src/server/account-limits-service.ts`. Выделить в именованный host adapter, например `account-display-authorization.ts`, только `Scope`, `Source`, существующий `resolve` SQL и предикаты `equalScope`/`owned`. Сохранить SQL, tombstone-условия, поля результата и выбор source/binding. Указать этот адаптер в scoped profile. Не создавать policy DSL, общий permission manager или новую абстракцию всех lifecycle операций. [Текущая реализация][rr-limits-service].
+Общий host adapter `apps/web/src/server/account-metadata/authorization.ts` содержит Scope, Source, existing resolve SQL и equalScope/owned. Его используют account-metadata-service.ts и прежний account-limits-service.ts. SQL, tombstone proofs, source/binding resolution и limits refresh semantics сохранены. Дополнительного permission manager или policy DSL нет.
 
 В limits остаются собственные статусы, refresh, namespace `account-limits-v1` и сериализация fingerprint. Его concurrency 4, трёхсекундный page deadline, 250 ms на необязательное refresh discovery и проверки перед explicit refresh не меняются. Для metadata задаётся отдельный ограниченный бюджет чтения; открытие списка не запускает provider refresh или health probe. В application поступает узкий callback живой авторизации с target и opaque token, без Prisma и session DTO.
 
 Metadata использует единую read policy [contracts](native-account-contracts.md): группировка разрешённых refs по owner, ограниченные batches и общий page deadline с резервом final fence. Не переносить limits refresh-discovery 250 ms как новый provider запрос metadata. Несвоевременная или непроверенная metadata не задерживает всю страницу и не выдаётся из старого cache после смены viewer scope.
+
+Фактическая page policy: до200 unique connection IDs, batch50 refs одного owner, concurrency4; до2.5s на начальную authorization/SDK reads, общий deadline3s с final fence. Deadline ограничивает ожидание страницы и новые reads; AbortSignal передаётся SDK. Уже выполняющиеся Prisma authorization queries он не отменяет. Shared SQL resolver сохраняет прежние limits semantics; runtime statement_timeout в этот scope не добавлен. Поэтому bounded UI response не означает DB query cancellation или release connection за тот же срок.
 
 | Наблюдатель | Identity/plan metadata | Поведение существующих limits |
 | --- | --- | --- |
@@ -97,19 +99,21 @@ Metadata использует единую read policy [contracts](native-accoun
 | [accounts-overview.ts][rr-overview] там же | Обзор смешанных подключений |
 | [gateway-model-account-options.ts][rr-model-detail] там же | Выбранное подключение и его detail |
 
-`dashboard-gateway-accounts.ts` заменяет исходные строки результатами detail hydration. Обогащение только первого списка поэтому теряет сведения. Применить один разрешённый enrichment на согласованной границе выдачи, включая detail, с финальным authority fence; не добавлять четыре provider mapper. Тест должен проверять именно замену выбранной строки. [Реализация hydration][rr-hydration].
+Все четыре AccountView-проекции используют один metadata service. В dashboard-gateway-accounts.ts initial list и selected detail вызываются с includeMetadata:false; один enrichMetadata применяется к окончательному массиву, включая selected bindings вне страницы. Final authorization находится после всех await. Regression проверяет замену строк и отзыв прав ранней строки во время поздней hydration.
 
 В identity показать пользовательское имя, native email и подтверждённый тариф; длинные значения переносить, выводить как текст. `connection.planLabel` сегодня происходит из каталога профилей и не является тарифом аккаунта: «Codex OAuth» не заменяет «Plus» или «Pro 200». Subscription end, token expiry, admin account expiry и quota reset не объединять в безымянное «Expires». Отсутствующее поле не заполнять догадкой. Общий компонент используется в личных, workspace и operation views; чужие строки получают уже отфильтрованную сервером модель. [Текущий renderer][rr-identity].
 
+Рендерит `apps/web/app/dashboard/account-metadata-line.tsx` через AccountIdentity. SDK reader явно выбирает разрешённые поля; infoRevision/private proofs не сериализуются. Calendar date остаётся YYYY-MM-DD, instant показывается с UTC; Subscription ends и Credential expires различаются. Общее предупреждение stale охватывает privacy и не требует tooltip на touch UI. Pending lifecycle подавляет прежние facts в трёх списках; c3f605d добавляет обязательный нейтральный displayToken ко всем pending variants.
+
 ### 6. Capabilities и формы входа
 
-Расширить три существующие product-owned точки допуска для **точных qualified Anthropic API/Gemini API profile tuples**: `apps/web/src/server/account-connection-catalog.ts`, `apps/web/src/features/provider-setup/setup-provider.ts` и `apps/web/src/features/account-gateway/connection-capabilities.ts`. Сейчас catalog автоматически добавляет qualified NVIDIA и настроенные subscription profiles, setup не имеет новых key choices, а AccountUpstreamProvider не содержит Gemini. V2 descriptor сам по себе эти фильтры не обходит. Сохранить различие brand и execution engine `codex_account_gateway`, не направлять Anthropic API в существующий Claude Code subscription route. Это admission/display mapping продукта, а не второй native catalog/models registry. Сквозной тест: v2 descriptor → setup choice → account/model binding → правильный runner; произвольный не qualified advertised profile остаётся unavailable.
+Обновлены account-connection-catalog.ts, features/provider-setup/setup-provider.ts и features/account-gateway/connection-capabilities.ts. Единственная product map native-api-profiles.ts допускает exact anthropic-messages-apikey-v1 и gemini-openai-chat-apikey-v1; downstream protocol — openai-responses. Brand — Anthropic/Gemini, review engine — existing Codex. Provider HTTP/codecs/model catalog здесь не реализуются.
 
-Потреблять **новый SDK-метод capabilities v2**, указанный каноническим контрактом. Не расширять существующий строгий ответ v1 неизвестными полями и не переинтерпретировать его как v2. Старые browser/device методы продолжают идти по существующему пути. Если новый endpoint/контракт недоступен, скрыть новые импорты и новые профили; это не причина сломать прежний вход. Временная ошибка discovery не превращается в бессрочный кеш «не поддерживается».
+Production composition использует getProviderConnectionCapabilitiesV2(). Выполненный v2 read никогда не пробует v1 при400/404/denied/timeout. Discovery error остаётся ошибкой; missing descriptor успешного response закрывает новые choices. Явно composed v1-only consumer сохраняет legacy path, но это не runtime fallback нового reader. Rollout: native/Gateway v2 producer, затем exact SDK/RR.
 
-Возможности create и reconnect проверять отдельно. Полученный список методов пересекается с разрешениями RR и квалифицированными профилями; клиентский выбор не обходит серверную проверку. Состояние `enabled` для входа само по себе не разрешает модель в review roster.
+Create/reconnect проверяются отдельно по методу и повторно server-side. create:false/reconnect:true сохраняет existing inventory/review catalog, убирая enrollment. Metadata не участвует в допуске. Imports ограничены exact Codex profile; произвольный advertised profile их не открывает.
 
-Переиспользовать существующий `ConnectionForm` и `AccountGatewayControls`, добавив небольшие контролируемые части для RT и файла/текста JSON. Для Anthropic/Gemini переиспользовать ключевую форму; не копировать весь компонент и не создавать schema-driven form engine. В UI различать провайдера и engine: профиль Anthropic/Gemini через Gateway может исполняться существующим Codex Responses runner, но должен иметь верную identity провайдера.
+AccountGatewayControls переиспользует OAuthForm, AccountForm и existing select/dialog/button primitives, existing submitGatewayApiKey transport. Небольшой credential-import-fields.tsx поддерживает RT text и auth.json text/file; API profiles используют общую key form. Новых HTTP routes и schema-driven form engine нет.
 
 ### 7. RT и полный Codex auth.json
 
@@ -117,7 +121,7 @@ RR передаёт bounded input SDK как выбранный тип импо�
 
 Для обоих входов native **всегда выполняет fenced RT exchange**. Полный `auth.json` с истёкшими access/id tokens и пригодным refresh token не отклоняется только из-за этих сроков: native получает новые токены и проверяет principal по своему протоколу. И наоборот, свежий AT не разрешает пропустить RT exchange. AT-only, mobile RT, Agent Identity и PAT не появляются автоматически под видом «полного JSON»; их отдельные режимы вне этого пакета.
 
-Raw credential не хранится в React persistence, query string, telemetry, журнале RR или operation receipt. Ошибки не цитируют исходный payload. На закрытие диалога, смену владельца, профиля или метода очищаются password, textarea, выбранный файл и удерживаемые значения. Текущий `clearUnsubmittedCredentials` очищает только password/callback/code inputs; новые поля надо включить явно. Повтор после неопределённого ответа использует существующие operation identity и reconcile правила, а не автоматически создаёт ещё один аккаунт. [Диалог и очистка][rr-dialog].
+Raw credential не хранится в React state/persistence, query string, telemetry, RR journal или receipt. credential-import-fields.tsx использует uncontrolled textarea/file; input ограничен65536 UTF-8 bytes. RR не разбирает provider JSON/JWT. Existing connect/reconnect получают credential:{kind:'credential_import',method:'refresh_token'|'oauth_auth_json',value:string}; public Operation.oauthMethod сохраняет browser/device. DOM/FormData очищаются до await. Close/ownership/profile/method/file changes инвалидируют поздний file.text() по generation/file identity/isConnected. Reconcile использует исходную operation без replay secret.
 
 ### 8. Личный Codex reconnect
 
@@ -125,9 +129,11 @@ Recovery показывает исходную Gateway operation. Поздний
 
 До method-bearing writer выпустить совместимый RR reader для `PersonalAccountOperation`: текущие normalizer/hash и browser-hardcoded dispatch/readback находятся в `personal-canonical-operation.ts` и `personal-canonical-accounts.ts`. Старые intent сохраняют прежнюю интерпретацию и hash; новый method связывается с versioned intent без массового переписывания старых rows. После первой записи новых методов установить minimum RR rollback version, умеющую их безопасно читать. Rolling-upgrade tests покрывают старые операции и новые RT/JSON/device reconnect records. Неизвестный/import method не приводится к browser; это не безобидный UI rollback.
 
-Сегодня [Codex задаёт `canReconnect: false`][rr-personal-composition], а personal OAuth reconnect допускает лишь browser и удаляет `method` перед разбором запроса. Поэтому одной смены флага недостаточно. Довести reconnect для объявленных методов Codex, сохранив выбранный метод в соответствующем operation intent и recovery-пути. Browser/device используют уже существующие протоколы; RT/JSON — новый метод SDK с отдельной проверкой разрешённости операции. [Canonical handler][rr-personal].
+Codex reconnect допускает только advertised reconnect methods. Browser/device проходят existing OAuth operations; RT/auth.json — существующий SDK reconnect credential variant. Nullable immutable credentialImportMethod добавлен migration000160 в PersonalAccountOperation. NULL означает отсутствие, discriminator включается в intent/hash только при наличии; старые hashes сохранены. Same nonce с иным method конфликтует; submitted/unknown читается по исходной operation. Workspace bindings не копируются, public Operation.oauthMethod не расширяется.
 
 Перед началом проверяются владелец, source state и актуальная generation/epoch. Пока операция pending, старые факты не выдаются. После native подтверждения обновляется то же логическое подключение с установленными Gateway fences; существующие workspace bindings не заменяются копиями. Результат чтения receipt, повтор запроса и восстановление после перезапуска должны сходиться к одному результату. Новый principal нельзя молча признать прежним только по переданному email; требуемое поведение смены identity задаёт канонический контракт. Не объединять рабочие workspace и personal протоколы ради одинаковой формы.
+
+Existing trusted workspace GET synchronization заполняет authorizationEpochMirror: positive safe integer, CAS текущей metadataRevision, pendingSourceOperationId:null, монотонный epoch. Existing workspace accounts могут читать metadata без искусственного reconnect; regression проверен на PostgreSQL.
 
 ### 9. Gate пригодности Anthropic/Gemini для ревью
 
@@ -149,7 +155,7 @@ Recovery показывает исходную Gateway operation. Поздний
 
 Один владелец пакета C редактирует shared RR файлы: `account-gateway-accounts.ts`, `personal-account-composition.ts`, `personal-canonical-accounts.ts`, `account-gateway-account-controls.tsx`, `accounts-add-dialog.tsx`, общий `AccountIdentity`, manifest и lockfile. Пакеты A/B/D не правят их параллельно; согласование профилей проходит через публичные контракты. Новые небольшие файлы можно разрабатывать параллельно после фиксации интерфейсов, интеграцию shared files выполняет один исполнитель.
 
-План 76 задаёт общий список, 77 явно откладывает personal Codex reconnect, 79 владеет одношаговым подключением и будущими `PersonalConnectPanel`/`ConnectTarget`. Этот пакет берёт reconnect как отдельную capability, переиспользует согласованные точки формы и не поглощает redesign 79. Перед implementation rebase проверить их фактическое состояние: документ плана не означает merged implementation. Работы над freshness/status текстами также не надо смешивать с добавлением фактов. [Планы 76][rr-plan76], [77][rr-plan77], [79][rr-plan79].
+План 76 задаёт общий список, 77 явно откладывает personal Codex reconnect, 79 владеет одношаговым подключением и будущими `PersonalConnectPanel`/`ConnectTarget`. Этот пакет берёт reconnect как отдельную capability, переиспользует согласованные точки формы и не поглощает redesign 79. Исторические планы задают соседние границы; этот пакет не поглощает redesign79. Работы над freshness/status текстами также не надо смешивать с добавлением фактов. [Планы 76][rr-plan76], [77][rr-plan77], [79][rr-plan79].
 
 ### 11. Проверки и выпуск
 
@@ -160,13 +166,31 @@ Recovery показывает исходную Gateway operation. Поздний
 | Authorization regression | Старые owner/borrower, suspended, source/binding и refresh сценарии limits не меняются |
 | Metadata races | Смена membership, binding revision, epoch, pending reconnect/delete и отказ DB подавляют приватный результат, включая финальный batch |
 | UI projections | Сведения сохраняются после selected-detail hydration; shared renderer корректен для длинных/пустых значений, keyboard и mobile |
-| Capability compatibility | Старый v1 работает; отсутствующий v2 закрывает только новые режимы; create не означает reconnect |
+| Capability compatibility | Явный composed v1 reader работает; v2 read не fallback-ится по ошибке; per-method create/reconnect независимы |
 | Import/reconnect | Валидный RT с expired AT/ID, ошибочный RT, повтор, timeout, cancel и recovery; stable logical identity и отсутствие лишних bindings |
 | Real review gate | Закреплённый CLI, реальные tools и второй turn, terminal result и существующий путь публикации результата |
 
 Расширять тесты следует для этих конкретных рисков, без тестирования каждого механического mapper отдельно. Зафиксированные ожидания privacy и native identity не вычисляются той же функцией, которую тестируют. Negative fixtures Foundation, меняющие временные файлы checkout, запускать последовательно.
 
-RR сейчас использует vendored SDK archive `agent-teams-account-gateway-0.1.0-nvidia-0c68a5d544ff.tgz`. Обновление требует нового build/pack receipt, source association, hash, lockfile и проверки фактически установленного архива, а не ссылки на Gateway main. Затем проверить capabilities квалифицированного Gateway/native runtime. Генерируемые архивы и lockfile не учитываются повторно как production LOC. [Зависимость Web][rr-sdk]. Откат Web скрывает новую UI capability, но не отменяет уже завершённый native import; поведение незавершённых операций и совместимость rollback задаёт общий план.
+RR использует tracked `vendor/account-gateway/agent-teams-account-gateway-0.1.0-native-imports-6c1350e296ae.tgz`, SHA-256 `de516c3f0aef8dd783a2e184f42e8a3fa7d10cc772d1af40b2654e4d7d140029`. SDK собран из committed Gateway6c1350 exact Node26.11.1/pnpm11.28.2; provenance — `vendor/account-gateway/native-account-info-sdk-provenance.json`. Web/API/provider-usage и lockfile используют один архив. HTTP/schema checks выполнены на installed archive, включая native_catalog tools:function_and_custom. Исторические receipts сохранены, generated archives/lock не считаются повторно production LOC.
+
+### Состояние квалификации реализации
+
+Точные results для head6c490c0 фиксируются отдельно:
+
+| Группа | Наблюдённый результат |
+| --- | --- |
+| C1 integration/architecture | Run44454251528 success:676files architecture, Foundation, metadata scoped profile/layout, provider-accounts source/test typechecks/build |
+| C1 behavioral/PG |48/48 и26/26 actual PostgreSQL |
+| P115 controlled HTTP | Run44454251536 success, real Gateway HTTP1/1 |
+| Historical focused M2/UI и installed SDK |132 cases плюс34 installed-SDK/catalog cases; не подменяют full Web checks |
+| Migration compatibility |359/359; fresh165 migration replay+C2b1/1; opt-in authority suite skipped |
+| Pending metadata variant types | Strict TS7 against actual three object expressions passes; прежний вариант rejects TS2322 |
+| Full Web TS и34actual browser captures | Ещё проверяются; локальные broad attempts terminated и не засчитаны |
+
+Browser workflow использует existing provider-setup-visual harness: actual Next/sessions/PostgreSQL migrations, loopback Gateway fixtures и запрет внешних requests. Требуются34 scenario/width/theme captures, exact head, sourceBefore=sourceAfter, no page/network errors/overflow. Source proof исключает только Next-generated next-env.d.ts, не SDK/lock/product code. Synthetic upstream не равен live provider access.
+
+Migration tree содержит165files. Exact165→164 reducer проверяет count/order/checksum; historical92/96/164 manifests не переписаны. Reader-compatible rollout предшествует method-bearing writer. После первой новой journal entry minimum rollback image обязан понимать credentialImportMethod. Deployment registry2026-11-19-native-account-info-imports остаётся NOT deployed.
 
 ## Examples
 
@@ -182,26 +206,26 @@ RR сейчас использует vendored SDK archive `agent-teams-account-g
 
 Gemini API key успешно сохранён и metadata endpoint доступен, но pinned Codex объявляет custom tool, который адаптер пока не обрабатывает. Подключение может существовать; выбрать его для ревью пока нельзя. После доказанной совместимости реального tool roundtrip и итогового результата capability разрешает нужный профиль. Такой gate не блокирует выпуск metadata для уже квалифицированного Codex.
 
-[rr-profile]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/architecture/review-history/consumer-module-profile.json
-[rr-foundation]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/architecture/foundation/provider-seams.yaml
-[rr-limits-composition]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/apps/web/src/server/account-limits-composition.ts
+[rr-profile]: https://github.com/777genius/review-router-ai/blob/597450b474c6f80e338249019a2454d2f876ad48/architecture/account-metadata/consumer-module-profile.json
+[rr-foundation]: https://github.com/777genius/review-router-ai/blob/597450b474c6f80e338249019a2454d2f876ad48/architecture/foundation/provider-seams.yaml
+[rr-limits-composition]: https://github.com/777genius/review-router-ai/blob/597450b474c6f80e338249019a2454d2f876ad48/apps/web/src/server/account-limits-composition.ts
 [fms]: https://github.com/agent-teams-ai/.github/blob/f5653f5630057524a4ee44e50c16e138442a9b42/docs/architecture/feature-module-standard/v1.1.md
-[rr-limits-service]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/apps/web/src/server/account-limits-service.ts
-[rr-limits-tests]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/apps/web/src/server/account-limits-service.test.ts
-[rr-hydration]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/apps/web/src/server/dashboard-gateway-accounts.ts
-[rr-identity]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/apps/web/app/dashboard/account-identity.tsx
-[rr-dialog]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/apps/web/app/dashboard/accounts-add-dialog.tsx
-[rr-personal]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/apps/web/src/server/personal-canonical-accounts.ts
-[rr-runner]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/packages/features/codex-oauth-rotating/src/action/github-action.ts
-[rr-joined]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/scripts/review-investigation-paired-e2e/support/provider-subscriptions-joined.ts
+[rr-limits-service]: https://github.com/777genius/review-router-ai/blob/597450b474c6f80e338249019a2454d2f876ad48/apps/web/src/server/account-limits-service.ts
+[rr-limits-tests]: https://github.com/777genius/review-router-ai/blob/597450b474c6f80e338249019a2454d2f876ad48/apps/web/src/server/account-limits-service.test.ts
+[rr-hydration]: https://github.com/777genius/review-router-ai/blob/597450b474c6f80e338249019a2454d2f876ad48/apps/web/src/server/dashboard-gateway-accounts.ts
+[rr-identity]: https://github.com/777genius/review-router-ai/blob/597450b474c6f80e338249019a2454d2f876ad48/apps/web/app/dashboard/account-identity.tsx
+[rr-dialog]: https://github.com/777genius/review-router-ai/blob/597450b474c6f80e338249019a2454d2f876ad48/apps/web/app/dashboard/accounts-add-dialog.tsx
+[rr-personal]: https://github.com/777genius/review-router-ai/blob/597450b474c6f80e338249019a2454d2f876ad48/apps/web/src/server/personal-canonical-accounts.ts
+[rr-runner]: https://github.com/777genius/review-router-ai/blob/597450b474c6f80e338249019a2454d2f876ad48/packages/features/codex-oauth-rotating/src/action/github-action.ts
+[rr-joined]: https://github.com/777genius/review-router-ai/blob/597450b474c6f80e338249019a2454d2f876ad48/scripts/review-investigation-paired-e2e/support/provider-subscriptions-joined.ts
 [rr-plan76]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/ai-docs/architecture/76-single-connections-list.md
 [rr-plan77]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/ai-docs/architecture/77-single-account-stack.md
 [rr-plan79]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/ai-docs/architecture/79-one-step-add-provider.md
-[rr-sdk]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/apps/web/package.json
-[rr-workspace]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/apps/web/src/server/account-gateway-accounts.ts
-[rr-overview]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/apps/web/src/server/accounts-overview.ts
-[rr-model-detail]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/apps/web/src/server/gateway-model-account-options.ts
-[rr-personal-composition]: https://github.com/777genius/review-router-ai/blob/f1cde67a2baf7416ea1d2341f6c9a98e64750aa4/apps/web/src/server/personal-account-composition.ts
+[rr-sdk]: https://github.com/777genius/review-router-ai/blob/597450b474c6f80e338249019a2454d2f876ad48/apps/web/package.json
+[rr-workspace]: https://github.com/777genius/review-router-ai/blob/597450b474c6f80e338249019a2454d2f876ad48/apps/web/src/server/account-gateway-accounts.ts
+[rr-overview]: https://github.com/777genius/review-router-ai/blob/597450b474c6f80e338249019a2454d2f876ad48/apps/web/src/server/accounts-overview.ts
+[rr-model-detail]: https://github.com/777genius/review-router-ai/blob/597450b474c6f80e338249019a2454d2f876ad48/apps/web/src/server/gateway-model-account-options.ts
+[rr-personal-composition]: https://github.com/777genius/review-router-ai/blob/597450b474c6f80e338249019a2454d2f876ad48/apps/web/src/server/personal-account-composition.ts
 [cms]: https://github.com/agent-teams-ai/get-modular/blob/7a7c4c54add9ccc06509423d7b89bcfc037227b1/docs/architecture/common-assembly.md
 [authoring]: https://github.com/agent-teams-ai/get-modular/blob/7a7c4c54add9ccc06509423d7b89bcfc037227b1/docs/guides/module-authoring.md
 [eqs]: https://github.com/agent-teams-ai/.github/blob/c8f3e7ba220241f79292c84c72712653019aa1df/docs/engineering-quality-standard.md
