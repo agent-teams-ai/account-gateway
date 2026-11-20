@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  capabilities,
+  ContainerInspectionError,
   createAppArmor,
   createSeccomp,
   requireContainer,
@@ -95,7 +95,23 @@ function fixture(seccomp: string) {
       Memory: 4 * 1024 ** 3,
       PidsLimit: 256,
       CapDrop: ["ALL"],
-      CapAdd: [...capabilities],
+      // Literal Docker CLI inspect representation, independent of our builder.
+      CapAdd: [
+        "CAP_AUDIT_WRITE",
+        "CAP_CHOWN",
+        "CAP_DAC_OVERRIDE",
+        "CAP_FOWNER",
+        "CAP_FSETID",
+        "CAP_KILL",
+        "CAP_MKNOD",
+        "CAP_NET_BIND_SERVICE",
+        "CAP_NET_RAW",
+        "CAP_SETFCAP",
+        "CAP_SETGID",
+        "CAP_SETPCAP",
+        "CAP_SETUID",
+        "CAP_SYS_CHROOT",
+      ],
       SecurityOpt: ["apparmor=" + name, "seccomp=" + readFileSync(seccomp, "utf8")],
       Ulimits: [{ Name: "nofile", Hard: 4096, Soft: 4096 }],
       Devices: [],
@@ -116,111 +132,128 @@ function fixture(seccomp: string) {
   return { expected, actual };
 }
 type Inspection = ReturnType<typeof fixture>["actual"];
-const mutations: Array<[string, (value: Inspection) => void]> = [
+const mutations: Array<[string, (value: Inspection) => void, ContainerInspectionError["field"]]> = [
   [
     "privileged",
     (v) => {
       v.HostConfig.Privileged = true;
     },
+    "privileged",
   ],
   [
     "host network",
     (v) => {
       v.HostConfig.NetworkMode = "host";
     },
+    "network",
   ],
   [
     "host PID",
     (v) => {
       v.HostConfig.PidMode = "host";
     },
+    "pid",
   ],
   [
     "host IPC",
     (v) => {
       v.HostConfig.IpcMode = "host";
     },
+    "ipc",
   ],
   [
     "SYS_ADMIN",
     (v) => {
-      v.HostConfig.CapAdd.push("SYS_ADMIN" as (typeof capabilities)[number]);
+      v.HostConfig.CapAdd.push("CAP_SYS_ADMIN");
     },
+    "cap-add",
   ],
   [
     "implicit capabilities",
     (v) => {
       v.HostConfig.CapDrop = [];
     },
+    "cap-drop",
   ],
   [
     "wrong AppArmor attachment",
     (v) => {
       v.AppArmorProfile = "docker-default";
     },
+    "apparmor",
   ],
   [
     "unconfined seccomp",
     (v) => {
       v.HostConfig.SecurityOpt[1] = "seccomp=unconfined";
     },
+    "seccomp",
   ],
   [
     "changed seccomp",
     (v) => {
       v.HostConfig.SecurityOpt[1] = 'seccomp={"defaultAction":"SCMP_ACT_ALLOW"}';
     },
+    "seccomp",
   ],
   [
     "unbounded PIDs",
     (v) => {
       v.HostConfig.PidsLimit = 0;
     },
+    "pids",
   ],
   [
     "unbounded memory",
     (v) => {
       v.HostConfig.Memory = 0;
     },
+    "memory",
   ],
   [
     "writable source",
     (v) => {
       v.Mounts[0].RW = true;
     },
+    "mount-readonly",
   ],
   [
     "changed source",
     (v) => {
       v.Mounts[0].Source = "/other";
     },
+    "mount-source",
   ],
   [
     "shared propagation",
     (v) => {
       v.Mounts[0].Propagation = "rshared";
     },
+    "mount-propagation",
   ],
   [
     "extra volume",
     (v) => {
       v.Mounts.push({ ...v.Mounts[2], Destination: "/additional" });
     },
+    "volume-count",
   ],
   [
     "wrong PostgreSQL volume",
     (v) => {
       v.Mounts[2].Destination = "/etc";
     },
+    "volume-target",
   ],
   [
     "named durable volume",
     (v) => {
       v.Mounts[2].Name = "production";
     },
+    "volume-name",
   ],
 ];
-for (const [label, mutate] of mutations) {
+for (const [label, mutate, field] of mutations) {
   void test("container rejects " + label, () => {
     const scratch = mkdtempSync(join(tmpdir(), "gateway-profile-contract-"));
     try {
@@ -231,9 +264,17 @@ for (const [label, mutate] of mutations) {
         requireContainer(actual, expected);
       });
       mutate(actual);
-      assert.throws(() => {
-        requireContainer(actual, expected);
-      });
+      assert.throws(
+        () => {
+          requireContainer(actual, expected);
+        },
+        (error: unknown) => {
+          assert.ok(error instanceof ContainerInspectionError);
+          assert.equal(error.field, field);
+          assert.equal(error.message, "container-inspection:" + field);
+          return true;
+        },
+      );
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }

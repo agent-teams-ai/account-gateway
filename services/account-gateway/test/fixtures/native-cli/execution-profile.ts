@@ -168,6 +168,43 @@ export interface ContainerContract {
   readonly seccomp: string;
   readonly mounts: readonly BindMount[];
 }
+type ContainerInspectionField =
+  | "shape"
+  | "name"
+  | "image"
+  | "privileged"
+  | "network"
+  | "pid"
+  | "ipc"
+  | "cpu"
+  | "memory"
+  | "pids"
+  | "user"
+  | "cap-drop"
+  | "cap-add"
+  | "apparmor"
+  | "security-options"
+  | "seccomp"
+  | "ulimits"
+  | "devices"
+  | "device-requests"
+  | "mount-count"
+  | "mount-target"
+  | "mount-source"
+  | "mount-readonly"
+  | "mount-propagation"
+  | "volume-count"
+  | "volume-target"
+  | "volume-readonly"
+  | "volume-name"
+  | "mount-types";
+export class ContainerInspectionError extends Error {
+  readonly field: ContainerInspectionField;
+  constructor(field: ContainerInspectionField) {
+    super("container-inspection:" + field);
+    this.field = field;
+  }
+}
 export function object(value: unknown): Record<string, unknown> {
   assert.ok(value !== null && typeof value === "object" && !Array.isArray(value));
   return value as Record<string, unknown>;
@@ -192,50 +229,88 @@ export function anonymousVolumeNames(actual: unknown): string[] {
     });
 }
 export function requireContainer(actual: unknown, expected: ContainerContract): void {
-  const data = object(actual),
-    host = object(data.HostConfig),
-    config = object(data.Config);
-  assert.equal(data.Name, "/" + safeProfileName(expected.name));
-  assert.equal(data.Image, expected.image);
-  assert.equal(host.Privileged, false);
-  assert.equal(host.NetworkMode, "none");
-  assert.equal(host.PidMode, "");
-  assert.equal(host.IpcMode, "private");
-  assert.equal(host.NanoCpus, 2_000_000_000);
-  assert.equal(host.Memory, 4 * 1024 ** 3);
-  assert.equal(host.PidsLimit, 256);
-  assert.equal(config.User, "0:0");
-  assert.deepEqual(host.CapDrop, ["ALL"]);
-  assert.deepEqual(strings(host.CapAdd).toSorted(), [...capabilities].toSorted());
-  assert.equal(data.AppArmorProfile, expected.name);
-  const security = strings(host.SecurityOpt);
-  assert.equal(security.length, 2);
-  assert.ok(security.includes("apparmor=" + expected.name));
-  // Docker inspect expands seccomp paths into the actual JSON filter.
-  const seccomp = security.find((value) => value.startsWith("seccomp="));
-  assert.ok(seccomp !== undefined);
-  assert.deepEqual(
-    JSON.parse(seccomp.slice(8)),
-    JSON.parse(readFileSync(expected.seccomp, "utf8")),
-  );
-  assert.deepEqual(host.Ulimits, [{ Name: "nofile", Hard: 4096, Soft: 4096 }]);
-  assert.deepEqual(host.Devices, []);
-  assert.deepEqual(host.DeviceRequests ?? [], []);
-  const mounts = array(data.Mounts).map(object);
-  const bindings = mounts.filter((value) => value.Type === "bind");
-  assert.equal(bindings.length, expected.mounts.length);
-  for (const mount of expected.mounts) {
-    const observed = bindings.find((value) => value.Destination === mount.target);
-    assert.ok(observed);
-    assert.equal(observed.Source, mount.source);
-    assert.equal(observed.RW, !mount.readonly);
-    assert.equal(observed.Propagation, "rprivate");
+  let field: ContainerInspectionField = "shape";
+  try {
+    const data = object(actual),
+      host = object(data.HostConfig),
+      config = object(data.Config);
+    field = "name";
+    assert.equal(data.Name, "/" + safeProfileName(expected.name));
+    field = "image";
+    assert.equal(data.Image, expected.image);
+    field = "privileged";
+    assert.equal(host.Privileged, false);
+    field = "network";
+    assert.equal(host.NetworkMode, "none");
+    field = "pid";
+    assert.equal(host.PidMode, "");
+    field = "ipc";
+    assert.equal(host.IpcMode, "private");
+    field = "cpu";
+    assert.equal(host.NanoCpus, 2_000_000_000);
+    field = "memory";
+    assert.equal(host.Memory, 4 * 1024 ** 3);
+    field = "pids";
+    assert.equal(host.PidsLimit, 256);
+    field = "user";
+    assert.equal(config.User, "0:0");
+    field = "cap-drop";
+    assert.deepEqual(host.CapDrop, ["ALL"]);
+    field = "cap-add";
+    // Docker CLI's vendored client canonicalizes these names before create.
+    assert.deepEqual(
+      strings(host.CapAdd).toSorted(),
+      capabilities.map((capability) => "CAP_" + capability).toSorted(),
+    );
+    field = "apparmor";
+    assert.equal(data.AppArmorProfile, expected.name);
+    field = "security-options";
+    const security = strings(host.SecurityOpt);
+    assert.equal(security.length, 2);
+    assert.ok(security.includes("apparmor=" + expected.name));
+    // Docker inspect expands seccomp paths into the actual JSON filter.
+    field = "seccomp";
+    const seccomp = security.find((value) => value.startsWith("seccomp="));
+    assert.ok(seccomp !== undefined);
+    assert.deepEqual(
+      JSON.parse(seccomp.slice(8)),
+      JSON.parse(readFileSync(expected.seccomp, "utf8")),
+    );
+    field = "ulimits";
+    assert.deepEqual(host.Ulimits, [{ Name: "nofile", Hard: 4096, Soft: 4096 }]);
+    field = "devices";
+    assert.deepEqual(host.Devices, []);
+    field = "device-requests";
+    assert.deepEqual(host.DeviceRequests ?? [], []);
+    field = "mount-count";
+    const mounts = array(data.Mounts).map(object);
+    const bindings = mounts.filter((value) => value.Type === "bind");
+    assert.equal(bindings.length, expected.mounts.length);
+    for (const mount of expected.mounts) {
+      field = "mount-target";
+      const observed = bindings.find((value) => value.Destination === mount.target);
+      assert.ok(observed);
+      field = "mount-source";
+      assert.equal(observed.Source, mount.source);
+      field = "mount-readonly";
+      assert.equal(observed.RW, !mount.readonly);
+      field = "mount-propagation";
+      assert.equal(observed.Propagation, "rprivate");
+    }
+    // PostgreSQL 17 declares this anonymous volume even with a custom entrypoint.
+    field = "volume-count";
+    const volumes = mounts.filter((value) => value.Type === "volume");
+    assert.equal(volumes.length, 1);
+    field = "volume-target";
+    assert.equal(volumes[0]?.Destination, "/var/lib/postgresql/data");
+    field = "volume-readonly";
+    assert.equal(volumes[0]?.RW, true);
+    field = "volume-name";
+    assert.match(String(volumes[0]?.Name), /^[a-f0-9]{64}$/);
+    field = "mount-types";
+    assert.equal(mounts.length, bindings.length + volumes.length);
+  } catch {
+    // Never retain raw inspection values, environment or assertion diffs.
+    throw new ContainerInspectionError(field);
   }
-  // PostgreSQL 17 declares this anonymous volume even with a custom entrypoint.
-  const volumes = mounts.filter((value) => value.Type === "volume");
-  assert.equal(volumes.length, 1);
-  assert.equal(volumes[0]?.Destination, "/var/lib/postgresql/data");
-  assert.equal(volumes[0]?.RW, true);
-  assert.match(String(volumes[0]?.Name), /^[a-f0-9]{64}$/);
-  assert.equal(mounts.length, bindings.length + volumes.length);
 }

@@ -7,6 +7,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   anonymousVolumeNames,
+  ContainerInspectionError,
   array,
   object,
   bwrapSHA256,
@@ -24,6 +25,7 @@ import {
 let commandFailure:
   | { command: string; exitCode: number | null; signal: string | null; error: string | null }
   | undefined;
+let inspectionFailure: ContainerInspectionError["field"] | undefined;
 function run(binary: string, args: string[], timeout = 30000, label = binary) {
   const result = spawnSync(binary, args, { encoding: "utf8", timeout, maxBuffer: 4 * 1024 * 1024 });
   if (result.error || result.status !== 0) {
@@ -315,7 +317,10 @@ try {
   assert.equal(state.ExitCode, 0);
   assert.equal(state.OOMKilled, false);
   outcome = "pass";
-} catch {
+} catch (error) {
+  if (error instanceof ContainerInspectionError) {
+    inspectionFailure = error.field;
+  }
   process.stderr.write("gateway-joined-execution-profile-failed-" + stage + "\n");
   process.exitCode = 1;
 } finally {
@@ -379,6 +384,7 @@ try {
           policyRemoved,
           cleanup,
           ...(commandFailure ? { failure: commandFailure } : {}),
+          ...(inspectionFailure ? { inspectionFailure } : {}),
         },
         null,
         2,
