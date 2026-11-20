@@ -148,6 +148,14 @@ async function main() {
     LC_ALL: "C",
   };
   const receipts: ProbeReceipt[] = [];
+  const runtimeAccess: Array<{
+    target: "codex" | "bwrap";
+    uid: 65534;
+    readableExecutable: boolean;
+    exitCode: number | null;
+    signal: NodeJS.Signals | null;
+    timedOut: boolean;
+  }> = [];
   let probeFailure: { phase: string; uid: number; field: ProbeReportField } | undefined;
   let commandFailure: ReturnType<typeof payloadCommandFailure> | undefined;
   const capture = (raw: string, expected: { phase: string; uid: number; profile: string }) => {
@@ -180,6 +188,31 @@ async function main() {
       capture(run.stdout, { phase: "outer", uid, profile: name });
       assert.equal(run.status, 0);
       requireProbe(run.stdout, { phase: "outer", uid, profile: name });
+    }
+    stage = "runtime-access";
+    for (const [target, path] of [
+      ["codex", cli],
+      ["bwrap", helper],
+    ] as const) {
+      const access = spawnSync("/usr/bin/test", ["-r", path, "-a", "-x", path], {
+        uid: 65534,
+        gid: 65534,
+        env: environment,
+        timeout: 15000,
+        maxBuffer: 8192,
+      });
+      const readableExecutable =
+        access.error === undefined && access.status === 0 && access.signal === null;
+      runtimeAccess.push({
+        target,
+        uid: 65534,
+        readableExecutable,
+        exitCode: access.status,
+        signal: access.signal,
+        timedOut:
+          access.error !== undefined && "code" in access.error && access.error.code === "ETIMEDOUT",
+      });
+      assert.equal(readableExecutable, true);
     }
     stage = "payload-control";
     await new Promise<void>((resolve, reject) => {
@@ -275,6 +308,7 @@ async function main() {
           codexSHA256,
           bwrapSHA256,
           receipts,
+          runtimeAccess,
           probeFailure,
           commandFailure,
         },

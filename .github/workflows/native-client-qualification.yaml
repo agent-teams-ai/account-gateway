@@ -107,7 +107,9 @@ jobs:
           rr_source="$GATEWAY_CLIENT_ROOT/review-router-source"
           action_source="$GATEWAY_CLIENT_ROOT/review-action-source"
           rr_assets="$GATEWAY_CLIENT_ROOT/review-router-assets"
-          mkdir -m 700 "$rr_assets" "$rr_assets/shim"
+          # The inner user namespace must traverse this host-runner-owned directory.
+          mkdir -m 711 "$rr_assets"
+          mkdir -m 700 "$rr_assets/shim"
           git clone --no-checkout --filter=blob:none https://github.com/777genius/review-router-ai.git "$rr_source"
           git -C "$rr_source" checkout --detach "$REVIEW_ROUTER_COMMIT"
           test "$(git -C "$rr_source" rev-parse HEAD)" = "$REVIEW_ROUTER_COMMIT"
