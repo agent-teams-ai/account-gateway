@@ -1,72 +1,85 @@
 import * as c from "@agent-teams/account-gateway/contracts";
-import { providerConnectionDefinition } from "./provider-connections.ts";
-import type { ProviderConnectionDefinition } from "./provider-connections.ts";
-
-export function providerConnectionCapability(
-  definition: ProviderConnectionDefinition,
-  modelIds?: readonly string[],
-): c.ProviderConnectionCapability {
-  const selected =
-    modelIds &&
-    definition.profileId !== "openai-responses-apikey-v1" &&
-    definition.provider.identity !== "openrouter"
-      ? definition.models.filter((model) => modelIds.includes(model.modelId))
-      : (modelIds?.map((modelId) => ({
-          modelId,
-          reasoning: null,
-          fast: null,
-          tools: {
-            allowed:
-              definition.provider.identity === "openrouter"
-                ? (["none"] as const)
-                : (["function", "function_and_custom"] as const),
-            default:
-              definition.provider.identity === "openrouter"
-                ? ("none" as const)
-                : ("function" as const),
-          },
-        })) ?? definition.models);
-  if (!selected.length || selected.length !== (modelIds?.length ?? definition.models.length)) {
-    throw new Error("unqualified_model");
-  }
-  return c.providerConnectionCapability.parse({
-    contract: c.PROVIDER_CONNECTIONS_CONTRACT,
-    profileId: definition.profileId,
-    provider: definition.provider,
-    plan: definition.plan,
-    region: definition.region,
-    protocol: definition.protocol,
-    modelIds: selected.map((model) => model.modelId),
-    authMethods: definition.authMethods,
-    completionInputKind: definition.completionInputKind,
-    availability: definition.availability,
-    oauthCallbackMode: definition.oauthCallbackMode,
-    reconnect: definition.reconnect,
-    limitsContract: definition.limitsContract,
-    models: selected.map((model) => ({
-      modelId: model.modelId,
-      reasoning: model.reasoning,
-      fast: model.fast,
-      tools: model.tools,
-    })),
-  });
+/** Backend catalog facts; the facade intersects deployment and bearer policy. */
+export interface ProviderConnectionSource {
+  getProviderConnectionCapabilities(): Promise<c.ProviderConnectionCapabilitiesV2>;
 }
 export function projectProviderConnections(
+  snapshot: c.ProviderConnectionCapabilitiesV2,
   profiles: readonly Pick<c.Profile, "profileId" | "protocol" | "modelIds">[],
-): c.ProviderConnectionCapabilities {
-  const capabilities = profiles.flatMap((profile) => {
-    const entry = providerConnectionDefinition(profile.profileId);
-    if (!entry || entry.protocol !== profile.protocol) {
-      return [];
-    }
-    try {
-      return [providerConnectionCapability(entry, profile.modelIds)];
-    } catch {
-      return [];
-    }
+): c.ProviderConnectionCapabilitiesV2 {
+  const accepted = c.providerConnectionCapabilitiesV2.parse(snapshot);
+  return c.providerConnectionCapabilitiesV2.parse({
+    contract: c.PROVIDER_CONNECTIONS_V2_CONTRACT,
+    capabilities: profiles.flatMap((profile) => {
+      const found = accepted.capabilities.find(
+        (candidate) =>
+          candidate.profileId === profile.profileId && candidate.protocol === profile.protocol,
+      );
+      if (!found) {
+        return [];
+      }
+      const models = profile.modelIds.map((id) =>
+        found.models.find((model) => model.modelId === id),
+      );
+      if (!models.length || models.some((model) => model === undefined)) {
+        return [];
+      }
+      return [{ ...found, models }];
+    }),
   });
+}
+
+/** Temporary v1 compatibility projection of the very same deployed snapshot. */
+export function projectProviderConnectionsV1(
+  snapshot: c.ProviderConnectionCapabilitiesV2,
+): c.ProviderConnectionCapabilities {
   return c.providerConnectionCapabilities.parse({
     contract: c.PROVIDER_CONNECTIONS_CONTRACT,
-    capabilities,
+    capabilities: snapshot.capabilities.flatMap((entry) => {
+      const provider = c.providerIdentity.safeParse(entry.provider.id);
+      if (!provider.success) {
+        return [];
+      }
+      const methods = entry.methods.filter(
+        (method) => method.create && method.kind !== "credential_import",
+      );
+      if (!methods.length) {
+        return [];
+      }
+      const browser = methods.find((method) => method.kind === "browser");
+      // V1 has one reconnect mode for every exposed method. A reconnect-only
+      // method or asymmetric support cannot grant that permission to another.
+      const reconnect = !methods.every((method) => method.reconnect)
+        ? "none"
+        : methods.every((method) => method.kind === "api_key")
+          ? "replace_api_key"
+          : methods.every((method) => method.kind === "browser" || method.kind === "device_code")
+            ? "oauth_reauthorize"
+            : "none";
+      return [
+        {
+          contract: c.PROVIDER_CONNECTIONS_CONTRACT,
+          profileId: entry.profileId,
+          provider: { identity: provider.data, label: entry.provider.label },
+          plan: { identity: entry.product.id, label: entry.product.label },
+          region: { identity: entry.region.id, label: entry.region.label },
+          protocol: entry.protocol,
+          modelIds: entry.models.map((model) => model.modelId),
+          models: entry.models,
+          authMethods: methods.map((method) =>
+            method.kind === "api_key"
+              ? "api_key"
+              : method.kind === "browser"
+                ? "oauth_authorization_code"
+                : "oauth_device_code",
+          ),
+          completionInputKind: browser?.completionInputKind ?? "none",
+          oauthCallbackMode: browser?.callbackMode ?? null,
+          reconnect,
+          limitsContract: entry.limitsContract,
+          availability: entry.availability,
+        },
+      ];
+    }),
   });
 }

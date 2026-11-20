@@ -10,6 +10,7 @@ import {
   defaults,
   factDefaults,
   identifier,
+  credentialImportMethod,
   integer,
   revision as authorityRevision,
   uuid,
@@ -28,6 +29,7 @@ import type {
   ResumeCustodyAuthority,
   AccountCustodyIdentity,
   AccountLimitsIdentity,
+  AccountInfoIdentity,
   ApprovedPreparation,
   ExecutionStatus,
   NativeDescriptor,
@@ -280,6 +282,47 @@ export class PostgresKernel implements DurableKernel {
       return accountStatus(r);
     });
   }
+  async accountInfoIdentities(
+    context: TrustedContext,
+    refs: readonly string[],
+  ): Promise<readonly AccountInfoIdentity[]> {
+    if (refs.length < 1 || refs.length > 50 || new Set(refs).size !== refs.length) {
+      throw new KernelError("invalid");
+    }
+    refs.forEach(uuid);
+    return this.read(context, async (tx) => {
+      // Metadata must leave time for the final whole-batch authority fence.
+      // This transaction-local timeout also bounds independent kernel consumers.
+      await tx.db.query("SET LOCAL statement_timeout = '400ms'");
+      const result = await tx.db.query<
+        AccountRow & {
+          active_generation: string | null;
+          native_identity: string | null;
+          readable: boolean | null;
+        }
+      >(
+        `SELECT a.*,c.native_identity,
+          (a.state IN ('active','suspended') AND c.state='ready'
+          AND NOT EXISTS (SELECT 1 FROM operations o WHERE o.consumer=a.consumer
+            AND o.account_ref=a.ref AND o.state IN ('pending','unknown')
+            AND o.intent->>'kind' IN ('reconnect','disable'))) AS readable
+        FROM accounts a LEFT JOIN candidates c ON c.consumer=a.consumer
+          AND c.generation=a.active_generation AND c.account_ref=a.ref
+        WHERE a.consumer=$1 AND a.ref=ANY($2::uuid[])
+        ORDER BY array_position($2::uuid[],a.ref)`,
+        [tx.consumer, refs],
+      );
+      if (result.rows.length !== refs.length) {
+        throw new KernelError("denied");
+      }
+      return result.rows.map((row) => ({
+        ...accountStatus(row),
+        readable: row.readable === true,
+        ...(row.active_generation !== null ? { generation: row.active_generation } : {}),
+        ...(row.native_identity !== null ? { nativePhysicalIdentity: row.native_identity } : {}),
+      }));
+    });
+  }
   // One SQL observation fences pending reconnect/delete before exposing quota.
   async accountLimitsIdentity(
     context: TrustedContext,
@@ -426,6 +469,7 @@ export class PostgresKernel implements DurableKernel {
       profile: input.profile,
       displayName: input.displayName,
       oauthMethod: input.oauthMethod,
+      credentialImportMethod: input.credentialImportMethod,
     };
     identifier(input.operationId);
     identifier(input.intentDigest);
@@ -433,7 +477,16 @@ export class PostgresKernel implements DurableKernel {
       throw new KernelError("invalid");
     }
     validateOAuthMethod(input.oauthMethod);
-    if (input.oauthMethod !== undefined && !["create", "reconnect"].includes(input.kind)) {
+    if (input.credentialImportMethod !== undefined) {
+      credentialImportMethod(input.credentialImportMethod);
+      if (input.oauthMethod !== undefined) {
+        throw new KernelError("invalid");
+      }
+    }
+    if (
+      (input.oauthMethod !== undefined || input.credentialImportMethod !== undefined) &&
+      !["create", "reconnect"].includes(input.kind)
+    ) {
       throw new KernelError("invalid");
     }
     if (input.kind === "create") {
@@ -465,6 +518,9 @@ export class PostgresKernel implements DurableKernel {
       profile: input.profile ?? null,
       name: input.displayName ?? null,
       ...(input.oauthMethod === undefined ? {} : { oauthMethod: input.oauthMethod }),
+      ...(input.credentialImportMethod === undefined
+        ? {}
+        : { credentialImportMethod: input.credentialImportMethod }),
     };
     return this.transaction(context, async (tx) => {
       const old = await this.existing(tx, input.operationId, intent);

@@ -9,6 +9,7 @@ import {
   defaults,
   type Bounds,
   type CleanupClaim,
+  type CredentialImportMethod,
   type DurableKernel,
   type ExecutionRead,
   type TrustedContext,
@@ -29,6 +30,8 @@ import { oauthProfileDefinition } from "./oauth-profiles.ts";
 import { providerConnectionDefinition } from "./provider-connections.ts";
 import {
   NativeAccountModelsClient,
+  NativeAccountInfoClient,
+  NativeAccountCapabilitiesClient,
   NativeAccountLimitsClient,
   NativeAccountLimitsRefreshClient,
   NativeAccountLimitsV2Client,
@@ -41,6 +44,7 @@ import { NativeAuthority } from "./native-authority.ts";
 import { NativeHTTPTransport } from "./native-transport.ts";
 import { FacadeBearers } from "./facade.ts";
 import { NativeAdmissionLimits } from "./admission-limits.ts";
+import { AccountInfoReader } from "./account-info-port.ts";
 import type { ConfiguredBearer, FacadeOptions } from "./facade.ts";
 import { captureServiceBearers, captureServiceProfiles } from "./service-config.ts";
 import type { ServiceConfig, ServiceProfile } from "./service-config.ts";
@@ -215,6 +219,17 @@ export function composeServiceControl(
           complete: (scope: OAuthScope, callback: OAuthCallback) =>
             forScope(scope).complete(scope, callback),
         },
+        ...(oauthProfileDefinition(profile.profile)?.family === "codex"
+          ? {
+              credentialImport: {
+                importCredential: (
+                  scope: OAuthScope,
+                  method: CredentialImportMethod,
+                  value: string,
+                ) => forScope(scope).importCredential(scope, method, value),
+              },
+            }
+          : {}),
         descriptor: { describe: (scope: OAuthScope) => forScope(scope).describe(scope) },
         lifecycle: {
           cleanup: (
@@ -278,6 +293,8 @@ export function composeServiceControl(
     management,
     catalog,
     nativeControls,
+    accountInfo: new AccountInfoReader(new NativeAccountInfoClient(control)),
+    providerConnections: new NativeAccountCapabilitiesClient(control),
     accountModels: new NativeAccountModelsClient(control),
     accountLimits: new NativeAccountLimitsClient(control),
     accountLimitsRefresh: new NativeAccountLimitsRefreshClient(control),
@@ -288,13 +305,26 @@ export function composeServiceControl(
 export function composeServiceCachedLimits(
   control: Pick<
     ReturnType<typeof composeServiceControl>,
-    "accountModels" | "accountLimits" | "accountLimitsV2" | "accountLimitsRefresh"
+    | "providerConnections"
+    | "accountInfo"
+    | "accountModels"
+    | "accountLimits"
+    | "accountLimitsV2"
+    | "accountLimitsRefresh"
   >,
 ): Pick<
   FacadeOptions,
-  "accountModels" | "accountLimits" | "accountLimitsV2" | "accountLimitsRefresh" | "admissionLimits"
+  | "providerConnections"
+  | "accountInfo"
+  | "accountModels"
+  | "accountLimits"
+  | "accountLimitsV2"
+  | "accountLimitsRefresh"
+  | "admissionLimits"
 > {
   return {
+    accountInfo: control.accountInfo,
+    providerConnections: control.providerConnections,
     accountModels: control.accountModels,
     accountLimits: control.accountLimits,
     accountLimitsRefresh: control.accountLimitsRefresh,

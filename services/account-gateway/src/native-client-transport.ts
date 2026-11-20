@@ -16,6 +16,10 @@ export interface NativeManagementOptions {
 }
 // One concrete bounded transport shared by the two private control adapters.
 // It carries no enrollment policy and never performs a second HTTP attempt.
+function signalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
+
 export class NativeControlHTTP {
   readonly #origin: URL;
   readonly #consumer: string;
@@ -92,12 +96,22 @@ export class NativeControlHTTP {
     path: string,
     value?: unknown,
     deadlineMs = this.#deadlineMs,
+    signal?: AbortSignal,
   ): Promise<Buffer> {
+    if (signalAborted(signal)) {
+      throw new NativeFailure("deadline");
+    }
     const deadline = Date.now() + Math.min(deadlineMs, this.#deadlineMs);
     let body: Buffer | undefined;
     try {
       body = value === undefined ? undefined : Buffer.from(JSON.stringify(value));
-      if (body && body.length > (path.endsWith("/oauth/connect/complete") ? 32_768 : 16_384)) {
+      const requestBytes =
+        path === "/private/native/v1/oauth/connect/import"
+          ? 400 * 1024
+          : path.endsWith("/oauth/connect/complete")
+            ? 32_768
+            : 16_384;
+      if (body && body.length > requestBytes) {
         throw new NativeFailure("bounded");
       }
     } catch {
@@ -105,11 +119,11 @@ export class NativeControlHTTP {
     }
     let release: (() => void) | undefined;
     try {
-      release = await this.#admission?.acquire(deadline);
+      release = await this.#admission?.acquire(deadline, signal);
     } catch {
       throw new NativeFailure("unavailable");
     }
-    if (Date.now() >= deadline) {
+    if (Date.now() >= deadline || signalAborted(signal)) {
       release?.();
       throw new NativeFailure("deadline");
     }
@@ -122,6 +136,7 @@ export class NativeControlHTTP {
         }
         finished = true;
         clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
         if (error) {
           reject(error);
         } else {
@@ -131,6 +146,9 @@ export class NativeControlHTTP {
       };
       const send = this.#origin.protocol === "https:" ? httpsRequest : httpRequest;
       let req: ReturnType<typeof httpRequest>;
+      const abort = () => {
+        finish(new NativeFailure("deadline"));
+      };
       try {
         req = send(this.#origin, {
           method,
@@ -162,6 +180,11 @@ export class NativeControlHTTP {
         }
       });
       req.maxHeadersCount = 65;
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signalAborted(signal)) {
+        abort();
+        return;
+      }
       timer = setTimeout(
         () => {
           finish(new NativeFailure("deadline"));

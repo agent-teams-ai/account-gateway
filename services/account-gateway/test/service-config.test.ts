@@ -386,3 +386,35 @@ void test("OpenRouter enrollment accepts future safe anchors without loosening i
     }),
   );
 });
+
+void test("official Anthropic and Gemini API profiles require exact deployment-qualified anchors", () => {
+  const selected = [
+    {
+      profile: "anthropic-messages-apikey-v1",
+      baseURL: "https://api.anthropic.com/v1",
+      model: "claude-sonnet-4-6",
+    },
+    {
+      profile: "gemini-openai-chat-apikey-v1",
+      baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+      model: "gemini-3.1-pro-preview",
+    },
+  ].map((tuple) => ({
+    ...tuple,
+    qualificationRef: "controlled-official-api-fixture",
+    limits: { requests: 2, concurrency: 1, requestBytes: 4096, outputBytes: 8192, tokens: 1000 },
+    providerTokenUpperBound: 1000,
+  }));
+  assert.deepEqual(
+    captureServiceProfiles({ profile: serviceProfile(2), providerProfiles: selected }).slice(1),
+    selected,
+  );
+  for (const profile of selected) {
+    denied(() =>
+      captureServiceProfiles({
+        profile: { ...profile, baseURL: "https://unqualified.example/v1" },
+      }),
+    );
+    denied(() => captureServiceProfiles({ profile: { ...profile, model: "invented-model" } }));
+  }
+});

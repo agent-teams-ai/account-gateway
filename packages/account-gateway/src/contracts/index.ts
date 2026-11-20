@@ -142,3 +142,40 @@ export type {
   AccountModelCapability,
   AccountModelSource,
 } from "../features/facade-client/contracts/index.js";
+
+export {
+  ACCOUNT_INFO_CONTRACT,
+  ACCOUNT_INFO_MAX_REFS,
+  ACCOUNT_INFO_REQUEST_BYTES,
+  ACCOUNT_INFO_RESULT_BYTES,
+  ACCOUNT_INFO_RESPONSE_BYTES,
+  accountInfoSource,
+  accountInfoSubscriptionEnd,
+  accountInfoSubscription,
+  accountInfoFields,
+  accountInfo,
+  accountInfoReadRequest,
+  accountInfoAccount,
+  accountInfoReadResponse,
+} from "../features/facade-client/contracts/index.js";
+export {
+  PROVIDER_CONNECTIONS_V2_CONTRACT,
+  providerConnectionMethod,
+  providerConnectionCapabilityV2,
+  providerConnectionCapabilitiesV2,
+} from "../features/facade-client/contracts/index.js";
+export type {
+  ProviderConnectionMethod,
+  ProviderConnectionCapabilityV2,
+  ProviderConnectionCapabilitiesV2,
+} from "../features/facade-client/contracts/index.js";
+export type {
+  AccountInfo,
+  AccountInfoFields,
+  AccountInfoSource,
+  AccountInfoSubscription,
+  AccountInfoSubscriptionEnd,
+  AccountInfoReadRequest,
+  AccountInfoReadResponse,
+  AccountInfoAccount,
+} from "../features/facade-client/contracts/index.js";

@@ -70,6 +70,13 @@ export class IntentSecrets implements IntentCustody {
           i.displayName ?? null,
           accepted.apiKey ?? null,
           ...(i.oauthMethod === undefined ? [] : [i.oauthMethod]),
+          ...(i.credentialImportMethod === undefined
+            ? []
+            : [
+                "credential-import/v1",
+                i.credentialImportMethod,
+                accepted.credentialImportValue ?? null,
+              ]),
         ]),
       )
       .digest("hex");

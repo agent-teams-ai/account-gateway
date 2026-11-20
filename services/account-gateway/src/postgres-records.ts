@@ -177,6 +177,11 @@ export const operationStatus = (r: OperationRow): OperationStatus => {
     ...(record(r.intent) && r.intent.oauthMethod === "device_code"
       ? { oauthMethod: "device_code" }
       : {}),
+    ...(record(r.intent) &&
+    (r.intent.credentialImportMethod === "refresh_token" ||
+      r.intent.credentialImportMethod === "oauth_auth_json")
+      ? { credentialImportMethod: r.intent.credentialImportMethod }
+      : {}),
     ...(saved === undefined ? {} : { lifecycle: saved }),
   };
 };

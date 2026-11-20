@@ -53,8 +53,93 @@ import {
   providerConnectionDefinition,
   providerConnectionRegistry,
 } from "../src/provider-connections.ts";
-import { projectProviderConnections } from "../src/provider-connection-capabilities.ts";
+import {
+  projectProviderConnections,
+  projectProviderConnectionsV1,
+} from "../src/provider-connection-capabilities.ts";
 const bytes = (text: string) => Buffer.from(text);
+
+void test("source HTTP: metadata traverses SDK, facade, native adapter and independent owner callback", async () => {
+  const f = await sourceHTTP(false);
+  try {
+    const connected = await f.publicCall("/v1/accounts", {
+      operationId: randomUUID(),
+      ownerRef: "owner-one",
+      profileId: f.profile.profile,
+      displayName: "Metadata fixture",
+      credential: { kind: "api_key", value: "fixture-write-only" },
+    });
+    assert.equal(connected.status, 200);
+    const operation = lifecycleWire.accountOperation.parse(await connected.json());
+    assert.equal(operation.state, "applied");
+    assert.ok(operation.result?.kind === "account");
+    const accountRef = operation.result.accountRef;
+    const unknown = { status: "unknown" } as const;
+    const info: lifecycleWire.AccountInfo = {
+      status: "available",
+      infoRevision: "6",
+      fields: {
+        email: {
+          status: "known",
+          value: "owner@example.invalid",
+          source: "provider_api",
+          observedAt: "2026-11-19T10:00:00Z",
+          freshness: "stale",
+        },
+        accountLabel: unknown,
+        subscription: unknown,
+        credentialExpiresAt: unknown,
+        privacyMode: unknown,
+      },
+    };
+    f.accountInfoResult(info);
+    const bearer = f.cfg.bearers.find((candidate) => candidate.role === "management");
+    assert.ok(bearer);
+    const client = createManagementClient({
+      role: "management",
+      origin: f.facadeOrigin,
+      token: bearer.token,
+    });
+    const input = { ownerRef: "owner-one", accountRefs: [accountRef] };
+    const beforeReads = f.seen.length;
+    const result = await client.readAccountInfo(input);
+    assert.deepEqual(result.accounts[0].info, info);
+    assert.deepEqual(
+      f.seen.slice(beforeReads).map((read) => read.path),
+      ["POST /private/native/v1/account-info/read"],
+    );
+    assert.equal(JSON.stringify(result).includes("fixture-principal"), false);
+    assert.equal(JSON.stringify(result).includes("physicalGeneration"), false);
+    const reads = f.seen.length;
+    assert.equal(
+      (await f.publicCall("/v1/account-info/read", { ...input, ownerRef: "owner-two" })).status,
+      403,
+    );
+    assert.equal(f.seen.length, reads, "foreign owner cannot enter native read");
+    let entered!: () => void, release!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.accountInfoResult(info, async () => {
+      entered();
+      await gate;
+    });
+    const pending = f.publicCall("/v1/account-info/read", input);
+    await waiting;
+    f.control.bearers.replace([]);
+    release();
+    assert.equal(
+      (await pending).status,
+      403,
+      "revocation during native await removes the complete snapshot",
+    );
+  } finally {
+    await f.close();
+  }
+});
 const valid = {
   model: "fixture-model",
   stream: true,
@@ -65,7 +150,44 @@ const valid = {
 const invalid = (fn: () => unknown) => {
   assert.throws(fn, (e) => e instanceof KernelError && e.code === "invalid");
 };
+const nativeModel = (
+  modelId: string,
+): lifecycleWire.ProviderConnectionCapabilityV2["models"][number] => ({
+  modelId,
+  reasoning: null,
+  fast: null,
+  tools: { allowed: ["none"], default: "none" },
+});
 void test("capability projection omits new profiles without configuration and does not invent model settings", () => {
+  const snapshot = lifecycleWire.providerConnectionCapabilitiesV2.parse({
+    contract: "provider-connections/v2",
+    capabilities: [
+      {
+        profileId: "openai-responses-apikey-v1",
+        provider: { id: "mimo", label: "Native MiMo" },
+        product: { id: "unknown", label: "Native product" },
+        region: { id: "global", label: "Global" },
+        protocol: "openai-responses",
+        models: [nativeModel("fixture-model")],
+        methods: [{ kind: "api_key", create: true, reconnect: true }],
+        accountInfo: true,
+        limitsContract: "none",
+        availability: "enabled",
+      },
+      {
+        profileId: "openrouter-openai-responses-apikey-v1",
+        provider: { id: "openrouter", label: "OpenRouter" },
+        product: { id: "pay_as_you_go", label: "Native credits" },
+        region: { id: "global", label: "Global" },
+        protocol: "openai-responses",
+        models: [nativeModel("future-vendor/birth-anchor")],
+        methods: [{ kind: "api_key", create: true, reconnect: true }],
+        accountInfo: true,
+        limitsContract: "none",
+        availability: "enabled",
+      },
+    ],
+  });
   const configured = [
     {
       profileId: "openai-responses-apikey-v1",
@@ -73,7 +195,7 @@ void test("capability projection omits new profiles without configuration and do
       modelIds: ["fixture-model"],
     },
   ];
-  const projection = projectProviderConnections(configured);
+  const projection = projectProviderConnections(snapshot, configured);
   assert.equal(projection.capabilities.length, 1);
   assert.equal(
     projection.capabilities.some(
@@ -84,7 +206,12 @@ void test("capability projection omits new profiles without configuration and do
   const glm = providerConnectionDefinition("glm-coding-global-responses-apikey-v1");
   assert.equal(glm?.models[0].modelId, "glm-5.3-flash");
   assert.equal(glm.models[0].reasoning, null);
-  const openrouter = projectProviderConnections([
+  assert.equal(projection.capabilities[0].provider.label, "Native MiMo");
+  assert.equal(
+    projectProviderConnectionsV1(projection).capabilities[0].plan.label,
+    "Native product",
+  );
+  const openrouter = projectProviderConnections(snapshot, [
     {
       profileId: "openrouter-openai-responses-apikey-v1",
       protocol: "openai-responses",
@@ -103,6 +230,59 @@ void test("capability projection omits new profiles without configuration and do
       tools: { allowed: ["none"], default: "none" },
     },
   ]);
+});
+void test("v1 projection only advertises reconnect shared by every exposed method", () => {
+  const browser = {
+    kind: "browser" as const,
+    create: true,
+    reconnect: false,
+    completionInputKind: "callback_url" as const,
+    callbackMode: "automatic" as const,
+  };
+  const device = { kind: "device_code" as const, create: false, reconnect: true };
+  const entry: lifecycleWire.ProviderConnectionCapabilityV2 = {
+    profileId: "openai-codex-oauth-responses-v1",
+    provider: { id: "openai", label: "OpenAI" },
+    product: { id: "subscription", label: "Subscription" },
+    region: { id: "global", label: "Global" },
+    protocol: "openai-responses",
+    models: [nativeModel("fixture-model")],
+    methods: [browser, device],
+    accountInfo: true,
+    limitsContract: "account-limits/v1",
+    availability: "enabled",
+  };
+  const project = (methods: lifecycleWire.ProviderConnectionCapabilityV2["methods"]) =>
+    projectProviderConnectionsV1({
+      contract: "provider-connections/v2",
+      capabilities: [{ ...entry, methods }],
+    }).capabilities[0];
+  const asymmetric = project([browser, device]);
+  assert.deepEqual(asymmetric.authMethods, ["oauth_authorization_code"]);
+  assert.equal(asymmetric.reconnect, "none");
+  assert.equal(project([browser, { ...device, create: true }]).reconnect, "none");
+  assert.equal(
+    project([
+      { ...browser, reconnect: true },
+      { ...device, create: true },
+    ]).reconnect,
+    "oauth_reauthorize",
+  );
+  assert.equal(
+    project([{ kind: "api_key", create: true, reconnect: false }, device]).reconnect,
+    "none",
+  );
+  assert.equal(
+    project([{ kind: "api_key", create: true, reconnect: true }]).reconnect,
+    "replace_api_key",
+  );
+  assert.equal(
+    project([
+      { kind: "api_key", create: true, reconnect: true },
+      { ...browser, reconnect: true },
+    ]).reconnect,
+    "none",
+  );
 });
 void test("Grok manual callback grammar is profile-owned and cannot select another provider", () => {
   const state = "a".repeat(64);
@@ -563,6 +743,25 @@ async function sourceHTTP(
     heartbeat: async () => {},
     reconcile: async () => {},
     account: async (c, id) => accounts.get(scopeKey(c, id)) ?? missing(),
+    accountInfoIdentities: async (c, ids) =>
+      Promise.all(
+        ids.map(async (id) => {
+          const row = await kernel.account(c, id);
+          const mapping = [...mappings.values()].find(
+            (m) => m.consumerId === c.consumerId && m.accountRef === id,
+          );
+          return {
+            ...row,
+            readable: !!mapping && ["active", "suspended"].includes(row.state),
+            ...(mapping
+              ? {
+                  generation: mapping.generation,
+                  nativePhysicalIdentity: mapping.descriptor.nativePhysicalIdentity,
+                }
+              : {}),
+          };
+        }),
+      ),
     accountLimitsIdentity: async (c, id) => {
       const account = await kernel.account(c, id);
       const mapping = [...mappings.values()].find(
@@ -925,6 +1124,8 @@ async function sourceHTTP(
   let modelResult: unknown = { status: "unavailable" };
   let modelHTTPStatus = 200;
   let modelRead: (() => Promise<void>) | undefined;
+  let infoResult: lifecycleWire.AccountInfo = { status: "unavailable" };
+  let infoRead: (() => Promise<void>) | undefined;
   const peer = createServer((req, res) => {
     const settled = (async () => {
       const chunks: Buffer[] = [];
@@ -940,6 +1141,58 @@ async function sourceHTTP(
         res.writeHead(status, { "content-type": "application/json" });
         res.end(JSON.stringify(body));
       };
+      if (req.method === "GET" && path === "/private/native/v1/account-capabilities") {
+        reply({
+          contract: "native-account-capabilities/v1",
+          profiles:
+            oauth === "grok"
+              ? [
+                  {
+                    profileId: "grok-subscription-responses-oauth-v1",
+                    provider: { id: "grok", label: "Grok" },
+                    product: { id: "subscription", label: "Subscription" },
+                    region: { id: "global", label: "Global" },
+                    protocol: "openai-responses",
+                    models: [nativeModel("grok-4.7")],
+                    methods: [
+                      {
+                        kind: "browser",
+                        create: true,
+                        reconnect: true,
+                        completionInputKind: "authorization_code",
+                        callbackMode: "manual_callback_url",
+                      },
+                    ],
+                    accountInfo: true,
+                    limitsContract: "account-limits/v2",
+                    availability: "enabled",
+                  },
+                ]
+              : [],
+        });
+        return;
+      }
+      if (req.method === "POST" && path === "/private/native/v1/account-info/read") {
+        assert.equal(req.headers.authorization, "Bearer " + consumer.managementCredential);
+        const grant = await callback("account-info-authority", { consumerId, ...tuple });
+        if (grant.status !== 200) {
+          await grant.arrayBuffer();
+          reply({ code: "denied" }, 403);
+          return;
+        }
+        const proof = (await grant.json()) as { native: { generation: string } };
+        await infoRead?.();
+        reply(
+          infoResult.status === "available"
+            ? {
+                info: infoResult,
+                physicalGeneration: proof.native.generation,
+                principalVersion: "fixture-principal",
+              }
+            : { info: infoResult },
+        );
+        return;
+      }
       if (req.method === "POST" && path === "/private/native/v1/account-models/read") {
         assert.equal(req.headers.authorization, "Bearer " + consumer.managementCredential);
         await modelRead?.();
@@ -1510,6 +1763,10 @@ async function sourceHTTP(
         modelHTTPStatus = httpStatus;
         modelResult = value;
         modelRead = enter;
+      },
+      accountInfoResult: (value: lifecycleWire.AccountInfo, enter?: () => Promise<void>) => {
+        infoResult = value;
+        infoRead = enter;
       },
       responseBytes: (value: number) => {
         responseBytes = value;

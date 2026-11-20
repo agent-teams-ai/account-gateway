@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -54,14 +55,311 @@ type counts struct {
 	CustomCalls     int64 `json:"customCalls"`
 	FunctionOutputs int64 `json:"functionOutputs"`
 	CustomOutputs   int64 `json:"customOutputs"`
+	SchemaRequests  int64 `json:"schemaRequests"`
+	SignatureChecks int64 `json:"signatureChecks"`
 }
 type counters struct {
 	dispatches, exchanges, refreshes, quotaGets, functionCalls, customCalls, functionOutputs, customOutputs atomic.Int64
+	schemaRequests, signatureChecks                                                                         atomic.Int64
 	toolMu                                                                                                  sync.Mutex
 	pendingTools                                                                                            *toolContinuation
 }
 
-type toolContinuation struct{ custom, reasoning bool }
+type toolContinuation struct {
+	custom, reasoning bool
+	calls             map[string]officialTool
+}
+
+type officialTool struct {
+	Name       string
+	Parameters json.RawMessage
+	Arguments  string
+	Signature  string
+}
+
+func officialArguments(tool officialTool) (string, []string, error) {
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+		Required   []string                   `json:"required"`
+	}
+	if json.Unmarshal(tool.Parameters, &schema) != nil {
+		return "", nil, deny
+	}
+	args := map[string]any{}
+	switch {
+	case tool.Name == "joined_lookup":
+	case strings.HasSuffix(tool.Name, "exec_command") && schema.Properties["cmd"] != nil:
+		args = map[string]any{"cmd": "pwd", "yield_time_ms": 1000, "max_output_tokens": 1000}
+	case strings.HasSuffix(tool.Name, "shell_command") && schema.Properties["command"] != nil:
+		args = map[string]any{"command": "pwd", "timeout_ms": 1000}
+	case tool.Name == "shell" && schema.Properties["command"] != nil:
+		args = map[string]any{"command": []string{"sh", "-lc", "pwd"}}
+	case strings.HasSuffix(tool.Name, "apply_patch") && schema.Properties["input"] != nil:
+		args = map[string]any{"input": "*** Begin Patch\n*** End Patch\n"}
+	default:
+		return "", nil, deny
+	}
+	for key := range args {
+		if schema.Properties[key] == nil {
+			delete(args, key)
+		}
+	}
+	for _, key := range schema.Required {
+		if _, exists := args[key]; !exists {
+			return "", nil, deny
+		}
+	}
+	raw, err := json.Marshal(args)
+	return string(raw), schema.Required, err
+}
+
+// This is the actual upstream protocol boundary: native must translate the
+// public Responses conversation, preserve schema, and restore each tool proof.
+func serveOfficial(w http.ResponseWriter, r *http.Request, provider string, c *counters, toolShapes map[string]any, toolShapeMu *sync.Mutex) error {
+	model, path := service.GatewayAnthropicAPIModel, "/v1/messages"
+	if provider == "gemini" {
+		model, path = service.GatewayGeminiAPIModel, "/v1beta/openai/chat/completions"
+		if r.Header.Get("Authorization") != "Bearer fixture-provider-key-gemini" || r.Header.Get("x-api-key") != "" {
+			return deny
+		}
+	} else if r.Header.Get("Authorization") != "" || r.Header.Get("x-api-key") != "fixture-provider-key-anthropic" || r.Header.Get("anthropic-version") != "2023-06-01" {
+		return deny
+	}
+	if r.Method != "POST" || r.URL.RequestURI() != path || r.Header.Get("Cookie") != "" || r.Header.Get("Idempotency-Key") != "" {
+		return deny
+	}
+	var body map[string]json.RawMessage
+	raw, err := io.ReadAll(io.LimitReader(r.Body, (4<<20)+1))
+	if err != nil || len(raw) > 4<<20 || json.Unmarshal(raw, &body) != nil || string(body["model"]) != fmt.Sprintf("%q", model) || string(body["stream"]) != "true" {
+		return deny
+	}
+	c.dispatches.Add(1)
+	c.toolMu.Lock()
+	defer c.toolMu.Unlock()
+	var format struct {
+		Type   string          `json:"type"`
+		Schema json.RawMessage `json:"schema"`
+	}
+	if provider == "anthropic" {
+		var output struct {
+			Format json.RawMessage `json:"format"`
+		}
+		if json.Unmarshal(body["output_config"], &output) == nil {
+			_ = json.Unmarshal(output.Format, &format)
+		}
+	} else {
+		var output struct {
+			Type       string          `json:"type"`
+			JSONSchema json.RawMessage `json:"json_schema"`
+		}
+		if json.Unmarshal(body["response_format"], &output) == nil && output.Type == "json_schema" {
+			_ = json.Unmarshal(output.JSONSchema, &format)
+			format.Type = output.Type
+		}
+	}
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if format.Type == "json_schema" && json.Unmarshal(format.Schema, &schema) == nil && schema.Properties["findings"] != nil && schema.Properties["revalidations"] != nil {
+		c.schemaRequests.Add(1)
+	} else if c.pendingTools == nil {
+		return deny
+	}
+	var messages []struct {
+		Role       string          `json:"role"`
+		ToolCallID string          `json:"tool_call_id"`
+		Content    json.RawMessage `json:"content"`
+		ToolCalls  []struct {
+			ID       string                           `json:"id"`
+			Function struct{ Name, Arguments string } `json:"function"`
+			Extra    struct {
+				Google struct {
+					Signature string `json:"thought_signature"`
+				} `json:"google"`
+			} `json:"extra_content"`
+		} `json:"tool_calls"`
+	}
+	if json.Unmarshal(body["messages"], &messages) != nil || len(messages) == 0 {
+		return deny
+	}
+	calls, outputs := map[string]officialTool{}, map[string]bool{}
+	for _, message := range messages {
+		if provider == "gemini" {
+			for _, call := range message.ToolCalls {
+				if message.Role != "assistant" || calls[call.ID].Name != "" {
+					return deny
+				}
+				calls[call.ID] = officialTool{Name: call.Function.Name, Arguments: call.Function.Arguments, Signature: call.Extra.Google.Signature}
+			}
+			if message.Role == "tool" {
+				if outputs[message.ToolCallID] || len(message.Content) == 0 || string(message.Content) == "null" {
+					return deny
+				}
+				outputs[message.ToolCallID] = true
+			}
+			continue
+		}
+		var parts []struct {
+			Type, ID, Name string
+			ToolUseID      string          `json:"tool_use_id"`
+			Input          json.RawMessage `json:"input"`
+			Content        json.RawMessage `json:"content"`
+		}
+		if json.Unmarshal(message.Content, &parts) != nil {
+			continue
+		}
+		for _, part := range parts {
+			switch part.Type {
+			case "tool_use":
+				if message.Role != "assistant" || calls[part.ID].Name != "" {
+					return deny
+				}
+				calls[part.ID] = officialTool{Name: part.Name, Arguments: string(part.Input)}
+			case "tool_result":
+				if message.Role != "user" || outputs[part.ToolUseID] || len(part.Content) == 0 || string(part.Content) == "null" {
+					return deny
+				}
+				outputs[part.ToolUseID] = true
+			}
+		}
+	}
+	continuation := c.pendingTools != nil
+	selected := map[string]officialTool{}
+	if continuation {
+		if len(calls) != len(c.pendingTools.calls) || len(outputs) != len(c.pendingTools.calls) {
+			return deny
+		}
+		for id, expected := range c.pendingTools.calls {
+			actual := calls[id]
+			var a, b any
+			if !outputs[id] || actual.Name != expected.Name || actual.Signature != expected.Signature || json.Unmarshal([]byte(actual.Arguments), &a) != nil || json.Unmarshal([]byte(expected.Arguments), &b) != nil || !reflect.DeepEqual(a, b) {
+				return deny
+			}
+		}
+		c.functionOutputs.Add(1)
+		if c.pendingTools.custom {
+			c.customOutputs.Add(1)
+		}
+		if provider == "gemini" {
+			c.signatureChecks.Add(1)
+		}
+		c.pendingTools = nil
+	} else {
+		if len(calls) != 0 || len(outputs) != 0 {
+			return deny
+		}
+		var tools []json.RawMessage
+		if json.Unmarshal(body["tools"], &tools) != nil {
+			return deny
+		}
+		shape := map[string]any{}
+		for _, rawTool := range tools {
+			var tool struct {
+				Name        string          `json:"name"`
+				InputSchema json.RawMessage `json:"input_schema"`
+				Function    struct {
+					Name       string          `json:"name"`
+					Parameters json.RawMessage `json:"parameters"`
+				} `json:"function"`
+			}
+			if json.Unmarshal(rawTool, &tool) != nil {
+				return deny
+			}
+			candidate := officialTool{Name: tool.Name, Parameters: tool.InputSchema}
+			if provider == "gemini" {
+				candidate.Name, candidate.Parameters = tool.Function.Name, tool.Function.Parameters
+			}
+			args, required, e := officialArguments(candidate)
+			if e != nil {
+				continue
+			}
+			candidate.Arguments = args
+			if strings.HasSuffix(candidate.Name, "apply_patch") {
+				selected["joined-call-custom"] = candidate
+				shape["customLoweredFunction"] = map[string]any{"name": candidate.Name, "type": "function", "inputProperty": "input"}
+			} else if selected["joined-call-1"].Name == "" || strings.HasSuffix(candidate.Name, "exec_command") {
+				selected["joined-call-1"] = candidate
+				shape["name"], shape["type"], shape["requiredProperties"] = candidate.Name, "function", required
+			}
+		}
+		if selected["joined-call-1"].Name == "" {
+			return deny
+		}
+		if provider == "gemini" {
+			first := selected["joined-call-1"]
+			first.Signature = "joined-gemini-signature"
+			selected["joined-call-1"] = first
+		}
+		_, custom := selected["joined-call-custom"]
+		c.pendingTools = &toolContinuation{custom: custom, calls: selected}
+		c.functionCalls.Add(1)
+		if custom {
+			c.customCalls.Add(1)
+		}
+		toolShapeMu.Lock()
+		toolShapes[provider] = shape
+		toolShapeMu.Unlock()
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	emit := func(kind string, body any) {
+		raw, _ := json.Marshal(body)
+		if provider == "anthropic" {
+			_, _ = fmt.Fprintf(w, "event: %s\n", kind)
+		}
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", raw)
+	}
+	text := `{"findings":[],"revalidations":[]}`
+	if provider == "anthropic" {
+		emit("message_start", map[string]any{"type": "message_start", "message": map[string]any{"id": "joined-official", "type": "message", "role": "assistant", "model": model, "content": []any{}, "stop_reason": nil, "stop_sequence": nil, "usage": map[string]int{"input_tokens": 7, "output_tokens": 0}}})
+		if continuation {
+			emit("content_block_start", map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}})
+			emit("content_block_delta", map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "text_delta", "text": text}})
+			emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
+		} else {
+			for index, id := range []string{"joined-call-1", "joined-call-custom"} {
+				call, exists := selected[id]
+				if !exists {
+					continue
+				}
+				emit("content_block_start", map[string]any{"type": "content_block_start", "index": index, "content_block": map[string]any{"type": "tool_use", "id": id, "name": call.Name, "input": map[string]any{}}})
+				emit("content_block_delta", map[string]any{"type": "content_block_delta", "index": index, "delta": map[string]any{"type": "input_json_delta", "partial_json": call.Arguments}})
+				emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": index})
+			}
+		}
+		reason := "tool_use"
+		if continuation {
+			reason = "end_turn"
+		}
+		emit("message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": reason, "stop_sequence": nil}, "usage": map[string]int{"output_tokens": 3}})
+		emit("message_stop", map[string]string{"type": "message_stop"})
+	} else {
+		chunk := func(delta any, finish any) map[string]any {
+			return map[string]any{"id": "joined-official", "object": "chat.completion.chunk", "created": 1, "model": model, "choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}}}
+		}
+		if continuation {
+			emit("", chunk(map[string]any{"role": "assistant", "content": text}, nil))
+		} else {
+			for index, id := range []string{"joined-call-1", "joined-call-custom"} {
+				call, exists := selected[id]
+				if !exists {
+					continue
+				}
+				emit("", chunk(map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"index": index, "id": id, "type": "function", "function": map[string]string{"name": call.Name, "arguments": call.Arguments}}}}, nil))
+			}
+			// Real Gemini may attach the first call's signature in a later delta.
+			emit("", chunk(map[string]any{"tool_calls": []any{map[string]any{"index": 0, "extra_content": map[string]any{"google": map[string]string{"thought_signature": selected["joined-call-1"].Signature}}}}}, nil))
+		}
+		reason := "tool_calls"
+		if continuation {
+			reason = "stop"
+		}
+		last := chunk(map[string]any{}, reason)
+		last["usage"] = map[string]int{"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+		emit("", last)
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}
+	return nil
+}
 
 // A provider may finish a tool turn only after consuming exactly the calls it
 // actually issued. Tool declarations on the continuation cannot change this.
@@ -131,7 +429,7 @@ func (c *counters) consumeToolContinuation(raw json.RawMessage) (bool, error) {
 }
 
 func (c *counters) snapshot() counts {
-	return counts{c.dispatches.Load(), c.exchanges.Load(), c.refreshes.Load(), c.quotaGets.Load(), c.functionCalls.Load(), c.customCalls.Load(), c.functionOutputs.Load(), c.customOutputs.Load()}
+	return counts{c.dispatches.Load(), c.exchanges.Load(), c.refreshes.Load(), c.quotaGets.Load(), c.functionCalls.Load(), c.customCalls.Load(), c.functionOutputs.Load(), c.customOutputs.Load(), c.schemaRequests.Load(), c.signatureChecks.Load()}
 }
 
 var deny = errors.New("joined provider fixture refused")
@@ -259,7 +557,7 @@ func run() error {
 		return deny
 	}
 	oauth := &oauthFixture{key: key}
-	countersByProvider := map[string]*counters{"kimi": {}, "glm": {}, "minimax": {}, "grok": {}, "openrouter": {}}
+	countersByProvider := map[string]*counters{"kimi": {}, "glm": {}, "minimax": {}, "grok": {}, "openrouter": {}, "anthropic": {}, "gemini": {}}
 	var unexpected atomic.Int64
 	var openRouterModelGets atomic.Int64
 	var openRouterModelRemoved atomic.Bool
@@ -277,6 +575,16 @@ func run() error {
 		reject := func() { unexpected.Add(1); w.WriteHeader(400) }
 		if r.Header.Get("Cookie") != "" {
 			reject()
+			return
+		}
+		if r.Host == "api.anthropic.com" || r.Host == "generativelanguage.googleapis.com" {
+			name := "anthropic"
+			if r.Host == "generativelanguage.googleapis.com" {
+				name = "gemini"
+			}
+			if serveOfficial(w, r, name, countersByProvider[name], toolShapes, &toolShapeMu) != nil {
+				reject()
+			}
 			return
 		}
 		if r.Host == "auth.x.ai" {
@@ -310,7 +618,7 @@ func run() error {
 					reject()
 					return
 				}
-				_ = json.NewEncoder(w).Encode(map[string]string{"sub": "joined-provider-subject", "team_id": ""})
+				_ = json.NewEncoder(w).Encode(map[string]string{"sub": "joined-provider-subject", "team_id": "", "email": "joined-grok@example.test", "name": "Joined Grok reviewer"})
 				return
 			default:
 				reject()
@@ -374,13 +682,13 @@ func run() error {
 			case "kimi:/coding/v1/usages":
 				_, _ = io.WriteString(w, `{"usages":{"limit_5h":{"used_ratio":0.25},"limit_month_total":{"used_ratio":0.5}}}`)
 			case "glm:/api/monitor/usage/quota/limit":
-				_, _ = io.WriteString(w, `{"success":true,"data":{"limits":[{"type":"CREDIT_LIMIT","unit":3,"percentage":25},{"type":"CREDIT_LIMIT","unit":6,"percentage":50}]}}`)
+				_, _ = io.WriteString(w, `{"success":true,"data":{"level":"GLM Max","limits":[{"type":"CREDIT_LIMIT","unit":3,"percentage":25},{"type":"CREDIT_LIMIT","unit":6,"percentage":50}]}}`)
 			case "minimax:/v1/token_plan/remains":
 				if r.Host != "www.minimax.io" {
 					reject()
 					return
 				}
-				_, _ = io.WriteString(w, `{"base_resp":{"status_code":0},"model_remains":[{"model_name":"general","current_interval_remaining_percent":75,"current_weekly_status":1,"current_weekly_remaining_percent":50}]}`)
+				_, _ = io.WriteString(w, `{"base_resp":{"status_code":0},"current_subscribe_title":"MiniMax M Plan Plus","model_remains":[{"model_name":"general","current_interval_remaining_percent":75,"current_weekly_status":1,"current_weekly_remaining_percent":50}]}`)
 			case "grok:/v1/billing?format=credits":
 				_, _ = io.WriteString(w, `{"config":{"currentPeriod":{"type":"weekly"},"creditUsagePercent":35}}`)
 			case "grok:/v1/billing":
@@ -587,7 +895,7 @@ func run() error {
 	defer providerTransport.CloseIdleConnections()
 	providerTransport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		switch address {
-		case "openrouter.ai:443", "auth.x.ai:443", "api.kimi.ai:443", "api.z.ai:443", "api.minimax.io:443", "www.minimax.io:443", "cli-chat-proxy.grok.com:443":
+		case "openrouter.ai:443", "auth.x.ai:443", "api.kimi.ai:443", "api.z.ai:443", "api.minimax.io:443", "www.minimax.io:443", "cli-chat-proxy.grok.com:443", "api.anthropic.com:443", "generativelanguage.googleapis.com:443":
 		default:
 			unexpected.Add(1)
 			return nil, deny
@@ -626,7 +934,10 @@ func run() error {
 	if gateway.SetGatewayOpenRouterModels(service.NewGatewayOpenRouterModels(providerTransport)) != nil {
 		return deny
 	}
-	cache := repository.NewGatewayAccountLimitsRepositoryV2(db)
+	cache, ok := repository.NewGatewayAccountLimitsRepositoryV2(db).(service.GatewayAccountQuotaInfoRepository)
+	if !ok {
+		return deny
+	}
 	collector := service.NewGatewayProviderQuotaCollector(providerTransport)
 	var callback atomic.Value
 	callback.Store("")
@@ -715,17 +1026,24 @@ func run() error {
 		c.Request.Body = io.NopCloser(bytes.NewReader(raw))
 		c.Next()
 	}
-	authorizeLimits := func(ctx context.Context, in service.GatewayAccountLimitsInput) (service.GatewayNativeRoute, error) {
-		var reply struct {
-			OK     bool                       `json:"ok"`
-			Native service.GatewayNativeRoute `json:"native"`
+	authorizeAccount := func(kind string) service.GatewayAccountLimitsAuthorizer {
+		return func(ctx context.Context, in service.GatewayAccountLimitsInput) (service.GatewayNativeRoute, error) {
+			var reply struct {
+				OK     bool                       `json:"ok"`
+				Native service.GatewayNativeRoute `json:"native"`
+			}
+			if post(ctx, kind, map[string]any{"consumerId": cfg.Consumer, "ownerRef": in.OwnerRef, "accountRef": in.AccountRef, "profileId": in.ProfileID, "expectedAuthorizationEpoch": in.ExpectedAuthorizationEpoch}, &reply) != nil || !reply.OK {
+				return reply.Native, deny
+			}
+			return reply.Native, nil
 		}
-		if post(ctx, "account-limits-authority", map[string]any{"consumerId": cfg.Consumer, "ownerRef": in.OwnerRef, "accountRef": in.AccountRef, "profileId": in.ProfileID, "expectedAuthorizationEpoch": in.ExpectedAuthorizationEpoch}, &reply) != nil || !reply.OK {
-			return reply.Native, deny
-		}
-		return reply.Native, nil
 	}
+	authorizeLimits := authorizeAccount("account-limits-authority")
 	reader, err := service.NewGatewayAccountLimitsReaderV2(cache, authorizeLimits)
+	if err != nil {
+		return deny
+	}
+	infoReader, err := service.NewGatewayAccountInfoReader(repository.NewGatewayAccountInfoRepository(db), authorizeAccount("account-info-authority"))
 	if err != nil {
 		return deny
 	}
@@ -805,12 +1123,19 @@ func run() error {
 	if admin.RegisterGatewayNativeOAuthCleanupRoute(router.Group(""), grok, authorizeCleanup, cleanupAuthority, prefix) != nil || admin.RegisterGatewayNativeGrokOAuthRoutes(router.Group(""), grok, authorize) != nil || admin.RegisterGatewayNativeOAuthDescriptorRoute(router.Group(""), grok, authorize, prefix) != nil || admin.RegisterGatewayNativeOAuthRetainedCustodyRoute(router.Group(""), grok, authorize, prefix) != nil || admin.RegisterGatewayNativeOAuthRefreshRoute(router.Group(""), grok, authorize, prefix) != nil || admin.RegisterGatewayAccountLimitsRoutesV2(router.Group(""), reader, authorizeLimitsHTTP) != nil || admin.RegisterGatewayAccountModelsRoutes(router.Group(""), modelReader, authorizeLimitsHTTP) != nil {
 		return deny
 	}
+	if admin.RegisterGatewayAccountInfoRoutes(router.Group(""), infoReader, authorizeLimitsHTTP) != nil {
+		return deny
+	}
 	primaryProfile := admin.GatewayNativeProfile{ID: service.GatewayMiMoResponsesProfile, BaseURL: "https://api.openai.com/v1", Model: "fixture-unused"}
 	openRouterQualified := gatewaytransport.QualifiedProfile{Profile: service.GatewayOpenRouterResponsesProfile, BaseURL: service.GatewayOpenRouterBaseURL, Model: "birth/anchor", QualificationRef: "controlled-source-v1", RequestBytes: 4 << 20, OutputBytes: 8 << 20, Tokens: 32768, ProviderTokenUpperBound: 32768}
 	plans := []gatewaytransport.QualifiedProfile{
 		{Profile: service.GatewayKimiCodeResponsesProfile, BaseURL: service.GatewayKimiCodeResponsesBaseURL, Model: service.GatewayKimiCodeResponsesModel},
 		{Profile: service.GatewayGLMCodingResponsesProfile, BaseURL: service.GatewayGLMCodingResponsesBaseURL, Model: service.GatewayGLMCodingResponsesModel},
 		{Profile: service.GatewayMiniMaxMPlanResponsesProfile, BaseURL: service.GatewayMiniMaxMPlanResponsesBaseURL, Model: service.GatewayMiniMaxMPlanResponsesModel},
+	}
+	officials := []gatewaytransport.QualifiedProfile{
+		{Profile: service.GatewayAnthropicAPIKeyProfile, BaseURL: service.GatewayAnthropicAPIBaseURL, Model: service.GatewayAnthropicAPIModel},
+		{Profile: service.GatewayGeminiAPIKeyProfile, BaseURL: service.GatewayGeminiAPIBaseURL, Model: service.GatewayGeminiAPIModel},
 	}
 	planProfiles := []admin.GatewayNativeProfile{{ID: openRouterQualified.Profile, BaseURL: openRouterQualified.BaseURL, Model: openRouterQualified.Model}}
 	for i := range plans {
@@ -821,7 +1146,27 @@ func run() error {
 		plans[i].ProviderTokenUpperBound = 32768
 		planProfiles = append(planProfiles, admin.GatewayNativeProfile{ID: plans[i].Profile, BaseURL: plans[i].BaseURL, Model: plans[i].Model})
 	}
+	for i := range officials {
+		officials[i].QualificationRef = "controlled-source-v1"
+		officials[i].RequestBytes = 4 << 20
+		officials[i].OutputBytes = 8 << 20
+		officials[i].Tokens = 32768
+		officials[i].ProviderTokenUpperBound = 32768
+		planProfiles = append(planProfiles, admin.GatewayNativeProfile{ID: officials[i].Profile, BaseURL: officials[i].BaseURL, Model: officials[i].Model})
+	}
 	admin.RegisterGatewayNativeRoutes(router.Group(""), adminSvc, gateway, primaryProfile, authorizeLimitsHTTP, func(*gin.Context, service.GatewayNativeRoute) error { return deny }, func(*gin.Context, bool, error) {}, custody, planProfiles...)
+	router.GET("/private/native/v1/account-capabilities", authorizeLimitsHTTP, func(c *gin.Context) {
+		profiles := make([]service.GatewayAccountCapability, 0, len(planProfiles)+1)
+		for _, profile := range append(append([]admin.GatewayNativeProfile{}, planProfiles...), admin.GatewayNativeProfile{ID: service.GatewayGrokOAuthResponsesProfile, Model: service.GatewayGrokOAuthModel}) {
+			capability, ok := service.GatewayNativeAccountCapability(profile.ID, profile.Model, true, false)
+			if !ok {
+				c.AbortWithStatus(503)
+				return
+			}
+			profiles = append(profiles, capability)
+		}
+		c.JSON(200, service.GatewayAccountCapabilities{Contract: "native-account-capabilities/v1", Profiles: profiles})
+	})
 	var private atomic.Pointer[gatewaytransport.Handler]
 	native := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handler := private.Load()
@@ -910,12 +1255,16 @@ func run() error {
 		scope := service.GatewayNativeCredentialScope{Consumer: cfg.Consumer, Owner: in.OwnerRef, Account: in.AccountRef, Generation: route.Generation, Purpose: purpose}
 		if r.URL.Path == "/quotas/collect" {
 			var physical service.GatewayNativeOAuthPhysical
-			var snapshot service.GatewayAccountLimitsSnapshotV2
-			var observed time.Time
+			var observation service.GatewayProviderQuotaObservation
+			order, reserveErr := cache.ReserveGatewayAccountInfoOrder(bounded)
+			if reserveErr != nil {
+				w.WriteHeader(409)
+				return
+			}
 			collect := func(key []byte, current service.GatewayNativeOAuthPhysical) error {
 				physical = current
 				var e error
-				snapshot, observed, e = collector.FetchObserved(bounded, service.GatewayAccountLimitsProviderV2(route.Profile), key)
+				observation, e = collector.FetchWithAccountInfo(bounded, service.GatewayAccountLimitsProviderV2(route.Profile), key)
 				return e
 			}
 			if route.Profile == service.GatewayGrokOAuthResponsesProfile {
@@ -923,7 +1272,11 @@ func run() error {
 			} else {
 				err = gateway.WithGatewayNativeQuotaCredential(bounded, scope, route, custody, collect)
 			}
-			if err != nil || cache.StoreGatewayAccountLimitsV2(bounded, physical, snapshot, observed) != nil {
+			var info *service.GatewayAccountInfoObservation
+			if observation.Info != nil {
+				info = &service.GatewayAccountInfoObservation{Source: "plan_quota", Order: order, CredentialRevision: physical.CredentialRevision, Fields: *observation.Info}
+			}
+			if err != nil || cache.StoreGatewayQuotaAndInfo(bounded, physical, observation.Limits, observation.ObservedAt, info) != nil {
 				w.WriteHeader(409)
 				return
 			}
@@ -996,7 +1349,7 @@ func run() error {
 	}
 	primary := gatewaytransport.QualifiedProfile{Profile: primaryProfile.ID, BaseURL: primaryProfile.BaseURL, Model: primaryProfile.Model, QualificationRef: command.QualificationRef, RequestBytes: 4 << 20, OutputBytes: 8 << 20, Tokens: 32768, ProviderTokenUpperBound: 32768}
 	qualified := gatewaytransport.QualifiedProfile{Profile: service.GatewayGrokOAuthResponsesProfile, BaseURL: service.GatewayGrokOAuthBaseURL, Model: service.GatewayGrokOAuthModel, QualificationRef: "controlled-source-v1", RequestBytes: 4 << 20, OutputBytes: 8 << 20, Tokens: 32768, ProviderTokenUpperBound: 32768}
-	tcfg := gatewaytransport.Config{Gateway: gateway, Custody: custody, GrokOAuth: grok, Grok: &qualified, OpenRouter: &openRouterQualified, CodingPlans: plans, ProviderLimits: cache, Profile: primary, Enrollment: gatewaytransport.Enrollment{OriginRef: command.OriginRef, EngineIncarnation: command.EngineIncarnation, QualificationRef: primary.QualificationRef}, CallbackOrigin: command.CallbackOrigin, CallbackCredential: cfg.Callback, CallbackTimeout: 4 * time.Second, IOTimeout: 5 * time.Second, ProviderReadIdle: 5 * time.Second, CleanupTimeout: 4 * time.Second, MaxEntries: 32, EnvelopeBytes: 5 << 20, CallbackBytes: 16384,
+	tcfg := gatewaytransport.Config{Gateway: gateway, Custody: custody, GrokOAuth: grok, Grok: &qualified, OpenRouter: &openRouterQualified, CodingPlans: plans, OfficialAPIs: officials, ProviderLimits: cache, Profile: primary, Enrollment: gatewaytransport.Enrollment{OriginRef: command.OriginRef, EngineIncarnation: command.EngineIncarnation, QualificationRef: primary.QualificationRef}, CallbackOrigin: command.CallbackOrigin, CallbackCredential: cfg.Callback, CallbackTimeout: 4 * time.Second, IOTimeout: 5 * time.Second, ProviderReadIdle: 5 * time.Second, CleanupTimeout: 4 * time.Second, MaxEntries: 32, EnvelopeBytes: 5 << 20, CallbackBytes: 16384,
 		Authorize: func(r *http.Request) (gatewaytransport.Peer, error) {
 			token := r.Header.Get("Authorization")
 			if token == "Bearer "+cfg.Control {
@@ -1056,6 +1409,8 @@ func run() error {
     WHEN 'kimi-code-global-responses-apikey-v1' THEN 'https://api.kimi.ai/coding/v1'
     WHEN 'glm-coding-global-responses-apikey-v1' THEN 'https://api.z.ai/api/v1'
     WHEN 'minimax-mplan-global-responses-apikey-v1' THEN 'https://api.minimax.io/v1'
+    WHEN 'anthropic-messages-apikey-v1' THEN 'https://api.anthropic.com/v1'
+    WHEN 'gemini-openai-chat-apikey-v1' THEN 'https://generativelanguage.googleapis.com/v1beta/openai'
    END
   ELSE false END) IS DISTINCT FROM TRUE)`).Scan(&retainedCredentials) != nil || retainedCredentials != 0 {
 		return deny

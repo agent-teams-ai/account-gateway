@@ -7,7 +7,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isNonemptyString } from "./model.ts";
 
-export const nativeSourceCommit = "a19cbcbedda8eccbe82bb24224052a1e9eaab309";
+export const nativeSourceCommit = "af418a6a6709d2c324348a80568c5abac76d7d95";
 export const migrationAdapterSource =
   [
     "// Disposable local fixture provisioning only. Production migration authority is",

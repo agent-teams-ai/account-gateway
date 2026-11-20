@@ -1,10 +1,22 @@
 import { spawn } from "node:child_process";
 
+interface CommandStatus {
+  readonly exitCode: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly timedOut: boolean;
+  readonly outputLimit: boolean;
+}
 export class CommandFailure extends Error {
   readonly output: string;
-  constructor(output: string) {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly status: CommandStatus;
+  constructor(output: string, stdout: string, stderr: string, status: CommandStatus) {
     super("joined-command-failed");
     this.output = output;
+    this.stdout = stdout;
+    this.stderr = stderr;
+    this.status = status;
   }
 }
 export async function command(
@@ -49,20 +61,34 @@ export async function command(
     expired = true;
     kill();
   }, options.timeout ?? 30_000);
-  const code = await new Promise<number | null>((resolve, reject) => {
+  const result = await new Promise<{
+    exitCode: number | null;
+    signal: NodeJS.Signals | null;
+  }>((resolve, reject) => {
     child.once("error", reject);
-    child.once("close", resolve);
+    child.once("close", (exitCode, signal) => {
+      resolve({ exitCode, signal });
+    });
   }).finally(() => {
     clearTimeout(timer);
   });
-  const commandFailed = () => expired || overflow;
-  if (commandFailed() || code !== (options.expected ?? 0)) {
-    throw new CommandFailure(output.map((chunk) => chunk.text).join(""));
-  }
-  // Successful proof stdout remains a strict protocol. Diagnostics still spend
-  // the shared byte budget and remain available only to failed-command sanitization.
-  return output
+  const stdout = output
     .filter((chunk) => chunk.stream === "stdout")
     .map((chunk) => chunk.text)
     .join("");
+  const commandFailed = () => expired || overflow;
+  if (commandFailed() || result.exitCode !== (options.expected ?? 0)) {
+    throw new CommandFailure(
+      output.map((chunk) => chunk.text).join(""),
+      stdout,
+      output
+        .filter((chunk) => chunk.stream === "stderr")
+        .map((chunk) => chunk.text)
+        .join(""),
+      { ...result, timedOut: expired, outputLimit: overflow },
+    );
+  }
+  // Successful proof stdout remains a strict protocol. Diagnostics still spend
+  // the shared byte budget and remain available only to failed-command sanitization.
+  return stdout;
 }

@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import type { Server, ServerResponse } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
-import { NativeOAuthEnrollmentClient } from "../src/native-client.ts";
+import { NativeAccountInfoClient, NativeOAuthEnrollmentClient } from "../src/native-client.ts";
 import type { OAuthScope } from "../src/management.ts";
 import { config, jsonBody, post } from "../src/native-wire.ts";
 import {
@@ -241,6 +241,54 @@ void test(
     }
   },
 );
+
+void test("cancelled metadata waiter immediately makes room for another read without HTTP", async () => {
+  const admission = new NativeControlAdmission(1, 1);
+  const release = await admission.acquire(Date.now() + 5000);
+  let received = 0;
+  const peer = createServer((req, res) => {
+    req.resume();
+    received++;
+    assert.equal(req.url, "/private/native/v1/account-info/read");
+    res.writeHead(200, { "content-type": "application/json", connection: "close" });
+    res.end(JSON.stringify({ info: { status: "unavailable" } }));
+  });
+  const origin = await listen(peer);
+  const client = new NativeAccountInfoClient({
+    origin,
+    consumerId: "control-fixture",
+    controlCredential: "synthetic-management-credential",
+    admission,
+  });
+  const input = {
+    ownerRef: "fixture-owner",
+    accountRef: randomUUID(),
+    profileId: "fixture-profile",
+    expectedAuthorizationEpoch: 1,
+  };
+  const abort = new AbortController();
+  try {
+    const cancelled = assert.rejects(
+      client.readAccountInfo(input, { signal: abort.signal, deadlineMs: 2000 }),
+    );
+    abort.abort();
+    // The only waiting slot must be free before the active permit is released.
+    // Otherwise this real client is rejected without reaching the loopback peer.
+    const replacement = client.readAccountInfo(input, {
+      signal: new AbortController().signal,
+      deadlineMs: 2000,
+    });
+    const completed = Promise.all([cancelled, replacement]);
+    release();
+    assert.deepEqual((await completed)[1], { info: { status: "unavailable" } });
+    assert.equal(received, 1);
+  } finally {
+    abort.abort();
+    release();
+    await stop(peer);
+    await admission.stop();
+  }
+});
 
 void test(
   "shutdown rejects queued and new controls, retaining an active HTTP socket until physical close",

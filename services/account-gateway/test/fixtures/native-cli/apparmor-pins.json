@@ -1,0 +1,20 @@
+{
+  "version": "5.0.2",
+  "packages": [
+    {
+      "file": "apparmor_5.0.2-5_amd64.deb",
+      "url": "https://snapshot.debian.org/file/ffe15b48c1fbb5d90adff1680bc0b46a793aa791",
+      "sha256": "d5a4639223193ca0a01d94c756c49f04630ff461d5c89203f0ba796f2839cbfd"
+    },
+    {
+      "file": "libapparmor1_5.0.2-5.1_amd64.deb",
+      "url": "https://snapshot.debian.org/file/0d3bc5f2202536c5664849ed1d24e6f6b0c932d0",
+      "sha256": "e90a072c66161a81de9130de380ea5fb507893003eefe6fdc5dac6dfe91c405e"
+    }
+  ],
+  "files": {
+    "usr/sbin/apparmor_parser": "f1059f8ca6a7571b1201a2126ea9d176d2b31018eb00b1566da5ad70d031298d",
+    "usr/lib/x86_64-linux-gnu/libapparmor.so.1": "a3fa5209d8b85e3d4f3d93273e8f2f480465fc70b4827c53c123ea2a00fa3fee",
+    "etc/apparmor.d/abi/5.0": "6939ba05dd5b8e4934fc8d912d22ad13f4f77710b097287a2d2d37be6cabe775"
+  }
+}

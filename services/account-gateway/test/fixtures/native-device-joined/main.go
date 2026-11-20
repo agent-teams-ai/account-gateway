@@ -108,15 +108,28 @@ func run() error {
 	if err != nil {
 		return deny
 	}
-	id := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{"iss": service.GatewayOAuthIssuer, "sub": "joined-device-principal", "aud": openai.ClientID, "exp": time.Now().Add(time.Hour).Unix()})
-	id.Header["kid"] = "joined-device"
-	idToken, err := id.SignedString(key)
-	if err != nil {
-		return deny
+	type identity struct{ access, refresh, idToken, account, email string }
+	identities := map[string]identity{}
+	for _, name := range []string{"device", "raw", "json", "ack"} {
+		email := "joined-" + name + "@example.test"
+		id := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{"iss": service.GatewayOAuthIssuer, "sub": "joined-principal-" + name, "aud": openai.ClientID, "exp": time.Now().Add(time.Hour).Unix(), "email": email, "name": "Verified reviewer", "https://api.openai.com/auth": map[string]string{"chatgpt_plan_type": "plus"}})
+		id.Header["kid"] = "joined-device"
+		idToken, err := id.SignedString(key)
+		if err != nil {
+			return deny
+		}
+		identities[name] = identity{"joined-fake-access-" + uuid.NewString(), "joined-fake-refresh-" + uuid.NewString(), idToken, uuid.NewString(), email}
 	}
-	access, refresh := "joined-fake-access-"+uuid.NewString(), "joined-fake-refresh-"+uuid.NewString()
+	device := identities["device"]
+	access, providerAccount := device.access, device.account
+	importIdentities := map[string]identity{
+		"joined-import-refresh-one":   identities["raw"],
+		"joined-import-refresh-two":   identities["json"],
+		"joined-import-refresh-three": identities["raw"],
+		"joined-import-refresh-ack":   identities["ack"],
+	}
+	subscriptionEnd := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second).Format(time.RFC3339)
 	verifier := strings.Repeat("v", 64)
-	providerAccount := uuid.NewString()
 	var starts, polls, exchanges, checks, unexpected, inferenceEntries, modelReads atomic.Int64
 	var authorized atomic.Bool
 	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -148,20 +161,53 @@ func run() error {
 			_ = json.NewEncoder(w).Encode(map[string]string{"authorization_code": "joined-native-authorization-code", "code_verifier": verifier, "code_challenge": openai.GenerateCodeChallenge(verifier)})
 		case "/oauth/token":
 			exchanges.Add(1)
-			if r.Host != "auth.openai.com" || r.Method != "POST" || r.ParseForm() != nil || len(r.PostForm) != 5 || r.PostForm.Get("grant_type") != "authorization_code" || r.PostForm.Get("code") != "joined-native-authorization-code" || r.PostForm.Get("code_verifier") != verifier || r.PostForm.Get("client_id") != openai.ClientID || r.PostForm.Get("redirect_uri") != service.GatewayOAuthDeviceRedirect || r.Header.Get("Cookie") != "" || r.Header.Get("Authorization") != "" {
+			if r.Host != "auth.openai.com" || r.Method != "POST" || r.ParseForm() != nil || r.PostForm.Get("client_id") != openai.ClientID || r.Header.Get("Cookie") != "" || r.Header.Get("Authorization") != "" {
 				unexpected.Add(1)
 				w.WriteHeader(400)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": access, "refresh_token": refresh, "id_token": idToken, "token_type": "Bearer", "expires_in": 3600, "scope": openai.DefaultScopes})
+			selected, scopes := device, openai.DefaultScopes
+			if r.PostForm.Get("grant_type") == "refresh_token" {
+				if len(r.PostForm) != 4 || r.PostForm.Get("scope") != openai.RefreshScopes {
+					unexpected.Add(1)
+					w.WriteHeader(400)
+					return
+				}
+				if r.PostForm.Get("refresh_token") == "joined-import-refresh-ambiguous" {
+					conn, _, err := w.(http.Hijacker).Hijack()
+					if err == nil {
+						_ = conn.Close()
+					}
+					return
+				}
+				var ok bool
+				selected, ok = importIdentities[r.PostForm.Get("refresh_token")]
+				if !ok {
+					unexpected.Add(1)
+					w.WriteHeader(400)
+					return
+				}
+				scopes = openai.RefreshScopes
+			} else if len(r.PostForm) != 5 || r.PostForm.Get("grant_type") != "authorization_code" || r.PostForm.Get("code") != "joined-native-authorization-code" || r.PostForm.Get("code_verifier") != verifier || r.PostForm.Get("redirect_uri") != service.GatewayOAuthDeviceRedirect {
+				unexpected.Add(1)
+				w.WriteHeader(400)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": selected.access, "refresh_token": selected.refresh, "id_token": selected.idToken, "token_type": "Bearer", "expires_in": 3600, "scope": scopes})
 		case "/backend-api/accounts/check/v4-2023-04-27":
 			checks.Add(1)
-			if r.Host != "chatgpt.com" || r.Header.Get("Authorization") != "Bearer "+access {
+			var selected identity
+			for _, candidate := range identities {
+				if r.Header.Get("Authorization") == "Bearer "+candidate.access {
+					selected = candidate
+				}
+			}
+			if r.Host != "chatgpt.com" || r.Method != "GET" || selected.access == "" {
 				unexpected.Add(1)
 				w.WriteHeader(400)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"accounts": map[string]any{"fixture": map[string]any{"account": map[string]any{"account_id": providerAccount, "is_default": true}, "entitlement": map[string]any{"expires_at": time.Now().Add(time.Hour).Format(time.RFC3339Nano)}}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"accounts": map[string]any{"fixture": map[string]any{"account": map[string]any{"account_id": selected.account, "is_default": true, "name": "Provider reviewer", "plan_type": "pro", "account_structure": "personal"}, "entitlement": map[string]any{"expires_at": subscriptionEnd}}}})
 		case "/backend-api/codex/models":
 			if !cfg.CLI || r.Host != "chatgpt.com" || r.Method != "GET" ||
 				r.Header.Get("Authorization") != "Bearer "+access || r.Header.Get("ChatGPT-Account-Id") != providerAccount ||
@@ -276,14 +322,18 @@ func run() error {
 			c.AbortWithStatus(403)
 			return
 		}
-		raw, err := io.ReadAll(io.LimitReader(c.Request.Body, 4097))
+		bodyLimit := int64(4096)
+		if c.Request.URL.Path == "/private/native/v1/oauth/connect/import" {
+			bodyLimit = service.GatewayOAuthImportBodyLimit
+		}
+		raw, err := io.ReadAll(io.LimitReader(c.Request.Body, bodyLimit+1))
 		var tuple struct {
 			Operation  string `json:"operation"`
 			Owner      string `json:"owner_ref"`
 			Account    string `json:"account_ref"`
 			Generation string `json:"generation"`
 		}
-		if err != nil || len(raw) > 4096 || json.Unmarshal(raw, &tuple) != nil {
+		if err != nil || int64(len(raw)) > bodyLimit || json.Unmarshal(raw, &tuple) != nil {
 			c.AbortWithStatus(400)
 			return
 		}
@@ -313,30 +363,37 @@ func run() error {
 	}) != nil {
 		return deny
 	}
-	authorizeLimits := func(ctx context.Context, in service.GatewayAccountLimitsInput) (service.GatewayNativeRoute, error) {
-		var result struct {
-			OK     bool                       `json:"ok"`
-			Native service.GatewayNativeRoute `json:"native"`
+	authorizeAccount := func(kind string) service.GatewayAccountLimitsAuthorizer {
+		return func(ctx context.Context, in service.GatewayAccountLimitsInput) (service.GatewayNativeRoute, error) {
+			var result struct {
+				OK     bool                       `json:"ok"`
+				Native service.GatewayNativeRoute `json:"native"`
+			}
+			body, _ := json.Marshal(map[string]any{"consumerId": cfg.Consumer, "ownerRef": in.OwnerRef, "accountRef": in.AccountRef, "profileId": in.ProfileID, "expectedAuthorizationEpoch": in.ExpectedAuthorizationEpoch})
+			req, err := http.NewRequestWithContext(ctx, "POST", callback.Load().(string)+"/private/native/v1/"+kind, bytes.NewReader(body))
+			if err != nil {
+				return result.Native, deny
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+cfg.Callback)
+			client := &http.Client{Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return deny }}
+			resp, err := client.Do(req)
+			if err != nil {
+				return result.Native, deny
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 || json.NewDecoder(io.LimitReader(resp.Body, 4097)).Decode(&result) != nil || !result.OK {
+				return result.Native, deny
+			}
+			return result.Native, nil
 		}
-		body, _ := json.Marshal(map[string]any{"consumerId": cfg.Consumer, "ownerRef": in.OwnerRef, "accountRef": in.AccountRef, "profileId": in.ProfileID, "expectedAuthorizationEpoch": in.ExpectedAuthorizationEpoch})
-		req, err := http.NewRequestWithContext(ctx, "POST", callback.Load().(string)+"/private/native/v1/account-limits-authority", bytes.NewReader(body))
-		if err != nil {
-			return result.Native, deny
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+cfg.Callback)
-		client := &http.Client{Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return deny }}
-		resp, err := client.Do(req)
-		if err != nil {
-			return result.Native, deny
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != 200 || json.NewDecoder(io.LimitReader(resp.Body, 4097)).Decode(&result) != nil || !result.OK {
-			return result.Native, deny
-		}
-		return result.Native, nil
 	}
+	authorizeLimits := authorizeAccount("account-limits-authority")
 	limitsReader, err := service.NewGatewayAccountLimitsReader(accountRepo.(service.GatewayAccountLimitsRepository), authorizeLimits)
+	if err != nil {
+		return deny
+	}
+	infoReader, err := service.NewGatewayAccountInfoReader(repository.NewGatewayAccountInfoRepository(db), authorizeAccount("account-info-authority"))
 	if err != nil {
 		return deny
 	}
@@ -361,7 +418,20 @@ func run() error {
 	if admin.RegisterGatewayAccountLimitsRoutes(router.Group(""), limitsReader, authorizeLimitsHTTP) != nil {
 		return deny
 	}
+	if admin.RegisterGatewayAccountInfoRoutes(router.Group(""), infoReader, authorizeLimitsHTTP) != nil {
+		return deny
+	}
+	router.GET("/private/native/v1/account-capabilities", authorizeLimitsHTTP, func(c *gin.Context) {
+		capability, ok := service.GatewayNativeAccountCapability(service.GatewayCodexOAuthResponsesProfile, service.GatewayCodexOAuthModel, true, true)
+		if !ok {
+			c.AbortWithStatus(503)
+			return
+		}
+		c.JSON(200, service.GatewayAccountCapabilities{Contract: "native-account-capabilities/v1", Profiles: []service.GatewayAccountCapability{capability}})
+	})
 	var private atomic.Pointer[gatewaytransport.Handler]
+	var dropImportACK atomic.Bool
+	var droppedImportACKs atomic.Int64
 	native := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if cfg.CLI && strings.HasPrefix(r.URL.Path, "/private/native/v1/transports") {
 			handler := private.Load()
@@ -370,6 +440,24 @@ func run() error {
 				return
 			}
 			handler.ServeHTTP(w, r)
+			return
+		}
+		if r.URL.Path == "/private/native/v1/oauth/connect/import" && dropImportACK.Swap(false) {
+			result := httptest.NewRecorder()
+			router.ServeHTTP(result, r)
+			var receipt struct {
+				State string `json:"state"`
+			}
+			if result.Code != 200 || json.Unmarshal(result.Body.Bytes(), &receipt) != nil || receipt.State != "completed" {
+				unexpected.Add(1)
+				w.WriteHeader(503)
+				return
+			}
+			droppedImportACKs.Add(1)
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
 			return
 		}
 		router.ServeHTTP(w, r)
@@ -382,6 +470,11 @@ func run() error {
 		}
 		if cfg.CLI && r.Method == "GET" && r.URL.Path == "/inference-stats" {
 			_ = json.NewEncoder(w).Encode(map[string]int64{"entries": inferenceEntries.Load(), "modelReads": modelReads.Load()})
+			return
+		}
+		if r.Method == "POST" && r.URL.Path == "/imports/drop-next-ack" {
+			dropImportACK.Store(true)
+			w.WriteHeader(204)
 			return
 		}
 		if r.Method == "POST" && (r.URL.Path == "/limits/seed" || r.URL.Path == "/limits/tombstone") {
@@ -530,11 +623,24 @@ func run() error {
 	if !scan.Scan() || scan.Text() != "stop" {
 		return deny
 	}
-	var material, credentials int
-	if db.QueryRow(`SELECT count(*) FROM gateway_oauth_connect_intents WHERE material_envelope<>''`).Scan(&material) != nil || db.QueryRow(`SELECT count(*) FROM accounts WHERE credentials::text LIKE $1 OR credentials::text LIKE $2 OR credentials::text LIKE $3`, "%"+access+"%", "%"+refresh+"%", "%"+idToken+"%").Scan(&credentials) != nil || material != 0 || credentials != 0 {
+	var secrets []string
+	for _, selected := range identities {
+		secrets = append(secrets, selected.access, selected.refresh, selected.idToken)
+	}
+	for refresh := range importIdentities {
+		secrets = append(secrets, refresh)
+	}
+	secrets = append(secrets, "joined-import-refresh-ambiguous", "untrusted-import-access", "untrusted-import-id")
+	encodedSecrets, _ := json.Marshal(secrets)
+	var material, credentials, transient, unresolved int
+	if db.QueryRow(`SELECT count(*) FROM gateway_oauth_connect_intents WHERE material_envelope<>''`).Scan(&material) != nil ||
+		db.QueryRow(`SELECT count(*) FROM accounts a WHERE EXISTS(SELECT 1 FROM jsonb_array_elements_text($1::jsonb) s(secret) WHERE a.credentials::text LIKE '%'||s.secret||'%')`, string(encodedSecrets)).Scan(&credentials) != nil ||
+		db.QueryRow(`SELECT count(*) FROM gateway_oauth_connect_intents i WHERE EXISTS(SELECT 1 FROM jsonb_array_elements_text($1::jsonb) s(secret) WHERE to_jsonb(i)::text LIKE '%'||s.secret||'%')`, string(encodedSecrets)).Scan(&transient) != nil ||
+		db.QueryRow(`SELECT count(*) FROM gateway_oauth_connect_intents WHERE method IN ('refresh_token','auth_json') AND state='unknown' AND recovery_denied AND import_claim_mac IS NOT NULL AND material_envelope=''`).Scan(&unresolved) != nil ||
+		material != 0 || credentials != 0 || transient != 0 {
 		return deny
 	}
-	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"event": "closed", "counts": counters{starts.Load(), polls.Load(), exchanges.Load(), checks.Load(), unexpected.Load()}, "plaintextCredentials": credentials, "retainedDeviceMaterial": material})
+	_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"event": "closed", "counts": counters{starts.Load(), polls.Load(), exchanges.Load(), checks.Load(), unexpected.Load()}, "plaintextCredentials": credentials, "plaintextTransientImports": transient, "retainedDeviceMaterial": material, "droppedImportACKs": droppedImportACKs.Load(), "unresolvedImportClaims": unresolved})
 	return nil
 }
 

@@ -73,6 +73,12 @@ export function instant(value: unknown): bigint {
     BigInt((match.at(2) ?? "").padEnd(9, "0"))
   );
 }
+export type CredentialImportMethod = "refresh_token" | "oauth_auth_json";
+export function credentialImportMethod(value: unknown): asserts value is CredentialImportMethod {
+  if (value !== "refresh_token" && value !== "oauth_auth_json") {
+    throw new KernelError("invalid");
+  }
+}
 export interface AccountIntent {
   operationId: string;
   kind: "create" | "reconnect" | "rename" | "suspend" | "resume" | "disable";
@@ -84,6 +90,7 @@ export interface AccountIntent {
   profile?: string;
   displayName?: string;
   oauthMethod?: "device_code";
+  credentialImportMethod?: CredentialImportMethod;
 }
 export interface AccountStatus {
   accountRef: string;
@@ -110,6 +117,11 @@ export interface ResumeCustodyAuthority extends RetainedCustodyProof {
 export interface AccountLimitsIdentity extends AccountStatus {
   generation: string;
   nativePhysicalIdentity: string;
+}
+export interface AccountInfoIdentity extends AccountStatus {
+  readonly readable: boolean;
+  readonly generation?: string;
+  readonly nativePhysicalIdentity?: string;
 }
 export interface AccountCustodyIdentity {
   generation: string;
@@ -176,6 +188,7 @@ export interface OperationStatus {
   epoch?: number;
   deadline?: string;
   oauthMethod?: "device_code";
+  credentialImportMethod?: CredentialImportMethod;
   lifecycle?: { kind: "suspend" | "resume"; expectedRevision: number; account: AccountStatus };
 }
 // Protected-private proof. An actual native adapter must qualify the physical
@@ -501,6 +514,10 @@ export function uuid(value: unknown): asserts value is string {
 export interface DurableKernel {
   issuer(context: TrustedContext): Promise<string>;
   account(context: TrustedContext, accountRef: string): Promise<AccountStatus>;
+  accountInfoIdentities?(
+    context: TrustedContext,
+    accountRefs: readonly string[],
+  ): Promise<readonly AccountInfoIdentity[]>;
   // Atomic current birth/epoch read; pending reconnect/delete is unavailable.
   accountLimitsIdentity?(
     context: TrustedContext,

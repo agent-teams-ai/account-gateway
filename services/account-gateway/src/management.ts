@@ -24,6 +24,7 @@ export {
 } from "./oauth-profiles.ts";
 import type {
   AccountIntent,
+  CredentialImportMethod,
   AccountStatus,
   DurableKernel,
   OperationStatus,
@@ -73,6 +74,13 @@ export interface OAuthEnrollmentNative {
   read(scope: OAuthScope): Promise<OAuthReadback>;
   complete(scope: OAuthScope, callback: OAuthCallback): Promise<OAuthReadback>;
   poll(scope: OAuthScope): Promise<OAuthReadback>;
+}
+export interface CredentialImportNative {
+  importCredential(
+    scope: OAuthScope,
+    method: CredentialImportMethod,
+    input: string,
+  ): Promise<OAuthReadback>;
 }
 export interface OAuthRefreshReadback {
   readonly operationId: string;
@@ -130,6 +138,7 @@ export interface OAuthDescriptorBoundary {
 export interface OAuthEnrollmentOptions {
   readonly profile: ManagedProfile;
   readonly native: OAuthEnrollmentNative;
+  readonly credentialImport?: CredentialImportNative;
   readonly descriptor?: OAuthDescriptorBoundary;
   readonly lifecycle?: OAuthLifecycleNative;
   readonly refresh?: OAuthRefreshNative;
@@ -154,6 +163,14 @@ export interface OAuthReconnectInput {
   readonly expectedRevision: number;
   readonly method?: OAuthMethod;
 }
+export type CredentialImportCreateInput = Omit<OAuthBeginInput, "method"> & {
+  readonly method: CredentialImportMethod;
+  readonly value: string;
+};
+export type CredentialImportReconnectInput = Omit<OAuthReconnectInput, "method"> & {
+  readonly method: CredentialImportMethod;
+  readonly value: string;
+};
 export interface OAuthPollInput {
   readonly operationId: string;
   readonly ownerRef: string;
@@ -183,6 +200,7 @@ export interface AcceptedIntent {
   readonly context: TrustedContext;
   readonly intent: AccountIntent;
   readonly apiKey?: string;
+  readonly credentialImportValue?: string;
 }
 export interface IntentCustody {
   digest(accepted: AcceptedIntent): string;

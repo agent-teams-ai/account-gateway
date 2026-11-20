@@ -8,6 +8,7 @@ import type {
   AccountLimitsV2,
   AccountLimitsV2Capabilities,
   AccountLimitsRefreshCapabilities,
+  ProviderConnectionCapabilitiesV2,
 } from "@agent-teams/account-gateway/contracts";
 import {
   accountModelsRequest,
@@ -18,9 +19,82 @@ import {
   accountLimits,
   accountLimitsV2,
   accountLimitsV2Capabilities,
+  accountInfo,
+  reference,
+  providerConnectionCapabilitiesV2,
+  PROVIDER_CONNECTIONS_V2_CONTRACT,
 } from "@agent-teams/account-gateway/contracts";
 import { NativeControlHTTP, type NativeManagementOptions } from "./native-client-transport.ts";
-import { NativeFailure, decode } from "./native-client-wire.ts";
+import { NativeFailure, decode, object } from "./native-client-wire.ts";
+import type { AccountInfoObservation, AccountInfoSource } from "./account-info-port.ts";
+
+export class NativeAccountCapabilitiesClient extends NativeControlHTTP {
+  constructor(options: NativeManagementOptions) {
+    super({ ...options, deadlineMs: 2000, bodyBytes: 262144 });
+  }
+  async getProviderConnectionCapabilities(): Promise<ProviderConnectionCapabilitiesV2> {
+    try {
+      const wire = object(
+        decode(await this.call("GET", "/private/native/v1/account-capabilities"), 10),
+        ["contract", "profiles"],
+      );
+      if (wire.contract !== "native-account-capabilities/v1") {
+        throw new NativeFailure("invalid_readback");
+      }
+      return providerConnectionCapabilitiesV2.parse({
+        contract: PROVIDER_CONNECTIONS_V2_CONTRACT,
+        capabilities: wire.profiles,
+      });
+    } catch {
+      throw new NativeFailure("invalid_readback");
+    }
+  }
+}
+
+/** Native proof is checked and removed here; no administrative DTO leaves the adapter. */
+export class NativeAccountInfoClient extends NativeControlHTTP implements AccountInfoSource {
+  constructor(options: NativeManagementOptions) {
+    super({ ...options, deadlineMs: 2000, bodyBytes: 16 * 1024 });
+  }
+  async readAccountInfo(
+    input: AccountLimitsRequest,
+    options: { readonly signal: AbortSignal; readonly deadlineMs: number },
+  ): Promise<AccountInfoObservation> {
+    try {
+      const wire = object(
+        decode(
+          await this.call(
+            "POST",
+            "/private/native/v1/account-info/read",
+            accountLimitsRequest.parse(input),
+            options.deadlineMs,
+            options.signal,
+          ),
+          8,
+        ),
+        ["info"],
+        ["physicalGeneration", "principalVersion"],
+      );
+      const info = accountInfo.parse(wire.info);
+      if (info.status === "available") {
+        const generation = reference.parse(wire.physicalGeneration);
+        if (
+          typeof wire.principalVersion !== "string" ||
+          !/^[\x21-\x7e]{1,128}$/.test(wire.principalVersion)
+        ) {
+          throw new NativeFailure("invalid_readback");
+        }
+        return { info, generation };
+      }
+      if (wire.physicalGeneration !== undefined || wire.principalVersion !== undefined) {
+        throw new NativeFailure("invalid_readback");
+      }
+      return { info };
+    } catch {
+      throw new NativeFailure("invalid_readback");
+    }
+  }
+}
 
 /** Cached source reads only; transport never retries or calls a provider. */
 export class NativeAccountLimitsClient extends NativeControlHTTP {

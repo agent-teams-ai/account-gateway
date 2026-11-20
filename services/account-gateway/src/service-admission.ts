@@ -264,8 +264,12 @@ export function facadeBoundedReadRoute(
 ): boolean {
   return (
     facadeUsageReadRoute(method, path) ||
+    (method === "GET" &&
+      (path === "/v1/provider-connection-capabilities" ||
+        path === "/v2/provider-connection-capabilities")) ||
     (method === "POST" &&
-      (path === "/v1/account-limits/read" ||
+      (path === "/v1/account-info/read" ||
+        path === "/v1/account-limits/read" ||
         path === "/v1/account-limits/refresh" ||
         path === "/v2/account-limits/read" ||
         path === "/v1/account-models/read"))
@@ -280,9 +284,11 @@ export function facadeControlRoute(method: string | undefined, path: string | un
       (path === "/v1/capabilities/account-limits" ||
         path === "/v1/capabilities/account-limits-refresh" ||
         path === "/v2/capabilities/account-limits" ||
+        path === "/v2/provider-connection-capabilities" ||
         path === "/v1/provider-connection-capabilities")) ||
     (method === "POST" &&
-      (path === "/v1/account-limits/read" ||
+      (path === "/v1/account-info/read" ||
+        path === "/v1/account-limits/read" ||
         path === "/v1/account-limits/refresh" ||
         path === "/v2/account-limits/read" ||
         path === "/v1/account-models/read"))

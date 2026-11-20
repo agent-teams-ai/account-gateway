@@ -408,7 +408,11 @@ export class NativeAuthority {
     return profile;
   }
   // Cached quota and model reads share owner authority and permit suspended custody.
-  async #accountLimitsOwner(ctx: TrustedContext, value: unknown): Promise<unknown> {
+  async #accountReadOwner(
+    ctx: TrustedContext,
+    value: unknown,
+    purpose: "limits" | "info",
+  ): Promise<unknown> {
     const r = object(value, [
       "consumerId",
       "ownerRef",
@@ -421,7 +425,8 @@ export class NativeAuthority {
       !this.#accountLimitsOwners ||
       typeof r.profileId !== "string" ||
       !providerConnectionDefinition(r.profileId) ||
-      (providerConnectionDefinition(r.profileId)?.limitsContract === "none" &&
+      (purpose === "limits" &&
+        providerConnectionDefinition(r.profileId)?.limitsContract === "none" &&
         !configuredAccountModelSource(r.profileId)) ||
       !this.#accountLimitsOwners.bearers.authorizesAccountLimits(
         ctx,
@@ -1208,7 +1213,7 @@ export class NativeAuthority {
           if (
             req.method !== "POST" ||
             !nonempty(req.url) ||
-            !/^\/private\/native\/v1\/(enrollment|admit|execution-authority|public-admit|execution-settle|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-custody-authority|oauth-refresh-authority|oauth-cleanup-authority|account-limits-authority)$/.test(
+            !/^\/private\/native\/v1\/(enrollment|admit|execution-authority|public-admit|execution-settle|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-custody-authority|oauth-refresh-authority|oauth-cleanup-authority|account-limits-authority|account-info-authority)$/.test(
               req.url,
             ) ||
             req.rawHeaders.length > 64 ||
@@ -1269,6 +1274,7 @@ export class NativeAuthority {
               return denied();
             }
             const limitsLookup = path.endsWith("/account-limits-authority");
+            const infoLookup = path.endsWith("/account-info-authority");
             const ownerLookup = path.endsWith("/oauth-owner-authority");
             const custodyLookup = path.endsWith("/oauth-custody-authority");
             const refreshLookup = path.endsWith("/oauth-refresh-authority");
@@ -1277,7 +1283,12 @@ export class NativeAuthority {
             const ctx = Object.freeze({ consumerId }),
               body = await jsonBody(
                 req,
-                limitsLookup || ownerLookup || custodyLookup || refreshLookup || cleanupLookup
+                limitsLookup ||
+                  infoLookup ||
+                  ownerLookup ||
+                  custodyLookup ||
+                  refreshLookup ||
+                  cleanupLookup
                   ? Math.min(1024, cfg.controlBytes)
                   : cfg.controlBytes,
               );
@@ -1304,8 +1315,8 @@ export class NativeAuthority {
               return;
             }
             diagnostic.phase = "callback_owner";
-            if (limitsLookup) {
-              send(200, await this.#accountLimitsOwner(ctx, body));
+            if (limitsLookup || infoLookup) {
+              send(200, await this.#accountReadOwner(ctx, body, infoLookup ? "info" : "limits"));
               return;
             }
             if (ownerLookup) {

@@ -291,6 +291,48 @@ void test("coding plan native catalogue is a closed API-key source without reaso
   assert.equal(accountModels.safeParse({ ...snapshot, extra: true }).success, false);
 });
 
+void test("native catalogue preserves qualified official API custom tools without widening other sources", () => {
+  for (const [profileId, modelId] of [
+    ["anthropic-messages-apikey-v1", "claude-sonnet-4-6"],
+    ["gemini-openai-chat-apikey-v1", "gemini-3.1-pro-preview"],
+  ]) {
+    assert.equal(
+      accountModelDiscoverySource({ profileId, protocol: "openai-responses", authKind: "api_key" }),
+      "native_catalog",
+    );
+    const snapshot = {
+      status: "snapshot",
+      source: "native_catalog",
+      physicalGeneration: "generation-a",
+      principalVersion: "principal-a",
+      fetchedAt: "2026-11-19T00:00:00Z",
+      expiresAt: "2026-11-19T00:01:00Z",
+      models: [
+        {
+          modelId,
+          reasoning: null,
+          fast: null,
+          tools: { allowed: ["function", "function_and_custom"], default: "function" },
+        },
+      ],
+    };
+    assert.deepEqual(accountModels.parse(snapshot), snapshot);
+    assert.deepEqual(accountModelCapability.parse(snapshot.models[0]), snapshot.models[0]);
+    for (const source of ["codex", "openrouter", "nvidia"]) {
+      assert.equal(accountModels.safeParse({ ...snapshot, source }).success, false);
+    }
+    assert.equal(
+      accountModels.safeParse({
+        ...snapshot,
+        models: [
+          { ...snapshot.models[0], tools: { allowed: ["unqualified"], default: "unqualified" } },
+        ],
+      }).success,
+      false,
+    );
+  }
+});
+
 void test("OpenRouter discovery supports bounded full catalogs without weakening Codex controls", () => {
   const model = {
     modelId: "future-vendor/review:model",

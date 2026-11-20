@@ -35,6 +35,8 @@ import {
 import { createFacade, cancelFacadeTransport } from "../src/facade.ts";
 import type { FacadeOptions } from "../src/facade.ts";
 import type { ServiceConfig } from "../src/service-config.ts";
+import { joinedSandboxQualification } from "./fixtures/native-cli/joined-evidence.ts";
+import { startWorkerHeartbeat } from "./fixtures/native-cli/worker-heartbeat.ts";
 
 const report = (value: object): void => {
   process.stdout.write(JSON.stringify(value) + "\n");
@@ -45,6 +47,7 @@ let pool: Pool | undefined;
 let child: ReturnType<typeof spawn> | undefined;
 let stopped = false;
 let childExit: Promise<number | null> | undefined;
+let stopHeartbeat: ReturnType<typeof startWorkerHeartbeat> | undefined;
 async function listen(server: Server): Promise<string> {
   servers.push(server);
   await new Promise<void>((resolve, reject) => {
@@ -153,7 +156,10 @@ async function run(): Promise<void> {
   const managementCredential = randomBytes(32).toString("base64url"),
     callbackCredential = randomBytes(32).toString("base64url");
   phase = "gateway-scratch";
-  const scratchRoot = resolvePath(dirname(fileURLToPath(import.meta.url)), "../../../tmp");
+  const scratchRoot =
+    process.env.AG_NATIVE_PROVIDER_JOINED_SCRATCH_ROOT ??
+    resolvePath(dirname(fileURLToPath(import.meta.url)), "../../../tmp");
+  assert.ok(isAbsolute(scratchRoot));
   await mkdir(scratchRoot, { recursive: true });
   const scratch = await mkdtemp(join(scratchRoot, "native-provider-joined-"));
   const configFile = join(scratch, "native-config.json");
@@ -247,6 +253,7 @@ async function run(): Promise<void> {
     context = { consumerId };
   await kernel.issuer(context);
   await kernel.heartbeat(context, worker);
+  stopHeartbeat = startWorkerHeartbeat(() => kernel.heartbeat(context, worker));
   const limits = {
     requests: 12,
     concurrency: 1,
@@ -257,7 +264,20 @@ async function run(): Promise<void> {
   const publicToken = randomBytes(32).toString("base64url"),
     consumerToken = randomBytes(32).toString("base64url");
   const foreignToken = randomBytes(32).toString("base64url");
-  const tuples = [kimiProfile, glmProfile, minimaxProfile, grokOAuthProfile];
+  const officialTuples = [
+    {
+      profile: "anthropic-messages-apikey-v1",
+      baseURL: "https://api.anthropic.com/v1",
+      model: "claude-sonnet-4-6",
+    },
+    {
+      profile: "gemini-openai-chat-apikey-v1",
+      baseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+      model: "gemini-3.1-pro-preview",
+    },
+  ] as const;
+  const tuples = [kimiProfile, glmProfile, minimaxProfile, grokOAuthProfile, ...officialTuples];
+  const providers = ["kimi", "glm", "minimax", "grok", "anthropic", "gemini"] as const;
   const qualified = tuples.map((tuple) => ({
     ...tuple,
     qualificationRef: "controlled-source-v1",
@@ -315,7 +335,7 @@ async function run(): Promise<void> {
       providerTokenUpperBound: 32768,
     },
     secondProfile: openRouterEnrollment,
-    providerProfiles: qualified.slice(0, 3),
+    providerProfiles: qualified.filter((profile) => profile.profile !== grokOAuthProfile.profile),
     grokOAuthEnrollment: {
       enabled: true,
       profile: "grok-subscription-responses-oauth-v1",
@@ -406,8 +426,10 @@ async function run(): Promise<void> {
     functionOutputs: number;
     customCalls: number;
     customOutputs: number;
+    schemaRequests: number;
+    signatureChecks: number;
   };
-  type Stats = Record<"kimi" | "glm" | "minimax" | "grok" | "openrouter", ProviderStats> & {
+  type Stats = Record<(typeof providers)[number] | "openrouter", ProviderStats> & {
     unexpected: number;
     openrouterModelGets: number;
   };
@@ -430,11 +452,13 @@ async function run(): Promise<void> {
   const capabilities = await consumer.getProviderConnectionCapabilities();
   assert.deepEqual(
     capabilities.capabilities.map((capability) => capability.profileId).toSorted(),
-    [...profileIds].toSorted(),
+    profileIds.filter((id) => id !== officialTuples[1].profile).toSorted(),
   );
   assert.equal(
     capabilities.capabilities
-      .filter((capability) => capability.profileId !== openRouterEnrollment.profile)
+      .filter((capability) =>
+        tuples.slice(0, 4).some((tuple) => tuple.profile === capability.profileId),
+      )
       .every((capability) => capability.limitsContract === "account-limits/v2"),
     true,
   );
@@ -444,13 +468,13 @@ async function run(): Promise<void> {
     quotaOnlyRefresh: false,
   });
   const accounts: {
-    provider: "kimi" | "glm" | "minimax" | "grok";
+    provider: (typeof providers)[number];
     tuple: (typeof tuples)[number];
     accountRef: string;
     generation: string;
   }[] = [];
   for (const [index, tuple] of tuples.entries()) {
-    const provider = (["kimi", "glm", "minimax", "grok"] as const)[index];
+    const provider = providers[index];
     phase = provider + "-protected-enrollment";
     const command = {
       operationId: randomUUID(),
@@ -519,6 +543,7 @@ async function run(): Promise<void> {
   assert.equal(afterEnrollment.unexpected, 0);
   for (const selected of accounts) {
     const { provider, tuple, accountRef, generation } = selected;
+    const official = provider === "anthropic" || provider === "gemini";
     const account = await kernel.account(context, accountRef);
     const limitsInput = {
       ownerRef,
@@ -532,7 +557,7 @@ async function run(): Promise<void> {
     await client.get(accountRef);
     await client.getProviderConnectionCapabilities();
     const initial = await limitsClient.readAccountLimits(limitsInput);
-    assert.ok(["unknown", "snapshot"].includes(initial.status));
+    assert.ok((official ? ["unsupported"] : ["unknown", "snapshot"]).includes(initial.status));
     await assert.rejects(
       limitsClient.readAccountLimits({ ...limitsInput, ownerRef: "joined-provider-foreign" }),
       denied,
@@ -647,6 +672,26 @@ async function run(): Promise<void> {
               stream: true,
               store: false,
               max_output_tokens: 100,
+              ...(official
+                ? {
+                    text: {
+                      format: {
+                        type: "json_schema",
+                        name: "codex_output_schema",
+                        strict: true,
+                        schema: {
+                          type: "object",
+                          properties: {
+                            findings: { type: "array", items: { type: "string" } },
+                            revalidations: { type: "array", items: { type: "string" } },
+                          },
+                          required: ["findings", "revalidations"],
+                          additionalProperties: false,
+                        },
+                      },
+                    },
+                  }
+                : {}),
               ...(provider === "minimax" ? { service_tier: "default" } : {}),
               input,
               ...(tools ? { tools } : {}),
@@ -664,6 +709,7 @@ async function run(): Promise<void> {
         assert.match(output, /response.completed/);
         return output;
       };
+      phase = provider + "-native-tool-request";
       const first = await request("Controlled disposable fixture", [
         {
           type: "function",
@@ -675,7 +721,7 @@ async function run(): Promise<void> {
       ]);
       assert.match(first, /function_call/);
       assert.match(first, /joined-call-1/);
-      const completed = first
+      const events = first
         .split(/\r?\n/)
         .filter((line) => line.startsWith("data:"))
         .map((line) => line.slice(5).trim())
@@ -685,11 +731,21 @@ async function run(): Promise<void> {
             JSON.parse(data) as {
               type?: string;
               response?: { output?: Record<string, unknown>[] };
+              item?: Record<string, unknown>;
             },
-        )
-        .find((event) => event.type === "response.completed");
+        );
+      const completed = events.find((event) => event.type === "response.completed");
       assert.ok(completed?.response?.output);
       const output = completed.response.output;
+      if (provider === "gemini") {
+        assert.deepEqual(
+          events
+            .filter((event) => event.type === "response.output_item.done")
+            .map((event) => event.item),
+          output,
+          "terminal event order and completed history preserve the same authenticated continuation",
+        );
+      }
       const calls = output.filter((item) => item.type === "function_call");
       assert.equal(calls.length, 1);
       const call = calls[0];
@@ -700,6 +756,7 @@ async function run(): Promise<void> {
         const reasoning = output.find((item) => item.type === "reasoning");
         assert.deepEqual(reasoning?.content, [{ type: "reasoning_text", text: "fixture thought" }]);
       }
+      phase = provider + "-native-tool-continuation";
       const second = await request([
         { role: "user", content: "Controlled disposable fixture" },
         ...output,
@@ -709,6 +766,7 @@ async function run(): Promise<void> {
       assert.match(second, /revalidations/);
       await execution.close(executionRef, { operationId: randomUUID(), reason: "completed" });
     }
+    phase = provider + "-native-tool-roundtrip";
     const after = await stats();
     assert.equal(after[provider].dispatches - before[provider].dispatches, 2);
     assert.equal(after[provider].functionCalls - before[provider].functionCalls, 1);
@@ -723,34 +781,81 @@ async function run(): Promise<void> {
       "every emitted custom call has a native-accepted output",
     );
     assert.equal(after.unexpected, 0);
-    phase = provider + "-read-only-quota-collector";
-    const collect = await controller("/quotas/collect", limitsInput);
-    assert.equal(collect.status, 204);
-    await collect.arrayBuffer();
-    const quota = await limitsClient.readAccountLimits(limitsInput);
-    assert.equal(quota.status, "snapshot");
-    if (!Object.is(quota.status, "snapshot")) {
-      throw new Error("missing observed limits");
+    if (official) {
+      assert.equal(after[provider].schemaRequests - before[provider].schemaRequests, 2);
+      assert.equal(after[provider].quotaGets, before[provider].quotaGets);
+      if (provider === "gemini") {
+        assert.equal(after.gemini.signatureChecks - before.gemini.signatureChecks, 1);
+      }
     }
-    assert.equal(quota.physicalGeneration, generation);
-    assert.ok(quota.windows.length > 0);
+    let collected = after;
+    if (!official) {
+      phase = provider + "-read-only-quota-collector";
+      const collect = await controller("/quotas/collect", limitsInput);
+      assert.equal(collect.status, 204);
+      await collect.arrayBuffer();
+      const quota = await limitsClient.readAccountLimits(limitsInput);
+      assert.equal(quota.status, "snapshot");
+      if (!Object.is(quota.status, "snapshot")) {
+        throw new Error("missing observed limits");
+      }
+      assert.equal(quota.physicalGeneration, generation);
+      assert.ok(quota.windows.length > 0);
+      assert.equal(
+        quota.windows.every((window) => window.provider === provider),
+        true,
+      );
+      collected = await stats();
+      assert.equal(
+        collected[provider].dispatches,
+        after[provider].dispatches,
+        "quota collection never infers",
+      );
+      assert.equal(
+        collected[provider].quotaGets - after[provider].quotaGets,
+        provider === "grok" ? 2 : 1,
+        "collector uses exact source-owned read-only quota endpoints",
+      );
+      await limitsClient.readAccountLimits(limitsInput);
+    }
+    await client.getProviderConnectionCapabilities();
+    const info = await client.readAccountInfo({ ownerRef, accountRefs: [accountRef] });
+    assert.equal(info.contract, "account-info/v1");
+    assert.equal(info.accounts.length, 1);
+    const observedInfo = info.accounts[0];
+    assert.equal(observedInfo.accountRef, accountRef);
+    assert.equal(observedInfo.info.status, "available");
+    if (provider === "glm" || provider === "minimax") {
+      const subscription = observedInfo.info.fields.subscription;
+      assert.equal(subscription.status, "known");
+      assert.equal(
+        subscription.value.label,
+        provider === "glm" ? "GLM Max" : "MiniMax M Plan Plus",
+      );
+      assert.equal(subscription.source, "provider_api");
+      assert.equal(observedInfo.info.fields.email.status, "unsupported");
+      assert.equal(observedInfo.info.fields.credentialExpiresAt.status, "unsupported");
+    }
+    if (provider === "grok") {
+      const email = observedInfo.info.fields.email;
+      assert.equal(email.status, "known");
+      assert.equal(email.value, "joined-grok@example.test");
+      assert.equal(email.source, "provider_api");
+      assert.equal(observedInfo.info.fields.credentialExpiresAt.status, "known");
+    }
+    if (official) {
+      assert.equal(observedInfo.info.fields.email.status, "unsupported");
+      assert.equal(observedInfo.info.fields.subscription.status, "unsupported");
+      assert.equal(observedInfo.info.fields.credentialExpiresAt.status, "unsupported");
+    }
+    await assert.rejects(foreign.readAccountInfo({ ownerRef, accountRefs: [accountRef] }), denied);
+    const connectionsV2 = await client.getProviderConnectionCapabilitiesV2();
+    assert.equal(connectionsV2.contract, "provider-connections/v2");
     assert.equal(
-      quota.windows.every((window) => window.provider === provider),
+      connectionsV2.capabilities.some((entry) => entry.profileId === openRouterEnrollment.profile),
       true,
     );
-    const collected = await stats();
-    assert.equal(
-      collected[provider].dispatches,
-      after[provider].dispatches,
-      "quota collection never infers",
-    );
-    assert.equal(
-      collected[provider].quotaGets - after[provider].quotaGets,
-      provider === "grok" ? 2 : 1,
-      "collector uses exact source-owned read-only quota endpoints",
-    );
-    await limitsClient.readAccountLimits(limitsInput);
-    await client.getProviderConnectionCapabilities();
+    assert.ok(connectionsV2.capabilities.every((entry) => entry.accountInfo));
     assert.deepEqual(await stats(), collected);
   }
   phase = "openrouter-dynamic-enrollment";
@@ -983,7 +1088,7 @@ async function run(): Promise<void> {
   if (rrAcceptance) {
     const raw = Reflect.get(globalThis, Symbol.for("provider-joined-e2e.rrReceipts")) as unknown;
     assert.ok(Array.isArray(raw));
-    assert.equal(raw.length, 4);
+    assert.equal(raw.length, tuples.length);
     const observations: readonly unknown[] = raw;
     for (const item of observations) {
       assert.ok(item !== null && typeof item === "object");
@@ -1000,6 +1105,7 @@ async function run(): Promise<void> {
       assert.match(String(observed.codexVersion), /^\d+\.\d+\.\d+$/);
       assert.equal(observed.providerEntries, 2);
       assert.equal(observed.streamCompletions, 2);
+      assert.equal(observed.structuredOutputRequests, 2);
       for (const name of [
         "declaredFunctionTools",
         "declaredCustomTools",
@@ -1018,8 +1124,8 @@ async function run(): Promise<void> {
       assert.equal(observed.executionClosureAcknowledged, true);
       assert.equal(observed.reasoningOmitted, true);
       assert.equal(observed.fastOmitted, true);
-      rrReceipts.push(
-        Object.fromEntries(
+      rrReceipts.push({
+        ...Object.fromEntries(
           [
             "profileId",
             "model",
@@ -1029,6 +1135,7 @@ async function run(): Promise<void> {
             "codexVersion",
             "providerEntries",
             "streamCompletions",
+            "structuredOutputRequests",
             "declaredFunctionTools",
             "declaredCustomTools",
             "returnedFunctionTools",
@@ -1038,9 +1145,10 @@ async function run(): Promise<void> {
             "executionClosureAcknowledged",
           ].map((name) => [name, observed[name]]),
         ),
-      );
+        sandboxQualification: joinedSandboxQualification(observed.sandboxQualification),
+      });
     }
-    assert.equal(new Set(rrReceipts.map((item) => item.profileId)).size, 4);
+    assert.equal(new Set(rrReceipts.map((item) => item.profileId)).size, tuples.length);
   }
   phase = "native-close";
   child.stdin!.end("stop\n");
@@ -1050,6 +1158,8 @@ async function run(): Promise<void> {
   assert.equal(closed.retainedOAuthMaterial, 0);
   assert.equal(closed.retainedCredentials, 0);
   assert.equal(await bounded(childExit), 0);
+  // No successful receipt may race a failed renewal still in flight.
+  await stopHeartbeat();
   phase = "completed";
   const receipt = {
     phase,
@@ -1068,6 +1178,9 @@ async function run(): Promise<void> {
     liveProviderAccount: false,
     providers: accounts.map((account) => account.provider),
     controlledTextAndFunctionToolRoundTrip: true,
+    officialAnthropicMessagesAndSchema: true,
+    officialGeminiChatSchemaAndAuthenticatedContinuation: true,
+    nativeAccountInfoObservedAtAndProvenance: true,
     dynamicOpenRouterDiscoveryAndDispatch: true,
     dynamicOpenRouterAuthoritativeRemoval: true,
     dynamicOpenRouterQualifiedReasoning: true,
@@ -1108,6 +1221,10 @@ try {
   });
   process.exitCode = 1;
 } finally {
+  // Drain renewal before closing its database pool, including failed runs.
+  await stopHeartbeat?.().catch(() => {
+    process.exitCode = 1;
+  });
   if (child && !Object.is(stopped, true)) {
     child.stdin!.end("stop\n");
   }

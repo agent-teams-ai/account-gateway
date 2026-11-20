@@ -1485,3 +1485,62 @@ test("provider quota diagnostic survives strict SDK parsing without changing unk
     "effect_unknown",
   );
 });
+
+// Import payloads stay opaque and write-only; the native backend owns their grammar.
+test("credential import ingress bounds decoded UTF8 and keeps legacy connect routes", async (t) => {
+  const value = "🦊".repeat(16_384);
+  assert.equal(
+    sdk.secretSubmission.credentialImport.safeParse({
+      kind: "credential_import",
+      method: "oauth_auth_json",
+      value,
+    }).success,
+    true,
+  );
+  for (const credential of [
+    { kind: "credential_import", method: "oauth_auth_json", value: value + "a" },
+    { kind: "credential_import", method: "refresh_token", value: "\ud800" },
+    { kind: "credential_import", method: "personal_access_token", value: "synthetic" },
+    { kind: "credential_import", method: "agent_identity", value: "synthetic" },
+    {
+      kind: "credential_import",
+      method: "refresh_token",
+      value: "synthetic",
+      access_token: "extra",
+    },
+  ]) {
+    assert.equal(sdk.secretSubmission.credentialImport.safeParse(credential).success, false);
+  }
+  const received = [];
+  const f = await fixture(t, async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) {
+      chunks.push(chunk);
+    }
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    received.push({ path: req.url, body });
+    json(res, { operationRef: body.operationId, state: "pending" });
+  });
+  const credential = {
+    kind: "credential_import",
+    method: "refresh_token",
+    value: "synthetic-refresh",
+  };
+  await f.management.connect({
+    operationId: "create",
+    ownerRef: "owner-a",
+    profileId: "openai-codex-oauth-responses-v1",
+    displayName: "Fixture",
+    credential,
+  });
+  await f.management.reconnect("account-a", {
+    operationId: "reconnect",
+    expectedMetadataRevision: 2,
+    credential,
+  });
+  assert.deepEqual(
+    received.map((entry) => entry.path),
+    ["/v1/accounts", "/v1/accounts/account-a/reconnect"],
+  );
+  assert.ok(received.every((entry) => entry.body.credential.value === "synthetic-refresh"));
+});

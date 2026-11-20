@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import type { CommandFailure } from "./joined-command.ts";
 
 export interface ClientPins {
   clients: { id: string; version: string; binarySHA256: string }[];
@@ -34,6 +35,8 @@ export const joinedFiles = Object.freeze({
   claudeFixture: "services/account-gateway/test/fixtures/native-claude-joined/main.go",
   codexHarness: "services/account-gateway/test/native-device-joined.ts",
   codexFixture: "services/account-gateway/test/fixtures/native-device-joined/main.go",
+  providerHarness: "services/account-gateway/test/native-provider-joined.ts",
+  providerFixture: "services/account-gateway/test/fixtures/native-provider-joined/main.go",
   sdkHTTP: "packages/account-gateway/dist/http/index.js",
 });
 export const digestFile = (path: string) =>
@@ -162,7 +165,219 @@ export function joinedReceipt(
     },
   };
 }
-export function joinedFailure(raw: string) {
+export const joinedProviderProfiles = [
+  ["kimi", "kimi-code-global-responses-apikey-v1", "k3-256k"],
+  ["glm", "glm-coding-global-responses-apikey-v1", "glm-5.3-flash"],
+  ["minimax", "minimax-mplan-global-responses-apikey-v1", "MiniMax-M3.1-Flash"],
+  ["grok", "grok-subscription-responses-oauth-v1", "grok-4.7"],
+  ["anthropic", "anthropic-messages-apikey-v1", "claude-sonnet-4-6"],
+  ["gemini", "gemini-openai-chat-apikey-v1", "gemini-3.1-pro-preview"],
+] as const;
+
+/** Only a completed real child probe qualifies this test-only sandbox backend. */
+export function joinedSandboxQualification(value: unknown) {
+  const expected = {
+    contract: "codex-read-only-sandbox/v1",
+    backend: "bubblewrap",
+    childExecuted: true,
+    readSucceeded: true,
+    workspaceWriteDenied: true,
+    outsideWriteDenied: true,
+    loopbackTCPDenied: true,
+    noNewPrivileges: true,
+  } as const;
+  const observed = record(value);
+  check(
+    observed !== undefined &&
+      Object.keys(observed).length === Object.keys(expected).length &&
+      Object.entries(expected).every(
+        ([key, required]) => Object.hasOwn(observed, key) && observed[key] === required,
+      ),
+  );
+  return expected;
+}
+
+/** This third case uses the real RR Action pin, independently of the two CLI lanes. */
+export function joinedProviderReceipt(
+  raw: string,
+  expected: {
+    nativeCommit: string;
+    gatewayCommit: string;
+    binarySHA256: string;
+    sourceHashes: Record<string, string>;
+    reviewRouterCommit: string;
+    preloadSHA256: string;
+    relayAdapterSHA256: string;
+    actionRef: string;
+    actionArchiveSHA256: string;
+    clientSHA256: string;
+    version: string;
+  },
+) {
+  check(Buffer.byteLength(raw) <= 131_072);
+  const lines = raw.trim().split(/\r?\n/);
+  check(lines.length <= 64 && lines.every((line) => Buffer.byteLength(line) <= 32_768));
+  let result: Record<string, unknown> | undefined;
+  for (const line of lines) {
+    check(result === undefined);
+    let value: Record<string, unknown> | undefined;
+    try {
+      value = record(JSON.parse(line) as unknown);
+    } catch {
+      throw new Error("joined-proof-invalid");
+    }
+    check(value !== undefined);
+    if (value.phase === "completed") {
+      result = value;
+    } else {
+      // Existing safe diagnostic events are deliberately not exported.
+      check(
+        value.phase === "enrollment-safe-counters" || value.phase === "actual-cli-request-shape",
+      );
+    }
+  }
+  const r = result;
+  check(
+    r !== undefined &&
+      r.contract === "gateway-native-provider-joined/v1" &&
+      r.nativeHead === expected.nativeCommit &&
+      r.gatewayBaseHead === expected.gatewayCommit &&
+      r.nativeBinarySHA256 === expected.binarySHA256 &&
+      r.liveProviderAccount === false &&
+      r.inertReadProviderCalls === 0,
+  );
+  const proofs = [
+    "nativeHTTP",
+    "gatewayFacadeAndSDK",
+    "rrAcceptance",
+    "actualPostgreSQL",
+    "providerShapedFixture",
+    "controlledTextAndFunctionToolRoundTrip",
+    "officialAnthropicMessagesAndSchema",
+    "officialGeminiChatSchemaAndAuthenticatedContinuation",
+    "nativeAccountInfoObservedAtAndProvenance",
+    "dynamicOpenRouterDiscoveryAndDispatch",
+    "dynamicOpenRouterAuthoritativeRemoval",
+    "dynamicOpenRouterQualifiedReasoning",
+    "dynamicOpenRouterImmutableAnchor",
+    "minimaxReasoningContentRoundTrip",
+    "reconnectRetainsAccount",
+    "canonicalErasure",
+    "grokRefresh",
+    "wrongOwnerDenied",
+  ] as const;
+  check(proofs.every((name) => r[name] === true));
+  const sources = {
+    harness: expected.sourceHashes.providerHarness,
+    nativeFixture: expected.sourceHashes.providerFixture,
+    sdkHTTP: expected.sourceHashes.sdkHTTP,
+  };
+  const observedSources = record(r.sourceHashes);
+  check(
+    observedSources !== undefined &&
+      Object.entries(sources).every(([key, value]) => observedSources[key] === value),
+  );
+  const providers = joinedProviderProfiles.map(([provider]) => provider);
+  check(JSON.stringify(r.providers) === JSON.stringify(providers));
+  check(Array.isArray(r.rrReceipts) && r.rrReceipts.length === joinedProviderProfiles.length);
+  const observedReceipts: unknown[] = r.rrReceipts;
+  const rrReceipts = joinedProviderProfiles.map(([, profileId, model], index) => {
+    const observed = record(observedReceipts[index]);
+    check(
+      observed !== undefined &&
+        observed.profileId === profileId &&
+        observed.model === model &&
+        observed.actionRef === expected.actionRef &&
+        observed.actionArchiveSHA256 === expected.actionArchiveSHA256 &&
+        observed.codexBinarySHA256 === expected.clientSHA256 &&
+        observed.codexVersion === expected.version &&
+        observed.providerEntries === 2 &&
+        observed.streamCompletions === 2 &&
+        observed.structuredOutputRequests === 2 &&
+        observed.executionClosureAcknowledged === true &&
+        observed.reasoningOmitted === true &&
+        observed.fastOmitted === true,
+    );
+    const functions = observed.declaredFunctionTools,
+      custom = observed.declaredCustomTools;
+    check(
+      typeof functions === "number" &&
+        Number.isSafeInteger(functions) &&
+        functions > 0 &&
+        functions <= 128 &&
+        typeof custom === "number" &&
+        Number.isSafeInteger(custom) &&
+        custom >= 0 &&
+        custom <= 128 &&
+        observed.returnedFunctionTools === 1 &&
+        observed.returnedCustomTools === (custom > 0 ? 1 : 0),
+    );
+    return {
+      profileId,
+      model,
+      actionRef: expected.actionRef,
+      actionArchiveSHA256: expected.actionArchiveSHA256,
+      codexBinarySHA256: expected.clientSHA256,
+      codexVersion: expected.version,
+      providerEntries: 2,
+      streamCompletions: 2,
+      structuredOutputRequests: 2,
+      declaredFunctionTools: functions,
+      declaredCustomTools: custom,
+      returnedFunctionTools: 1,
+      returnedCustomTools: custom > 0 ? 1 : 0,
+      reasoningOmitted: true,
+      fastOmitted: true,
+      executionClosureAcknowledged: true,
+      sandboxQualification: joinedSandboxQualification(observed.sandboxQualification),
+    };
+  });
+  return {
+    phase: "completed",
+    contract: "gateway-native-provider-joined/v1",
+    nativeHead: expected.nativeCommit,
+    gatewayBaseHead: expected.gatewayCommit,
+    nativeBinarySHA256: expected.binarySHA256,
+    sourceHashes: sources,
+    reviewRouterCommit: expected.reviewRouterCommit,
+    preloadSHA256: expected.preloadSHA256,
+    relayAdapterSHA256: expected.relayAdapterSHA256,
+    providers,
+    rrReceipts,
+    liveProviderAccount: false,
+    inertReadProviderCalls: 0,
+    ...Object.fromEntries(proofs.map((name) => [name, true])),
+  };
+}
+
+function startupFailure(command: Pick<CommandFailure, "stderr" | "status">) {
+  if (command.status.timedOut) {
+    return { reason: "timeout" as const };
+  }
+  if (command.status.outputLimit) {
+    return { reason: "output-limit" as const };
+  }
+  // esbuild 0.28.1 lib/main.js createChannel/afterClose preserves the failed
+  // native spawn in this fixed message. Never export the interpolated path.
+  for (const line of command.stderr.split(/\r?\n/)) {
+    if (line.length > 16_384) {
+      continue;
+    }
+    const match = line.match(
+      /^(?:Error|TransformError): The service (?:was stopped|is no longer running): spawn \/[^\r\n]*\/node_modules\/\.pnpm\/@esbuild\+linux-x64@0\.28\.1\/node_modules\/@esbuild\/linux-x64\/bin\/esbuild (EACCES|EPERM|ENOENT|ENOEXEC)$/,
+    );
+    if (match) {
+      return { reason: "esbuild-spawn" as const, errno: match[1] };
+    }
+  }
+  return { reason: "unclassified" as const };
+}
+
+function boundedCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 1_000_000;
+}
+
+export function joinedFailure(raw: string, command?: Pick<CommandFailure, "stderr" | "status">) {
   const phases = new Set([
     "guard",
     "pinned-client-and-network",
@@ -192,30 +407,258 @@ export function joinedFailure(raw: string) {
     "cached-native-account-limits",
     "actual-codex-cli-through-real-authority",
     "actual-codex-cli-cleanup",
+    "gateway-control-composition",
+    "gateway-native-composition",
+    "safe-source-capabilities",
+    "openrouter-dynamic-enrollment",
+    "openrouter-dynamic-real-native-dispatch",
+    "openrouter-dynamic-authoritative-removal",
+    "grok-source-refresh",
+    "canonical-generation-and-execution-cleanup",
+    ...joinedProviderProfiles.flatMap(([provider]) =>
+      [
+        "protected-enrollment",
+        "inert-reads",
+        "unsupported-settings-zero-entry",
+        "native-tool-roundtrip",
+        "native-tool-request",
+        "native-tool-continuation",
+        "read-only-quota-collector",
+        "reconnect-and-canonical-erasure",
+      ].map((step) => provider + "-" + step),
+    ),
   ]);
   let at = "driver",
-    frame: string | undefined;
+    frame: string | undefined,
+    failureCode: string | undefined;
+  let reported = false;
+  const failureNames = new Set([
+    "GatewayError",
+    "AssertionError",
+    "Error",
+    "TypeError",
+    "RangeError",
+    "SyntaxError",
+  ]);
+  const gatewayCodes = new Set([
+    "invalid_input",
+    "transport",
+    "invalid_response",
+    "cancelled",
+    "safe_error",
+  ]);
+  const diagnosticCodes = new Set([
+    "invalid_request",
+    "unauthenticated",
+    "forbidden",
+    "not_found",
+    "conflict",
+    "admission_limited",
+    "upstream_failure",
+    "internal_error",
+  ]);
+  // Published facade effectState; no private messages or references are retained.
+  const effects = new Set([
+    "not_dispatched",
+    "dispatch_started",
+    "response_started",
+    "completed",
+    "effect_unknown",
+    "rejected_before_dispatch",
+  ]);
+  const countKeys = [
+    "dispatches",
+    "exchanges",
+    "refreshes",
+    "quotaGets",
+    "functionCalls",
+    "customCalls",
+    "functionOutputs",
+    "customOutputs",
+    "schemaRequests",
+    "signatureChecks",
+  ] as const;
+  type NativeCounts = Record<(typeof countKeys)[number], number>;
+  type Provider = (typeof joinedProviderProfiles)[number][0];
+  type SDKFailure = {
+    gatewayCode: string;
+    effect: string;
+    diagnosticCode?: string;
+    httpStatus?: number;
+  };
+  const isCounts = (value: unknown): value is NativeCounts => {
+    const counts = record(value);
+    return (
+      counts !== undefined &&
+      Object.keys(counts).length === countKeys.length &&
+      countKeys.every((key) => boundedCount(counts[key]))
+    );
+  };
+  const sdkFailures = new Map<Provider, SDKFailure>();
+  const nativeCounts = new Map<Provider, NativeCounts & { unexpected: number }>();
+  let providerDiagnostics: {
+    sdk?: SDKFailure;
+    nativeCounters?: NativeCounts & { unexpected: number };
+  } = {};
+  let details: {
+    driverCode?: "assertion_failed" | "qualification_failed";
+    failureName?: string;
+    gatewayCode?: string;
+    diagnosticCode?: string;
+    httpStatus?: number;
+  } = {};
   for (const line of raw.split(/\r?\n/)) {
     if (line.length > 16_384) {
       continue;
     }
     try {
       const value = record(JSON.parse(line) as unknown);
+      if (value?.phase === "actual-cli-sdk-error") {
+        const selected = joinedProviderProfiles.find(([, profile]) => profile === value.profileId);
+        if (!selected) {
+          continue;
+        }
+        const [provider] = selected;
+        sdkFailures.delete(provider);
+        if (
+          Object.keys(value).some(
+            (key) =>
+              !["phase", "profileId", "code", "effect", "diagnosticCode", "httpStatus"].includes(
+                key,
+              ),
+          ) ||
+          typeof value.code !== "string" ||
+          !gatewayCodes.has(value.code) ||
+          typeof value.effect !== "string" ||
+          !effects.has(value.effect) ||
+          (value.diagnosticCode !== undefined &&
+            (typeof value.diagnosticCode !== "string" ||
+              !diagnosticCodes.has(value.diagnosticCode))) ||
+          (value.httpStatus !== undefined &&
+            (typeof value.httpStatus !== "number" ||
+              !Number.isInteger(value.httpStatus) ||
+              value.httpStatus < 100 ||
+              value.httpStatus > 599))
+        ) {
+          continue;
+        }
+        sdkFailures.set(provider, {
+          gatewayCode: value.code,
+          effect: value.effect,
+          ...(typeof value.diagnosticCode === "string"
+            ? { diagnosticCode: value.diagnosticCode }
+            : {}),
+          ...(typeof value.httpStatus === "number" ? { httpStatus: value.httpStatus } : {}),
+        });
+        continue;
+      }
+      if (value?.phase === "actual-cli-native-counters") {
+        const selected = joinedProviderProfiles.find(([provider]) => provider === value.provider);
+        if (!selected) {
+          continue;
+        }
+        const [provider] = selected;
+        nativeCounts.delete(provider);
+        const counters = record(value.counters);
+        const providers = [...joinedProviderProfiles.map(([name]) => name), "openrouter"];
+        if (
+          Object.keys(value).some((key) => !["phase", "provider", "counters"].includes(key)) ||
+          !counters ||
+          Object.keys(counters).length !== providers.length + 2 ||
+          !providers.every((name) => isCounts(counters[name])) ||
+          !boundedCount(counters.unexpected) ||
+          !boundedCount(counters.openrouterModelGets)
+        ) {
+          continue;
+        }
+        const counts = counters[provider];
+        if (isCounts(counts)) {
+          nativeCounts.set(provider, { ...counts, unexpected: counters.unexpected });
+        }
+        continue;
+      }
       if (value?.phase !== "failed") {
         continue;
+      }
+      reported = true;
+      // Attach only events preceding this final failure for its exact provider.
+      const selected = joinedProviderProfiles.find(
+        ([provider]) => value.at === provider + "-native-tool-roundtrip",
+      );
+      const sdk = selected ? sdkFailures.get(selected[0]) : undefined;
+      const counters = selected ? nativeCounts.get(selected[0]) : undefined;
+      providerDiagnostics = {
+        ...(sdk ? { sdk } : {}),
+        ...(counters ? { nativeCounters: counters } : {}),
+      };
+      sdkFailures.clear();
+      nativeCounts.clear();
+      // Export only closed driver/SDK classifications, never messages or references.
+      details = {};
+      if (value.code === "assertion_failed" || value.code === "qualification_failed") {
+        details.driverCode = value.code;
+      }
+      if (typeof value.failureName === "string" && failureNames.has(value.failureName)) {
+        details.failureName = value.failureName;
+      }
+      if (value.failureName === "GatewayError") {
+        if (typeof value.failureCode === "string" && gatewayCodes.has(value.failureCode)) {
+          details.gatewayCode = value.failureCode;
+        }
+        if (typeof value.diagnosticCode === "string" && diagnosticCodes.has(value.diagnosticCode)) {
+          details.diagnosticCode = value.diagnosticCode;
+        }
+        if (
+          typeof value.httpStatus === "number" &&
+          Number.isInteger(value.httpStatus) &&
+          value.httpStatus >= 100 &&
+          value.httpStatus <= 599
+        ) {
+          details.httpStatus = value.httpStatus;
+        }
       }
       if (typeof value.at === "string" && phases.has(value.at)) {
         at = value.at;
       }
       if (
         typeof value.frame === "string" &&
-        /^native-(claude|device)-joined\.ts:[0-9]{1,6}:[0-9]{1,6}$/.test(value.frame)
+        /^native-(claude|device|provider)-joined\.ts:[0-9]{1,6}:[0-9]{1,6}$/.test(value.frame)
       ) {
         frame = value.frame;
+      }
+      if (
+        typeof value.failureCode === "string" &&
+        value.failureCode === value.failureCode.trim() &&
+        (/^rr_provider_joined_failed_cli_sandbox_preflight_(?:(?:positive_controls|child_spawn|child_timeout|child_output_limit|policy_refused|child_namespace_refused|child_usage_exit|child_panic_exit|child_nonzero_exit|proof(?:_(?:empty|size|json|shape|fields|contract|child_executed|read_succeeded|workspace_write_denied|outside_write_denied|loopback_tcp_denied|no_new_privileges))?|postconditions|cleanup)_)?none$/.test(
+          value.failureCode,
+        ) ||
+          /^rr_provider_joined_failed_(?:installed_action_real_cli_review|tool_cycle_and_parser_proof)_(?:none|ingress|cli_model|cli_stream|cli_review_schema|cli_reasoning|cli_fast|cli_tool_declarations|cli_tool_output|production_relay_adapter|sdk_execution_request|sdk_stream)$/.test(
+            value.failureCode,
+          ))
+      ) {
+        failureCode = value.failureCode;
       }
     } catch {
       /* Never reflect arbitrary child output. */
     }
   }
-  return { code: "joined-driver-failed", at, ...(isNonemptyString(frame) ? { frame } : {}) };
+  return {
+    code: "joined-driver-failed",
+    at,
+    ...details,
+    ...providerDiagnostics,
+    ...(isNonemptyString(frame) ? { frame } : {}),
+    ...(isNonemptyString(failureCode) ? { failureCode } : {}),
+    ...(command
+      ? {
+          command: {
+            exitCode: command.status.exitCode,
+            signal: command.status.signal,
+            timedOut: command.status.timedOut,
+            outputLimit: command.status.outputLimit,
+            ...(!reported ? { startup: startupFailure(command) } : {}),
+          },
+        }
+      : {}),
+  };
 }

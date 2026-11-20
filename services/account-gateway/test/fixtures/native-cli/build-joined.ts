@@ -1,4 +1,4 @@
-// Build the two disposable joined fixtures against one clean pinned Go tree.
+// Build disposable joined fixtures against one clean pinned Go tree.
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
@@ -23,6 +23,11 @@ function command(binary: string, args: string[], cwd: string) {
     timeout: 600_000,
     maxBuffer: 4_194_304,
   });
+  // This phase compiles checked-in synthetic source only; no fixture is run and
+  // no credential is available. Keep compiler diagnostics visible on failure.
+  if (args[0] === "build" && child.status !== 0 && child.stderr) {
+    process.stderr.write(child.stderr.slice(0, 65_536));
+  }
   check(child.status === 0 && !child.error, "joined-build-command-failed");
   return child.stdout.trim();
 }
@@ -81,6 +86,7 @@ try {
   for (const [client, fixture] of [
     ["claude", "native-claude-joined"],
     ["codex", "native-device-joined"],
+    ["provider", "native-provider-joined"],
   ] as const) {
     const relative = "backend/tmp/" + fixture,
       generated = join(native, relative),
@@ -96,7 +102,12 @@ try {
       writeFileSync(
         join(generated, "main.go"),
         readFileSync(
-          join(repo, joinedFiles[(client + "Fixture") as "claudeFixture" | "codexFixture"]),
+          join(
+            repo,
+            joinedFiles[
+              (client + "Fixture") as "claudeFixture" | "codexFixture" | "providerFixture"
+            ],
+          ),
         ),
         { mode: 0o600, flag: "wx" },
       );

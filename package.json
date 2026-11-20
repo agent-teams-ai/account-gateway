@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node --run check:toolchain-config && node --run test:consumer-pin && node --test tests/*.test.mjs tests/*.test.mts tests/whole-consumer.test.ts",
+    "test": "node --run check:toolchain-config && node --run test:consumer-pin && node --test tests/*.test.mjs tests/*.test.mts tests/whole-consumer.test.ts tests/account-info.test.ts",
     "typecheck:tests": "tsc --project tsconfig.tests.json",
     "test:static": "node --run check:toolchain-config && node --run test:consumer-pin && node --test --test-name-pattern=\"public Core/Assembly\" tests/client.test.mjs && node --test tests/source-policy.test.mjs",
     "test:consumer-pin": "tsc --project tsconfig.consumer-pin.json && node --test tests/consumer-module-pin.test.ts",
