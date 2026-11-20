@@ -135,6 +135,8 @@ ${execute.map((path) => "  " + path + " ix,").join("\n")}
 }
 profile ${name}-bwrap flags=(attach_disconnected,mediate_deleted) {
 ${common}
+  # The pinned helper opens / read-only before its second pivot. /** excludes /.
+  / r,
   /** rwmkl,
   userns,
   mount,
