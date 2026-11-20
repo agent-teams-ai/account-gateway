@@ -408,6 +408,18 @@ void test("failed payload keeps stdout separate and exports only closed command 
       "bubblewrap.c:3162",
       null,
     ],
+    [
+      "bwrap: Creating new namespace failed: nesting depth or /proc/sys/user/max_*_namespaces exceeded (ENOSPC)\n",
+      "namespace-refused",
+      "bubblewrap.c:3160",
+      28,
+    ],
+    [
+      "bwrap: Creating new namespace failed: nesting depth or /proc/sys/user/max_*_namespaces exceeded (ENOSPC) PRIVATE_SUFFIX\n",
+      "namespace-refused",
+      "bubblewrap.c:3160",
+      null,
+    ],
     ["bwrap: setting up uid map: PRIVATE_ERROR\n", "uid-gid-map", "bubblewrap.c:1011", null],
     ["bwrap: setting up gid map: PRIVATE_ERROR\n", "uid-gid-map", "bubblewrap.c:1026", null],
     [

@@ -537,7 +537,7 @@ void test("native failure diagnostics retain only closed SDK fields and known re
   }
 });
 
-void test("sandbox preflight failure exports only its fixed diagnostic code", () => {
+void test("RR failures export only fixed preflight and review diagnostic codes", () => {
   const failed = {
     phase: "failed",
     at: "kimi-native-tool-roundtrip",
@@ -583,6 +583,29 @@ void test("sandbox preflight failure exports only its fixed diagnostic code", ()
       failureCode,
     });
   }
+  for (const phase of ["installed_action_real_cli_review", "tool_cycle_and_parser_proof"]) {
+    for (const relayPhase of [
+      "none",
+      "ingress",
+      "cli_model",
+      "cli_stream",
+      "cli_review_schema",
+      "cli_reasoning",
+      "cli_fast",
+      "cli_tool_declarations",
+      "cli_tool_output",
+      "production_relay_adapter",
+      "sdk_execution_request",
+      "sdk_stream",
+    ]) {
+      const failureCode = "rr_provider_joined_failed_" + phase + "_" + relayPhase;
+      assert.deepEqual(joinedFailure(JSON.stringify({ ...failed, failureCode })), {
+        code: "joined-driver-failed",
+        at: "kimi-native-tool-roundtrip",
+        failureCode,
+      });
+    }
+  }
   for (const failureCode of [
     "private-child-error",
     "rr_provider_joined_failed_cli_sandbox_preflight_private_child_error_none",
@@ -595,6 +618,17 @@ void test("sandbox preflight failure exports only its fixed diagnostic code", ()
     "rr_provider_joined_failed_cli_sandbox_preflight_proof_read_succeeded_none\n",
     "rr_provider_joined_failed_cli_sandbox_preflight_proof_read_succeeded_none\r",
     "rr_provider_joined_failed_cli_sandbox_preflight_proof_read_succeeded_none\nprivate",
+    "rr_provider_joined_failed_private_phase_none",
+    "rr_provider_joined_failed_installed_action_real_cli_review_private_relay",
+    "rr_provider_joined_failed_installed_action_real_cli_review_sdk_stream_private",
+    "rr_provider_joined_failed_installed_action_real_cli_review_sdk_stream\n",
+    "rr_provider_joined_failed_installed_action_real_cli_review_sdk_stream\r",
+    "rr_provider_joined_failed_installed_action_real_cli_review_sdk_stream\nprivate",
+    "rr_provider_joined_failed_tool_cycle_and_parser_proof_private_relay",
+    "rr_provider_joined_failed_tool_cycle_and_parser_proof_none_private",
+    "rr_provider_joined_failed_tool_cycle_and_parser_proof_none\n",
+    "rr_provider_joined_failed_tool_cycle_and_parser_proof_none\r",
+    "rr_provider_joined_failed_tool_cycle_and_parser_proof_none\nprivate",
   ]) {
     assert.deepEqual(joinedFailure(JSON.stringify({ ...failed, failureCode })), {
       code: "joined-driver-failed",

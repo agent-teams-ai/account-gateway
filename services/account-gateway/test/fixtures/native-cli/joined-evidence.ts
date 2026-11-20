@@ -506,9 +506,12 @@ export function joinedFailure(raw: string, command?: Pick<CommandFailure, "stder
       if (
         typeof value.failureCode === "string" &&
         value.failureCode === value.failureCode.trim() &&
-        /^rr_provider_joined_failed_cli_sandbox_preflight_(?:(?:positive_controls|child_spawn|child_timeout|child_output_limit|policy_refused|child_namespace_refused|child_usage_exit|child_panic_exit|child_nonzero_exit|proof(?:_(?:empty|size|json|shape|fields|contract|child_executed|read_succeeded|workspace_write_denied|outside_write_denied|loopback_tcp_denied|no_new_privileges))?|postconditions|cleanup)_)?none$/.test(
+        (/^rr_provider_joined_failed_cli_sandbox_preflight_(?:(?:positive_controls|child_spawn|child_timeout|child_output_limit|policy_refused|child_namespace_refused|child_usage_exit|child_panic_exit|child_nonzero_exit|proof(?:_(?:empty|size|json|shape|fields|contract|child_executed|read_succeeded|workspace_write_denied|outside_write_denied|loopback_tcp_denied|no_new_privileges))?|postconditions|cleanup)_)?none$/.test(
           value.failureCode,
-        )
+        ) ||
+          /^rr_provider_joined_failed_(?:installed_action_real_cli_review|tool_cycle_and_parser_proof)_(?:none|ingress|cli_model|cli_stream|cli_review_schema|cli_reasoning|cli_fast|cli_tool_declarations|cli_tool_output|production_relay_adapter|sdk_execution_request|sdk_stream)$/.test(
+            value.failureCode,
+          ))
       ) {
         failureCode = value.failureCode;
       }

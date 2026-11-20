@@ -392,6 +392,13 @@ function readErrno(line: string, format: "c" | "rust"): number | null {
     const value = Number(rust[1]);
     return knownErrnos.has(value) ? value : null;
   }
+  // This pinned bubblewrap fatal literal follows its explicit errno == ENOSPC branch.
+  if (
+    line ===
+    "bwrap: Creating new namespace failed: nesting depth or /proc/sys/user/max_*_namespaces exceeded (ENOSPC)"
+  ) {
+    return 28;
+  }
   // Exact C-locale suffixes from strerror; no path or arbitrary number enters.
   const c = cErrnos.find(([text]) => line.endsWith(": " + text));
   if (c) {
