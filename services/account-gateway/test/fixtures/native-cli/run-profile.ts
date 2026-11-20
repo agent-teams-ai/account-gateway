@@ -90,6 +90,12 @@ let outcome = "fail",
 let image = "",
   profileSHA256 = "",
   seccompSHA256 = "";
+let kernelCompressedLoad: "yes" | "no" | "absent" | "other" | "unobserved" = "unobserved";
+let compiledPolicy: {
+  encoding: "uncompressed" | "unexpected";
+  bytes: number;
+  sha256: string;
+} | null = null;
 let containerRemoved = false,
   policyRemoved = false,
   volumesRemoved = false;
@@ -117,6 +123,13 @@ try {
     readFileSync("/sys/kernel/security/apparmor/features/domain/stack", "utf8").trim(),
     "yes",
   );
+  const compressedFeature = "/sys/kernel/security/apparmor/features/policy/compressed_load";
+  if (existsSync(compressedFeature)) {
+    const value = readFileSync(compressedFeature, "utf8").trim();
+    kernelCompressedLoad = value === "yes" || value === "no" ? value : "other";
+  } else {
+    kernelCompressedLoad = "absent";
+  }
   assert.equal(fileDigest(join(root, "review-router-assets/codex-runtime/bin/codex")), codexSHA256);
   assert.equal(
     fileDigest(join(root, "review-router-assets/codex-runtime/codex-resources/bwrap")),
@@ -184,11 +197,32 @@ try {
   stage = "compile";
   // Compile against the running kernel. Unsupported namespace mediation or any
   // compiler warning aborts; parser success alone is never runtime acceptance.
-  parser(["--skip-kernel-load", "--skip-cache", "--Werror", "--ofile", binaryPolicy, profilePath]);
+  parser([
+    "--skip-kernel-load",
+    "--skip-cache",
+    "--Werror",
+    "--zstd-compress-level=0",
+    "--ofile",
+    binaryPolicy,
+    profilePath,
+  ]);
+  // Keep the complete profile set as raw records. Compressed --ofile output
+  // adds a userspace header to each profile, which is not one load buffer.
+  const binary = readFileSync(binaryPolicy);
+  const versionRecord = Buffer.from("04080076657273696f6e0002", "hex");
+  compiledPolicy = {
+    encoding: binary.subarray(0, versionRecord.length).equals(versionRecord)
+      ? "uncompressed"
+      : "unexpected",
+    bytes: binary.length,
+    sha256: digest(binary),
+  };
+  assert.equal(compiledPolicy.encoding, "uncompressed");
+  assert.ok(binary.length > versionRecord.length && binary.length <= 4 * 1024 * 1024);
   stage = "load";
   assert.deepEqual(ownedProfiles(), []);
   loadAttempted = true;
-  parser(["--add", "--binary", binaryPolicy], true);
+  parser(["--add", "--binary", "--zstd-compress-level=0", binaryPolicy], true);
   assert.deepEqual(
     ownedProfiles().toSorted(),
     [name, name + "-bwrap", name + "-payload"].toSorted(),
@@ -336,6 +370,8 @@ try {
           profileSHA256,
           seccompSHA256,
           parserPinsSHA256: digest(readFileSync(new URL("./apparmor-pins.json", import.meta.url))),
+          kernelCompressedLoad,
+          compiledPolicy,
           loaded,
           created,
           containerRemoved,

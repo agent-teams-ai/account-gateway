@@ -296,6 +296,7 @@ jobs:
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/execution-host.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/execution-preflight.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/execution.apparmor
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/execution.apparmor.bin
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/execution-seccomp.json
           if-no-files-found: warn
           retention-days: 14
