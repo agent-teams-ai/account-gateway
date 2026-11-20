@@ -9,6 +9,9 @@ import {
   joinedSandboxQualification,
 } from "./joined-evidence.ts";
 import { CommandFailure, command } from "./joined-command.ts";
+import { startWorkerHeartbeat } from "./worker-heartbeat.ts";
+
+const json = (...values: unknown[]) => values.map((value) => JSON.stringify(value)).join("\n");
 
 const sandboxQualification = {
   contract: "codex-read-only-sandbox/v1",
@@ -20,6 +23,57 @@ const sandboxQualification = {
   loopbackTCPDenied: true,
   noNewPrivileges: true,
 };
+
+void test("worker renewal is nonoverlapping and stop drains the owned in-flight heartbeat", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let calls = 0;
+  const stop = startWorkerHeartbeat(() => {
+    calls++;
+    return calls === 8 ? pending : Promise.resolve();
+  });
+  t.mock.timers.tick(4999);
+  assert.equal(calls, 0);
+  // Keep renewing through 35 seconds, beyond the original 30-second lease.
+  for (let tick = 0; tick < 7; tick++) {
+    t.mock.timers.tick(tick === 0 ? 1 : 5000);
+    await Promise.resolve();
+    assert.equal(calls, tick + 1);
+  }
+  t.mock.timers.tick(5000);
+  assert.equal(calls, 8);
+  t.mock.timers.tick(15_000);
+  assert.equal(calls, 8);
+  let stopped = false;
+  const stopping = stop().then(() => {
+    stopped = true;
+    return stopped;
+  });
+  await Promise.resolve();
+  assert.equal(stopped, false);
+  release();
+  await stopping;
+  t.mock.timers.tick(30_000);
+  assert.equal(calls, 8);
+  await stop();
+});
+
+void test("failed worker renewal cannot produce a successful stop or retry an expired lease", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let calls = 0;
+  const stop = startWorkerHeartbeat(async () => {
+    calls++;
+    throw new Error("private-database-error");
+  });
+  t.mock.timers.tick(5000);
+  await assert.rejects(stop(), { message: "provider-worker-heartbeat-failed" });
+  t.mock.timers.tick(30_000);
+  assert.equal(calls, 1);
+  await assert.rejects(stop(), { message: "provider-worker-heartbeat-failed" });
+});
 
 void test("sandbox evidence requires actual read and denial proofs, not child startup failure", async (t) => {
   assert.deepEqual(joinedSandboxQualification(sandboxQualification), sandboxQualification);
@@ -634,5 +688,157 @@ void test("RR failures export only fixed preflight and review diagnostic codes",
       code: "joined-driver-failed",
       at: "kimi-native-tool-roundtrip",
     });
+  }
+});
+
+void test("RR SDK and native counter events are retained only for the final failed provider", () => {
+  const failed = { phase: "failed", at: "gemini-native-tool-roundtrip" };
+  const sdk = {
+    phase: "actual-cli-sdk-error",
+    profileId: "gemini-openai-chat-apikey-v1",
+    code: "safe_error",
+    effect: "not_dispatched",
+    diagnosticCode: "forbidden",
+    httpStatus: 403,
+  };
+  const count = {
+    dispatches: 1,
+    exchanges: 0,
+    refreshes: 0,
+    quotaGets: 0,
+    functionCalls: 1,
+    customCalls: 1,
+    functionOutputs: 0,
+    customOutputs: 0,
+    schemaRequests: 1,
+    signatureChecks: 0,
+  };
+  const counters = {
+    phase: "actual-cli-native-counters",
+    provider: "gemini",
+    counters: {
+      kimi: count,
+      glm: count,
+      minimax: count,
+      grok: count,
+      anthropic: count,
+      gemini: count,
+      openrouter: count,
+      unexpected: 0,
+      openrouterModelGets: 2,
+    },
+  };
+  const expected = {
+    code: "joined-driver-failed",
+    at: failed.at,
+    sdk: {
+      gatewayCode: "safe_error",
+      effect: "not_dispatched",
+      diagnosticCode: "forbidden",
+      httpStatus: 403,
+    },
+    nativeCounters: { ...count, unexpected: 0 },
+  };
+  assert.deepEqual(
+    joinedFailure(
+      json(
+        { ...sdk, profileId: "anthropic-messages-apikey-v1", diagnosticCode: "upstream_failure" },
+        sdk,
+        counters,
+        {
+          phase: "actual-cli-native-tool-shapes",
+          provider: "gemini",
+          shapes: "private-tool-output",
+        },
+        failed,
+      ),
+    ),
+    expected,
+  );
+  for (const effect of [
+    "not_dispatched",
+    "dispatch_started",
+    "response_started",
+    "completed",
+    "effect_unknown",
+    "rejected_before_dispatch",
+  ]) {
+    assert.equal(joinedFailure(json({ ...sdk, effect }, failed)).sdk?.effect, effect);
+  }
+  assert.deepEqual(
+    joinedFailure(
+      json(
+        { phase: sdk.phase, profileId: sdk.profileId, code: "transport", effect: "effect_unknown" },
+        failed,
+      ),
+    ).sdk,
+    { gatewayCode: "transport", effect: "effect_unknown" },
+  );
+  // Events after a failure, or before an earlier failure, cannot be grafted on.
+  assert.deepEqual(joinedFailure(json(failed, sdk, counters)), {
+    code: "joined-driver-failed",
+    at: failed.at,
+  });
+  assert.deepEqual(joinedFailure(json(sdk, counters, failed, failed)), {
+    code: "joined-driver-failed",
+    at: failed.at,
+  });
+  assert.equal(
+    joinedFailure(json(sdk, counters, { ...failed, at: "anthropic-native-tool-roundtrip" })).sdk,
+    undefined,
+  );
+  assert.equal(
+    joinedFailure(json(sdk, counters, { ...failed, at: "anthropic-native-tool-roundtrip" }))
+      .nativeCounters,
+    undefined,
+  );
+  for (const patch of [
+    { profileId: "anthropic-messages-apikey-v1" },
+    { profileId: sdk.profileId + "\n" },
+    { code: "private-code" },
+    { code: "safe_error\n" },
+    { effect: "private-effect" },
+    { effect: "not_dispatched\r" },
+    { diagnosticCode: "private-diagnostic" },
+    { diagnosticCode: "forbidden\n" },
+    { diagnosticCode: null },
+    { message: "private-message" },
+    { traceRef: "private-reference" },
+    ...[99, 600, 403.5, "403", null].map((httpStatus) => ({ httpStatus })),
+  ]) {
+    const safe = joinedFailure(json({ ...sdk, ...patch }, failed));
+    assert.equal(safe.sdk, undefined);
+    assert.equal(JSON.stringify(safe).includes("private"), false);
+  }
+  for (const candidate of [
+    { ...counters, provider: "anthropic" },
+    { ...counters, provider: "gemini\n" },
+    { ...counters, traceRef: "private-reference" },
+    { ...counters, counters: { ...counters.counters, private: "private-value" } },
+    {
+      ...counters,
+      counters: { ...counters.counters, gemini: { ...count, private: "private-value" } },
+    },
+    { ...counters, counters: { ...counters.counters, unexpected: -1 } },
+    { ...counters, counters: { ...counters.counters, openrouterModelGets: "private-value" } },
+    ...[-1, 0.5, 1_000_001, "1", null].map((dispatches) => ({
+      ...counters,
+      counters: { ...counters.counters, gemini: { ...count, dispatches } },
+    })),
+  ]) {
+    const safe = joinedFailure(json(candidate, failed));
+    assert.equal(safe.nativeCounters, undefined);
+    assert.equal(JSON.stringify(safe).includes("private"), false);
+  }
+  // A later malformed event for the same provider removes stale diagnostics.
+  assert.equal(joinedFailure(json(sdk, { ...sdk, code: "private-code" }, failed)).sdk, undefined);
+  assert.equal(
+    joinedFailure(json(counters, { ...counters, counters: {} }, failed)).nativeCounters,
+    undefined,
+  );
+  for (const at of ["gemini-native-tool-roundtrip\n", "private-phase", "guard"]) {
+    const safe = joinedFailure(json(sdk, counters, { ...failed, at }));
+    assert.equal(safe.sdk, undefined);
+    assert.equal(safe.nativeCounters, undefined);
   }
 });

@@ -36,6 +36,7 @@ import { createFacade, cancelFacadeTransport } from "../src/facade.ts";
 import type { FacadeOptions } from "../src/facade.ts";
 import type { ServiceConfig } from "../src/service-config.ts";
 import { joinedSandboxQualification } from "./fixtures/native-cli/joined-evidence.ts";
+import { startWorkerHeartbeat } from "./fixtures/native-cli/worker-heartbeat.ts";
 
 const report = (value: object): void => {
   process.stdout.write(JSON.stringify(value) + "\n");
@@ -46,6 +47,7 @@ let pool: Pool | undefined;
 let child: ReturnType<typeof spawn> | undefined;
 let stopped = false;
 let childExit: Promise<number | null> | undefined;
+let stopHeartbeat: ReturnType<typeof startWorkerHeartbeat> | undefined;
 async function listen(server: Server): Promise<string> {
   servers.push(server);
   await new Promise<void>((resolve, reject) => {
@@ -251,6 +253,7 @@ async function run(): Promise<void> {
     context = { consumerId };
   await kernel.issuer(context);
   await kernel.heartbeat(context, worker);
+  stopHeartbeat = startWorkerHeartbeat(() => kernel.heartbeat(context, worker));
   const limits = {
     requests: 12,
     concurrency: 1,
@@ -1155,6 +1158,8 @@ async function run(): Promise<void> {
   assert.equal(closed.retainedOAuthMaterial, 0);
   assert.equal(closed.retainedCredentials, 0);
   assert.equal(await bounded(childExit), 0);
+  // No successful receipt may race a failed renewal still in flight.
+  await stopHeartbeat();
   phase = "completed";
   const receipt = {
     phase,
@@ -1216,6 +1221,10 @@ try {
   });
   process.exitCode = 1;
 } finally {
+  // Drain renewal before closing its database pool, including failed runs.
+  await stopHeartbeat?.().catch(() => {
+    process.exitCode = 1;
+  });
   if (child && !Object.is(stopped, true)) {
     child.stdin!.end("stop\n");
   }

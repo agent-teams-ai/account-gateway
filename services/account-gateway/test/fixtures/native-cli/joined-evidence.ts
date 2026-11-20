@@ -373,6 +373,10 @@ function startupFailure(command: Pick<CommandFailure, "stderr" | "status">) {
   return { reason: "unclassified" as const };
 }
 
+function boundedCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 1_000_000;
+}
+
 export function joinedFailure(raw: string, command?: Pick<CommandFailure, "stderr" | "status">) {
   const phases = new Set([
     "guard",
@@ -453,6 +457,49 @@ export function joinedFailure(raw: string, command?: Pick<CommandFailure, "stder
     "upstream_failure",
     "internal_error",
   ]);
+  // Published facade effectState; no private messages or references are retained.
+  const effects = new Set([
+    "not_dispatched",
+    "dispatch_started",
+    "response_started",
+    "completed",
+    "effect_unknown",
+    "rejected_before_dispatch",
+  ]);
+  const countKeys = [
+    "dispatches",
+    "exchanges",
+    "refreshes",
+    "quotaGets",
+    "functionCalls",
+    "customCalls",
+    "functionOutputs",
+    "customOutputs",
+    "schemaRequests",
+    "signatureChecks",
+  ] as const;
+  type NativeCounts = Record<(typeof countKeys)[number], number>;
+  type Provider = (typeof joinedProviderProfiles)[number][0];
+  type SDKFailure = {
+    gatewayCode: string;
+    effect: string;
+    diagnosticCode?: string;
+    httpStatus?: number;
+  };
+  const isCounts = (value: unknown): value is NativeCounts => {
+    const counts = record(value);
+    return (
+      counts !== undefined &&
+      Object.keys(counts).length === countKeys.length &&
+      countKeys.every((key) => boundedCount(counts[key]))
+    );
+  };
+  const sdkFailures = new Map<Provider, SDKFailure>();
+  const nativeCounts = new Map<Provider, NativeCounts & { unexpected: number }>();
+  let providerDiagnostics: {
+    sdk?: SDKFailure;
+    nativeCounters?: NativeCounts & { unexpected: number };
+  } = {};
   let details: {
     driverCode?: "assertion_failed" | "qualification_failed";
     failureName?: string;
@@ -466,10 +513,86 @@ export function joinedFailure(raw: string, command?: Pick<CommandFailure, "stder
     }
     try {
       const value = record(JSON.parse(line) as unknown);
+      if (value?.phase === "actual-cli-sdk-error") {
+        const selected = joinedProviderProfiles.find(([, profile]) => profile === value.profileId);
+        if (!selected) {
+          continue;
+        }
+        const [provider] = selected;
+        sdkFailures.delete(provider);
+        if (
+          Object.keys(value).some(
+            (key) =>
+              !["phase", "profileId", "code", "effect", "diagnosticCode", "httpStatus"].includes(
+                key,
+              ),
+          ) ||
+          typeof value.code !== "string" ||
+          !gatewayCodes.has(value.code) ||
+          typeof value.effect !== "string" ||
+          !effects.has(value.effect) ||
+          (value.diagnosticCode !== undefined &&
+            (typeof value.diagnosticCode !== "string" ||
+              !diagnosticCodes.has(value.diagnosticCode))) ||
+          (value.httpStatus !== undefined &&
+            (typeof value.httpStatus !== "number" ||
+              !Number.isInteger(value.httpStatus) ||
+              value.httpStatus < 100 ||
+              value.httpStatus > 599))
+        ) {
+          continue;
+        }
+        sdkFailures.set(provider, {
+          gatewayCode: value.code,
+          effect: value.effect,
+          ...(typeof value.diagnosticCode === "string"
+            ? { diagnosticCode: value.diagnosticCode }
+            : {}),
+          ...(typeof value.httpStatus === "number" ? { httpStatus: value.httpStatus } : {}),
+        });
+        continue;
+      }
+      if (value?.phase === "actual-cli-native-counters") {
+        const selected = joinedProviderProfiles.find(([provider]) => provider === value.provider);
+        if (!selected) {
+          continue;
+        }
+        const [provider] = selected;
+        nativeCounts.delete(provider);
+        const counters = record(value.counters);
+        const providers = [...joinedProviderProfiles.map(([name]) => name), "openrouter"];
+        if (
+          Object.keys(value).some((key) => !["phase", "provider", "counters"].includes(key)) ||
+          !counters ||
+          Object.keys(counters).length !== providers.length + 2 ||
+          !providers.every((name) => isCounts(counters[name])) ||
+          !boundedCount(counters.unexpected) ||
+          !boundedCount(counters.openrouterModelGets)
+        ) {
+          continue;
+        }
+        const counts = counters[provider];
+        if (isCounts(counts)) {
+          nativeCounts.set(provider, { ...counts, unexpected: counters.unexpected });
+        }
+        continue;
+      }
       if (value?.phase !== "failed") {
         continue;
       }
       reported = true;
+      // Attach only events preceding this final failure for its exact provider.
+      const selected = joinedProviderProfiles.find(
+        ([provider]) => value.at === provider + "-native-tool-roundtrip",
+      );
+      const sdk = selected ? sdkFailures.get(selected[0]) : undefined;
+      const counters = selected ? nativeCounts.get(selected[0]) : undefined;
+      providerDiagnostics = {
+        ...(sdk ? { sdk } : {}),
+        ...(counters ? { nativeCounters: counters } : {}),
+      };
+      sdkFailures.clear();
+      nativeCounts.clear();
       // Export only closed driver/SDK classifications, never messages or references.
       details = {};
       if (value.code === "assertion_failed" || value.code === "qualification_failed") {
@@ -523,6 +646,7 @@ export function joinedFailure(raw: string, command?: Pick<CommandFailure, "stder
     code: "joined-driver-failed",
     at,
     ...details,
+    ...providerDiagnostics,
     ...(isNonemptyString(frame) ? { frame } : {}),
     ...(isNonemptyString(failureCode) ? { failureCode } : {}),
     ...(command
