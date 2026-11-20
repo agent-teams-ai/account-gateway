@@ -251,4 +251,5 @@ boundaries:
     dependencyMode: runtime
     roots: [services/account-gateway/test/fixtures/native-cli]
     entrypoints: [services/account-gateway/test/fixtures/native-cli/run.ts, services/account-gateway/test/fixtures/native-cli/race.ts, services/account-gateway/test/fixtures/native-cli/evidence.test.ts, services/account-gateway/test/fixtures/native-cli/build-joined.ts, services/account-gateway/test/fixtures/native-cli/joined.ts, services/account-gateway/test/fixtures/native-cli/joined-evidence.ts, services/account-gateway/test/fixtures/native-cli/joined-evidence.test.ts]
-    allow: {boundaries: [], packages: [], builtins: ['node:child_process', 'node:crypto', 'node:fs', 'node:net', 'node:os', 'node:path', 'node:url', 'node:test', 'node:assert/strict'], runtimeReferences: []}
+    # Host createRequire resolves the frozen tsx compiler before loading the profile.
+    allow: {boundaries: [], packages: [], builtins: ['node:child_process', 'node:crypto', 'node:fs', 'node:module', 'node:net', 'node:os', 'node:path', 'node:url', 'node:test', 'node:assert/strict'], runtimeReferences: []}
