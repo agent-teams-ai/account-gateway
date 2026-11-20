@@ -18,8 +18,8 @@ jobs:
         node: ['26.11.1', '24.21.0']
     env:
       NPM_CONFIG_ENGINE_STRICT: 'true'
-      NATIVE_COMMIT: 79b0e866fa32c98691f8c72018367fce9ebafb7e
-      REVIEW_ROUTER_COMMIT: effa35f0758ba5d939c4e563079b4adb3354265e
+      NATIVE_COMMIT: f2fa862ba6b197529309b780ae5919be6651daeb
+      REVIEW_ROUTER_COMMIT: 604158520d83984e7a53fb3539d41e86efa7cf22
       REVIEW_ACTION_COMMIT: 0454fc0a3af15f94522c7c31cce59c0c62af6567
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
     steps:
@@ -67,6 +67,28 @@ jobs:
           test "$(git -C "$cli_root/native-source" rev-parse HEAD)" = "$NATIVE_COMMIT"
           test -z "$(git -C "$cli_root/native-source" status --porcelain)"
           python3 services/account-gateway/test/fixtures/native-cli/install.py --destination "$cli_root/clients"
+      - name: Extract pinned AppArmor compiler and ABI without changing host packages
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess, urllib.request
+          root = pathlib.Path(os.environ['GATEWAY_CLIENT_ROOT'])
+          tools = root / 'apparmor-tools'
+          tools.mkdir(mode=0o700)
+          pins = json.loads(pathlib.Path('services/account-gateway/test/fixtures/native-cli/apparmor-pins.json').read_text())
+          for package in pins['packages']:
+              assert re.fullmatch(r'[A-Za-z0-9_+.-]+\.deb', package['file'])
+              assert re.fullmatch(r'https://snapshot\.debian\.org/file/[a-f0-9]{40}', package['url'])
+              with urllib.request.urlopen(package['url'], timeout=90) as response:
+                  content = response.read(2 * 1024 * 1024 + 1)
+              assert len(content) <= 2 * 1024 * 1024
+              assert hashlib.sha256(content).hexdigest() == package['sha256']
+              archive = root / 'build' / package['file']
+              archive.write_bytes(content)
+              subprocess.run(['dpkg-deb', '--extract', str(archive), str(tools)], check=True, timeout=30)
+          for relative, digest in pins['files'].items():
+              assert hashlib.sha256((tools / relative).read_bytes()).hexdigest() == digest
+          (tools / 'empty.conf').write_text('')
+          PY
       - name: Install frozen TypeScript dependencies and build the real SDK
         run: |
           test "$(pnpm --version)" = 11.28.2
@@ -78,6 +100,7 @@ jobs:
           ln -s "$GATEWAY_CLIENT_ROOT/sdk-dist" packages/account-gateway/dist
           pnpm --dir services/account-gateway run typecheck
           node --test services/account-gateway/test/fixtures/native-cli/joined-evidence.test.ts
+          node --test services/account-gateway/test/fixtures/native-cli/execution-profile.test.ts
           git diff --exit-code -- pnpm-lock.yaml
       - name: Prepare exact Review Router source, real Action and its pinned Codex CLI
         run: |
@@ -131,6 +154,9 @@ jobs:
           NODE
       - name: Build isolated real-client and PostgreSQL lifecycle test binaries
         run: |
+          CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
+            -o "$GATEWAY_CLIENT_ROOT/build/execution-probe" \
+            "$GITHUB_WORKSPACE/services/account-gateway/test/fixtures/native-cli/execution-probe.go"
           cd "$GATEWAY_CLIENT_ROOT/native-source/backend"
           go test -tags unit,nativecli -c ./internal/gatewaytransport -o "$GATEWAY_CLIENT_ROOT/build/native-cli.test"
           go test -c ./internal/repository -o "$GATEWAY_CLIENT_ROOT/build/native-repository.test"
@@ -158,12 +184,23 @@ jobs:
           import { join } from 'node:path';
           import { goTestEvidence } from './services/account-gateway/test/fixtures/native-cli/evidence.ts';
           const suites = [
-            ['service', '^TestGateway(AccountInfo|QuotaAndInfo|Codex(Info|RetainedInfo|Maintenance)|ClaudeInfo|GrokInfo|OAuthInfo|AccountCapabilities|GeminiContinuation|NativeGemini|NativeOfficial|NativeAnthropicSchema|NativeOAuthImport)', [
+            ['service', '^Test(Gateway(AccountInfo|AccountModelsReadFencesAndRedaction|GLMAccountModelsCatalog|NVIDIAAccountModelsPhysicalRouteAndFences|OpenRouterModelsSourcePolicyAndCache|QuotaAndInfo|Codex(Info|RetainedInfo|Maintenance)|ClaudeInfo|GrokInfo|OAuthInfo|AccountCapabilities|GeminiContinuation|NativeGemini|NativeOfficial|NativeAnthropicSchema|NativeOAuthImport|NVIDIABuildChatUpstreamStatusDiagnostic)|ForwardResponses_(ForceChatCompletionsRoutes|ChatFallback)|ForwardResponsesChatCompletionsFallbackKeepsFunctionArgumentsSingle)', [
               'TestGatewayAccountInfoReaderUsesCurrentSnapshotAndFinalAuthority',
+              'TestGatewayAccountModelsReadFencesAndRedaction',
+              'TestGatewayGLMAccountModelsCatalog',
+              'TestGatewayNVIDIAAccountModelsPhysicalRouteAndFences',
+              'TestGatewayOpenRouterModelsSourcePolicyAndCache',
               'TestGatewayCodexMaintenanceHydratesOnceWithoutProviderHTTP',
               'TestGatewayNativeOfficialAnthropicOriginalSchemaBeforeSuccess',
               'TestGatewayNativeOfficialGeminiActualTLSContinuationAndSchema',
               'TestGatewayNativeOAuthImportStrictEscapedIngressAndSeparateCodec',
+              'TestForwardResponses_ForceChatCompletionsRoutesNonStreamingToChatCompletions',
+              'TestForwardResponses_ForceChatCompletionsRoutesStreamingToChatCompletions',
+              'TestForwardResponses_ChatFallbackRejectsInvalidToolArgumentsAtOutputLimit',
+              'TestForwardResponses_ChatFallbackCachesStreamedReasoning',
+              'TestForwardResponses_ChatFallbackRestoresReasoningFromCache',
+              'TestForwardResponsesChatCompletionsFallbackKeepsFunctionArgumentsSingle',
+              'TestGatewayNVIDIABuildChatUpstreamStatusDiagnostic',
             ]],
             ['bootstrap', '^Test(NativeAccountCapabilities|NativeOfficialAPIConfig|GatewayAccountLimitsAuthorityHTTP)', [
               'TestNativeAccountCapabilitiesExposeImportsOnlyWithComposedCodex',
@@ -220,31 +257,7 @@ jobs:
             --native-commit "$NATIVE_COMMIT" --gateway-commit "$(git rev-parse HEAD)"
       - name: Join real clients and six Review Router providers to TypeScript authority
         run: |
-          docker run --rm --network none --user 0:0 --cpus 2 --memory 4g --pids-limit 256 --ulimit nofile=4096:4096 \
-            --mount "type=bind,source=$GATEWAY_CLIENT_NODE_HOME,target=$GATEWAY_CLIENT_NODE_HOME,readonly" \
-            --mount "type=bind,source=$GATEWAY_CLIENT_GO_HOME,target=$GATEWAY_CLIENT_GO_HOME,readonly" \
-            --mount "type=bind,source=$GITHUB_WORKSPACE,target=$GITHUB_WORKSPACE,readonly" \
-            --mount "type=bind,source=$GATEWAY_CLIENT_ROOT,target=$GATEWAY_CLIENT_ROOT,readonly" \
-            --mount "type=bind,source=$GATEWAY_CLIENT_ROOT/build/joined/native-claude-joined,target=/tmp/native-claude-joined,readonly" \
-            --mount "type=bind,source=$GATEWAY_CLIENT_ROOT/build/joined/native-device-joined,target=/tmp/native-device-joined,readonly" \
-            --mount "type=bind,source=$GATEWAY_CLIENT_ROOT/build/joined/native-provider-joined,target=/tmp/native-provider-joined,readonly" \
-            --env "RR_PROVIDER_JOINED_SOURCE_COMMIT=$REVIEW_ROUTER_COMMIT" \
-            --env "RR_PROVIDER_JOINED_ACTION_REF=$REVIEW_ACTION_COMMIT" \
-            --env RR_PROVIDER_JOINED_CODEX_VERSION=0.133.0 \
-            --env "RR_PROVIDER_JOINED_ACTION_ARCHIVE=$GATEWAY_CLIENT_ROOT/review-router-assets/action.tar" \
-            --env "RR_PROVIDER_JOINED_CODEX_BINARY=$GATEWAY_CLIENT_ROOT/review-router-assets/codex-runtime/bin/codex" \
-            --env "RR_PROVIDER_JOINED_RELAY_ADAPTER=$GATEWAY_CLIENT_ROOT/review-router-source/apps/api/src/review-run-gateway-relay.ts" \
-            --mount "type=bind,source=$GATEWAY_CLIENT_ROOT/artifacts,target=$GATEWAY_CLIENT_ROOT/artifacts" \
-            --entrypoint "$GATEWAY_CLIENT_NODE" gateway-native-clients:qualified \
-            "$GITHUB_WORKSPACE/services/account-gateway/test/fixtures/native-cli/joined.ts" \
-            --repo "$GITHUB_WORKSPACE" --pg-bin /usr/lib/postgresql/17/bin --go "$GATEWAY_CLIENT_GO" \
-            --claude-binary /tmp/native-claude-joined/fixture --codex-binary /tmp/native-device-joined/fixture \
-            --provider-binary /tmp/native-provider-joined/fixture \
-            --provider-preload "$GATEWAY_CLIENT_ROOT/review-router-assets/preload.mjs" \
-            --clients "$GATEWAY_CLIENT_ROOT/clients/clients.json" \
-            --build-receipt "$GATEWAY_CLIENT_ROOT/build/joined/joined-build.json" \
-            --artifacts "$GATEWAY_CLIENT_ROOT/artifacts/joined-clients" \
-            --native-commit "$NATIVE_COMMIT" --gateway-commit "$(git rev-parse HEAD)"
+          node services/account-gateway/test/fixtures/native-cli/run-profile.ts
       - name: Expose bounded synthetic qualification evidence
         if: ${{ always() && env.GATEWAY_CLIENT_ROOT != '' }}
         run: |
@@ -280,6 +293,10 @@ jobs:
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/native-handler-unit.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/joined-clients/result.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/joined-clients/network.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/execution-host.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/execution-preflight.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/execution.apparmor
+            ${{ env.GATEWAY_CLIENT_ROOT }}/build/execution-seccomp.json
           if-no-files-found: warn
           retention-days: 14
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
