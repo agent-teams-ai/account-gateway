@@ -506,7 +506,7 @@ export function joinedFailure(raw: string, command?: Pick<CommandFailure, "stder
       if (
         typeof value.failureCode === "string" &&
         value.failureCode === value.failureCode.trim() &&
-        /^rr_provider_joined_failed_cli_sandbox_preflight_(?:(?:positive_controls|child_spawn|child_timeout|child_output_limit|policy_refused|child_namespace_refused|child_usage_exit|child_panic_exit|child_nonzero_exit|proof|postconditions|cleanup)_)?none$/.test(
+        /^rr_provider_joined_failed_cli_sandbox_preflight_(?:(?:positive_controls|child_spawn|child_timeout|child_output_limit|policy_refused|child_namespace_refused|child_usage_exit|child_panic_exit|child_nonzero_exit|proof(?:_(?:empty|size|json|shape|fields|contract|child_executed|read_succeeded|workspace_write_denied|outside_write_denied|loopback_tcp_denied|no_new_privileges))?|postconditions|cleanup)_)?none$/.test(
           value.failureCode,
         )
       ) {
