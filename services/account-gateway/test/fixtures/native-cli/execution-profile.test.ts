@@ -314,6 +314,7 @@ void test("probe receipt requires every independent denial and exact enforced ph
     profile: profile + " (enforce)",
     pass: true,
     checks: Object.fromEntries(keys.map((key) => [key, true])),
+    procMemory: { pidNumbersMatch: true, readOpen: "eacces", readWriteOpen: "eperm" },
   };
   const expected = { phase: "payload", uid: 0, profile };
   assert.doesNotThrow(() => requireProbe(JSON.stringify(receipt), expected));
@@ -334,6 +335,35 @@ void test("probe receipt requires every independent denial and exact enforced ph
   );
   assert.throws(() => requireProbe(JSON.stringify({ ...receipt, uid: 65534 }), expected));
   assert.throws(() => requireProbe(JSON.stringify({ ...receipt, phase: "outer" }), expected));
+  for (const pidNumbersMatch of [true, false]) {
+    assert.doesNotThrow(() =>
+      requireProbe(
+        JSON.stringify({
+          ...receipt,
+          procMemory: { pidNumbersMatch, readOpen: "eacces", readWriteOpen: "erofs" },
+        }),
+        expected,
+      ),
+    );
+  }
+  // A read-only filesystem cannot substitute for an independent read denial.
+  for (const [readOpen, readWriteOpen] of [
+    ["opened", "eperm"],
+    ["erofs", "erofs"],
+    ["other", "eperm"],
+    ["eacces", "opened"],
+    ["eperm", "other"],
+  ]) {
+    assert.throws(() =>
+      requireProbe(
+        JSON.stringify({
+          ...receipt,
+          procMemory: { pidNumbersMatch: true, readOpen, readWriteOpen },
+        }),
+        expected,
+      ),
+    );
+  }
   assert.throws(() =>
     requireProbe(
       JSON.stringify({ ...receipt, checks: { ...receipt.checks, unexpected: true } }),
@@ -344,6 +374,17 @@ void test("probe receipt requires every independent denial and exact enforced ph
     ["", "empty"],
     ["PRIVATE_DIAGNOSTIC", "json"],
     [JSON.stringify({ ...receipt, profile: "PRIVATE_PROFILE" }), "profile"],
+    [
+      JSON.stringify({
+        ...receipt,
+        procMemory: { ...receipt.procMemory, readOpen: "PRIVATE_ERROR" },
+      }),
+      "proc-memory",
+    ],
+    [
+      JSON.stringify({ ...receipt, procMemory: { ...receipt.procMemory, path: "PRIVATE_PATH" } }),
+      "proc-memory",
+    ],
   ]) {
     assert.throws(
       () => requireProbe(raw, expected),

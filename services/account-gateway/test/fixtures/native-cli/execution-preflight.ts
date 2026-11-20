@@ -32,9 +32,23 @@ interface ProbeReceipt {
   readonly uid: number;
   readonly profile: string;
   readonly checks: Record<string, boolean>;
+  readonly procMemory: {
+    readonly pidNumbersMatch: boolean;
+    readonly readOpen: ProcMemoryOpen;
+    readonly readWriteOpen: ProcMemoryOpen;
+  };
   readonly pass: boolean;
 }
-type ProbeReportField = "empty" | "size" | "json" | "identity" | "profile" | "pass" | "checks";
+type ProcMemoryOpen = "opened" | "eperm" | "eacces" | "erofs" | "other";
+type ProbeReportField =
+  | "empty"
+  | "size"
+  | "json"
+  | "identity"
+  | "profile"
+  | "pass"
+  | "checks"
+  | "proc-memory";
 export class ProbeReportError extends Error {
   readonly field: ProbeReportField;
   constructor(field: ProbeReportField) {
@@ -42,6 +56,17 @@ export class ProbeReportError extends Error {
     this.field = field;
   }
 }
+function procOpenResult(value: unknown): ProcMemoryOpen {
+  assert.ok(
+    value === "opened" ||
+      value === "eperm" ||
+      value === "eacces" ||
+      value === "erofs" ||
+      value === "other",
+  );
+  return value;
+}
+const procPermissionDenied = (value: ProcMemoryOpen) => value === "eperm" || value === "eacces";
 function parseProbe(
   raw: string,
   expected: { phase: string; uid: number; profile: string },
@@ -90,6 +115,21 @@ function parseProbe(
     const checks = object(result.checks);
     assert.deepEqual(Object.keys(checks).toSorted(), keys.toSorted());
     assert.ok(keys.every((key) => typeof checks[key] === "boolean"));
+    field = "proc-memory";
+    const memory = object(result.procMemory);
+    assert.deepEqual(Object.keys(memory).toSorted(), [
+      "pidNumbersMatch",
+      "readOpen",
+      "readWriteOpen",
+    ]);
+    assert.equal(typeof memory.pidNumbersMatch, "boolean");
+    const readOpen = procOpenResult(memory.readOpen);
+    const readWriteOpen = procOpenResult(memory.readWriteOpen);
+    assert.equal(
+      checks.procMemoryDenied,
+      procPermissionDenied(readOpen) &&
+        (procPermissionDenied(readWriteOpen) || readWriteOpen === "erofs"),
+    );
     return {
       kind: "gateway-execution-probe/v1",
       phase: expected.phase,
@@ -97,6 +137,7 @@ function parseProbe(
       profile: expected.profile + " (enforce)",
       pass: result.pass === true,
       checks: Object.fromEntries(keys.map((key) => [key, checks[key] === true])),
+      procMemory: { pidNumbersMatch: memory.pidNumbersMatch === true, readOpen, readWriteOpen },
     };
   } catch {
     throw new ProbeReportError(field);

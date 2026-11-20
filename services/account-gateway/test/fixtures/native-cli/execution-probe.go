@@ -20,6 +20,12 @@ import (
 
 var marker = []byte("gateway-owned-memory-control")
 
+type procMemoryReceipt struct {
+	PIDNumbersMatch bool   `json:"pidNumbersMatch"`
+	ReadOpen        string `json:"readOpen"`
+	ReadWriteOpen   string `json:"readWriteOpen"`
+}
+
 func denied(err error) bool {
 	return err == syscall.EPERM || err == syscall.EACCES
 }
@@ -42,6 +48,30 @@ func value(status, key string) string {
 
 func fatal() { fmt.Fprintln(os.Stderr, "execution-probe-invalid"); os.Exit(1) }
 
+func procMemoryOpen(path string, flags int) string {
+	mem, err := os.OpenFile(path, flags, 0)
+	if mem != nil {
+		_ = mem.Close()
+	}
+	if pathErr, ok := err.(*os.PathError); ok {
+		err = pathErr.Err
+	}
+	switch err {
+	case nil:
+		return "opened"
+	case syscall.EPERM:
+		return "eperm"
+	case syscall.EACCES:
+		return "eacces"
+	case syscall.EROFS:
+		return "erofs"
+	default:
+		return "other"
+	}
+}
+
+func procPermissionDenied(result string) bool { return result == "eperm" || result == "eacces" }
+
 func userNamespaceDenied() bool {
 	// unshare(CLONE_NEWUSER) can fail EINVAL for Go's multi-threaded runtime
 	// before consulting the LSM. A raw fork-like clone has no such prerequisite.
@@ -61,7 +91,17 @@ func userNamespaceDenied() bool {
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "target" {
-		fmt.Printf("%d %d\n", os.Getpid(), uintptr(unsafe.Pointer(&marker[0])))
+		// A retained procfs can use an ancestor PID namespace. Its own self link
+		// identifies this child in that mount without guessing another task's PID.
+		procSelf, err := os.Readlink("/proc/self")
+		if err != nil {
+			fatal()
+		}
+		procPID, err := strconv.Atoi(procSelf)
+		if err != nil || procPID < 1 || strconv.Itoa(procPID) != procSelf {
+			fatal()
+		}
+		fmt.Printf("%d %d %d\n", os.Getpid(), procPID, uintptr(unsafe.Pointer(&marker[0])))
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		runtime.KeepAlive(marker)
 		return
@@ -143,9 +183,9 @@ func main() {
 	if err != nil {
 		fatal()
 	}
-	var pid int
+	var pid, procPID int
 	var address uintptr
-	if n, err := fmt.Sscanf(line, "%d %d", &pid, &address); err != nil || n != 2 || pid != cmd.Process.Pid || address == 0 {
+	if n, err := fmt.Sscanf(line, "%d %d %d", &pid, &procPID, &address); err != nil || n != 3 || len(strings.Fields(line)) != 3 || pid != cmd.Process.Pid || procPID < 1 || address == 0 {
 		fatal()
 	}
 	checks["ownedChildAlive"] = syscall.Kill(pid, 0) == nil
@@ -159,14 +199,12 @@ func main() {
 	checks["processMemoryReadDenied"] = denied(e)
 	_, _, e = syscall.Syscall6(311, uintptr(pid), uintptr(unsafe.Pointer(&localVec)), 1, uintptr(unsafe.Pointer(&remoteVec)), 1, 0)
 	checks["processMemoryWriteDenied"] = denied(e)
-	mem, err := os.OpenFile(fmt.Sprintf("/proc/%d/mem", pid), os.O_RDWR, 0)
-	if mem != nil {
-		_ = mem.Close()
-	}
-	if pathErr, ok := err.(*os.PathError); ok {
-		err = pathErr.Err
-	}
-	checks["procMemoryDenied"] = denied(err)
+	procPath := fmt.Sprintf("/proc/%d/mem", procPID)
+	procMemory := procMemoryReceipt{pid == procPID, procMemoryOpen(procPath, os.O_RDONLY), procMemoryOpen(procPath, os.O_RDWR)}
+	// A read-only mount can refuse O_RDWR before the LSM. It qualifies only
+	// together with an independently denied read-only open of this same child.
+	checks["procMemoryDenied"] = procPermissionDenied(procMemory.ReadOpen) &&
+		(procPermissionDenied(procMemory.ReadWriteOpen) || procMemory.ReadWriteOpen == "erofs")
 	err = syscall.PtraceAttach(pid)
 	checks["ptraceDenied"] = denied(err)
 	if err == nil {
@@ -179,13 +217,14 @@ func main() {
 		pass = pass && check
 	}
 	receipt := struct {
-		Kind    string          `json:"kind"`
-		Phase   string          `json:"phase"`
-		UID     int             `json:"uid"`
-		Profile string          `json:"profile"`
-		Checks  map[string]bool `json:"checks"`
-		Pass    bool            `json:"pass"`
-	}{"gateway-execution-probe/v1", phase, os.Getuid(), label, checks, pass}
+		Kind       string            `json:"kind"`
+		Phase      string            `json:"phase"`
+		UID        int               `json:"uid"`
+		Profile    string            `json:"profile"`
+		Checks     map[string]bool   `json:"checks"`
+		ProcMemory procMemoryReceipt `json:"procMemory"`
+		Pass       bool              `json:"pass"`
+	}{"gateway-execution-probe/v1", phase, os.Getuid(), label, checks, procMemory, pass}
 	if err := json.NewEncoder(os.Stdout).Encode(receipt); err != nil {
 		fatal()
 	}
