@@ -359,7 +359,7 @@ async function main() {
   } catch (error) {
     failure =
       error instanceof CommandFailure
-        ? joinedFailure(error.output)
+        ? joinedFailure(error.output, error)
         : {
             code:
               error instanceof Error && /^joined-[a-z-]+$/.test(error.message)

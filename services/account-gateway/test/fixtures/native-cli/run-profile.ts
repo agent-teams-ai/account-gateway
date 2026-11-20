@@ -3,7 +3,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import {
   anonymousVolumeNames,
@@ -16,6 +17,8 @@ import {
   createAppArmor,
   createSeccomp,
   digest,
+  esbuildRelativePath,
+  esbuildSHA256,
   fileDigest,
   requireContainer,
   safePath,
@@ -92,6 +95,7 @@ let outcome = "fail",
 let image = "",
   profileSHA256 = "",
   seccompSHA256 = "";
+let esbuildVerified = false;
 let kernelCompressedLoad: "yes" | "no" | "absent" | "other" | "unobserved" = "unobserved";
 let compiledPolicy: {
   encoding: "uncompressed" | "unexpected";
@@ -137,6 +141,15 @@ try {
     fileDigest(join(root, "review-router-assets/codex-runtime/codex-resources/bwrap")),
     bwrapSHA256,
   );
+  const tsxPackage = join(root, "review-router-source/node_modules/tsx/package.json");
+  assert.equal(object(JSON.parse(readFileSync(tsxPackage, "utf8")) as unknown).version, "4.23.1");
+  const tsxRequire = createRequire(realpathSync(tsxPackage));
+  const compilerRequire = createRequire(tsxRequire.resolve("esbuild"));
+  const compiler = compilerRequire.resolve("@esbuild/linux-x64/bin/esbuild");
+  assert.equal(realpathSync(compiler), join(root, esbuildRelativePath));
+  assert.equal(fileDigest(compiler), esbuildSHA256);
+  assert.equal(run(compiler, ["--version"], 30000, "esbuild"), "0.28.1");
+  esbuildVerified = true;
   const profile = createAppArmor(name, { root, nodeHome, goHome });
   const seccomp = JSON.stringify(createSeccomp(), null, 2) + "\n";
   writeFileSync(profilePath, profile, { mode: 0o600, flag: "wx" });
@@ -375,6 +388,7 @@ try {
           profileSHA256,
           seccompSHA256,
           parserPinsSHA256: digest(readFileSync(new URL("./apparmor-pins.json", import.meta.url))),
+          esbuild: { version: "0.28.1", sha256: esbuildSHA256, verified: esbuildVerified },
           kernelCompressedLoad,
           compiledPolicy,
           loaded,

@@ -8,6 +8,11 @@ export const defaultSeccompSHA256 =
   "1a4d017730647621403920d9558aa0152adef04dd89ed7720e4abafa24551999";
 export const codexSHA256 = "524396258c974948334eabe6f2c6b1d8e1979dfd048d67d535ad9e4550fa5b26";
 export const bwrapSHA256 = "90604f553d1fc200c6b23f53ef80a58f952e9b50e2716cb590f7e1bfa0f27b27";
+// The frozen RR tsx 4.23.1 loader starts this native compiler. Its exact file
+// inherits the outer restrictions; it is not a namespace-capable helper.
+export const esbuildRelativePath =
+  "review-router-source/node_modules/.pnpm/@esbuild+linux-x64@0.28.1/node_modules/@esbuild/linux-x64/bin/esbuild";
+export const esbuildSHA256 = "0c6588b092a2c291a72bab90659f3c9e0e25e0fe59c9ac12b4dae4d945e5548c";
 export const capabilities = [
   "AUDIT_WRITE",
   "CHOWN",
@@ -119,6 +124,7 @@ ${filesystemRules}`;
     go + "/**",
     root + "/clients/**",
     root + "/build/execution-probe",
+    join(root, esbuildRelativePath),
     cli,
   ];
   assert.ok(!execute.some((value) => helper.startsWith(value.replace(/\*\*$/, ""))));

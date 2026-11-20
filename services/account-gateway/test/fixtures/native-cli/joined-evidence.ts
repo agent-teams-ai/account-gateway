@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import type { CommandFailure } from "./joined-command.ts";
 
 export interface ClientPins {
   clients: { id: string; version: string; binarySHA256: string }[];
@@ -349,7 +350,30 @@ export function joinedProviderReceipt(
   };
 }
 
-export function joinedFailure(raw: string) {
+function startupFailure(command: Pick<CommandFailure, "stderr" | "status">) {
+  if (command.status.timedOut) {
+    return { reason: "timeout" as const };
+  }
+  if (command.status.outputLimit) {
+    return { reason: "output-limit" as const };
+  }
+  // esbuild 0.28.1 lib/main.js createChannel/afterClose preserves the failed
+  // native spawn in this fixed message. Never export the interpolated path.
+  for (const line of command.stderr.split(/\r?\n/)) {
+    if (line.length > 16_384) {
+      continue;
+    }
+    const match = line.match(
+      /^(?:Error|TransformError): The service (?:was stopped|is no longer running): spawn \/[^\r\n]*\/node_modules\/\.pnpm\/@esbuild\+linux-x64@0\.28\.1\/node_modules\/@esbuild\/linux-x64\/bin\/esbuild (EACCES|EPERM|ENOENT|ENOEXEC)$/,
+    );
+    if (match) {
+      return { reason: "esbuild-spawn" as const, errno: match[1] };
+    }
+  }
+  return { reason: "unclassified" as const };
+}
+
+export function joinedFailure(raw: string, command?: Pick<CommandFailure, "stderr" | "status">) {
   const phases = new Set([
     "guard",
     "pinned-client-and-network",
@@ -403,6 +427,7 @@ export function joinedFailure(raw: string) {
   let at = "driver",
     frame: string | undefined,
     failureCode: string | undefined;
+  let reported = false;
   const failureNames = new Set([
     "GatewayError",
     "AssertionError",
@@ -444,6 +469,7 @@ export function joinedFailure(raw: string) {
       if (value?.phase !== "failed") {
         continue;
       }
+      reported = true;
       // Export only closed driver/SDK classifications, never messages or references.
       details = {};
       if (value.code === "assertion_failed" || value.code === "qualification_failed") {
@@ -496,5 +522,16 @@ export function joinedFailure(raw: string) {
     ...details,
     ...(isNonemptyString(frame) ? { frame } : {}),
     ...(isNonemptyString(failureCode) ? { failureCode } : {}),
+    ...(command
+      ? {
+          command: {
+            exitCode: command.status.exitCode,
+            signal: command.status.signal,
+            timedOut: command.status.timedOut,
+            outputLimit: command.status.outputLimit,
+            ...(!reported ? { startup: startupFailure(command) } : {}),
+          },
+        }
+      : {}),
   };
 }

@@ -181,6 +181,9 @@ void test("joined client evidence requires real terminal proofs and discards arb
     await assert.rejects(runChild("overflow"), (error: unknown) => {
       assert.ok(error instanceof CommandFailure);
       assert.equal(error.status.outputLimit, true);
+      assert.deepEqual(joinedFailure(error.output, error).command?.startup, {
+        reason: "output-limit",
+      });
       return true;
     });
   });
@@ -212,8 +215,58 @@ void test("joined client evidence requires real terminal proofs and discards arb
           frame: "native-device-joined.ts:42:9",
         });
         assert.equal(JSON.stringify(sanitized).includes("SECRET"), false);
+        const withStatus = joinedFailure(error.output, error);
+        assert.deepEqual(withStatus.command, error.status);
+        assert.equal(JSON.stringify(withStatus).includes("SECRET"), false);
         return true;
       });
+    },
+  );
+  await t.test(
+    "early compiler spawn failure keeps closed status without any private path",
+    async () => {
+      const compiler =
+        "/PRIVATE_SENTINEL/review-router-source/node_modules/.pnpm/@esbuild+linux-x64@0.28.1/node_modules/@esbuild/linux-x64/bin/esbuild";
+      for (const state of ["was stopped", "is no longer running"]) {
+        for (const errno of ["EACCES", "EPERM", "ENOENT", "ENOEXEC"]) {
+          const stderr = `Error: The service ${state}: spawn ${compiler} ${errno}\n`;
+          await assert.rejects(
+            runChild("failure", "PRIVATE_STDOUT\n", stderr),
+            (error: unknown) => {
+              assert.ok(error instanceof CommandFailure);
+              const safeFailure = joinedFailure(error.output, error);
+              assert.deepEqual(safeFailure, {
+                code: "joined-driver-failed",
+                at: "driver",
+                command: {
+                  exitCode: 1,
+                  signal: null,
+                  timedOut: false,
+                  outputLimit: false,
+                  startup: { reason: "esbuild-spawn", errno },
+                },
+              });
+              assert.equal(JSON.stringify(safeFailure).includes("PRIVATE"), false);
+              return true;
+            },
+          );
+        }
+      }
+      const known = `Error: The service was stopped: spawn ${compiler} EACCES\n`;
+      for (const [stdout, stderr] of [
+        [known, "PRIVATE_STDERR\n"],
+        ["", known.replace("@0.28.1/", "@0.28.2/")],
+        ["", known.replace(" EACCES", " PRIVATE_ERRNO")],
+        ["", known.replace("Error:", "PRIVATE_PREFIX:")],
+      ]) {
+        await assert.rejects(runChild("failure", stdout, stderr), (error: unknown) => {
+          assert.ok(error instanceof CommandFailure);
+          const safeFailure = joinedFailure(error.output, error);
+          assert.deepEqual(safeFailure.command?.startup, { reason: "unclassified" });
+          assert.equal(JSON.stringify(safeFailure).includes("PRIVATE"), false);
+          return true;
+        });
+      }
     },
   );
   await t.test("child timeout still terminates the detached command", async () => {
@@ -221,6 +274,7 @@ void test("joined client evidence requires real terminal proofs and discards arb
       assert.ok(error instanceof CommandFailure);
       assert.equal(error.status.timedOut, true);
       assert.equal(error.status.signal, "SIGKILL");
+      assert.deepEqual(joinedFailure(error.output, error).command?.startup, { reason: "timeout" });
       return true;
     });
   });
