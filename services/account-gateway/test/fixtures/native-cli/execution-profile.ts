@@ -4,7 +4,6 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isAbsolute, join, normalize } from "node:path";
 
-export const dockerSource = "d3298094ac5111e5d67517a252d291d27543e408";
 export const defaultSeccompSHA256 =
   "1a4d017730647621403920d9558aa0152adef04dd89ed7720e4abafa24551999";
 export const codexSHA256 = "524396258c974948334eabe6f2c6b1d8e1979dfd048d67d535ad9e4550fa5b26";
@@ -70,7 +69,8 @@ export function createSeccomp(): object {
 }
 
 // These are the immutable Docker 29.4.2 AppArmor filesystem restrictions.
-// Source: moby/moby@d3298094.../vendor/github.com/moby/profiles/apparmor/template.go.
+// Source: moby/moby@d3298094ac5111e5d67517a252d291d27543e408,
+// vendor/github.com/moby/profiles/apparmor/template.go.
 const filesystemRules = `
   deny /proc/* w,
   deny /proc/{[^1-9],[^1-9][^0-9],[^1-9s][^0-9y][^0-9s],[^1-9][^0-9][^0-9][^0-9/]*}/** w,
