@@ -5,6 +5,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSyn
 import { createConnection, createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { command, CommandFailure } from "./joined-command.ts";
+import { payloadCommandFailure } from "./execution-diagnostics.ts";
 import {
   fileDigest,
   codexSHA256,
@@ -109,41 +110,6 @@ export function requireProbe(
   assert.equal(result.pass, true);
   assert.ok(Object.values(result.checks).every((value) => value));
   return result;
-}
-
-export function payloadCommandFailure(error: unknown) {
-  if (!(error instanceof CommandFailure)) {
-    return { reason: "spawn-or-command" as const };
-  }
-  // Match only fixed diagnostics from the pinned helper/CLI/probe. Never export
-  // stderr, paths, environment, assertion values or arbitrary error messages.
-  const markers = [
-    [
-      "namespace-refused",
-      /^bwrap: (?:Creating new namespace failed|No permissions to create a new namespace)/m,
-    ],
-    [
-      "mount-refused",
-      /^bwrap: (?:Can't mount|Can't bind mount|Can't remount|Can't pivot_root|Can't umount|pivot_root\(\/newroot\)|umount old root)/m,
-    ],
-    [
-      "uid-gid-map",
-      /^bwrap: (?:setting up uid map|setting up gid map|error writing to setgroups)/m,
-    ],
-    ["payload-exec", /^bwrap: execvp /m],
-    ["helper-exec", /failed to exec (?:bundled|system) bubblewrap/],
-    ["helper-unavailable", /bubblewrap is unavailable:/],
-    ["helper-digest", /bundled bubblewrap digest mismatch/],
-    ["sandbox-restrictions", /error applying Linux sandbox restrictions:/],
-    ["command-build", /error building bubblewrap command:/],
-    ["probe-invalid", /^execution-probe-invalid$/m],
-  ] as const;
-  const reason = error.status.timedOut
-    ? "timeout"
-    : error.status.outputLimit
-      ? "output-limit"
-      : (markers.find(([, pattern]) => pattern.test(error.output))?.[0] ?? "unclassified-exit");
-  return { ...error.status, reason };
 }
 
 async function main() {

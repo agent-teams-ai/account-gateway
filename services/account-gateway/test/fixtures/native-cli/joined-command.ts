@@ -9,11 +9,13 @@ interface CommandStatus {
 export class CommandFailure extends Error {
   readonly output: string;
   readonly stdout: string;
+  readonly stderr: string;
   readonly status: CommandStatus;
-  constructor(output: string, stdout: string, status: CommandStatus) {
+  constructor(output: string, stdout: string, stderr: string, status: CommandStatus) {
     super("joined-command-failed");
     this.output = output;
     this.stdout = stdout;
+    this.stderr = stderr;
     this.status = status;
   }
 }
@@ -76,11 +78,15 @@ export async function command(
     .join("");
   const commandFailed = () => expired || overflow;
   if (commandFailed() || result.exitCode !== (options.expected ?? 0)) {
-    throw new CommandFailure(output.map((chunk) => chunk.text).join(""), stdout, {
-      ...result,
-      timedOut: expired,
-      outputLimit: overflow,
-    });
+    throw new CommandFailure(
+      output.map((chunk) => chunk.text).join(""),
+      stdout,
+      output
+        .filter((chunk) => chunk.stream === "stderr")
+        .map((chunk) => chunk.text)
+        .join(""),
+      { ...result, timedOut: expired, outputLimit: overflow },
+    );
   }
   // Successful proof stdout remains a strict protocol. Diagnostics still spend
   // the shared byte budget and remain available only to failed-command sanitization.

@@ -13,7 +13,8 @@ import {
   safeProfileName,
   type ContainerContract,
 } from "./execution-profile.ts";
-import { payloadCommandFailure, ProbeReportError, requireProbe } from "./execution-preflight.ts";
+import { ProbeReportError, requireProbe } from "./execution-preflight.ts";
+import { payloadCommandFailure } from "./execution-diagnostics.ts";
 import { command, CommandFailure } from "./joined-command.ts";
 
 const name = "gateway-joined-0123456789abcdef01234567";
@@ -359,26 +360,104 @@ void test("probe receipt requires every independent denial and exact enforced ph
 
 void test("failed payload keeps stdout separate and exports only closed command diagnostics", async () => {
   const child = fileURLToPath(new URL("./joined-command-fixture.ts", import.meta.url));
-  for (const [stderr, reason] of [
-    ["bwrap: Creating new namespace failed: PRIVATE_ERROR\n", "namespace-refused"],
-    ["bwrap: setting up uid map: PRIVATE_ERROR\n", "uid-gid-map"],
-    ["bwrap: setting up gid map: PRIVATE_ERROR\n", "uid-gid-map"],
-    ["bwrap: error writing to setgroups: PRIVATE_ERROR\n", "uid-gid-map"],
-    ["bwrap: pivot_root(/newroot): PRIVATE_ERROR\n", "mount-refused"],
-    ["bwrap: umount old root: PRIVATE_ERROR\n", "mount-refused"],
-    ["PRIVATE_STDERR\n", "unclassified-exit"],
-  ]) {
+  const cases: Array<[string, string, string | readonly string[] | null, number | null]> = [
+    [
+      "bwrap: Creating new namespace failed: PRIVATE_ERROR\n",
+      "namespace-refused",
+      "bubblewrap.c:3162",
+      null,
+    ],
+    ["bwrap: setting up uid map: PRIVATE_ERROR\n", "uid-gid-map", "bubblewrap.c:1011", null],
+    ["bwrap: setting up gid map: PRIVATE_ERROR\n", "uid-gid-map", "bubblewrap.c:1026", null],
+    [
+      "bwrap: error writing to setgroups: PRIVATE_ERROR\n",
+      "uid-gid-map",
+      "bubblewrap.c:1022",
+      null,
+    ],
+    ["bwrap: pivot_root(/newroot): Permission denied\n", "mount-refused", "bubblewrap.c:3460", 13],
+    ["bwrap: umount old root: Operation not permitted\n", "mount-refused", "bubblewrap.c:3464", 1],
+    [
+      "bwrap: Can't bind mount /PRIVATE_SOURCE on /PRIVATE_DEST: Permission denied\n",
+      "mount-refused",
+      "bubblewrap.c:1129",
+      13,
+    ],
+    ["bwrap: setsid: Operation not permitted\n", "helper-setup", "bubblewrap.c:3565", 1],
+    [
+      "bwrap: prctl(PR_SET_NO_NEW_PRIVS) failed: Invalid argument\n",
+      "helper-setup",
+      "bubblewrap.c:2934",
+      22,
+    ],
+    [
+      "WARNING: proceeding, even though we could not update PATH: PRIVATE_PATH\nRefusing to create helper binaries under temporary dir PRIVATE_PATH\n<3>bwrap: Can't chdir to /PRIVATE_PATH: Permission denied\nbwrap: setsid: Operation not permitted\n",
+      "helper-setup",
+      "bubblewrap.c:3544",
+      13,
+    ],
+    [
+      "WARNING: failed to prepare host proxy routing bridge: PRIVATE_WARNING\nfailed to prepare host proxy routing bridge: PRIVATE_DETAIL (os error 13)\n",
+      "codex-diagnostic",
+      "linux_run_main.rs:220",
+      13,
+    ],
+    [
+      "Error: Failed to read config file /PRIVATE_CONFIG: Permission denied (os error 13)\n",
+      "codex-diagnostic",
+      "config/src/loader/mod.rs:472",
+      13,
+    ],
+    [
+      "Error: Permission denied (os error 13)\nStack backtrace:\n0: PRIVATE_ADDRESS <unknown>\n",
+      "generic-os-error",
+      null,
+      13,
+    ],
+    ["Error: PRIVATE_ERROR (os error 999)\n", "cli-unclassified", null, null],
+    ["Error: PRIVATE_ERROR: Permission denied\n", "cli-unclassified", null, null],
+    [
+      "<4>bwrap: Can't chdir to /PRIVATE_WARNING: Permission denied\nPRIVATE_STDERR\n",
+      "unclassified-exit",
+      null,
+      null,
+    ],
+    [
+      "bwrap: open /proc/PRIVATE_PID/ns failed: Permission denied\n",
+      "helper-setup",
+      ["bubblewrap.c:991", "bubblewrap.c:2840"],
+      13,
+    ],
+    [
+      "bwrap: capset failed: Operation not permitted\n",
+      "helper-setup",
+      ["bubblewrap.c:703", "bubblewrap.c:742"],
+      1,
+    ],
+    ["bubblewrap is unavailable: PRIVATE_DETAILS\n", "helper-unavailable", "launcher.rs:43", null],
+    [
+      "bundled bubblewrap digest mismatch for /PRIVATE_BINARY: expected sha256:PRIVATE_EXPECTED, got sha256:PRIVATE_ACTUAL\n",
+      "helper-digest",
+      "bundled_bwrap.rs:154",
+      null,
+    ],
+    ["PRIVATE_STDERR\n", "unclassified-exit", null, null],
+  ];
+  for (const [stderr, reason, site, errno] of cases) {
     await assert.rejects(
       command(process.execPath, [child, "failure", "PRIVATE_STDOUT\n", stderr], {}),
       (error: unknown) => {
         assert.ok(error instanceof CommandFailure);
         assert.equal(error.stdout, "PRIVATE_STDOUT\n");
+        assert.equal(error.stderr, stderr);
         assert.deepEqual(payloadCommandFailure(error), {
           exitCode: 1,
           signal: null,
           timedOut: false,
           outputLimit: false,
           reason,
+          sites: site === null ? [] : typeof site === "string" ? [site] : site,
+          errno,
         });
         assert.equal(JSON.stringify(payloadCommandFailure(error)).includes("PRIVATE"), false);
         return true;
