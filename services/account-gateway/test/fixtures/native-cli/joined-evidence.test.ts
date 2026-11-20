@@ -178,7 +178,11 @@ void test("joined client evidence requires real terminal proofs and discards arb
     },
   );
   await t.test("combined stdout and stderr still spend the original four MiB bound", async () => {
-    await assert.rejects(runChild("overflow"), CommandFailure);
+    await assert.rejects(runChild("overflow"), (error: unknown) => {
+      assert.ok(error instanceof CommandFailure);
+      assert.equal(error.status.outputLimit, true);
+      return true;
+    });
   });
   await t.test(
     "real child failure keeps bounded stderr in the existing private sanitizer",
@@ -194,6 +198,13 @@ void test("joined client evidence requires real terminal proofs and discards arb
         assert.ok(error instanceof CommandFailure);
         assert.equal(error.output.includes("SECRET_STDERR"), true);
         assert.equal(error.output.includes("SECRET_STDOUT"), true);
+        assert.equal(error.stdout, raw);
+        assert.deepEqual(error.status, {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          outputLimit: false,
+        });
         const sanitized = joinedFailure(error.output);
         assert.deepEqual(sanitized, {
           code: "joined-driver-failed",
@@ -206,7 +217,12 @@ void test("joined client evidence requires real terminal proofs and discards arb
     },
   );
   await t.test("child timeout still terminates the detached command", async () => {
-    await assert.rejects(runChild("wait", "", "", 100), CommandFailure);
+    await assert.rejects(runChild("wait", "", "", 100), (error: unknown) => {
+      assert.ok(error instanceof CommandFailure);
+      assert.equal(error.status.timedOut, true);
+      assert.equal(error.status.signal, "SIGKILL");
+      return true;
+    });
   });
 });
 

@@ -33,53 +33,73 @@ interface ProbeReceipt {
   readonly checks: Record<string, boolean>;
   readonly pass: boolean;
 }
+type ProbeReportField = "empty" | "size" | "json" | "identity" | "profile" | "pass" | "checks";
+export class ProbeReportError extends Error {
+  readonly field: ProbeReportField;
+  constructor(field: ProbeReportField) {
+    super("execution-probe-report:" + field);
+    this.field = field;
+  }
+}
 function parseProbe(
   raw: string,
   expected: { phase: string; uid: number; profile: string },
 ): ProbeReceipt {
-  assert.ok(Buffer.byteLength(raw) <= 8192);
-  const result = object(JSON.parse(raw) as unknown);
-  assert.equal(result.kind, "gateway-execution-probe/v1");
-  assert.equal(result.phase, expected.phase);
-  assert.equal(result.uid, expected.uid);
-  assert.equal(result.profile, expected.profile + " (enforce)");
-  assert.equal(typeof result.pass, "boolean");
-  const keys = [
-    "enforcedProfile",
-    "seccompFilter",
-    "noInitialSysAdmin",
-    "canaryRead",
-    "userNamespaceDenied",
-    "mountDenied",
-    "immutableWriteDenied",
-    "immutableModeDenied",
-    "ownedChildAlive",
-    "processMemoryReadDenied",
-    "processMemoryWriteDenied",
-    "procMemoryDenied",
-    "ptraceDenied",
-  ];
-  if (expected.phase === "payload") {
-    keys.push(
-      "noNewPrivileges",
-      "workspaceWriteDenied",
-      "workspaceModeDenied",
-      "outsideWriteDenied",
-      "outsideModeDenied",
-      "loopbackDenied",
-    );
+  let field: ProbeReportField = "empty";
+  try {
+    assert.ok(raw.trim().length > 0);
+    field = "size";
+    assert.ok(Buffer.byteLength(raw) <= 8192);
+    field = "json";
+    const result = object(JSON.parse(raw) as unknown);
+    field = "identity";
+    assert.equal(result.kind, "gateway-execution-probe/v1");
+    assert.equal(result.phase, expected.phase);
+    assert.equal(result.uid, expected.uid);
+    field = "profile";
+    assert.equal(result.profile, expected.profile + " (enforce)");
+    field = "pass";
+    assert.equal(typeof result.pass, "boolean");
+    const keys = [
+      "enforcedProfile",
+      "seccompFilter",
+      "noInitialSysAdmin",
+      "canaryRead",
+      "userNamespaceDenied",
+      "mountDenied",
+      "immutableWriteDenied",
+      "immutableModeDenied",
+      "ownedChildAlive",
+      "processMemoryReadDenied",
+      "processMemoryWriteDenied",
+      "procMemoryDenied",
+      "ptraceDenied",
+    ];
+    if (expected.phase === "payload") {
+      keys.push(
+        "noNewPrivileges",
+        "workspaceWriteDenied",
+        "workspaceModeDenied",
+        "outsideWriteDenied",
+        "outsideModeDenied",
+        "loopbackDenied",
+      );
+    }
+    field = "checks";
+    const checks = object(result.checks);
+    assert.deepEqual(Object.keys(checks).toSorted(), keys.toSorted());
+    assert.ok(keys.every((key) => typeof checks[key] === "boolean"));
+    return {
+      kind: "gateway-execution-probe/v1",
+      phase: expected.phase,
+      uid: expected.uid,
+      profile: expected.profile + " (enforce)",
+      pass: result.pass === true,
+      checks: Object.fromEntries(keys.map((key) => [key, checks[key] === true])),
+    };
+  } catch {
+    throw new ProbeReportError(field);
   }
-  const checks = object(result.checks);
-  assert.deepEqual(Object.keys(checks).toSorted(), keys.toSorted());
-  assert.ok(keys.every((key) => typeof checks[key] === "boolean"));
-  return {
-    kind: "gateway-execution-probe/v1",
-    phase: expected.phase,
-    uid: expected.uid,
-    profile: expected.profile + " (enforce)",
-    pass: result.pass === true,
-    checks: Object.fromEntries(keys.map((key) => [key, checks[key] === true])),
-  };
 }
 export function requireProbe(
   raw: string,
@@ -89,6 +109,41 @@ export function requireProbe(
   assert.equal(result.pass, true);
   assert.ok(Object.values(result.checks).every((value) => value));
   return result;
+}
+
+export function payloadCommandFailure(error: unknown) {
+  if (!(error instanceof CommandFailure)) {
+    return { reason: "spawn-or-command" as const };
+  }
+  // Match only fixed diagnostics from the pinned helper/CLI/probe. Never export
+  // stderr, paths, environment, assertion values or arbitrary error messages.
+  const markers = [
+    [
+      "namespace-refused",
+      /^bwrap: (?:Creating new namespace failed|No permissions to create a new namespace)/m,
+    ],
+    [
+      "mount-refused",
+      /^bwrap: (?:Can't mount|Can't bind mount|Can't remount|Can't pivot_root|Can't umount|pivot_root\(\/newroot\)|umount old root)/m,
+    ],
+    [
+      "uid-gid-map",
+      /^bwrap: (?:setting up uid map|setting up gid map|error writing to setgroups)/m,
+    ],
+    ["payload-exec", /^bwrap: execvp /m],
+    ["helper-exec", /failed to exec (?:bundled|system) bubblewrap/],
+    ["helper-unavailable", /bubblewrap is unavailable:/],
+    ["helper-digest", /bundled bubblewrap digest mismatch/],
+    ["sandbox-restrictions", /error applying Linux sandbox restrictions:/],
+    ["command-build", /error building bubblewrap command:/],
+    ["probe-invalid", /^execution-probe-invalid$/m],
+  ] as const;
+  const reason = error.status.timedOut
+    ? "timeout"
+    : error.status.outputLimit
+      ? "output-limit"
+      : (markers.find(([, pattern]) => pattern.test(error.output))?.[0] ?? "unclassified-exit");
+  return { ...error.status, reason };
 }
 
 async function main() {
@@ -127,11 +182,15 @@ async function main() {
     LC_ALL: "C",
   };
   const receipts: ProbeReceipt[] = [];
+  let probeFailure: { phase: string; uid: number; field: ProbeReportField } | undefined;
+  let commandFailure: ReturnType<typeof payloadCommandFailure> | undefined;
   const capture = (raw: string, expected: { phase: string; uid: number; profile: string }) => {
     try {
       receipts.push(parseProbe(raw, expected));
-    } catch {
-      /* Never retain unstructured child output. */
+    } catch (error) {
+      if (error instanceof ProbeReportError) {
+        probeFailure = { phase: expected.phase, uid: expected.uid, field: error.field };
+      }
     }
   };
   const sockets = new Set<Socket>();
@@ -156,7 +215,7 @@ async function main() {
       assert.equal(run.status, 0);
       requireProbe(run.stdout, { phase: "outer", uid, profile: name });
     }
-    stage = "payload";
+    stage = "payload-control";
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(0, "127.0.0.1", resolve);
@@ -176,6 +235,7 @@ async function main() {
       });
     });
     const profile = name + "-bwrap//&" + name + "-payload";
+    stage = "payload-command";
     let stdout: string;
     try {
       stdout = await command(
@@ -200,13 +260,16 @@ async function main() {
         { cwd: workspace, timeout: 15000 },
       );
     } catch (error) {
+      commandFailure = payloadCommandFailure(error);
       if (error instanceof CommandFailure) {
-        capture(error.output, { phase: "payload", uid: 0, profile });
+        capture(error.stdout, { phase: "payload", uid: 0, profile });
       }
       throw error;
     }
+    stage = "payload-proof";
     capture(stdout, { phase: "payload", uid: 0, profile });
     requireProbe(stdout, { phase: "payload", uid: 0, profile });
+    stage = "payload-postconditions";
     for (const path of [workspace, outside]) {
       assert.equal(readFileSync(join(path, "mutable-control"), "utf8"), "parent-write-control\n");
       assert.equal(statSync(join(path, "mutable-control")).mode & 0o777, 0o644);
@@ -246,6 +309,8 @@ async function main() {
           codexSHA256,
           bwrapSHA256,
           receipts,
+          probeFailure,
+          commandFailure,
         },
         null,
         2,

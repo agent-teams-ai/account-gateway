@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   ContainerInspectionError,
   createAppArmor,
@@ -12,7 +13,8 @@ import {
   safeProfileName,
   type ContainerContract,
 } from "./execution-profile.ts";
-import { requireProbe } from "./execution-preflight.ts";
+import { payloadCommandFailure, ProbeReportError, requireProbe } from "./execution-preflight.ts";
+import { command, CommandFailure } from "./joined-command.ts";
 
 const name = "gateway-joined-0123456789abcdef01234567";
 const profilePaths = {
@@ -337,4 +339,53 @@ void test("probe receipt requires every independent denial and exact enforced ph
       expected,
     ),
   );
+  for (const [raw, field] of [
+    ["", "empty"],
+    ["PRIVATE_DIAGNOSTIC", "json"],
+    [JSON.stringify({ ...receipt, profile: "PRIVATE_PROFILE" }), "profile"],
+  ]) {
+    assert.throws(
+      () => requireProbe(raw, expected),
+      (error: unknown) => {
+        assert.ok(error instanceof ProbeReportError);
+        assert.equal(error.field, field);
+        assert.equal(error.message, "execution-probe-report:" + field);
+        assert.equal(JSON.stringify(error).includes("PRIVATE"), false);
+        return true;
+      },
+    );
+  }
+});
+
+void test("failed payload keeps stdout separate and exports only closed command diagnostics", async () => {
+  const child = fileURLToPath(new URL("./joined-command-fixture.ts", import.meta.url));
+  for (const [stderr, reason] of [
+    ["bwrap: Creating new namespace failed: PRIVATE_ERROR\n", "namespace-refused"],
+    ["bwrap: setting up uid map: PRIVATE_ERROR\n", "uid-gid-map"],
+    ["bwrap: setting up gid map: PRIVATE_ERROR\n", "uid-gid-map"],
+    ["bwrap: error writing to setgroups: PRIVATE_ERROR\n", "uid-gid-map"],
+    ["bwrap: pivot_root(/newroot): PRIVATE_ERROR\n", "mount-refused"],
+    ["bwrap: umount old root: PRIVATE_ERROR\n", "mount-refused"],
+    ["PRIVATE_STDERR\n", "unclassified-exit"],
+  ]) {
+    await assert.rejects(
+      command(process.execPath, [child, "failure", "PRIVATE_STDOUT\n", stderr], {}),
+      (error: unknown) => {
+        assert.ok(error instanceof CommandFailure);
+        assert.equal(error.stdout, "PRIVATE_STDOUT\n");
+        assert.deepEqual(payloadCommandFailure(error), {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          outputLimit: false,
+          reason,
+        });
+        assert.equal(JSON.stringify(payloadCommandFailure(error)).includes("PRIVATE"), false);
+        return true;
+      },
+    );
+  }
+  assert.deepEqual(payloadCommandFailure(new Error("PRIVATE_SPAWN_ERROR")), {
+    reason: "spawn-or-command",
+  });
 });
