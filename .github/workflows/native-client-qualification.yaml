@@ -62,7 +62,7 @@ jobs:
           printf '#!/bin/sh\nexec "%s" "%s" pnpm "$@"\n' "$(command -v node)" "$GATEWAY_CLIENT_COREPACK" > "$cli_root/shim/pnpm"
           chmod 755 "$cli_root/shim/pnpm"
           echo "$cli_root/shim" >> "$GITHUB_PATH"
-          git clone --no-checkout https://github.com/agent-teams-ai/sub2api.git "$cli_root/native-source"
+          git clone --no-checkout https://github.com/agent-teams-ai/sub2api-standalone.git "$cli_root/native-source"
           git -C "$cli_root/native-source" checkout --detach "$NATIVE_COMMIT"
           test "$(git -C "$cli_root/native-source" rev-parse HEAD)" = "$NATIVE_COMMIT"
           test -z "$(git -C "$cli_root/native-source" status --porcelain)"

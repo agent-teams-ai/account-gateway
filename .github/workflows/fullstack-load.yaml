@@ -123,7 +123,7 @@ jobs:
             '
       - name: Build the exact production native CLI and production migration adapter
         run: |
-          git clone --no-checkout https://github.com/agent-teams-ai/sub2api.git "$GATEWAY_LOAD_ROOT/native-source"
+          git clone --no-checkout https://github.com/agent-teams-ai/sub2api-standalone.git "$GATEWAY_LOAD_ROOT/native-source"
           git -C "$GATEWAY_LOAD_ROOT/native-source" checkout --detach "$NATIVE_COMMIT"
           node services/account-gateway/test/load/build-native-fixture.ts --native-source "$GATEWAY_LOAD_ROOT/native-source" --output "$GATEWAY_LOAD_ROOT/native-build"
       - name: Run real E2E in a disposable container with no external network
