@@ -78,13 +78,18 @@ export interface OAuthDeviceAuthorization {
 export interface OAuthEnrollmentNative {
   begin(scope: OAuthScope, method?: OAuthMethod): Promise<OAuthBeginReadback>;
   read(scope: OAuthScope): Promise<OAuthReadback>;
-  complete(scope: OAuthScope, callback: OAuthCallback): Promise<OAuthReadback>;
+  complete(
+    scope: OAuthScope,
+    callback: OAuthCallback,
+    signal?: AbortSignal,
+  ): Promise<OAuthReadback>;
   poll(scope: OAuthScope): Promise<OAuthReadback>;
 }
 export interface ConnectionEnrollmentNative extends OAuthEnrollmentNative {
   beginConnection(
     scope: OAuthScope,
     inputFields?: Readonly<Record<string, string>>,
+    signal?: AbortSignal,
   ): Promise<OAuthBeginReadback>;
 }
 export interface NativeConnectionAdapter

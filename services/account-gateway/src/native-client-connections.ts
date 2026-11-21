@@ -205,6 +205,21 @@ export class NativeConnectionCapabilitiesClient extends NativeControlHTTP {
 
 /** One generic control adapter. Provider-specific exchange and signing stay native. */
 export class NativeConnectionClient extends NativeControlHTTP implements NativeConnectionAdapter {
+  constructor(options: NativeManagementOptions) {
+    super({ ...options, deadlineMs: options.deadlineMs ?? 100_000 }, 100_000);
+  }
+  // Native owns a bounded 90s completion (including SSO polling). Only the
+  // sensitive begin/submit calls request that budget; reads and maintenance
+  // retain their short deadline, and an explicit shorter caller bound wins.
+  protected override call(
+    method: "POST" | "GET" | "PUT",
+    path: string,
+    value?: unknown,
+    deadlineMs = 5000,
+    signal?: AbortSignal,
+  ): Promise<Buffer> {
+    return super.call(method, path, value, deadlineMs, signal);
+  }
   private capture(input: OAuthScope): OAuthScope & { connection: c.ConnectionBinding } {
     const scope = {
       consumerId: input.consumerId,
@@ -304,11 +319,18 @@ export class NativeConnectionClient extends NativeControlHTTP implements NativeC
   async beginConnection(
     input: OAuthScope,
     inputFields?: Readonly<Record<string, string>>,
+    signal?: AbortSignal,
   ): Promise<OAuthBeginReadback> {
     const scope = this.capture(input),
       fields = secretSubmission.connectionInputFields.parse(inputFields ?? {});
     return this.ack(
-      await this.call("POST", prefix + "begin", { ...this.wire(scope), input_fields: fields }),
+      await this.call(
+        "POST",
+        prefix + "begin",
+        { ...this.wire(scope), input_fields: fields },
+        100_000,
+        signal,
+      ),
       scope,
       true,
     );
@@ -320,7 +342,11 @@ export class NativeConnectionClient extends NativeControlHTTP implements NativeC
     const scope = this.capture(input);
     return this.ack(await this.call("POST", prefix + "read", this.wire(scope)), scope, false);
   }
-  async complete(input: OAuthScope, callback: OAuthCallback): Promise<OAuthReadback> {
+  async complete(
+    input: OAuthScope,
+    callback: OAuthCallback,
+    signal?: AbortSignal,
+  ): Promise<OAuthReadback> {
     const scope = this.capture(input);
     if (!("authorizationCode" in callback)) {
       throw new NativeFailure("denied");
@@ -329,7 +355,13 @@ export class NativeConnectionClient extends NativeControlHTTP implements NativeC
       completion: callback.authorizationCode,
     });
     return this.ack(
-      await this.call("POST", prefix + "submit", { ...this.wire(scope), input_fields: fields }),
+      await this.call(
+        "POST",
+        prefix + "submit",
+        { ...this.wire(scope), input_fields: fields },
+        100_000,
+        signal,
+      ),
       scope,
       false,
     );

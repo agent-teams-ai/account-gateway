@@ -4,7 +4,12 @@ import { createServer } from "node:http";
 import type { Server, ServerResponse } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
-import { NativeAccountInfoClient, NativeOAuthEnrollmentClient } from "../src/native-client.ts";
+import {
+  NativeAccountInfoClient,
+  NativeOAuthEnrollmentClient,
+  NativeConnectionClient,
+  NativeFailure,
+} from "../src/native-client.ts";
 import type { OAuthScope } from "../src/management.ts";
 import { config, jsonBody, post } from "../src/native-wire.ts";
 import {
@@ -87,6 +92,9 @@ async function wire(
     hop.abort();
   }
 }
+
+const nativeDeadline = (error: unknown) =>
+  error instanceof NativeFailure && error.code === "deadline";
 
 void test(
   "one shared queue bounds actual management and transport HTTP through response body closure",
@@ -519,3 +527,124 @@ void test("preclaim callback saturation leaves accepted dispatch, closure and se
     await Promise.all([preclaim.stop(), critical.stop(), settlement.stop()]);
   }
 });
+
+void test(
+  "native connection entry may outlive a short read; explicit deadlines and abort never replay",
+  { timeout: 15_000 },
+  async () => {
+    class ObservedAdmission extends NativeControlAdmission {
+      readonly budgets: number[] = [];
+      override acquire(deadline: number, signal?: AbortSignal): Promise<() => void> {
+        this.budgets.push(deadline - Date.now());
+        return super.acquire(deadline, signal);
+      }
+    }
+    const admission = new ObservedAdmission(),
+      entered = Promise.withResolvers<void>(),
+      timers = new Set<ReturnType<typeof setTimeout>>();
+    const paths: string[] = [];
+    let failure: unknown;
+    const peer = createServer((req, res) => {
+      void (async () => {
+        const chunks: Buffer[] = [];
+        for await (const raw of req) {
+          chunks.push(raw as Buffer);
+        }
+        const scope = JSON.parse(Buffer.concat(chunks).toString()) as {
+          operation: string;
+          account_ref: string;
+          connection: OAuthScope["connection"];
+        };
+        paths.push(req.url ?? "");
+        if (scope.operation === "cancel-connection") {
+          entered.resolve();
+          return;
+        }
+        const timer = setTimeout(() => {
+          timers.delete(timer);
+          if (!res.destroyed) {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(
+              JSON.stringify({
+                operation: scope.operation,
+                account_ref: scope.account_ref,
+                connection: scope.connection,
+                state: req.url?.endsWith("/submit") === true ? "completed" : "prepared",
+              }),
+            );
+          }
+        }, 5200);
+        timers.add(timer);
+      })().catch((error: unknown) => {
+        failure = error;
+        res.destroy();
+      });
+    });
+    const origin = await listen(peer),
+      options = {
+        origin,
+        consumerId: "connection-budget",
+        controlCredential: "fixture-management",
+        admission,
+      },
+      client = new NativeConnectionClient(options),
+      scope: OAuthScope = {
+        consumerId: options.consumerId,
+        operationId: "bounded-connection",
+        accountRef: randomUUID(),
+        ownerRef: "fixture-owner",
+        generation: randomUUID(),
+        connection: {
+          profileId: "fixture-profile",
+          methodId: "fixture-method",
+          methodRevision: 1,
+          configurationGeneration: "fixture-configuration",
+        },
+      };
+    try {
+      const [begin, complete] = await Promise.all([
+        client.beginConnection(scope, { credential: "write-only-fixture" }),
+        client.complete(scope, { authorizationCode: "write-only-completion" }),
+        assert.rejects(client.read(scope), nativeDeadline),
+      ]);
+      assert.equal(begin.state, "prepared");
+      assert.equal(complete.state, "completed");
+      assert.deepEqual(paths, [
+        "/private/native/v2/connections/begin",
+        "/private/native/v2/connections/submit",
+        "/private/native/v2/connections/read",
+      ]);
+      assert.ok(admission.budgets[0] > 95_000 && admission.budgets[0] <= 100_000);
+      assert.ok(admission.budgets[1] > 95_000 && admission.budgets[1] <= 100_000);
+      assert.ok(admission.budgets[2] > 0 && admission.budgets[2] <= 5000);
+      const short = new NativeConnectionClient({ ...options, deadlineMs: 200 });
+      await assert.rejects(
+        short.beginConnection(scope, { credential: "short-bound" }),
+        nativeDeadline,
+      );
+      assert.equal(paths.length, 4);
+      const cancelled = new AbortController();
+      const result = assert.rejects(
+        client.beginConnection(
+          { ...scope, operationId: "cancel-connection" },
+          {},
+          cancelled.signal,
+        ),
+        nativeDeadline,
+      );
+      await entered.promise;
+      cancelled.abort();
+      await result;
+      assert.equal(paths.length, 5);
+      await assert.rejects(client.beginConnection(scope, {}, cancelled.signal), nativeDeadline);
+      assert.equal(paths.length, 5, "pre-aborted enrollment never sends HTTP");
+      assert.ifError(failure);
+    } finally {
+      for (const timer of timers) {
+        clearTimeout(timer);
+      }
+      await stop(peer);
+      await admission.stop();
+    }
+  },
+);

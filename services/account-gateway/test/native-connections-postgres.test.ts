@@ -247,11 +247,19 @@ async function fixture() {
   };
   const token = "fixture-public-management",
     intentHmacKey = randomBytes(32);
-  const intents = new Map<string, { scope: Scope; state: "prepared" | "completed"; id: number }>();
+  const intents = new Map<
+    string,
+    { scope: Scope; state: "prepared" | "entered" | "completed"; id: number }
+  >();
+  const heldSubmit = {
+    entered: Promise.withResolvers<void>(),
+    closed: Promise.withResolvers<void>(),
+  };
   const counts = { begin: 0, submit: 0, poll: 0, refresh: 0, erase: 0 };
   const erased = new Set<string>();
   let withdrawn = false,
     dropSubmit = false,
+    holdSubmit = false,
     dropErase = false,
     callbackOrigin = "",
     fault: unknown;
@@ -394,6 +402,14 @@ async function fixture() {
           counts.submit++;
         } else {
           counts.poll++;
+        }
+        if (holdSubmit && action === "submit") {
+          intent.state = "entered";
+          res.once("close", () => {
+            heldSubmit.closed.resolve();
+          });
+          heldSubmit.entered.resolve();
+          return;
         }
         intent.state = "completed";
         if (dropSubmit && action === "submit") {
@@ -580,6 +596,10 @@ async function fixture() {
     },
     dropCompletionACK() {
       dropSubmit = true;
+    },
+    holdCompletion() {
+      holdSubmit = true;
+      return { entered: heldSubmit.entered.promise, closed: heldSubmit.closed.promise };
     },
     dropErasureACK() {
       dropErase = true;
@@ -851,3 +871,56 @@ void test("reconnect preserves historical attestation and deletion recovers a lo
     await f.stop();
   }
 });
+
+void test(
+  "caller disconnect cancels the sole native submission and keeps durable uncertainty",
+  { timeout: 10_000 },
+  async () => {
+    const f = await fixture();
+    const controller = new AbortController();
+    try {
+      const operationId = randomUUID();
+      const begun = await f.client.beginConnection({
+        operationId,
+        ownerRef,
+        displayName: "Cancelled native completion",
+        connection: binding("native_browser"),
+      });
+      assert.equal(begun.challenge?.kind, "browser");
+      const held = f.holdCompletion();
+      const pending = assert.rejects(
+        f.client.submitConnection(
+          {
+            operationId,
+            ownerRef,
+            inputFields: { completion: "write-only-cancelled-native-callback" },
+          },
+          { signal: controller.signal },
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof GatewayError);
+          assert.equal(error.code, "cancelled");
+          assert.equal(error.effect, "effect_unknown");
+          assert.equal(error.operationRef, operationId);
+          return true;
+        },
+      );
+      await held.entered;
+      controller.abort();
+      await pending;
+      await held.closed;
+      assert.equal((await f.client.readConnection(operationId)).operation.state, "unknown");
+      const duplicate = await f.client.submitConnection({
+        operationId,
+        ownerRef,
+        inputFields: { completion: "write-only-cancelled-native-callback" },
+      });
+      assert.equal(duplicate.operation.state, "unknown");
+      assert.equal(f.counts.begin, 1);
+      assert.equal(f.counts.submit, 1, "a lost completion ACK never starts a new native attempt");
+    } finally {
+      controller.abort();
+      await f.stop();
+    }
+  },
+);

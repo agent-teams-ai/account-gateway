@@ -652,10 +652,25 @@ export function createFacade(options: FacadeOptions): Server {
         return settled;
       };
       const controller = new AbortController();
-      const ingressTimer = setTimeout(() => {
+      const ingressStarted = Date.now();
+      const abortIngress = () => {
         controller.abort();
         res.destroy();
-      }, timeoutMs);
+      };
+      let ingressTimer = setTimeout(abortIngress, timeoutMs);
+      // Extend only after an authenticated native connection operation was
+      // selected. Explicit deployment bounds still apply; ordinary requests
+      // retain the short default and disconnect still cancels the sole hop.
+      const connectionSignal = (): AbortSignal => {
+        if (options.timeoutMs === undefined && !controller.signal.aborted) {
+          const remaining = Math.max(1, 110_000 - (Date.now() - ingressStarted));
+          clearTimeout(ingressTimer);
+          ingressTimer = setTimeout(abortIngress, remaining);
+          req.setTimeout(remaining);
+          res.setTimeout(remaining);
+        }
+        return controller.signal;
+      };
       const disconnected = () => {
         if (!res.writableFinished) {
           controller.abort();
@@ -1841,13 +1856,17 @@ export function createFacade(options: FacadeOptions): Server {
               identity = { operationRef: input.operationId };
               requireCurrent(grant);
               uncertain = true;
-              result = await management.reconnectConnection(context, {
-                operationId: input.operationId,
-                accountRef,
-                expectedRevision: input.expectedMetadataRevision,
-                snapshot,
-                inputFields: input.inputFields,
-              });
+              result = await management.reconnectConnection(
+                context,
+                {
+                  operationId: input.operationId,
+                  accountRef,
+                  expectedRevision: input.expectedMetadataRevision,
+                  snapshot,
+                  inputFields: input.inputFields,
+                },
+                connectionSignal(),
+              );
             } else {
               const input = parse(secretSubmission.connectionBegin, raw);
               if (!permitsOwner(grant, input.ownerRef)) {
@@ -1857,13 +1876,17 @@ export function createFacade(options: FacadeOptions): Server {
               identity = { operationRef: input.operationId };
               requireCurrent(grant);
               uncertain = true;
-              result = await management.beginConnection(context, {
-                operationId: input.operationId,
-                ownerRef: input.ownerRef,
-                displayName: input.displayName,
-                snapshot,
-                inputFields: input.inputFields,
-              });
+              result = await management.beginConnection(
+                context,
+                {
+                  operationId: input.operationId,
+                  ownerRef: input.ownerRef,
+                  displayName: input.displayName,
+                  snapshot,
+                  inputFields: input.inputFields,
+                },
+                connectionSignal(),
+              );
             }
             const connectionReply = await connectionResult(result.operation);
             reply(
@@ -1915,11 +1938,15 @@ export function createFacade(options: FacadeOptions): Server {
               ) {
                 throw new KernelError("invalid");
               }
-              operation = await management.completeOAuth(context, {
-                operationId: input.operationId,
-                ownerRef: input.ownerRef,
-                authorizationCode: fields.completion,
-              });
+              operation = await management.completeOAuth(
+                context,
+                {
+                  operationId: input.operationId,
+                  ownerRef: input.ownerRef,
+                  authorizationCode: fields.completion,
+                },
+                connectionSignal(),
+              );
             } else {
               if (original.connection.method.interaction.kind !== "device") {
                 throw new KernelError("denied");
@@ -2243,13 +2270,17 @@ export function createFacade(options: FacadeOptions): Server {
               requireCurrent(grant);
               uncertain = true;
               await replyOAuthBegin(
-                await management.beginConnection(context, {
-                  operationId: input.operationId,
-                  ownerRef: input.ownerRef,
-                  displayName: input.displayName,
-                  snapshot: selection.snapshot,
-                  legacyConnectionKind: selection.legacyConnectionKind,
-                }),
+                await management.beginConnection(
+                  context,
+                  {
+                    operationId: input.operationId,
+                    ownerRef: input.ownerRef,
+                    displayName: input.displayName,
+                    snapshot: selection.snapshot,
+                    legacyConnectionKind: selection.legacyConnectionKind,
+                  },
+                  connectionSignal(),
+                ),
               );
               return;
             }
@@ -2383,11 +2414,15 @@ export function createFacade(options: FacadeOptions): Server {
             }
             requireCurrent(grant);
             uncertain = true;
-            const operation = await management.completeOAuth(context, {
-              operationId: input.operationId,
-              ownerRef: input.ownerRef,
-              ...oauthCallback,
-            });
+            const operation = await management.completeOAuth(
+              context,
+              {
+                operationId: input.operationId,
+                ownerRef: input.ownerRef,
+                ...oauthCallback,
+              },
+              original.connection ? connectionSignal() : controller.signal,
+            );
             const dto = await operationDTO(context, operation);
             requireCurrent(grant);
             reply(c.accountOperation, dto, operation.state === "pending" ? 202 : 200);
@@ -2418,14 +2453,18 @@ export function createFacade(options: FacadeOptions): Server {
               }
               requireCurrent(grant);
               uncertain = true;
-              const result = await management.beginConnection(context, {
-                operationId: input.operationId,
-                ownerRef: input.ownerRef,
-                displayName: input.displayName,
-                snapshot: selection.snapshot,
-                legacyConnectionKind: selection.legacyConnectionKind,
-                inputFields: { [selection.inputFieldId]: input.credential.value },
-              });
+              const result = await management.beginConnection(
+                context,
+                {
+                  operationId: input.operationId,
+                  ownerRef: input.ownerRef,
+                  displayName: input.displayName,
+                  snapshot: selection.snapshot,
+                  legacyConnectionKind: selection.legacyConnectionKind,
+                  inputFields: { [selection.inputFieldId]: input.credential.value },
+                },
+                connectionSignal(),
+              );
               reply(
                 c.accountOperation,
                 await operationDTO(context, result.operation),
@@ -2561,14 +2600,18 @@ export function createFacade(options: FacadeOptions): Server {
                   identity = { operationRef: input.operationId };
                   requireCurrent(grant);
                   uncertain = true;
-                  const result = await management.reconnectConnection(context, {
-                    operationId: input.operationId,
-                    accountRef: ref,
-                    expectedRevision: input.expectedMetadataRevision,
-                    snapshot: selection.snapshot,
-                    legacyConnectionKind: selection.legacyConnectionKind,
-                    inputFields: { [selection.inputFieldId]: input.credential.value },
-                  });
+                  const result = await management.reconnectConnection(
+                    context,
+                    {
+                      operationId: input.operationId,
+                      accountRef: ref,
+                      expectedRevision: input.expectedMetadataRevision,
+                      snapshot: selection.snapshot,
+                      legacyConnectionKind: selection.legacyConnectionKind,
+                      inputFields: { [selection.inputFieldId]: input.credential.value },
+                    },
+                    connectionSignal(),
+                  );
                   reply(
                     c.accountOperation,
                     await operationDTO(context, result.operation),
@@ -2585,13 +2628,17 @@ export function createFacade(options: FacadeOptions): Server {
                   requireCurrent(grant);
                   uncertain = true;
                   await replyOAuthBegin(
-                    await management.reconnectConnection(context, {
-                      operationId: input.operationId,
-                      accountRef: ref,
-                      expectedRevision: input.expectedMetadataRevision,
-                      snapshot: selection.snapshot,
-                      legacyConnectionKind: selection.legacyConnectionKind,
-                    }),
+                    await management.reconnectConnection(
+                      context,
+                      {
+                        operationId: input.operationId,
+                        accountRef: ref,
+                        expectedRevision: input.expectedMetadataRevision,
+                        snapshot: selection.snapshot,
+                        legacyConnectionKind: selection.legacyConnectionKind,
+                      },
+                      connectionSignal(),
+                    ),
                   );
                 }
                 return;

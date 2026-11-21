@@ -303,3 +303,81 @@ void test("generic observations keep old strict readers and unknown billing trut
     false,
   );
 });
+
+void test(
+  "connection methods honor explicit shorter deadlines and caller cancellation without replay",
+  { timeout: 10_000 },
+  async (t) => {
+    const paths: string[] = [];
+    const entered = Promise.withResolvers<void>();
+    const server = createServer((req) => {
+      req.resume();
+      paths.push(req.url ?? "");
+      if (paths.length === 4) {
+        entered.resolve();
+      }
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    t.after(() => {
+      server.closeAllConnections();
+      server.close();
+    });
+    const address = server.address();
+    assert.ok(address !== null && typeof address === "object");
+    const settings = {
+      role: "management" as const,
+      token: "fixture-control",
+      origin: `http://127.0.0.1:${address.port}`,
+    };
+    const client = sdk.createManagementClient({ ...settings, timeoutMs: 200 });
+    const input = {
+      operationId: "bounded-connection",
+      ownerRef: "owner",
+      displayName: "Fixture",
+      connection: binding,
+      inputFields: { credential: "write-only-secret" },
+    };
+    const cancelled = (error: unknown) => {
+      assert.ok(error instanceof sdk.GatewayError);
+      assert.equal(error.code, "cancelled");
+      assert.equal(error.effect, "effect_unknown");
+      assert.equal(error.operationRef, input.operationId);
+      assert.equal(JSON.stringify(error).includes("write-only-secret"), false);
+      return true;
+    };
+    await assert.rejects(client.beginConnection(input), cancelled);
+    await assert.rejects(
+      client.reconnectConnection("account", {
+        operationId: input.operationId,
+        expectedMetadataRevision: 1,
+        connection: binding,
+        inputFields: input.inputFields,
+      }),
+      cancelled,
+    );
+    await assert.rejects(
+      client.submitConnection({
+        operationId: input.operationId,
+        ownerRef: input.ownerRef,
+        inputFields: { completion: "write-only-secret" },
+      }),
+      cancelled,
+    );
+    const controller = new AbortController();
+    const unconfigured = sdk.createManagementClient(settings);
+    const pending = assert.rejects(
+      unconfigured.beginConnection(input, { signal: controller.signal }),
+      cancelled,
+    );
+    await entered.promise;
+    controller.abort();
+    await pending;
+    assert.deepEqual(paths, [
+      "/v3/accounts/connections/begin",
+      "/v3/accounts/account/connections/reconnect",
+      "/v3/accounts/connections/submit",
+      "/v3/accounts/connections/begin",
+    ]);
+  },
+);

@@ -30,7 +30,7 @@ export class NativeControlHTTP {
   readonly #headerBytes: number;
   readonly #admission?: NativeControlAdmission;
   readonly #distinguishNotListening: boolean;
-  constructor(options: NativeManagementOptions) {
+  constructor(options: NativeManagementOptions, maximumDeadlineMs: 30_000 | 100_000 = 30_000) {
     let origin: URL;
     try {
       origin = new URL(options.origin);
@@ -65,7 +65,7 @@ export class NativeControlHTTP {
     if (
       !Number.isInteger(deadlineMs) ||
       deadlineMs < 1 ||
-      deadlineMs > 30_000 ||
+      deadlineMs > maximumDeadlineMs ||
       !Number.isInteger(bodyBytes) ||
       bodyBytes < 1 ||
       bodyBytes > 2 * 1024 * 1024 ||

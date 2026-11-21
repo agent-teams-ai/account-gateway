@@ -349,6 +349,7 @@ export class AccountManagement {
   async beginConnection(
     context: TrustedContext,
     input: ConnectionBeginInput,
+    signal?: AbortSignal,
   ): Promise<OAuthBeginResult> {
     const ctx = captureContext(context),
       snapshot = captureConnectionSnapshot(input.snapshot);
@@ -375,7 +376,7 @@ export class AccountManagement {
     identifier(intent.operationId);
     identifier(intent.ownerRef);
     name(intent.displayName);
-    return this.beginOAuthIntent(ctx, intent, undefined, input.inputFields);
+    return this.beginOAuthIntent(ctx, intent, undefined, input.inputFields, signal);
   }
   async connectionSnapshot(
     context: TrustedContext,
@@ -414,6 +415,7 @@ export class AccountManagement {
   async reconnectConnection(
     context: TrustedContext,
     input: ConnectionReconnectInput,
+    signal?: AbortSignal,
   ): Promise<OAuthBeginResult> {
     const ctx = captureContext(context),
       snapshot = captureConnectionSnapshot(input.snapshot);
@@ -447,6 +449,7 @@ export class AccountManagement {
       },
       undefined,
       input.inputFields,
+      signal,
     );
   }
   async beginOAuth(context: TrustedContext, input: OAuthBeginInput): Promise<OAuthBeginResult> {
@@ -557,7 +560,11 @@ export class AccountManagement {
     intent: AccountIntent,
     credentialImportValue?: string,
     connectionInputFields?: Readonly<Record<string, string>>,
+    signal?: AbortSignal,
   ): Promise<OAuthBeginResult> {
+    if (signalAborted(signal)) {
+      throw new KernelError("unavailable");
+    }
     // No secret is staged in TS SQL. Native owns exchange and token custody.
     intent.intentDigest = this.custody.digest({
       context: ctx,
@@ -626,6 +633,7 @@ export class AccountManagement {
           begun = await oauth.connection.beginConnection(
             oauthScope(journal),
             connectionInputFields,
+            signal,
           );
         } else if (intent.credentialImportMethod !== undefined) {
           if (!oauth.credentialImport || credentialImportValue === undefined) {
@@ -673,6 +681,7 @@ export class AccountManagement {
   async completeOAuth(
     context: TrustedContext,
     input: OAuthCompleteInput,
+    signal?: AbortSignal,
   ): Promise<OperationStatus> {
     const ctx = captureContext(context),
       operationId = input.operationId,
@@ -764,7 +773,7 @@ export class AccountManagement {
     }
     let completed: OAuthReadback;
     try {
-      completed = await oauth.native.complete(scope, callback);
+      completed = await oauth.native.complete(scope, callback, signal);
     } catch {
       return this.kernel.unknownCandidate(ctx, operationId, journal.worker);
     }
