@@ -1,5 +1,28 @@
+import type {
+  ConnectionProfileV3,
+  ConnectionBinding,
+  ProviderConnectionIdentity,
+} from "@agent-teams/account-gateway/contracts";
+import type { ManagedProfile } from "./candidate-identity.ts";
+import type { LegacyConnectionKind } from "./connection-domain.ts";
+export interface NativeConnectionProfile {
+  readonly capability: ConnectionProfileV3;
+  readonly mount: ManagedProfile;
+  readonly legacyAliases: readonly {
+    readonly kind: LegacyConnectionKind;
+    readonly connection: ConnectionBinding;
+    readonly inputFieldId?: string;
+  }[];
+}
+export interface NativeConnectionCapabilitiesSnapshot {
+  readonly profiles: readonly NativeConnectionProfile[];
+  readonly enrollment: {
+    readonly originRef: string;
+    readonly engineIncarnation: string;
+    readonly qualificationRef: string;
+  };
+}
 import { providerConnectionIdentity } from "@agent-teams/account-gateway/contracts";
-import type { ProviderConnectionIdentity } from "@agent-teams/account-gateway/contracts";
 
 type Setting<T> = { readonly allowed: readonly T[]; readonly default: T };
 type ModelCapability = {

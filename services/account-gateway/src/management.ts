@@ -33,7 +33,11 @@ import type {
   PolicyUseClosureReadback,
   RetainedCustodyProof,
 } from "./domain.ts";
-import type { ConnectionBinding, ConnectionSnapshot, CredentialAttestation } from "./connection-domain.ts";
+import type {
+  ConnectionBinding,
+  ConnectionSnapshot,
+  CredentialAttestation,
+} from "./connection-domain.ts";
 
 // Private consumer-owned ports. They are not SDK DTOs or an inference authority.
 export interface CandidateNative {
@@ -78,9 +82,17 @@ export interface OAuthEnrollmentNative {
   poll(scope: OAuthScope): Promise<OAuthReadback>;
 }
 export interface ConnectionEnrollmentNative extends OAuthEnrollmentNative {
-  beginConnection(scope: OAuthScope, inputFields?: Readonly<Record<string, string>>): Promise<OAuthBeginReadback>;
+  beginConnection(
+    scope: OAuthScope,
+    inputFields?: Readonly<Record<string, string>>,
+  ): Promise<OAuthBeginReadback>;
 }
-export interface NativeConnectionAdapter extends ConnectionEnrollmentNative, OAuthDescriptorBoundary, OAuthRefreshNative, OAuthLifecycleNative {}
+export interface NativeConnectionAdapter
+  extends
+    ConnectionEnrollmentNative,
+    OAuthDescriptorBoundary,
+    OAuthRefreshNative,
+    OAuthLifecycleNative {}
 export interface ConnectionBeginInput {
   readonly operationId: string;
   readonly ownerRef: string;
@@ -255,7 +267,10 @@ export interface ManagementStore extends AccountRetirementRead, PolicyUseClosure
     connection?: ConnectionSnapshot,
   ): Promise<CandidateJournal>;
   readJournal(context: TrustedContext, operationId: string): Promise<CandidateJournal | undefined>;
-  readGeneration?(context: TrustedContext, generation: string): Promise<CandidateJournal | undefined>;
+  readGeneration?(
+    context: TrustedContext,
+    generation: string,
+  ): Promise<CandidateJournal | undefined>;
   credential(scope: CandidateScope): Promise<string | undefined>;
   eraseIntent(scope: CandidateScope): Promise<void>;
   saveMapping(mapping: CandidateMapping): Promise<void>;
@@ -274,7 +289,7 @@ export interface ManagementStore extends AccountRetirementRead, PolicyUseClosure
   nextOAuthRefresh?(
     context: TrustedContext,
     worker: string,
-    profile: ManagedProfile,
+    profile: ManagedProfile | undefined,
     after?: string,
   ): Promise<CandidateMapping | undefined>;
   activeOAuthRefresh?(

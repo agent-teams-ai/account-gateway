@@ -110,7 +110,11 @@ export const accountInfoV2 = z
   .discriminatedUnion("status", [
     z.strictObject({
       status: z.literal("available"),
-      infoRevision: z.string().min(1).max(128).regex(/^[\x21-\x7e]+$/),
+      infoRevision: z
+        .string()
+        .min(1)
+        .max(128)
+        .regex(/^[\x21-\x7e]+$/),
       fields: accountInfoFieldsV2,
     }),
     z.strictObject({ status: z.enum(["unavailable", "unsupported"]) }),
@@ -122,7 +126,9 @@ export const accountInfoAccountV2 = accountInfoAccount.omit({ info: true }).exte
 export const accountInfoReadResponseV2 = z
   .strictObject({
     contract: z.literal(ACCOUNT_INFO_V2_CONTRACT),
-    accounts: z.array(accountInfoAccountV2).max(ACCOUNT_INFO_MAX_REFS)
+    accounts: z
+      .array(accountInfoAccountV2)
+      .max(ACCOUNT_INFO_MAX_REFS)
       .refine((values) => new Set(values.map((value) => value.accountRef)).size === values.length),
   })
   .refine((value) => bytesWithin(value, ACCOUNT_INFO_RESPONSE_BYTES));
@@ -134,13 +140,17 @@ export type AccountInfoReadResponseV2 = z.infer<typeof accountInfoReadResponseV2
 
 /** Explicit old-source adapter; failures never trigger protocol fallback. */
 export function accountInfoFromV1(value: AccountInfo): AccountInfoV2 {
-  if (value.status !== "available") return value;
+  if (value.status !== "available") {
+    return value;
+  }
   const { privacyMode: _legacyPrivacy, ...fields } = value.fields;
   return { ...value, fields: { ...fields, trainingUsage: { status: "unsupported" } } };
 }
 
 export function accountInfoToV1(value: AccountInfoV2): AccountInfo {
-  if (value.status !== "available") return value;
+  if (value.status !== "available") {
+    return value;
+  }
   const { trainingUsage: _trainingUsage, ...fields } = value.fields;
   return { ...value, fields: { ...fields, privacyMode: { status: "unsupported" } } };
 }

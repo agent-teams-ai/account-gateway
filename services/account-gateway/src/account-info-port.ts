@@ -5,7 +5,10 @@ import type { AccountInfoIdentity } from "./domain.ts";
 
 /** Safe backend result. Private native principal proofs terminate in its adapter. */
 export type AccountInfoObservation =
-  | { readonly info: Extract<c.AccountInfoV2, { status: "available" }>; readonly generation: string }
+  | {
+      readonly info: Extract<c.AccountInfoV2, { status: "available" }>;
+      readonly generation: string;
+    }
   | { readonly info: Exclude<c.AccountInfoV2, { status: "available" }> };
 export interface AccountInfoSource {
   readAccountInfo(

@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { captureConnectionSnapshot, capturePublication, captureLegacyConnectionKind } from "./connection-domain.ts";
+import {
+  captureConnectionSnapshot,
+  capturePublication,
+  captureLegacyConnectionKind,
+} from "./connection-domain.ts";
 import type { ConnectionPublication } from "./connection-domain.ts";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import {
@@ -229,13 +233,22 @@ export class PostgresKernel implements DurableKernel {
     return operationStatus(saved);
   }
   private async lifecycleSnapshot(tx: Tx, account: AccountRow): Promise<object> {
-    if (!account.active_generation) return accountStatus(account);
-    const row = (await tx.db.query<{ publication: unknown }>(
-      "SELECT publication FROM ag_management.physical_mappings WHERE consumer=$1 AND generation=$2",
-      [tx.consumer, account.active_generation])).rows.at(0);
-    if (row?.publication == null) return accountStatus(account);
+    if (account.active_generation === null || account.active_generation === "") {
+      return accountStatus(account);
+    }
+    const row = (
+      await tx.db.query<{ publication: unknown }>(
+        "SELECT publication FROM ag_management.physical_mappings WHERE consumer=$1 AND generation=$2",
+        [tx.consumer, account.active_generation],
+      )
+    ).rows.at(0);
+    if (!row || row.publication === null || row.publication === undefined) {
+      return accountStatus(account);
+    }
     const publication = capturePublication(row.publication as ConnectionPublication);
-    if (publication.connection.profileId !== account.profile) throw new KernelError("conflict");
+    if (publication.connection.profileId !== account.profile) {
+      throw new KernelError("conflict");
+    }
     return { ...accountStatus(account), publication };
   }
   private async insertOperation(
@@ -473,7 +486,9 @@ export class PostgresKernel implements DurableKernel {
         metadataRevision: retainedCustody.metadataRevision,
         authorizationEpoch: retainedCustody.authorizationEpoch,
         credentialKinds: Object.freeze([...retainedCustody.credentialKinds]),
-        ...(retainedCustody.publication === undefined ? {} : { publication: capturePublication(retainedCustody.publication) }),
+        ...(retainedCustody.publication === undefined
+          ? {}
+          : { publication: capturePublication(retainedCustody.publication) }),
       });
     input = {
       operationId: input.operationId,
@@ -486,8 +501,12 @@ export class PostgresKernel implements DurableKernel {
       displayName: input.displayName,
       oauthMethod: input.oauthMethod,
       credentialImportMethod: input.credentialImportMethod,
-      ...(input.connection === undefined ? {} : { connection: captureConnectionSnapshot(input.connection) }),
-      ...(input.legacyConnectionKind === undefined ? {} : { legacyConnectionKind: captureLegacyConnectionKind(input.legacyConnectionKind) }),
+      ...(input.connection === undefined
+        ? {}
+        : { connection: captureConnectionSnapshot(input.connection) }),
+      ...(input.legacyConnectionKind === undefined
+        ? {}
+        : { legacyConnectionKind: captureLegacyConnectionKind(input.legacyConnectionKind) }),
     };
     identifier(input.operationId);
     identifier(input.intentDigest);
@@ -502,14 +521,22 @@ export class PostgresKernel implements DurableKernel {
       }
     }
     if (
-      (input.oauthMethod !== undefined || input.credentialImportMethod !== undefined || input.connection !== undefined) &&
+      (input.oauthMethod !== undefined ||
+        input.credentialImportMethod !== undefined ||
+        input.connection !== undefined) &&
       !["create", "reconnect"].includes(input.kind)
     ) {
       throw new KernelError("invalid");
     }
-    if (input.legacyConnectionKind !== undefined && input.connection === undefined) throw new KernelError("invalid");
-    if (input.connection !== undefined && (input.oauthMethod !== undefined || input.credentialImportMethod !== undefined ||
-      (input.kind === "create" && input.connection.connection.profileId !== input.profile))) {
+    if (input.legacyConnectionKind !== undefined && input.connection === undefined) {
+      throw new KernelError("invalid");
+    }
+    if (
+      input.connection !== undefined &&
+      (input.oauthMethod !== undefined ||
+        input.credentialImportMethod !== undefined ||
+        (input.kind === "create" && input.connection.connection.profileId !== input.profile))
+    ) {
       throw new KernelError("invalid");
     }
     if (input.kind === "create") {
@@ -545,7 +572,9 @@ export class PostgresKernel implements DurableKernel {
         ? {}
         : { credentialImportMethod: input.credentialImportMethod }),
       ...(input.connection === undefined ? {} : { connection: input.connection }),
-      ...(input.legacyConnectionKind === undefined ? {} : { legacyConnectionKind: input.legacyConnectionKind }),
+      ...(input.legacyConnectionKind === undefined
+        ? {}
+        : { legacyConnectionKind: input.legacyConnectionKind }),
     };
     return this.transaction(context, async (tx) => {
       const old = await this.existing(tx, input.operationId, intent);
@@ -615,7 +644,8 @@ export class PostgresKernel implements DurableKernel {
           retainedCustody.credentialKinds.length === 1 &&
           (retainedCustody.contract === "native-retained-custody/v2"
             ? retainedCustody.publication?.connection.profileId === a.profile &&
-              retainedCustody.credentialKinds[0] === retainedCustody.publication?.credential.credentialKind
+              retainedCustody.credentialKinds[0] ===
+                retainedCustody.publication.credential.credentialKind
             : retainedCustody.publication === undefined &&
               ["api_key", "oauth"].includes(retainedCustody.credentialKinds[0]));
         const candidate =

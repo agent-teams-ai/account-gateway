@@ -22,7 +22,7 @@ import { createFacade, cancelFacadeTransport } from "./facade.ts";
 import type { FacadeOptions } from "./facade.ts";
 import { strictJSON } from "./facade-ingress.ts";
 import { object } from "./native-wire.ts";
-import { NativeFailure } from "./native-client-wire.ts";
+import { NativeFailure } from "./native-client.ts";
 import { forwardNativeResponseDiagnostics } from "./native-response-diagnostics.ts";
 import {
   captureServiceProfiles,
@@ -815,23 +815,46 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
       while (nativeProfiles === undefined) {
         startupActive();
         const remaining = readyDeadline - Date.now();
-        if (remaining <= 0) throw new ServiceError("startup_denied");
+        if (remaining <= 0) {
+          throw new ServiceError("startup_denied");
+        }
         try {
           nativeProfiles = await loadNativeConnectionProfiles(
-            cfg, nativeControls, readbackAbort.signal, Math.min(2000, remaining),
+            cfg,
+            nativeControls,
+            readbackAbort.signal,
+            Math.min(2000, remaining),
           );
         } catch (error) {
           // Only a listener that has not opened yet may be awaited. A native
           // HTTP response, malformed catalog or failed authority is terminal.
-          if (!(error instanceof NativeFailure) || error.code !== "not_listening") throw error;
-          await pause(Math.min(delayMs, Math.max(1, readyDeadline - Date.now())), undefined,
-            { signal: readbackAbort.signal });
+          if (!(error instanceof NativeFailure) || error.code !== "not_listening") {
+            throw error;
+          }
+          await pause(Math.min(delayMs, Math.max(1, readyDeadline - Date.now())), undefined, {
+            signal: readbackAbort.signal,
+          });
           delayMs = Math.min(delayMs * 2, 800);
         }
       }
     }
     startupActive();
-    control = composeServiceControl(cfg, kernel, store, custody, worker, nativeControls, nativeProfiles);
+    if (
+      nativeProfiles &&
+      (nativeProfiles.enrollment.originRef !== original!.originRef ||
+        nativeProfiles.enrollment.engineIncarnation !== original!.incarnation)
+    ) {
+      throw new ServiceError("startup_denied");
+    }
+    control = composeServiceControl(
+      cfg,
+      kernel,
+      store,
+      custody,
+      worker,
+      nativeControls,
+      nativeProfiles,
+    );
     const { profiles, bearers, management, catalog } = control;
     bearers.configureExecutionKey(keyBytes(cfg.keys.facadeHMAC));
     const binding = original!;

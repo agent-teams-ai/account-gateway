@@ -335,7 +335,10 @@ export interface BridgeConfig {
   maxPending?: number;
   controlBytes?: number;
 }
-export function config(input: BridgeConfig) {
+export function config(
+  input: BridgeConfig,
+  options: { readonly allowEmptyProfiles?: boolean } = {},
+) {
   const parseURL = (value: string): URL => {
     try {
       return new URL(value);
@@ -366,7 +369,7 @@ export function config(input: BridgeConfig) {
   if (
     !input.consumers.length ||
     input.consumers.length > 128 ||
-    !input.profiles.length ||
+    (!input.profiles.length && options.allowEmptyProfiles !== true) ||
     input.profiles.length > 128
   ) {
     return denied();

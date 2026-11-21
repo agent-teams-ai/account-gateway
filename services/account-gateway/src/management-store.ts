@@ -18,7 +18,11 @@ import type {
 } from "./management.ts";
 import { scopeCopy } from "./intent-secrets.ts";
 import type { IntentEnvelope, IntentSecrets } from "./intent-secrets.ts";
-import { captureConnectionSnapshot, capturePublication, samePublication } from "./connection-domain.ts";
+import {
+  captureConnectionSnapshot,
+  capturePublication,
+  samePublication,
+} from "./connection-domain.ts";
 import type { ConnectionSnapshot, ConnectionPublication } from "./connection-domain.ts";
 import {
   journalRow,
@@ -42,12 +46,13 @@ const activeOAuthMapping = `SELECT j.*,m.native_physical_identity,m.native_id,m.
       AND j.operation_id=c.operation_id AND j.owner_ref=a.owner_ref AND j.profile=c.profile
   JOIN ag_management.physical_mappings m ON m.consumer=j.consumer AND m.generation=j.generation
   JOIN ag_kernel.operations o ON o.consumer=j.consumer AND o.id=j.operation_id AND o.account_ref=a.ref
-  WHERE a.consumer=$1 AND a.state='active' AND a.profile=$3 AND c.state='ready'
+  WHERE a.consumer=$1 AND a.state='active' AND a.profile=j.profile AND c.state='ready'
     AND c.native_identity=j.generation AND m.native_physical_identity=j.generation
-    AND j.profile=$3 AND j.base_url=$4 AND j.model=$5 AND j.qualification_ref=$6
     AND j.purpose IN ('create','reconnect') AND o.state='applied' AND o.intent->>'kind'=j.purpose
     AND EXISTS (SELECT 1 FROM ag_kernel.workers w WHERE w.consumer=a.consumer AND w.worker=$2
       AND w.lease_until>clock_timestamp())`;
+const exactOAuthProfile =
+  " AND j.profile=$3 AND j.base_url=$4 AND j.model=$5 AND j.qualification_ref=$6";
 // Staging recovery is bound to the ORIGINAL creator, not a replacement service.
 // No physical mapping grants authority; native additionally checks completed
 // enrollment/MAC before the existing F2 fence can enter a refresh.
@@ -235,8 +240,15 @@ export class PostgresManagementStore implements ManagementStore {
     uuid(worker);
     identifier(profile.profile, 64);
     identifier(profile.qualificationRef);
-    const journal = Object.freeze({ ...s, generation, worker, profile,
-      ...(connection === undefined ? {} : { connectionSnapshot: captureConnectionSnapshot(connection) }) });
+    const journal = Object.freeze({
+      ...s,
+      generation,
+      worker,
+      profile,
+      ...(connection === undefined
+        ? {}
+        : { connectionSnapshot: captureConnectionSnapshot(connection) }),
+    });
     return this.tx(s.consumerId, async (db) => {
       const owned = await db.query(
         `SELECT 1 FROM ag_kernel.candidates c JOIN ag_kernel.accounts a
@@ -303,11 +315,19 @@ export class PostgresManagementStore implements ManagementStore {
       return r ? this.secrets.open(s, r) : undefined;
     });
   }
-  async readGeneration(context: TrustedContext, generation: string): Promise<CandidateJournal | undefined> {
-    const ctx = captureContext(context); uuid(generation);
+  async readGeneration(
+    context: TrustedContext,
+    generation: string,
+  ): Promise<CandidateJournal | undefined> {
+    const ctx = captureContext(context);
+    uuid(generation);
     return this.read(ctx.consumerId, async (db) => {
-      const row = (await db.query<JournalRow>(
-        "SELECT * FROM ag_management.candidate_journal WHERE consumer=$1 AND generation=$2", [ctx.consumerId, generation])).rows.at(0);
+      const row = (
+        await db.query<JournalRow>(
+          "SELECT * FROM ag_management.candidate_journal WHERE consumer=$1 AND generation=$2",
+          [ctx.consumerId, generation],
+        )
+      ).rows.at(0);
       return row === undefined ? undefined : journalRow(row);
     });
   }
@@ -335,7 +355,9 @@ export class PostgresManagementStore implements ManagementStore {
         qualificationRef: input.profile.qualificationRef,
         ...(input.connectionSnapshot === undefined ? {} : { nativeConnection: true as const }),
       }),
-      ...(input.connectionSnapshot === undefined ? {} : { connectionSnapshot: captureConnectionSnapshot(input.connectionSnapshot) }),
+      ...(input.connectionSnapshot === undefined
+        ? {}
+        : { connectionSnapshot: captureConnectionSnapshot(input.connectionSnapshot) }),
     };
     if (!exactCandidate(j, d)) {
       throw new KernelError("conflict");
@@ -354,11 +376,21 @@ export class PostgresManagementStore implements ManagementStore {
         `INSERT INTO ag_management.physical_mappings
         (consumer,generation,native_physical_identity,native_id,native_created_at,publication) VALUES ($1,$2,$3,$4,$5,$6)
         ON CONFLICT DO NOTHING`,
-        [s.consumerId, j.generation, d.nativePhysicalIdentity, d.nativeId, d.createdAt, d.publication ?? null],
+        [
+          s.consumerId,
+          j.generation,
+          d.nativePhysicalIdentity,
+          d.nativeId,
+          d.createdAt,
+          d.publication ?? null,
+        ],
       );
       const row = (
         await db.query<
-          Pick<MappingRow, "native_physical_identity" | "native_id" | "native_created_at" | "publication">
+          Pick<
+            MappingRow,
+            "native_physical_identity" | "native_id" | "native_created_at" | "publication"
+          >
         >("SELECT * FROM ag_management.physical_mappings WHERE consumer=$1 AND generation=$2", [
           s.consumerId,
           j.generation,
@@ -369,7 +401,12 @@ export class PostgresManagementStore implements ManagementStore {
         row.native_physical_identity !== d.nativePhysicalIdentity ||
         Number(row.native_id) !== d.nativeId ||
         row.native_created_at !== d.createdAt ||
-        !samePublication(row.publication == null ? undefined : capturePublication(row.publication as ConnectionPublication), d.publication)
+        !samePublication(
+          row.publication === null || row.publication === undefined
+            ? undefined
+            : capturePublication(row.publication as ConnectionPublication),
+          d.publication,
+        )
       ) {
         throw new KernelError("conflict");
       }
@@ -409,7 +446,9 @@ export class PostgresManagementStore implements ManagementStore {
         profile: j.profile.profile,
         baseURL: j.profile.baseURL,
         model: j.profile.model,
-        ...(r.publication == null ? {} : { publication: capturePublication(r.publication as ConnectionPublication) }),
+        ...(r.publication === null || r.publication === undefined
+          ? {}
+          : { publication: capturePublication(r.publication as ConnectionPublication) }),
       });
       if (!exactCandidate(j, descriptor)) {
         throw new KernelError("conflict");
@@ -420,23 +459,30 @@ export class PostgresManagementStore implements ManagementStore {
   async nextOAuthRefresh(
     context: TrustedContext,
     worker: string,
-    source: ManagedProfile,
+    source: ManagedProfile | undefined,
     after?: string,
   ): Promise<CandidateMapping | undefined> {
     const ctx = captureContext(context),
-      p = refreshProfile(source),
+      p = source === undefined ? undefined : refreshProfile(source),
       cursor = after;
     uuid(worker);
     if (cursor !== undefined) {
       uuid(cursor);
     }
     return this.tx(ctx.consumerId, async (db) => {
-      const values = [ctx.consumerId, worker, p.profile, p.baseURL, p.model, p.qualificationRef];
+      const values = p
+        ? [ctx.consumerId, worker, p.profile, p.baseURL, p.model, p.qualificationRef]
+        : [ctx.consumerId, worker];
+      const selection = p
+        ? exactOAuthProfile
+        : " AND j.connection_snapshot IS NOT NULL AND m.publication->'credential'->>'refreshPolicy'='native'";
+      const cursorPosition = p ? 7 : 3;
       const select = async (cursorValue?: string): Promise<MappingRow | undefined> =>
         (
           await db.query<MappingRow>(
             activeOAuthMapping +
-              " AND ($7::uuid IS NULL OR j.generation>$7::uuid) ORDER BY j.generation LIMIT 1",
+              selection +
+              ` AND ($${cursorPosition}::uuid IS NULL OR j.generation>$${cursorPosition}::uuid) ORDER BY j.generation LIMIT 1`,
             [...values, cursorValue ?? null],
           )
         ).rows.at(0);
@@ -470,6 +516,7 @@ export class PostgresManagementStore implements ManagementStore {
       const row = (
         await db.query<MappingRow>(
           activeOAuthMapping +
+            exactOAuthProfile +
             " AND j.operation_id=$7 AND j.account_ref=$8 AND j.generation=$9 LIMIT 1",
           [
             ctx.consumerId,

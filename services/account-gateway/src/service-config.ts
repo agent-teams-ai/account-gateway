@@ -112,21 +112,47 @@ export interface NativeConnectionsConfig {
 export function captureNativeConnections(value: unknown): NativeConnectionsConfig {
   try {
     const r = object(value, ["contract", "profiles"]);
-    if (r.contract !== "native-account-capabilities/v2" || !Array.isArray(r.profiles) ||
-      !r.profiles.length || r.profiles.length > 128) return deny();
-    const profiles = r.profiles.map((value) => {
-      const p = object(value, ["profileId", "limits", "providerTokenUpperBound"]);
+    if (
+      r.contract !== "native-account-capabilities/v2" ||
+      !Array.isArray(r.profiles) ||
+      !r.profiles.length ||
+      r.profiles.length > 128
+    ) {
+      return deny();
+    }
+    const profiles = r.profiles.map((entry) => {
+      const p = object(entry, ["profileId", "limits", "providerTokenUpperBound"]);
       identifier(p.profileId, 64);
-      const limits = approvedLimits(object(p.limits, ["requests", "concurrency", "requestBytes", "outputBytes", "tokens"]) as unknown as ApprovedLimits,
-        { ...defaults, maxConcurrent: 64 });
+      const limits = approvedLimits(
+        object(p.limits, [
+          "requests",
+          "concurrency",
+          "requestBytes",
+          "outputBytes",
+          "tokens",
+        ]) as unknown as ApprovedLimits,
+        { ...defaults, maxConcurrent: 64 },
+      );
       integer(p.providerTokenUpperBound, 10_000_000);
-      if (limits.tokens > (p.providerTokenUpperBound as number)) return deny();
-      return Object.freeze({ profileId: p.profileId as string, limits,
-        providerTokenUpperBound: p.providerTokenUpperBound as number });
+      if (limits.tokens > p.providerTokenUpperBound) {
+        return deny();
+      }
+      return Object.freeze({
+        profileId: p.profileId,
+        limits,
+        providerTokenUpperBound: p.providerTokenUpperBound,
+      });
     });
-    if (new Set(profiles.map((p) => p.profileId)).size !== profiles.length) return deny();
-    return Object.freeze({ contract: "native-account-capabilities/v2", profiles: Object.freeze(profiles) });
-  } catch { return deny(); }
+    if (new Set(profiles.map((p) => p.profileId)).size !== profiles.length) {
+      return deny();
+    }
+    return Object.freeze({
+      contract: "native-account-capabilities/v2",
+      profiles: Object.freeze(profiles),
+    });
+  } catch {
+    return deny();
+  }
 }
 export const openRouterProfile = Object.freeze({
   profile: "openrouter-openai-responses-apikey-v1",
@@ -447,8 +473,16 @@ export function captureServiceProfiles(
   try {
     if (input.nativeConnections !== undefined) {
       captureNativeConnections(input.nativeConnections);
-      if (input.profile !== undefined || input.secondProfile !== undefined || input.providerProfiles !== undefined ||
-        input.oauthEnrollment !== undefined || input.claudeOAuthEnrollment !== undefined || input.grokOAuthEnrollment !== undefined) return deny();
+      if (
+        input.profile !== undefined ||
+        input.secondProfile !== undefined ||
+        input.providerProfiles !== undefined ||
+        input.oauthEnrollment !== undefined ||
+        input.claudeOAuthEnrollment !== undefined ||
+        input.grokOAuthEnrollment !== undefined
+      ) {
+        return deny();
+      }
       return [];
     }
     const first = captureProfile(input.profile);
@@ -713,9 +747,14 @@ export function loadServiceConfig(file: string): ServiceConfig {
     const requestReadbackRetentionMs = Object.hasOwn(r, "requestReadbackRetentionMs")
       ? captureRequestReadbackRetention(r.requestReadbackRetentionMs)
       : undefined;
-    const nativeConnections = r.nativeConnections === undefined ? undefined : captureNativeConnections(r.nativeConnections);
-    const accountInfoContract = r.accountInfoContract ?? "account-info/v2";
-    if (accountInfoContract !== "account-info/v1" && accountInfoContract !== "account-info/v2") return deny();
+    const nativeConnections =
+      r.nativeConnections === undefined ? undefined : captureNativeConnections(r.nativeConnections);
+    const accountInfoContract =
+      r.accountInfoContract ??
+      (r.nativeConnections === undefined ? "account-info/v1" : "account-info/v2");
+    if (accountInfoContract !== "account-info/v1" && accountInfoContract !== "account-info/v2") {
+      return deny();
+    }
     const accountLifecycle =
       r.accountLifecycle === undefined ? undefined : captureAccountLifecycle(r.accountLifecycle);
     const oauthEnrollment = Object.hasOwn(r, "oauthEnrollment")
@@ -808,7 +847,9 @@ export function loadServiceConfig(file: string): ServiceConfig {
     if (new Set(Object.values(keys)).size !== 3) {
       deny();
     }
-    const policyProfiles = nativeConnections?.profiles.map((p) => ({ profile: p.profileId, limits: p.limits })) ?? profiles;
+    const policyProfiles =
+      nativeConnections?.profiles.map((p) => ({ profile: p.profileId, limits: p.limits })) ??
+      profiles;
     const bearers = captureServiceBearers(r.bearers, consumer.consumerId, policyProfiles);
     const credentials = [
       consumer.managementCredential,

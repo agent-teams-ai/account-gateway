@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import { PostgresUsageJournal } from "../src/usage.ts";
-import type { UsageObservation } from "@agent-teams/account-gateway/contracts";
+import {
+  projectUsageV1,
+  projectUsageV2,
+  type UsageObservation,
+  type UsageObservationV2,
+} from "@agent-teams/account-gateway/contracts";
 
 void test("real PostgreSQL journal deduplicates concurrent writes and freezes bounded pages across late corrections", async () => {
   const database = process.env.AG_USAGE_DISPOSABLE_DB;
@@ -232,6 +237,57 @@ void test("real PostgreSQL journal deduplicates concurrent writes and freezes bo
         "DROP TRIGGER usage_retry_fault ON ag_kernel.usage_observations; DROP FUNCTION ag_kernel.usage_retry_fault(); DROP SEQUENCE ag_kernel.usage_retry_attempt",
       );
     }
+    // Upgrading a wire reader cannot rewrite an existing immutable fact, enrich
+    // a v1 row in place or erase v2 context. Actual new evidence is a new revision.
+    const context = {
+      providerId: "native_provider",
+      productId: "native_product",
+      profileId: fact.profileId,
+      modelId: fact.model,
+      billing: { status: "known" as const, kind: "mixed" as const },
+    };
+    await journal.append(
+      { consumerId: "one" },
+      { ...projectUsageV2(fact), nativeContext: context },
+    );
+    const written = (
+      await pool.query<{ fact: UsageObservation }>(
+        "SELECT fact FROM ag_kernel.usage_observations WHERE consumer='one' AND request_ref='request' AND revision=0",
+      )
+    ).rows[0].fact;
+    assert.deepEqual(written, fact);
+    const v2: UsageObservationV2 = {
+      ...projectUsageV2(fact),
+      requestRef: "native-v2-fact",
+      eventId: "native-v2-fact",
+      revision: 2,
+      completeness: "complete",
+      inputTokens: 13,
+      outputTokens: 7,
+      nativeContext: context,
+      cost: { currency: "USD", amountDecimal: "0.013" },
+    };
+    await pool.query("INSERT INTO ag_kernel.requests VALUES($1,$2,$3)", [
+      "one",
+      fact.executionRef,
+      v2.requestRef,
+    ]);
+    await journal.append({ consumerId: "one" }, v2);
+    await journal.append({ consumerId: "one" }, projectUsageV1(v2));
+    assert.deepEqual(
+      await journal.observe({ consumerId: "one" }, v2.executionRef, v2.requestRef),
+      v2,
+    );
+    await assert.rejects(
+      journal.append(
+        { consumerId: "one" },
+        { ...v2, nativeContext: { ...context, billing: { status: "unknown" } } },
+      ),
+      { message: "conflict" },
+    );
+    await assert.rejects(journal.append({ consumerId: "one" }, { ...v2, cost: null }), {
+      message: "conflict",
+    });
   } finally {
     await pool.end();
   }

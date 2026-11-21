@@ -58,7 +58,12 @@ export async function checkToolchainConfiguration(root: string): Promise<void> {
   }
   samePaths(
     (await json(root, "tsconfig.tests.json")).include,
-    ["tests/**/*.mts", "tests/whole-consumer.test.ts", "tests/account-info.test.ts"],
+    [
+      "tests/**/*.mts",
+      "tests/whole-consumer.test.ts",
+      "tests/account-info.test.ts",
+      "tests/provider-connections-v3.test.ts",
+    ],
     "test-scope",
   );
   samePaths(

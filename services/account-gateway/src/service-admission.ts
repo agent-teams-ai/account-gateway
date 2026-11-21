@@ -269,12 +269,14 @@ export function facadeBoundedReadRoute(
         path === "/v2/provider-connection-capabilities")) ||
     (method === "GET" && path === "/v3/provider-connection-capabilities") ||
     (method === "POST" &&
-      (path === "/v1/account-info/read" || path === "/v2/account-info/read" ||
+      (path === "/v1/account-info/read" ||
+        path === "/v2/account-info/read" ||
         path === "/v1/account-limits/read" ||
         path === "/v1/account-limits/refresh" ||
         path === "/v2/account-limits/read" ||
         path === "/v3/account-limits/read" ||
-        path === "/v1/account-models/read" || path === "/v2/account-models/read"))
+        path === "/v1/account-models/read" ||
+        path === "/v2/account-models/read"))
   );
 }
 export function facadeControlRoute(method: string | undefined, path: string | undefined): boolean {
@@ -291,12 +293,14 @@ export function facadeControlRoute(method: string | undefined, path: string | un
         path === "/v2/provider-connection-capabilities" ||
         path === "/v1/provider-connection-capabilities")) ||
     (method === "POST" &&
-      (path === "/v1/account-info/read" || path === "/v2/account-info/read" ||
+      (path === "/v1/account-info/read" ||
+        path === "/v2/account-info/read" ||
         path === "/v1/account-limits/read" ||
         path === "/v1/account-limits/refresh" ||
         path === "/v2/account-limits/read" ||
         path === "/v3/account-limits/read" ||
-        path === "/v1/account-models/read" || path === "/v2/account-models/read"))
+        path === "/v1/account-models/read" ||
+        path === "/v2/account-models/read"))
   ) {
     return true;
   }

@@ -31,14 +31,18 @@ export function acceptedLimitsWire(
   observed: unknown,
   provider?: LimitsProvider,
 ): c.AccountLimits | c.AccountLimitsV2 | c.AccountLimitsV3 {
-  const parsed = (contract === "account-limits/v3" ? c.accountLimitsV3 : contract === "account-limits/v2" ? c.accountLimitsV2 : c.accountLimits).safeParse(
-    observed,
-  );
+  const parsed = (
+    contract === "account-limits/v3"
+      ? c.accountLimitsV3
+      : contract === "account-limits/v2"
+        ? c.accountLimitsV2
+        : c.accountLimits
+  ).safeParse(observed);
   if (!parsed.success) {
     return { status: "unavailable" };
   }
   const result = parsed.data;
-  if (result.status === "snapshot" && provider) {
+  if (result.status === "snapshot" && provider !== undefined) {
     const matches =
       contract === "account-limits/v2" || contract === "account-limits/v3"
         ? (result as Extract<c.AccountLimitsV3, { status: "snapshot" }>).windows.every(

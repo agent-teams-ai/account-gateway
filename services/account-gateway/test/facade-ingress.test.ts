@@ -3928,7 +3928,10 @@ void test("source HTTP: Claude browser completion follows saved profile and qual
 void test("source HTTP: public execution callbacks hydrate authority, claim once and settle after revoke without pending routing state", async () => {
   let usageFault = true,
     recorded: lifecycleWire.UsageObservation | lifecycleWire.UsageObservationV2 | null = null;
-  const currentRecorded = (): lifecycleWire.UsageObservation | lifecycleWire.UsageObservationV2 | null => recorded;
+  const currentRecorded = ():
+    | lifecycleWire.UsageObservation
+    | lifecycleWire.UsageObservationV2
+    | null => recorded;
   const callbackGate = new NativeControlAdmission(1, 0);
   const usage: UsageJournal = {
     observe: async () => recorded,

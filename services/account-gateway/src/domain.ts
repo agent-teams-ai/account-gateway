@@ -194,8 +194,12 @@ export interface OperationStatus {
   credentialImportMethod?: CredentialImportMethod;
   connection?: import("./connection-domain.ts").ConnectionSnapshot;
   legacyConnectionKind?: import("./connection-domain.ts").LegacyConnectionKind;
-  lifecycle?: { kind: "suspend" | "resume"; expectedRevision: number; account: AccountStatus;
-    publication?: import("./connection-domain.ts").ConnectionPublication };
+  lifecycle?: {
+    kind: "suspend" | "resume";
+    expectedRevision: number;
+    account: AccountStatus;
+    publication?: import("./connection-domain.ts").ConnectionPublication;
+  };
 }
 // Protected-private proof. An actual native adapter must qualify the physical
 // identity mechanism before accepting this proof. Never send it in a safe DTO.

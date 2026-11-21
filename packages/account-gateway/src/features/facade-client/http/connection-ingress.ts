@@ -1,16 +1,24 @@
 import { z } from "zod";
-import { reference, revision } from "../contracts/primitives.js";
 import {
+  reference,
+  revision,
   connectionBinding,
   CONNECTION_INPUT_BYTES,
   type ConnectionInputField,
-} from "../contracts/connections-v3.js";
+} from "../contracts/index.js";
 
 const fieldId = z.string().regex(/^[a-z][a-z0-9_-]{0,127}$/);
 /** Every value is sensitive; never export this envelope through a safe DTO. */
-export const connectionInputFields = z.record(fieldId, z.string().refine((v) => !/\p{Cs}/u.test(v)))
-  .refine((v) => Object.keys(v).length <= 16 &&
-    new TextEncoder().encode(JSON.stringify(v)).length <= CONNECTION_INPUT_BYTES);
+export const connectionInputFields = z
+  .record(
+    fieldId,
+    z.string().refine((v) => !/\p{Cs}/u.test(v)),
+  )
+  .refine(
+    (v) =>
+      Object.keys(v).length <= 16 &&
+      new TextEncoder().encode(JSON.stringify(v)).length <= CONNECTION_INPUT_BYTES,
+  );
 export const connectionBegin = z.strictObject({
   operationId: reference,
   ownerRef: reference,
@@ -35,14 +43,24 @@ export function validateConnectionFields(
   input: Record<string, string> | undefined,
 ): boolean {
   const parsed = connectionInputFields.safeParse(input ?? {});
-  if (!parsed.success) return false;
+  if (!parsed.success) {
+    return false;
+  }
   const allowed = new Map(fields.map((field) => [field.fieldId, field]));
-  if (Object.keys(parsed.data).some((key) => !allowed.has(key))) return false;
+  if (Object.keys(parsed.data).some((key) => !allowed.has(key))) {
+    return false;
+  }
   return fields.every((field) => {
-    const value = parsed.data[field.fieldId];
-    if (value === undefined) return !field.required;
-    if (field.required && value.length === 0) return false;
-    if (new TextEncoder().encode(value).length > field.maxBytes) return false;
+    const value = (parsed.data as Partial<Record<string, string>>)[field.fieldId];
+    if (value === undefined) {
+      return !field.required;
+    }
+    if (field.required && value.length === 0) {
+      return false;
+    }
+    if (new TextEncoder().encode(value).length > field.maxBytes) {
+      return false;
+    }
     return field.kind !== "select" || field.choices.some((choice) => choice.value === value);
   });
 }

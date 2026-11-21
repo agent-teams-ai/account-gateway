@@ -49,8 +49,11 @@ export function exactCandidate(j: CandidateJournal, d: PhysicalCandidate): boole
     d.baseURL === j.profile.baseURL &&
     d.model === j.profile.model &&
     sameConnection(j.connectionSnapshot?.connection, d.publication?.connection) &&
-    (j.connectionSnapshot === undefined || (d.publication !== undefined &&
-      j.connectionSnapshot.method.allowedCredentialPolicies.includes(d.publication.credential.credentialPolicy)))
+    (j.connectionSnapshot === undefined ||
+      (d.publication !== undefined &&
+        j.connectionSnapshot.method.allowedCredentialPolicies.includes(
+          d.publication.credential.credentialPolicy,
+        )))
   );
 }
 export function sameCandidate(a: PhysicalCandidate, b: PhysicalCandidate): boolean {
@@ -61,7 +64,8 @@ export function sameCandidate(a: PhysicalCandidate, b: PhysicalCandidate): boole
     a.createdAt === b.createdAt &&
     a.profile === b.profile &&
     a.baseURL === b.baseURL &&
-    a.model === b.model && samePublication(a.publication, b.publication)
+    a.model === b.model &&
+    samePublication(a.publication, b.publication)
   );
 }
 // Keep RFC3339 text verbatim. No Date conversion, ID-only or latest-row recovery.
@@ -74,7 +78,9 @@ export function physicalCandidate(input: PhysicalCandidate): PhysicalCandidate {
     profile: input.profile,
     baseURL: input.baseURL,
     model: input.model,
-    ...(input.publication === undefined ? {} : { publication: capturePublication(input.publication) }),
+    ...(input.publication === undefined
+      ? {}
+      : { publication: capturePublication(input.publication) }),
   };
   uuid(d.generation);
   uuid(d.nativePhysicalIdentity);

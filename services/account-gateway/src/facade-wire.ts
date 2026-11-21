@@ -59,7 +59,9 @@ export function accountDTO(a: Awaited<ReturnType<AccountManagement["account"]>>)
   });
 }
 export function lifecycleAccountDTO(r: AccountLifecycleReadback): c.LifecycleAccount {
-  if (r.authKind !== "api_key" && r.authKind !== "oauth") throw new KernelError("unavailable");
+  if (r.authKind !== "api_key" && r.authKind !== "oauth") {
+    throw new KernelError("unavailable");
+  }
   const a = r.account;
   return c.lifecycleAccount.parse({
     accountRef: a.accountRef,
@@ -75,9 +77,18 @@ export function lifecycleAccountDTO(r: AccountLifecycleReadback): c.LifecycleAcc
 }
 export function lifecycleAccountV3DTO(r: AccountLifecycleReadback): c.LifecycleAccountV3 {
   const a = r.account;
-  return c.lifecycleAccountV3.parse({ accountRef: a.accountRef, ownerRef: a.ownerRef, profileId: a.profile,
-    displayName: a.displayName, state: a.state, metadataRevision: a.revision, authorizationEpoch: a.epoch,
-    authKind: r.authKind, resumeCustody: r.resumeCustody, ...(r.credential === undefined ? {} : { credential: r.credential }) });
+  return c.lifecycleAccountV3.parse({
+    accountRef: a.accountRef,
+    ownerRef: a.ownerRef,
+    profileId: a.profile,
+    displayName: a.displayName,
+    state: a.state,
+    metadataRevision: a.revision,
+    authorizationEpoch: a.epoch,
+    authKind: r.authKind,
+    resumeCustody: r.resumeCustody,
+    ...(r.credential === undefined ? {} : { credential: r.credential }),
+  });
 }
 export function retirementDTO(
   r: Awaited<ReturnType<AccountManagement["retirement"]>>,

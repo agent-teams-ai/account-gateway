@@ -35,7 +35,9 @@ export class NativeRetainedCustodyClient
     this.connections = new NativeConnectionClient(options);
   }
   async verify(input: CandidateMapping): Promise<RetainedCustodyProof> {
-    if (input.connectionSnapshot) return this.connections.verify(input);
+    if (input.connectionSnapshot) {
+      return this.connections.verify(input);
+    }
     this.scope(input);
     const d = physicalCandidate(input.descriptor);
     if (!exactCandidate(input, d) || d.nativePhysicalIdentity !== d.generation) {

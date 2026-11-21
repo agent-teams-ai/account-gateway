@@ -394,10 +394,26 @@ export class FacadeBearers {
             permitsProfile(grant, profileId)),
     );
   }
-  authorizesConnectionOwner(context: TrustedContext, ownerRef: string, profileId: string,
-    credentialPolicies: readonly string[]): boolean {
-    if (!credentialPolicies.length || credentialPolicies.some((policy) =>
-      !["provider_key", "subscription_session", "cloud_identity", "delegated_identity"].includes(policy))) return false;
+  authorizesConnectionOwner(
+    context: TrustedContext,
+    ownerRef: string,
+    profileId: string,
+    credentialPolicies: readonly string[],
+  ): boolean {
+    if (
+      !credentialPolicies.length ||
+      credentialPolicies.some(
+        (policy) =>
+          ![
+            "provider_key",
+            "subscription_session",
+            "cloud_identity",
+            "delegated_identity",
+          ].includes(policy),
+      )
+    ) {
+      return false;
+    }
     return credentialPolicies.every((policy) => policy === "provider_key")
       ? this.authorizesAccountLimits(context, ownerRef, profileId)
       : this.authorizesOwner(context, ownerRef, profileId);

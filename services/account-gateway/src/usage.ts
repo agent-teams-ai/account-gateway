@@ -1,6 +1,12 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import type { Pool } from "pg";
-import { usageObservation, usageObservationV2, projectUsageV1, nativeUsageContext, observedUsageCost } from "@agent-teams/account-gateway/contracts";
+import {
+  usageObservation,
+  usageObservationV2,
+  projectUsageV1,
+  nativeUsageContext,
+  observedUsageCost,
+} from "@agent-teams/account-gateway/contracts";
 import type {
   UsageObservation,
   UsageObservationV2,
@@ -17,9 +23,13 @@ const record = (value: unknown): value is Record<string, unknown> =>
 const numeric = (value: unknown): number | null =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
 export type UsageObservationFact = UsageObservation | UsageObservationV2;
-export type UsagePageFacts = Omit<UsagePage, "observations"> & { observations: UsageObservationFact[] };
+export type UsagePageFacts = Omit<UsagePage, "observations"> & {
+  observations: UsageObservationFact[];
+};
 function captureObservation(value: unknown): UsageObservationFact {
-  return record(value) && value.schemaVersion === 2 ? usageObservationV2.parse(value) : usageObservation.parse(value);
+  return record(value) && value.schemaVersion === 2
+    ? usageObservationV2.parse(value)
+    : usageObservation.parse(value);
 }
 
 /** Stable request identity shared by the proxy and native-public ingress adapters. */
@@ -72,8 +82,14 @@ function sameObservation(stored: UsageObservationFact, fact: UsageObservationFac
   // Contract upgrades do not rewrite an immutable observation. A cross-version
   // replay is the same fact only when its complete old projection is identical.
   // Two v2 observations still compare all native context and cost evidence.
-  return JSON.stringify(current(stored.schemaVersion === fact.schemaVersion ? stored : projectUsageV1(stored))) ===
-    JSON.stringify(current(stored.schemaVersion === fact.schemaVersion ? fact : projectUsageV1(fact)));
+  return (
+    JSON.stringify(
+      current(stored.schemaVersion === fact.schemaVersion ? stored : projectUsageV1(stored)),
+    ) ===
+    JSON.stringify(
+      current(stored.schemaVersion === fact.schemaVersion ? fact : projectUsageV1(fact)),
+    )
+  );
 }
 
 /** Native counters are observations; absent values remain unknown in both paths. */
@@ -97,8 +113,12 @@ export function nativeUsageObservation(
 ): UsageObservationFact {
   const common = { ...base, ...nativeUsageFields(observed) };
   return observed?.nativeContext !== undefined || observed?.cost !== undefined
-    ? usageObservationV2.parse({ ...common, schemaVersion: 2, nativeContext: observed.nativeContext ?? null,
-      cost: observed.cost ?? null })
+    ? usageObservationV2.parse({
+        ...common,
+        schemaVersion: 2,
+        nativeContext: observed.nativeContext ?? null,
+        cost: observed.cost ?? null,
+      })
     : usageObservation.parse(common);
 }
 
@@ -496,8 +516,13 @@ export interface NativeUsage {
   reasoningOutputTokens?: number;
   costState: "unknown" | "known";
   nativeContext?: {
-    providerId: string; productId: string; profileId: string; modelId: string;
-    billing: { status: "unknown" } | { status: "known"; kind: "subscription" | "credits" | "free" | "payg" | "mixed" };
+    providerId: string;
+    productId: string;
+    profileId: string;
+    modelId: string;
+    billing:
+      | { status: "unknown" }
+      | { status: "known"; kind: "subscription" | "credits" | "free" | "payg" | "mixed" };
   };
   cost?: { currency: string; amountDecimal: string };
   finalized: boolean;
@@ -516,7 +541,14 @@ function validateNativeUsage(value: unknown): asserts value is NativeUsage {
   }
   const r = value;
   const required = ["source", "state", "costState", "finalized"],
-    optional = ["inputTokens", "outputTokens", "cachedInputTokens", "reasoningOutputTokens", "nativeContext", "cost"];
+    optional = [
+      "inputTokens",
+      "outputTokens",
+      "cachedInputTokens",
+      "reasoningOutputTokens",
+      "nativeContext",
+      "cost",
+    ];
   if (
     required.some((key) => !Object.hasOwn(r, key)) ||
     Object.keys(r).some((key) => !required.includes(key) && !optional.includes(key))
@@ -535,8 +567,14 @@ function validateNativeUsage(value: unknown): asserts value is NativeUsage {
   optionalCounter(r.outputTokens);
   optionalCounter(r.cachedInputTokens);
   optionalCounter(r.reasoningOutputTokens);
-  if (r.nativeContext !== undefined && !nativeUsageContext.safeParse(r.nativeContext).success) throw new KernelError("invalid");
-  if (r.costState === "known" ? !observedUsageCost.safeParse(r.cost).success : r.cost !== undefined) throw new KernelError("invalid");
+  if (r.nativeContext !== undefined && !nativeUsageContext.safeParse(r.nativeContext).success) {
+    throw new KernelError("invalid");
+  }
+  if (
+    r.costState === "known" ? !observedUsageCost.safeParse(r.cost).success : r.cost !== undefined
+  ) {
+    throw new KernelError("invalid");
+  }
   if (
     (r.state === "complete" && (r.inputTokens === undefined || r.outputTokens === undefined)) ||
     (r.cachedInputTokens !== undefined &&
@@ -562,7 +600,9 @@ export function nativeUsage(value: unknown): NativeUsage {
     const context = nativeUsageContext.parse(snapshot.nativeContext);
     snapshot.nativeContext = Object.freeze({ ...context, billing: Object.freeze(context.billing) });
   }
-  if (snapshot.cost !== undefined) snapshot.cost = Object.freeze(observedUsageCost.parse(snapshot.cost));
+  if (snapshot.cost !== undefined) {
+    snapshot.cost = Object.freeze(observedUsageCost.parse(snapshot.cost));
+  }
   // Return the same validated snapshot, preserving own-key and symbol semantics.
   return Object.freeze(snapshot);
 }

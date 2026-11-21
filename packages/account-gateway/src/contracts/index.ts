@@ -1,6 +1,71 @@
-export * from "../features/facade-client/contracts/connections-v3.js";
-export * from "../features/facade-client/contracts/native-observations.js";
-export * from "../features/facade-client/contracts/lifecycle-v3.js";
+export {
+  PROVIDER_CONNECTIONS_V3_CONTRACT,
+  CONNECTION_INPUT_BYTES,
+  CONNECTION_REQUIRED_CAPABILITIES,
+  connectionBinding,
+  credentialPolicy,
+  credentialAttestation,
+  connectionInputField,
+  connectionInteraction,
+  connectionMethodV3,
+  supportedConnectionMethodV3,
+  supportsConnectionMethod,
+  nativeModelPolicy,
+  connectionProfileV3,
+  providerConnectionCapabilitiesV3,
+  connectionSnapshot,
+  connectionOperation,
+  connectionChallenge,
+  connectionBeginResponse,
+  connectionOperationRequest,
+  type ConnectionBinding,
+  type CredentialPolicy,
+  type CredentialAttestation,
+  type ConnectionInputField,
+  type ConnectionInteraction,
+  type ConnectionMethodV3,
+  type SupportedConnectionMethodV3,
+  type ConnectionProfileV3,
+  type ProviderConnectionCapabilitiesV3,
+  type ConnectionSnapshot,
+  type ConnectionOperation,
+  type ConnectionBeginResponse,
+  type ConnectionOperationRequest,
+} from "../features/facade-client/contracts/index.js";
+export {
+  NATIVE_ACCOUNT_MODELS_V2_CONTRACT,
+  accountModelsV2,
+  ACCOUNT_LIMITS_V3_CONTRACT,
+  accountLimitsV3Capabilities,
+  accountLimitsV3,
+  nativeBillingObservation,
+  nativeUsageContext,
+  observedUsageCost,
+  usageObservationV2,
+  usagePageV2,
+  usageReadV2,
+  projectUsageV2,
+  projectUsageV1,
+  type AccountModelsV2,
+  type AccountLimitsV3Capabilities,
+  type AccountLimitsV3,
+  type NativeUsageContext,
+  type ObservedUsageCost,
+  type UsageObservationV2,
+  type UsagePageV2,
+} from "../features/facade-client/contracts/index.js";
+export {
+  LIFECYCLE_V3_CAPABILITY_CONTRACT,
+  LIFECYCLE_V3_CLIENT_CONTRACT,
+  lifecycleCapabilityV3,
+  lifecycleAccountV3,
+  lifecycleAccountsV3,
+  lifecycleOperationV3,
+  type LifecycleCapabilityV3,
+  type LifecycleAccountV3,
+  type LifecycleAccountsV3,
+  type LifecycleOperationV3,
+} from "../features/facade-client/contracts/index.js";
 export {
   ACCOUNT_INFO_V2_CONTRACT,
   accountInfoFieldsV2,
@@ -9,13 +74,13 @@ export {
   accountInfoReadResponseV2,
   accountInfoFromV1,
   accountInfoToV1,
-} from "../features/facade-client/contracts/account-info.js";
+} from "../features/facade-client/contracts/index.js";
 export type {
   AccountInfoV2,
   AccountInfoFieldsV2,
   AccountInfoAccountV2,
   AccountInfoReadResponseV2,
-} from "../features/facade-client/contracts/account-info.js";
+} from "../features/facade-client/contracts/index.js";
 export {
   reference,
   revision,

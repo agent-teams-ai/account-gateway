@@ -109,13 +109,14 @@ export class NativeControlHTTP {
     try {
       body = value === undefined ? undefined : Buffer.from(JSON.stringify(value));
       const requestBytes =
-        path === "/private/native/v2/connections/begin" || path === "/private/native/v2/connections/submit"
+        path === "/private/native/v2/connections/begin" ||
+        path === "/private/native/v2/connections/submit"
           ? 80 * 1024
           : path === "/private/native/v1/oauth/connect/import"
-          ? 400 * 1024
-          : path.endsWith("/oauth/connect/complete")
-            ? 32_768
-            : 16_384;
+            ? 400 * 1024
+            : path.endsWith("/oauth/connect/complete")
+              ? 32_768
+              : 16_384;
       if (body && body.length > requestBytes) {
         throw new NativeFailure("bounded");
       }
@@ -197,7 +198,13 @@ export class NativeControlHTTP {
         Math.max(1, deadline - Date.now()),
       );
       req.on("error", (error: NodeJS.ErrnoException) => {
-        finish(new NativeFailure(this.#distinguishNotListening && error.code === "ECONNREFUSED" ? "not_listening" : "unavailable"));
+        finish(
+          new NativeFailure(
+            this.#distinguishNotListening && error.code === "ECONNREFUSED"
+              ? "not_listening"
+              : "unavailable",
+          ),
+        );
       });
       req.on("response", (res) => {
         // Retain one overflow sentinel beyond 64 pairs; Node truncates the rest.

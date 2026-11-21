@@ -78,15 +78,17 @@ export class IntentSecrets implements IntentCustody {
                 i.credentialImportMethod,
                 accepted.credentialImportValue ?? null,
               ]),
-          ...(i.connection === undefined ? [] : [
-            "native-connection/v1",
-            i.connection.connection.profileId,
-            i.connection.connection.methodId,
-            i.connection.connection.methodRevision,
-            i.connection.connection.configurationGeneration,
-            connectionInputCommitment(accepted.connectionInputFields),
-            i.legacyConnectionKind ?? null,
-          ]),
+          ...(i.connection === undefined
+            ? []
+            : [
+                "native-connection/v1",
+                i.connection.connection.profileId,
+                i.connection.connection.methodId,
+                i.connection.connection.methodRevision,
+                i.connection.connection.configurationGeneration,
+                connectionInputCommitment(accepted.connectionInputFields),
+                i.legacyConnectionKind ?? null,
+              ]),
         ]),
       )
       .digest("hex");
