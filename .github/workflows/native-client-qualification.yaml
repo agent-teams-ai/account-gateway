@@ -10,9 +10,9 @@ concurrency:
 jobs:
   native_account_consumer:
     name: Pinned RR account browser and TypeScript 7 qualification
-    uses: 777genius/review-router-ai/.github/workflows/native-accounts-browser.yml@e39640f21d4814f0409ba226c723fc34f857ef55
+    uses: 777genius/review-router-ai/.github/workflows/native-accounts-browser.yml@25abc7707a9977bd9cbb661e4bd838b1ee0d4a2f
     with:
-      source_revision: e39640f21d4814f0409ba226c723fc34f857ef55
+      source_revision: 25abc7707a9977bd9cbb661e4bd838b1ee0d4a2f
   native_clients:
     name: native clients (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
@@ -23,8 +23,8 @@ jobs:
         node: ['26.11.1', '24.21.0']
     env:
       NPM_CONFIG_ENGINE_STRICT: 'true'
-      NATIVE_COMMIT: 898e19fa42d4c6bc04e6f180f31b1c108e2606be
-      REVIEW_ROUTER_COMMIT: e39640f21d4814f0409ba226c723fc34f857ef55
+      NATIVE_COMMIT: 8945a0b9d103cb837ed9aae19816e4cee8ccada6
+      REVIEW_ROUTER_COMMIT: 25abc7707a9977bd9cbb661e4bd838b1ee0d4a2f
       REVIEW_ACTION_COMMIT: 0454fc0a3af15f94522c7c31cce59c0c62af6567
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
     steps:
@@ -326,12 +326,15 @@ jobs:
           if-no-files-found: error
           retention-days: 3
   native_client_gate:
-    needs: native_clients
+    needs: [native_clients, native_account_consumer]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Require both client qualification lanes
+      - name: Require client lanes and consumer qualification
         env:
           LANE_RESULT: ${{ needs.native_clients.result }}
-        run: test "$LANE_RESULT" = success
+          CONSUMER_RESULT: ${{ needs.native_account_consumer.result }}
+        run: |
+          test "$LANE_RESULT" = success
+          test "$CONSUMER_RESULT" = success
 
