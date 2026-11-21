@@ -19,6 +19,7 @@ interface PreflightConfig {
   readonly name: string;
   readonly root: string;
   readonly joinedArguments: string[];
+  readonly connectionArguments?: string[];
   readonly gatewayCommit: string;
   readonly nativeCommit: string;
   readonly reviewRouterCommit: string;
@@ -137,7 +138,11 @@ function parseProbe(
       profile: expected.profile + " (enforce)",
       pass: result.pass === true,
       checks: Object.fromEntries(keys.map((key) => [key, checks[key] === true])),
-      procMemory: { pidNumbersMatch: memory.pidNumbersMatch === true, readOpen, readWriteOpen },
+      procMemory: {
+        pidNumbersMatch: memory.pidNumbersMatch === true,
+        readOpen,
+        readWriteOpen,
+      },
     };
   } catch {
     throw new ProbeReportError(field);
@@ -179,7 +184,9 @@ async function main() {
     chmodSync(path, 0o777);
   }
   for (const path of [workspace, outside]) {
-    writeFileSync(join(path, "mutable-control"), "parent-write-control\n", { mode: 0o644 });
+    writeFileSync(join(path, "mutable-control"), "parent-write-control\n", {
+      mode: 0o644,
+    });
     chmodSync(join(path, "mutable-control"), 0o644);
   }
   const environment: NodeJS.ProcessEnv = {
@@ -204,7 +211,11 @@ async function main() {
       receipts.push(parseProbe(raw, expected));
     } catch (error) {
       if (error instanceof ProbeReportError) {
-        probeFailure = { phase: expected.phase, uid: expected.uid, field: error.field };
+        probeFailure = {
+          phase: expected.phase,
+          uid: expected.uid,
+          field: error.field,
+        };
       }
     }
   };
@@ -263,7 +274,10 @@ async function main() {
     const address = server.address();
     assert.ok(address !== null && typeof address === "object");
     await new Promise<void>((resolve, reject) => {
-      const socket = createConnection({ host: "127.0.0.1", port: address.port });
+      const socket = createConnection({
+        host: "127.0.0.1",
+        port: address.port,
+      });
       socket.once("connect", () => {
         socket.destroy();
         resolve();
@@ -363,8 +377,24 @@ async function main() {
   // This is the original joined runner and arguments. Its six provider receipts,
   // own CLI read/write/network/NNP proof and SQL closure gate remain mandatory.
   process.stdout.write(
-    await command(process.execPath, config.joinedArguments, process.env, { timeout: 600000 }),
+    await command(process.execPath, config.joinedArguments, process.env, {
+      timeout: 600000,
+    }),
   );
+  if (process.versions.node === "26.11.1") {
+    assert.ok(
+      config.connectionArguments,
+      "the primary runtime requires the complete native provider matrix",
+    );
+    process.stdout.write(
+      await command(process.execPath, config.connectionArguments, process.env, {
+        timeout: 6_300_000,
+      }),
+    );
+  } else {
+    assert.equal(process.versions.node, "24.21.0");
+    assert.equal(config.connectionArguments, undefined);
+  }
 }
 if (process.argv[1]?.endsWith("/execution-preflight.ts")) {
   main().catch(() => {

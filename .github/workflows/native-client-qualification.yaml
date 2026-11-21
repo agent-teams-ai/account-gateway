@@ -10,21 +10,21 @@ concurrency:
 jobs:
   native_account_consumer:
     name: Pinned RR account browser and TypeScript 7 qualification
-    uses: 777genius/review-router-ai/.github/workflows/native-accounts-browser.yml@ee047d1d452b5616318edaa63b55aeaa0f2b2a2e
+    uses: 777genius/review-router-ai/.github/workflows/native-accounts-browser.yml@5b6377efd0b6a347655379a6874a7b85a29dc682
     with:
-      source_revision: ee047d1d452b5616318edaa63b55aeaa0f2b2a2e
+      source_revision: 5b6377efd0b6a347655379a6874a7b85a29dc682
   native_clients:
     name: native clients (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 155
     strategy:
       fail-fast: false
       matrix:
-        node: ['26.11.1', '24.21.0']
+        node: ["26.11.1", "24.21.0"]
     env:
-      NPM_CONFIG_ENGINE_STRICT: 'true'
-      NATIVE_COMMIT: 8945a0b9d103cb837ed9aae19816e4cee8ccada6
-      REVIEW_ROUTER_COMMIT: ee047d1d452b5616318edaa63b55aeaa0f2b2a2e
+      NPM_CONFIG_ENGINE_STRICT: "true"
+      NATIVE_COMMIT: a59da2e24adec39b8b21a512bc6721bf7fa2a4c1
+      REVIEW_ROUTER_COMMIT: 5b6377efd0b6a347655379a6874a7b85a29dc682
       REVIEW_ACTION_COMMIT: 0454fc0a3af15f94522c7c31cce59c0c62af6567
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
     steps:
@@ -34,7 +34,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '24.21.0'
+          node-version: "24.21.0"
       - name: Retain the qualified Corepack entrypoint
         run: |
           corepack_entry="$(dirname "$(dirname "$(command -v node)")")/lib/node_modules/corepack/dist/corepack.js"
@@ -46,7 +46,7 @@ jobs:
           node-version: ${{ matrix.node }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.4'
+          go-version: "1.27.4"
           cache: false
       - name: Prepare exact source and pinned real clients
         run: |
@@ -145,6 +145,8 @@ jobs:
             pnpm rebuild @prisma/engines
             node scripts/prepare-pinned-subscription-runtime.ts
             REVIEW_ROUTER_REQUIRE_OFFLINE_PRISMA=1 node scripts/generate-prisma-offline.mjs
+            pnpm compiler:prepare
+            node scripts/local-checks/compiler-cli.ts --native --noEmit --incremental false -p tsconfig.provider-subscriptions-joined.json
             git diff --exit-code -- package.json pnpm-lock.yaml
           )
           node --input-type=module <<'NODE'
@@ -191,13 +193,16 @@ jobs:
           import { join } from 'node:path';
           import { goTestEvidence } from './services/account-gateway/test/fixtures/native-cli/evidence.ts';
           const suites = [
-            ['service', '^Test(Gateway(AccountInfo|AccountModelsReadFencesAndRedaction|GLMAccountModelsCatalog|NVIDIAAccountModelsPhysicalRouteAndFences|OpenRouterModelsSourcePolicyAndCache|QuotaAndInfo|Codex(Info|RetainedInfo|Maintenance)|ClaudeInfo|GrokInfo|OAuthInfo|AccountCapabilities|GeminiContinuation|NativeGemini|NativeOfficial|NativeAnthropicSchema|NativeMiniMax(WireDefaultTierAndReasoningHistory|ReasoningHistoryBounded)$|NativeOpenRouterAcceptsReplayedReasoningText$|NativeOAuthImport|NVIDIABuildChatUpstreamStatusDiagnostic)|ForwardResponses_(ForceChatCompletionsRoutes|ChatFallback)|ForwardResponsesChatCompletionsFallbackKeepsFunctionArgumentsSingle)', [
+            ['service', '^Test(Gateway(AccountInfo|AccountModelsReadFencesAndRedaction|GLMAccountModelsCatalog|NVIDIAAccountModelsPhysicalRouteAndFences|OpenRouterModelsSourcePolicyAndCache|QuotaAndInfo|Codex(Info|RetainedInfo|Maintenance)|Claude(Info|Continuation|ThinkingCarrier)|GrokInfo|OAuthInfo|AccountCapabilities|GeminiContinuation|NativeGemini|NativeClaudeReview|NativeOfficial|NativeAnthropicSchema|NativeMiniMax(WireDefaultTierAndReasoningHistory|ReasoningHistoryBounded)$|NativeOpenRouterAcceptsReplayedReasoningText$|NativeOAuthImport|NVIDIABuildChatUpstreamStatusDiagnostic)|ForwardResponses_(ForceChatCompletionsRoutes|ChatFallback)|ForwardResponsesChatCompletionsFallbackKeepsFunctionArgumentsSingle)', [
               'TestGatewayAccountInfoReaderUsesCurrentSnapshotAndFinalAuthority',
               'TestGatewayAccountModelsReadFencesAndRedaction',
               'TestGatewayGLMAccountModelsCatalog',
               'TestGatewayNVIDIAAccountModelsPhysicalRouteAndFences',
               'TestGatewayOpenRouterModelsSourcePolicyAndCache',
               'TestGatewayCodexMaintenanceHydratesOnceWithoutProviderHTTP',
+              'TestGatewayNativeClaudeReviewPreservesToolsSchemaAndOriginalOutputConstraint',
+              'TestGatewayClaudeContinuationBindsCurrentOwnerBirthMethodAndCredentialRevision',
+              'TestGatewayClaudeThinkingCarrierSealsExactNativeOutputAndRejectsTampering',
               'TestGatewayNativeOfficialAnthropicOriginalSchemaBeforeSuccess',
               'TestGatewayNativeOfficialGeminiActualTLSContinuationAndSchema',
               'TestGatewayNativeOAuthImportStrictEscapedIngressAndSeparateCodec',
@@ -212,9 +217,10 @@ jobs:
               'TestForwardResponsesChatCompletionsFallbackKeepsFunctionArgumentsSingle',
               'TestGatewayNVIDIABuildChatUpstreamStatusDiagnostic',
             ]],
-            ['bootstrap', '^Test(NativeAccountCapabilities|NativeOfficialAPIConfig|GatewayAccountLimitsAuthorityHTTP)', [
+            ['bootstrap', '^Test(NativeAccountCapabilities|NativeOfficialAPIConfig|NativeConnectionCleanupAuthorityStoredTuple|GatewayAccountLimitsAuthorityHTTP)', [
               'TestNativeAccountCapabilitiesExposeImportsOnlyWithComposedCodex',
               'TestNativeOfficialAPIConfigUsesExistingClosedFD6Profiles',
+              'TestNativeConnectionCleanupAuthorityStoredTuple',
               'TestGatewayAccountLimitsAuthorityHTTP',
             ]],
             ['handler', '^TestGateway(AccountInfoPrivateHTTPContract|NativeOAuthConnectHTTPImportStrictIngress)', [
@@ -265,7 +271,7 @@ jobs:
             --clients "$GATEWAY_CLIENT_ROOT/clients/clients.json" \
             --artifacts "$GATEWAY_CLIENT_ROOT/artifacts/native-clients" \
             --native-commit "$NATIVE_COMMIT" --gateway-commit "$(git rev-parse HEAD)"
-      - name: Join real clients and six Review Router providers to TypeScript authority
+      - name: Join real clients, legacy providers and the complete native method matrix
         run: |
           node services/account-gateway/test/fixtures/native-cli/run-profile.ts
       - name: Expose bounded synthetic qualification evidence
@@ -281,6 +287,10 @@ jobs:
             }
             const joined = join(process.env.GATEWAY_CLIENT_ROOT, "artifacts", "joined-clients", "result.json");
             if (existsSync(joined)) process.stdout.write("joined-clients\n" + readFileSync(joined, "utf8") + "\n");
+            const connections = join(process.env.GATEWAY_CLIENT_ROOT, "artifacts", "native-connections");
+            for (const file of ["run.json", "standard/native-receipt.json", "standard/gateway-rr-receipt.json", "express/native-receipt.json", "express/gateway-rr-receipt.json"]) {
+              if (existsSync(join(connections, file))) process.stdout.write("native-connections/" + file + "\n" + readFileSync(join(connections, file), "utf8") + "\n");
+            }
           '
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() && env.GATEWAY_CLIENT_ROOT != '' }}
@@ -325,6 +335,18 @@ jobs:
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/joined/joined-build.json
           if-no-files-found: error
           retention-days: 3
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() && matrix.node == '26.11.1' && env.GATEWAY_CLIENT_ROOT != '' }}
+        with:
+          name: native-connections-method-matrix
+          path: |
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-connections/build.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-connections/run.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-connections/*/native-receipt.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-connections/*/gateway-rr-receipt.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-connections/*/joined-transcript.jsonl
+          if-no-files-found: error
+          retention-days: 3
   native_client_gate:
     needs: [native_clients, native_account_consumer]
     if: ${{ always() }}
@@ -337,4 +359,3 @@ jobs:
         run: |
           test "$LANE_RESULT" = success
           test "$CONSUMER_RESULT" = success
-

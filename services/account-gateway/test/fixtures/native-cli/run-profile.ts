@@ -26,11 +26,20 @@ import {
 } from "./execution-profile.ts";
 
 let commandFailure:
-  | { command: string; exitCode: number | null; signal: string | null; error: string | null }
+  | {
+      command: string;
+      exitCode: number | null;
+      signal: string | null;
+      error: string | null;
+    }
   | undefined;
 let inspectionFailure: ContainerInspectionError["field"] | undefined;
 function run(binary: string, args: string[], timeout = 30000, label = binary) {
-  const result = spawnSync(binary, args, { encoding: "utf8", timeout, maxBuffer: 4 * 1024 * 1024 });
+  const result = spawnSync(binary, args, {
+    encoding: "utf8",
+    timeout,
+    maxBuffer: 4 * 1024 * 1024,
+  });
   if (result.error || result.status !== 0) {
     commandFailure ??= {
       command: label === "sudo" ? "sudo-" + args[0] : label,
@@ -194,6 +203,50 @@ try {
     "--gateway-commit",
     gatewayCommit,
   ];
+  // The complete native-method matrix uses the primary qualified runtime and
+  // the same isolated container after the existing client gates. The Node 24
+  // lane retains its original compatibility qualification.
+  let connectionArguments: string[] | undefined;
+  if (process.versions.node === "26.11.1") {
+    const vendor = join(root, "review-router-source/vendor/account-gateway");
+    const provenance = object(
+      JSON.parse(
+        readFileSync(join(vendor, "native-provider-parity-sdk-provenance.json"), "utf8"),
+      ) as unknown,
+    );
+    assert.equal(provenance.contract, "native-provider-parity-sdk-provenance/v1");
+    assert.equal(typeof provenance.archive, "string");
+    assert.match(provenance.archive as string, /^agent-teams-account-gateway-[a-zA-Z0-9.-]+\.tgz$/);
+    assert.equal(typeof provenance.sha256, "string");
+    assert.match(provenance.sha256 as string, /^[a-f0-9]{64}$/);
+    const sdkArchive = join(vendor, provenance.archive as string);
+    assert.equal(fileDigest(sdkArchive), provenance.sha256);
+    connectionArguments = [
+      join(repo, "services/account-gateway/test/fixtures/native-connections-joined/run.ts"),
+      "--gateway-root",
+      repo,
+      "--gateway-commit",
+      gatewayCommit,
+      "--native-root",
+      join(root, "native-source"),
+      "--native-commit",
+      nativeCommit!,
+      "--rr-root",
+      join(root, "review-router-source"),
+      "--rr-commit",
+      reviewRouterCommit!,
+      "--sdk-archive",
+      sdkArchive,
+      "--sdk-sha256",
+      provenance.sha256 as string,
+      "--pg-bin",
+      "/usr/lib/postgresql/17/bin",
+      "--go",
+      go,
+      "--output",
+      join(root, "artifacts/native-connections"),
+    ];
+  }
   writeFileSync(
     configPath,
     JSON.stringify({
@@ -203,6 +256,7 @@ try {
       nativeCommit,
       reviewRouterCommit,
       joinedArguments,
+      ...(connectionArguments ? { connectionArguments } : {}),
       probeSHA256: fileDigest(join(root, "build/execution-probe")),
       profileSHA256,
       seccompSHA256,
@@ -253,7 +307,11 @@ try {
       target: "/tmp/native-" + part + "-joined",
       readonly: true,
     })),
-    { source: join(root, "artifacts"), target: join(root, "artifacts"), readonly: false },
+    {
+      source: join(root, "artifacts"),
+      target: join(root, "artifacts"),
+      readonly: false,
+    },
   ];
   image = run("docker", [
     "image",
@@ -303,6 +361,11 @@ try {
       root,
       "review-router-source/apps/api/src/review-run-gateway-relay.ts",
     ),
+    // Host compilation has already downloaded and verified these exact module
+    // checksums. Container execution has no network and cannot fetch a fallback.
+    GOMODCACHE: join(root, "go-modules"),
+    GOPROXY: "off",
+    CGO_ENABLED: "0",
   })) {
     args.push("--env", key + "=" + value);
   }
@@ -323,7 +386,9 @@ try {
   anonymousVolumes = anonymousVolumeNames(inspected[0]);
   requireContainer(inspected[0], { name, image, seccomp: seccompPath, mounts });
   stage = "execute";
-  process.stdout.write(run("docker", ["start", "--attach", name], 660000) + "\n");
+  process.stdout.write(
+    run("docker", ["start", "--attach", name], connectionArguments ? 7_200_000 : 660_000) + "\n",
+  );
   const ended = array(JSON.parse(run("docker", ["inspect", name])) as unknown);
   const state = object(object(ended[0]).State);
   assert.equal(state.Running, false);
@@ -388,7 +453,11 @@ try {
           profileSHA256,
           seccompSHA256,
           parserPinsSHA256: digest(readFileSync(new URL("./apparmor-pins.json", import.meta.url))),
-          esbuild: { version: "0.28.1", sha256: esbuildSHA256, verified: esbuildVerified },
+          esbuild: {
+            version: "0.28.1",
+            sha256: esbuildSHA256,
+            verified: esbuildVerified,
+          },
           kernelCompressedLoad,
           compiledPolicy,
           loaded,
@@ -404,7 +473,10 @@ try {
         2,
       ) + "\n";
     // The original workflow deliberately owns this artifact directory as root.
-    const written = spawnSync("sudo", ["tee", hostReceipt], { input: receipt, encoding: "utf8" });
+    const written = spawnSync("sudo", ["tee", hostReceipt], {
+      input: receipt,
+      encoding: "utf8",
+    });
     if (written.status !== 0) {
       process.exitCode = 1;
     }

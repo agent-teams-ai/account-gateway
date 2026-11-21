@@ -200,6 +200,26 @@ boundaries:
     entrypoints: [services/account-gateway/test/native-device-joined.ts, services/account-gateway/test/native-claude-joined.ts, services/account-gateway/test/native-provider-joined.ts]
     # Share the qualification fixture's declared evidence validator.
     allow: {boundaries: [kernel-postgres, native-management, native-management-postgres, private-facade, foreground-service-entry, native-transport-http, http, usage-journal, native-client-fixture], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:assert/strict', 'node:crypto', 'node:child_process', 'node:fs/promises', 'node:path', 'node:readline', 'node:timers/promises', 'node:http', 'node:util', 'node:url'], runtimeReferences: []}
+  - id: native-connections-joined-test
+    dependencyMode: runtime
+    roots: [services/account-gateway/test/native-connections-joined.ts]
+    entrypoints: [services/account-gateway/test/native-connections-joined.ts]
+    # Actual native HTTP/PG and packed SDK are qualified with the unchanged RR consumer.
+    allow: {boundaries: [contracts, kernel-postgres, native-management-postgres, private-facade, foreground-service-entry, native-client-fixture, native-connections-consumer-fixture], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:path', 'node:readline', 'node:http', 'node:timers/promises'], runtimeReferences: []}
+  - id: native-connections-consumer-fixture
+    dependencyMode: runtime
+    roots: [services/account-gateway/test/fixtures/native-connections-joined/consumers.ts]
+    entrypoints: [services/account-gateway/test/fixtures/native-connections-joined/consumers.ts]
+    # Only this disposable loader may import fixed SDK/RR entrypoints from the
+    # qualified pack/RR checkout. It compares every installed SDK module to the
+    # archive before loading; callers cannot supply a module name or subpath.
+    allow: {boundaries: [], packages: ['@agent-teams/account-gateway'], builtins: ['node:assert/strict', 'node:crypto', 'node:child_process', 'node:fs/promises', 'node:module', 'node:path', 'node:url'], runtimeReferences: [dynamic]}
+  - id: native-connections-qualification-driver
+    dependencyMode: runtime
+    roots: [services/account-gateway/test/fixtures/native-connections-joined/run.ts]
+    entrypoints: [services/account-gateway/test/fixtures/native-connections-joined/run.ts]
+    # Exact clean source pins, one exclusive output, and a driver-owned PG cluster.
+    allow: {boundaries: [], packages: [], builtins: ['node:assert/strict', 'node:child_process', 'node:crypto', 'node:fs', 'node:fs/promises', 'node:module', 'node:net', 'node:path'], runtimeReferences: []}
   - id: foreground-service-entry
     dependencyMode: runtime
     roots: [services/account-gateway/src/service.ts, services/account-gateway/src/service-assembly.ts, services/account-gateway/src/service-runtime.ts, services/account-gateway/src/service-config.ts, services/account-gateway/src/serve.ts]
