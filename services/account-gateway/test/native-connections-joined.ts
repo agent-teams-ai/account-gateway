@@ -3,7 +3,7 @@
  * Every inventory row is attempted; execution uses the pinned real Action and
  * Codex CLI. Unavailable source methods remain explicit qualification blockers. */
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { lstat, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -13,6 +13,7 @@ import { Pool } from "pg";
 import * as c from "@agent-teams/account-gateway/contracts";
 import { PostgresKernel } from "../src/postgres.ts";
 import { IntentSecrets, PostgresManagementStore } from "../src/management-store.ts";
+import { PostgresUsageJournal } from "../src/usage.ts";
 import { createFacade, cancelFacadeTransport } from "../src/facade.ts";
 import type { FacadeOptions } from "../src/facade.ts";
 import {
@@ -25,6 +26,7 @@ import {
 import type { ServiceConfig } from "../src/service-config.ts";
 import { startWorkerHeartbeat } from "./fixtures/native-cli/worker-heartbeat.ts";
 import { loadQualifiedConnectionConsumers } from "./fixtures/native-connections-joined/consumers.ts";
+import { prepareGatewayRollbackReader } from "./fixtures/native-connections-joined/rollback.ts";
 
 const report = (value: object) => process.stdout.write(JSON.stringify(value) + "\n");
 const required = (name: string) => {
@@ -36,6 +38,7 @@ const servers: Server[] = [];
 let frames: ReturnType<typeof createInterface> | undefined;
 let pool: Pool | undefined;
 let heartbeat: (() => Promise<void>) | undefined;
+let rollback: Awaited<ReturnType<typeof prepareGatewayRollbackReader>> | undefined;
 let phase = "guard";
 type Completion = {
   action: "submit" | "poll";
@@ -70,9 +73,39 @@ type RowReceipt = {
   reconnect: "not_requested" | "passed" | "failed";
   review: "not_requested" | "passed" | "failed" | "not_run";
   erased: boolean;
+  pendingRecovery?: boolean;
   slowSSOMilliseconds?: number;
   failure?: { at: string; error: string; code?: string; locations?: string[] };
 };
+type CredentialScanReceipt = Awaited<ReturnType<typeof assertCredentialsAbsent>>;
+type ExtensionProof = {
+  setup?: {
+    formSubmitted: true;
+    methodId: string;
+    interaction: string;
+    environment: "dom_integration";
+  };
+  beforeReview?: Readonly<Record<string, unknown>>;
+  afterReview?: Readonly<Record<string, unknown>>;
+  afterRetirement?: Readonly<Record<string, unknown>>;
+  activeCredentialScan?: CredentialScanReceipt;
+  retiredCredentialScan?: CredentialScanReceipt;
+};
+const extensionOracle = {
+  rowId: "fixture-native-extension-responses-v1/fixture_browser_v1/same_consumer_build",
+  profileId: "fixture-native-extension-responses-v1",
+  providerId: "fixture-native-extension",
+  methodId: "fixture_browser_v1",
+  modelId: "fixture-review-model",
+} as const;
+const consumerBuildDigest = (provenance: Readonly<Record<string, string>>) =>
+  createHash("sha256")
+    .update(
+      JSON.stringify(
+        Object.entries(provenance).toSorted(([left], [right]) => left.localeCompare(right)),
+      ),
+    )
+    .digest("hex");
 function safeFailure(error: unknown, at: string): NonNullable<RowReceipt["failure"]> {
   const raw =
     error !== null && typeof error === "object" && "code" in error ? error.code : undefined;
@@ -114,6 +147,34 @@ async function measuredBytes(url: string, credential: string) {
   assert.ok(bytes.byteLength > 0 && bytes.byteLength <= 2_097_152);
   return bytes.byteLength;
 }
+async function assertCredentialsAbsent(database: Pool, sentinels: readonly string[]) {
+  assert.equal(sentinels.length, 2);
+  assert.equal(new Set(sentinels).size, 2);
+  assert.ok(sentinels.every((value) => value.length >= 16 && value.length <= 1024));
+  const tables = await database.query<{ table_schema: string; table_name: string }>(
+    "SELECT table_schema,table_name FROM information_schema.tables WHERE table_schema IN ('ag_kernel','ag_management') AND table_type='BASE TABLE' ORDER BY table_schema,table_name",
+  );
+  assert.ok(tables.rows.length > 0);
+  let scannedRows = 0;
+  for (const table of tables.rows) {
+    assert.match(table.table_schema, /^[a-z][a-z0-9_]+$/);
+    assert.match(table.table_name, /^[a-z][a-z0-9_]+$/);
+    const snapshot = await database.query<{ encoded: string }>(
+      `SELECT row_to_json(source_row)::text AS encoded FROM "${table.table_schema}"."${table.table_name}" AS source_row LIMIT 10001`,
+    );
+    assert.ok(snapshot.rows.length <= 10_000, "credential scan is bounded");
+    for (const row of snapshot.rows) {
+      assert.ok(Buffer.byteLength(row.encoded) <= 4 * 1024 * 1024);
+      assert.equal(
+        sentinels.some((sentinel) => row.encoded.includes(sentinel)),
+        false,
+        "provider credential must not enter Gateway durable rows",
+      );
+    }
+    scannedRows += snapshot.rows.length;
+  }
+  return { absent: true as const, schemas: 2, tables: tables.rows.length, scannedRows };
+}
 async function main() {
   assert.equal(process.env.AG_NATIVE_CONNECTION_JOINED_ALLOW, "disposable_pg17_10");
   const fixture = JSON.parse(
@@ -132,12 +193,25 @@ async function main() {
     rows: Row[];
     exchangePath: string;
     private: Record<string, string>;
-    batch: "standard" | "express";
+    batch: "standard" | "express" | "extensibility";
     expectedInventoryRows: number;
+    expectedExtensionRows?: number;
   };
   assert.equal(fixture.expectedInventoryRows, 53);
-  assert.ok(["standard", "express"].includes(fixture.batch));
+  assert.ok(["standard", "express", "extensibility"].includes(fixture.batch));
+  const isExtensibility = fixture.batch === "extensibility";
   assert.equal(fixture.rows.length, fixture.batch === "standard" ? 52 : 1);
+  if (isExtensibility) {
+    assert.equal(fixture.expectedExtensionRows, 1);
+    const [extension] = fixture.rows;
+    assert.equal(extension.id, extensionOracle.rowId);
+    assert.equal(extension.profileId, extensionOracle.profileId);
+    assert.equal(extension.provider, extensionOracle.providerId);
+    assert.equal(extension.methodId, extensionOracle.methodId);
+    assert.equal(extension.model, extensionOracle.modelId);
+    assert.equal(extension.execute, true);
+    assert.equal(extension.blocker, undefined);
+  }
   assert.equal(new Set(fixture.rows.map((row) => row.id)).size, fixture.rows.length);
   assert.ok(isAbsolute(fixture.exchangePath));
   for (const row of fixture.rows) {
@@ -149,20 +223,29 @@ async function main() {
   assert.ok(native.port);
   assert.equal(native.username + native.password + native.search + native.hash, "");
   phase = "packed-sdk-provenance";
+  const loadConsumers = () =>
+    loadQualifiedConnectionConsumers({
+      archive: required("AG_NATIVE_CONNECTION_JOINED_SDK_TGZ"),
+      sdkRoot: required("AG_NATIVE_CONNECTION_JOINED_SDK_ROOT"),
+      sdkSHA256: process.env.AG_NATIVE_CONNECTION_JOINED_SDK_SHA256 ?? "",
+      rrRoot: required("RR_NATIVE_CONNECTION_JOINED_ROOT"),
+    });
   const {
     sdk,
     createNativeConnectionAdapter,
     nativeConnectionProfileView,
     createNativeConnectionManagementClient,
     reviewConsumer,
+    extensionConsumer,
     reviewSchemaDigest,
     provenance,
-  } = await loadQualifiedConnectionConsumers({
-    archive: required("AG_NATIVE_CONNECTION_JOINED_SDK_TGZ"),
-    sdkRoot: required("AG_NATIVE_CONNECTION_JOINED_SDK_ROOT"),
-    sdkSHA256: process.env.AG_NATIVE_CONNECTION_JOINED_SDK_SHA256 ?? "",
-    rrRoot: required("RR_NATIVE_CONNECTION_JOINED_ROOT"),
-  });
+  } = await loadConsumers();
+  const consumerBuildDigestBefore = consumerBuildDigest(provenance);
+  const extensionModule = isExtensibility ? await extensionConsumer() : undefined;
+  const extensionProof: ExtensionProof | undefined = isExtensibility ? {} : undefined;
+  const extensionSentinels = isExtensibility
+    ? [fixture.private.extensionSentinelFirst, fixture.private.extensionSentinelReplacement]
+    : [];
   phase = "gateway-postgres";
   const dsn = process.env.AG_NATIVE_CONNECTION_JOINED_KERNEL_DSN;
   assert.ok(dsn !== undefined && dsn.length > 0);
@@ -197,6 +280,16 @@ async function main() {
   const kernel = new PostgresKernel(pool),
     secrets = new IntentSecrets(randomBytes(32), randomBytes(32));
   const store = new PostgresManagementStore(pool, secrets);
+  phase = "old-gateway-reader-build";
+  if (fixture.batch !== "express") {
+    rollback = await prepareGatewayRollbackReader({
+      readerRoot: required("AG_NATIVE_CONNECTION_JOINED_GATEWAY_READER_ROOT"),
+      rrRoot: required("RR_NATIVE_CONNECTION_JOINED_ROOT"),
+      workRoot: required("RR_PROVIDER_JOINED_WORK_ROOT"),
+      output: required("GATEWAY_NATIVE_CONNECTION_JOINED_ARTIFACTS"),
+      databaseURL: dsn,
+    });
+  }
   const kernelContext = { consumerId: fixture.consumerId },
     worker = randomUUID();
   await kernel.issuer(kernelContext);
@@ -274,7 +367,8 @@ async function main() {
     engineIncarnation: fixture.engineIncarnation,
     worker,
   };
-  const bridge = composeServiceNative(cfg, control, kernel, store, enrollment);
+  const usage = new PostgresUsageJournal(pool, randomBytes(32));
+  const bridge = composeServiceNative(cfg, control, kernel, store, enrollment, usage);
   const callbackOrigin = await listen(bridge.authority.createServer());
   const facadeOptions = {
     kernel,
@@ -284,6 +378,7 @@ async function main() {
     profiles: control.catalog,
     enrollment,
     transport: bridge.transport,
+    usage,
     ...composeServiceCachedLimits(control),
     intentHmacKey: randomBytes(32),
     lifecycle: { contract: c.LIFECYCLE_CAPABILITY_CONTRACT, writeGate: "enabled" },
@@ -313,80 +408,90 @@ async function main() {
   });
   let discovery = true,
     catalogReads = 0;
+  let rawProfiles: readonly c.ConnectionProfileV3[] = [];
   const ownedAccounts = new Map<string, { accountRef: string; profileId: string }>();
   const profileViews = async () => {
     assert.equal(discovery, true, "recovery must not rediscover a method");
     catalogReads++;
-    return (await client.getProviderConnectionCapabilitiesV3()).capabilities.map(
-      nativeConnectionProfileView,
-    );
+    rawProfiles = (await client.getProviderConnectionCapabilitiesV3()).capabilities;
+    return rawProfiles.map(nativeConnectionProfileView);
   };
-  const adapter = createNativeConnectionAdapter({
-    authorize: async (context: string) => {
-      assert.equal(context, "authorized");
-      return ownerRef;
-    },
-    owner: (owner: string) => owner,
-    operationId: (_owner: string, nonce: string) => "rr-joined-" + nonce,
-    client: (context, owner, onEnter) => {
-      assert.equal(context, "authorized");
-      assert.equal(owner, ownerRef);
-      const entered = async <T>(call: () => Promise<T>) => {
-        await onEnter?.();
-        try {
-          return await call();
-        } catch (error) {
-          if (error instanceof sdk.GatewayError) {
-            report({
-              phase: "gateway-method-failed",
-              code: error.diagnostic?.code,
-              effect: error.effect,
-            });
+  const createAdapter = () =>
+    createNativeConnectionAdapter({
+      authorize: async (context: string) => {
+        assert.equal(context, "authorized");
+        return ownerRef;
+      },
+      owner: (owner: string) => owner,
+      operationId: (_owner: string, nonce: string) => "rr-joined-" + nonce,
+      client: (context, owner, onEnter) => {
+        assert.equal(context, "authorized");
+        assert.equal(owner, ownerRef);
+        const entered = async <T>(call: () => Promise<T>) => {
+          await onEnter?.();
+          try {
+            return await call();
+          } catch (error) {
+            if (error instanceof sdk.GatewayError) {
+              report({
+                phase: "gateway-method-failed",
+                code: error.diagnostic?.code,
+                effect: error.effect,
+              });
+            }
+            throw error;
           }
-          throw error;
-        }
-      };
-      return {
-        beginConnection: (request) => entered(() => client.beginConnection(request)),
-        reconnectConnection: (account, request) =>
-          entered(() => client.reconnectConnection(account, request)),
-        submitConnection: (request) => entered(() => client.submitConnection(request)),
-        pollConnection: (request) => entered(() => client.pollConnection(request)),
-        readConnection: (operation) => client.readConnection(operation),
-      };
-    },
-    reauthorize: async (context: string, owner: string) => {
-      assert.equal(context, "authorized");
-      assert.equal(owner, ownerRef);
-    },
-    profiles: profileViews,
-    reconnectTarget: async (context, owner, intent) => {
-      assert.equal(context, "authorized");
-      assert.equal(owner, ownerRef);
-      assert.ok(intent.existing);
-      assert.equal(intent.existing.mirrorRevision, 1);
-      const target = ownedAccounts.get(intent.existing.connectionId);
-      assert.ok(target);
-      assert.equal(target.profileId, intent.connection.profileId);
-      const expected = intent.existing.gatewayRevision;
-      const assertCurrent = async () => {
-        const account = await client.get(target.accountRef);
-        assert.equal(account.ownerRef, ownerRef);
-        assert.equal(account.metadataRevision, expected);
-      };
-      await assertCurrent();
-      return { ...target, metadataRevision: expected, assertCurrent };
-    },
-    project: async (_context: string, _owner: string, nonce: string, operation: c.Operation) => ({
-      nonce,
-      state: operation.state,
-      cleanup: "unresolved" as const,
-    }),
-    failure: () => ({ status: "unavailable" as const }),
-  });
+        };
+        return {
+          beginConnection: (request) => entered(() => client.beginConnection(request)),
+          reconnectConnection: (account, request) =>
+            entered(() => client.reconnectConnection(account, request)),
+          submitConnection: (request) => entered(() => client.submitConnection(request)),
+          pollConnection: (request) => entered(() => client.pollConnection(request)),
+          readConnection: (operation) => client.readConnection(operation),
+        };
+      },
+      reauthorize: async (context: string, owner: string) => {
+        assert.equal(context, "authorized");
+        assert.equal(owner, ownerRef);
+      },
+      profiles: profileViews,
+      reconnectTarget: async (context, owner, intent) => {
+        assert.equal(context, "authorized");
+        assert.equal(owner, ownerRef);
+        assert.ok(intent.existing);
+        assert.equal(intent.existing.mirrorRevision, 1);
+        const target = ownedAccounts.get(intent.existing.connectionId);
+        assert.ok(target);
+        assert.equal(target.profileId, intent.connection.profileId);
+        const expected = intent.existing.gatewayRevision;
+        const assertCurrent = async () => {
+          const account = await client.get(target.accountRef);
+          assert.equal(account.ownerRef, ownerRef);
+          assert.equal(account.metadataRevision, expected);
+        };
+        await assertCurrent();
+        return { ...target, metadataRevision: expected, assertCurrent };
+      },
+      project: async (_context: string, _owner: string, nonce: string, operation: c.Operation) => ({
+        nonce,
+        state: operation.state,
+        cleanup: "unresolved" as const,
+      }),
+      failure: () => ({ status: "unavailable" as const }),
+    });
+  let adapter = createAdapter();
   phase = "native-discovery-through-rr";
   const profiles = await profileViews();
   assert.equal(profiles.length, fixture.profiles.length);
+  const discoveredProviders = profiles.map((profile) => {
+    assert.ok(profile.connection);
+    return {
+      profileId: profile.id,
+      providerId: profile.connection.provider,
+      methodIds: profile.connection.nativeMethods?.map((method) => method.methodId) ?? [],
+    };
+  });
   if (fixture.batch === "standard") {
     const discovered = profiles.find((profile) => profile.id === "deepseek-responses-apikey-v1");
     assert.equal(discovered?.connection?.provider, "deepseek");
@@ -495,6 +600,9 @@ async function main() {
     receipts.push(receipt);
     let accountRef: string | undefined;
     let retired = false;
+    let extensionObserver:
+      | Awaited<ReturnType<NonNullable<typeof extensionModule>["createExtensionObserver"]>>
+      | undefined;
     try {
       phase = "row-selection";
       report({ phase: "case", rowId: row.id });
@@ -516,11 +624,41 @@ async function main() {
       const nonce = randomUUID(),
         started = Date.now();
       phase = "rr-enrollment";
-      const begun = await adapter.begin(
-        "authorized",
-        { nonce, connection: selection, label: "Joined " + row.methodId },
-        row.fields,
-      );
+      const beginning: { result?: Awaited<ReturnType<typeof adapter.begin>> } = {};
+      const rawProfile = rawProfiles.find((candidate) => candidate.profileId === row.profileId);
+      if (extensionModule) {
+        assert.ok(rawProfile);
+        assert.ok(extensionProof);
+        let submissions = 0;
+        extensionProof.setup = await extensionModule.submitSetup({
+          profile: rawProfile,
+          selection,
+          begin: async (submission) => {
+            submissions++;
+            assert.equal(submissions, 1);
+            assert.deepEqual(submission.intent.connection, selection);
+            assert.equal(submission.interaction, "browser");
+            assert.deepEqual(submission.inputFields, row.fields);
+            beginning.result = await adapter.begin(
+              "authorized",
+              { nonce, ...submission.intent },
+              submission.inputFields,
+            );
+          },
+        });
+        assert.equal(extensionProof.setup.formSubmitted, true);
+        assert.equal(extensionProof.setup.methodId, row.methodId);
+        assert.equal(extensionProof.setup.interaction, "browser");
+        assert.equal(submissions, 1);
+      } else {
+        beginning.result = await adapter.begin(
+          "authorized",
+          { nonce, connection: selection, label: "Joined " + row.methodId },
+          row.fields,
+        );
+      }
+      const begun = beginning.result;
+      assert.ok(begun);
       if (row.blocker !== undefined && row.blocker.length > 0) {
         assert.notEqual(method.availability, "enabled");
         assert.equal(
@@ -534,6 +672,34 @@ async function main() {
       }
       assert.equal(begun.status, "ok");
       let operation = begun.value.operation;
+      if (isExtensibility) {
+        phase = "rr-pending-operation-recovery-after-native-recomposition";
+        assert.equal(operation.state, "pending");
+        assert.ok(operation.native);
+        assert.equal(operation.native.method.interaction.kind, "browser");
+        assert.ok(rollback);
+        await rollback.probe("pending", {
+          consumerId: fixture.consumerId,
+          operationId: "rr-joined-" + nonce,
+          pool,
+          kernel,
+          store,
+        });
+        report({ phase: "pending-recovery", rowId: row.id });
+        await handshake({ phase: "pending-recovery-ready", rowId: row.id });
+        const reads = catalogReads;
+        discovery = false;
+        // A new consumer instance has only the operation nonce. The source
+        // service was recomposed over its actual PostgreSQL journal above.
+        adapter = createAdapter();
+        const recovered = await adapter.read("authorized", nonce);
+        assert.equal(recovered.status, "ok");
+        assert.equal(recovered.value.state, "pending");
+        assert.deepEqual(recovered.value.native, operation.native);
+        assert.equal(catalogReads, reads);
+        receipt.pendingRecovery = true;
+        operation = recovered.value;
+      }
       for (const step of row.completion ?? []) {
         phase = "rr-completion";
         assert.equal(operation.state, "pending");
@@ -551,6 +717,19 @@ async function main() {
         operation = completed.value;
       }
       assert.equal(operation.state, "applied");
+      if (isExtensibility) {
+        assert.ok(rollback);
+        await rollback.probe("applied", {
+          consumerId: fixture.consumerId,
+          operationId: "rr-joined-" + nonce,
+          pool,
+          kernel,
+          store,
+        });
+        report({ phase: "pending-recovery-complete", rowId: row.id });
+        await handshake({ phase: "pending-recovery-restored", rowId: row.id });
+      }
+      discovery = true;
       assert.ok(operation.native);
       assert.deepEqual(operation.native.connection, selection);
       assert.deepEqual(operation.native.credential, {
@@ -586,6 +765,21 @@ async function main() {
       assert.equal(catalogReads, reads);
       receipt.recovery = true;
       discovery = true;
+      if (extensionModule) {
+        phase = "rr-native-models-and-limits";
+        assert.ok(rawProfile);
+        assert.ok(extensionProof);
+        extensionObserver = await extensionModule.createExtensionObserver({
+          origin,
+          managementToken: token,
+          consumerToken,
+          ownerRef,
+          accountRef,
+          profile: rawProfile,
+          modelId: row.model,
+        });
+        extensionProof.beforeReview = await extensionObserver.beforeReview();
+      }
       if (row.execute) {
         phase = "actual-rr-review";
         if (reviewEnvironmentBlocker) {
@@ -602,6 +796,7 @@ async function main() {
               model: row.model,
               limits,
               ...(row.reviewProof ? { reviewProof: row.reviewProof } : {}),
+              ...(extensionObserver ? { beforeDispatch: extensionObserver.beforeDispatch } : {}),
             });
             assert.equal(reviewSource.joinedProviderReceipts.length, before + 1);
             const proof = reviewSource.joinedProviderReceipts[before];
@@ -621,6 +816,10 @@ async function main() {
               assert.ok((proof.reasoningContinuations ?? 0) > 0);
             }
             reviews.push({ rowId: row.id, executionFamily: row.executionFamily, proof });
+            if (extensionObserver) {
+              assert.ok(extensionProof);
+              extensionProof.afterReview = await extensionObserver.afterReview();
+            }
             receipt.review = "passed";
           } catch (error) {
             receipt.review = "failed";
@@ -630,6 +829,13 @@ async function main() {
             }
           }
         }
+      }
+      if (extensionProof) {
+        phase = "active-gateway-provider-credential-scan";
+        extensionProof.activeCredentialScan = await assertCredentialsAbsent(
+          pool,
+          extensionSentinels,
+        );
       }
       phase = "retained-native-lifecycle";
       const original = await lifecycle.get(accountRef);
@@ -716,6 +922,17 @@ async function main() {
       assert.equal(retirementStatus.state, "completed");
       assert.equal(retirementStatus.inert, true);
       receipt.erased = true;
+      if (extensionProof) {
+        phase = "retired-gateway-provider-credential-scan";
+        extensionProof.retiredCredentialScan = await assertCredentialsAbsent(
+          pool,
+          extensionSentinels,
+        );
+        if (extensionObserver && receipt.review === "passed") {
+          phase = "rr-historical-usage-after-native-erasure";
+          extensionProof.afterRetirement = await extensionObserver.afterRetirement();
+        }
+      }
       receipt.outcome =
         receipt.review === "failed"
           ? "failed"
@@ -771,6 +988,14 @@ async function main() {
       );
       assert.equal(unknown.status, "ok");
       assert.equal(unknown.value.operation.state, "unknown");
+      assert.ok(rollback);
+      await rollback.probe("unknown", {
+        consumerId: fixture.consumerId,
+        operationId: "rr-joined-" + nonce,
+        pool,
+        kernel,
+        store,
+      });
       discovery = false;
       for (let attempt = 0; attempt < 2; attempt++) {
         const recovered = await adapter.read("authorized", nonce);
@@ -786,14 +1011,51 @@ async function main() {
   const passed = receipts.filter((receipt) => receipt.outcome === "passed").length;
   const failed = receipts.filter((receipt) => receipt.outcome === "failed").length;
   const blocked = receipts.filter((receipt) => receipt.outcome === "blocked").length;
-  const qualified = failed === 0 && blocked === 0 && negativeFailures.length === 0;
+  const compatibilityStates = rollback?.cases.map((entry) => entry.gatewayState).toSorted() ?? [];
+  const expectedCompatibilityStates = isExtensibility
+    ? ["applied", "pending"]
+    : fixture.batch === "standard"
+      ? ["unknown"]
+      : [];
+  const gatewayCompatibility = {
+    qualified: JSON.stringify(compatibilityStates) === JSON.stringify(expectedCompatibilityStates),
+    ...(rollback
+      ? {
+          readerSHA: rollback.build.readerSHA,
+          bundleSHA256: rollback.build.bundleSHA256,
+          dependencySHA256: rollback.build.dependencySHA256,
+          oldSourceGraphSHA256: rollback.build.oldSourceGraphSHA256,
+        }
+      : {}),
+    cases: rollback?.cases ?? [],
+  };
+  const extensionComplete =
+    !isExtensibility ||
+    (extensionProof?.setup?.formSubmitted === true &&
+      extensionProof.beforeReview !== undefined &&
+      extensionProof.afterReview !== undefined &&
+      extensionProof.afterRetirement !== undefined &&
+      extensionProof.activeCredentialScan?.absent === true &&
+      extensionProof.retiredCredentialScan?.absent === true &&
+      receipts.every((row) => row.pendingRecovery === true));
+  const qualified =
+    failed === 0 &&
+    blocked === 0 &&
+    negativeFailures.length === 0 &&
+    extensionComplete &&
+    gatewayCompatibility.qualified;
+  const consumerBuildDigestAfter = consumerBuildDigest((await loadConsumers()).provenance);
+  assert.equal(consumerBuildDigestAfter, consumerBuildDigestBefore);
   const receipt = {
     phase: qualified ? "completed" : "blocked",
     qualified,
-    contract: "native-connections-gateway-sdk-rr-joined/v1",
+    contract: isExtensibility
+      ? "native-provider-extension-gateway-sdk-rr/v1"
+      : "native-connections-gateway-sdk-rr-joined/v1",
     ...provenance,
     batch: fixture.batch,
     expectedInventoryRows: 53,
+    ...(isExtensibility ? { expectedExtensionRows: 1 } : {}),
     batchRows: rows.length,
     passed,
     failed,
@@ -802,6 +1064,11 @@ async function main() {
     reviewPassed: receipts.filter((row) => row.review === "passed").length,
     nativeCatalogBytes,
     publicCatalogBytes,
+    discoveredProviders,
+    consumerBuildDigestBefore,
+    consumerBuildDigestAfter,
+    gatewayCompatibility,
+    ...(isExtensibility ? { extensionComplete, extensionProof } : {}),
     reviewSchemaSHA256,
     lostGrantNotReplayed,
     negativeFailures,
@@ -850,6 +1117,7 @@ try {
 } finally {
   frames?.close();
   await heartbeat?.();
+  await rollback?.close();
   for (const server of servers.toReversed()) {
     server.closeAllConnections();
     await new Promise<void>((resolve) => {

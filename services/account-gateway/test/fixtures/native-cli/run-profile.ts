@@ -227,6 +227,8 @@ try {
       repo,
       "--gateway-commit",
       gatewayCommit,
+      "--gateway-reader-root",
+      join(root, "gateway-reader-source"),
       "--native-root",
       join(root, "native-source"),
       "--native-commit",

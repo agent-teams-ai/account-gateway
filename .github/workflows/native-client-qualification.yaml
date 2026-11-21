@@ -10,9 +10,9 @@ concurrency:
 jobs:
   native_account_consumer:
     name: Pinned RR account browser and TypeScript 7 qualification
-    uses: 777genius/review-router-ai/.github/workflows/native-accounts-browser.yml@38eb54a1706658fc005eba99d5c774c50005df90
+    uses: 777genius/review-router-ai/.github/workflows/native-accounts-browser.yml@e3d1ae5d6469f1eca0695a5e923a853072dd64c2
     with:
-      source_revision: 38eb54a1706658fc005eba99d5c774c50005df90
+      source_revision: e3d1ae5d6469f1eca0695a5e923a853072dd64c2
   native_clients:
     name: native clients (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
@@ -23,8 +23,9 @@ jobs:
         node: ["26.11.1", "24.21.0"]
     env:
       NPM_CONFIG_ENGINE_STRICT: "true"
-      NATIVE_COMMIT: a59da2e24adec39b8b21a512bc6721bf7fa2a4c1
-      REVIEW_ROUTER_COMMIT: 38eb54a1706658fc005eba99d5c774c50005df90
+      NATIVE_COMMIT: e7b78d3cecd9edc4f00c252bb2315e90b710badd
+      GATEWAY_READER_COMMIT: bcfcde2d06d7bbdb941258e1908986b9f5718feb
+      REVIEW_ROUTER_COMMIT: e3d1ae5d6469f1eca0695a5e923a853072dd64c2
       REVIEW_ACTION_COMMIT: 0454fc0a3af15f94522c7c31cce59c0c62af6567
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
     steps:
@@ -71,6 +72,10 @@ jobs:
           git -C "$cli_root/native-source" checkout --detach "$NATIVE_COMMIT"
           test "$(git -C "$cli_root/native-source" rev-parse HEAD)" = "$NATIVE_COMMIT"
           test -z "$(git -C "$cli_root/native-source" status --porcelain)"
+          git clone --no-checkout --filter=blob:none https://github.com/agent-teams-ai/account-gateway.git "$cli_root/gateway-reader-source"
+          git -C "$cli_root/gateway-reader-source" checkout --detach "$GATEWAY_READER_COMMIT"
+          test "$(git -C "$cli_root/gateway-reader-source" rev-parse HEAD)" = "$GATEWAY_READER_COMMIT"
+          test -z "$(git -C "$cli_root/gateway-reader-source" status --porcelain --untracked-files=all)"
           python3 services/account-gateway/test/fixtures/native-cli/install.py --destination "$cli_root/clients"
       - name: Extract pinned AppArmor compiler and ABI without changing host packages
         run: |
@@ -102,11 +107,13 @@ jobs:
           test -f "$GATEWAY_CLIENT_ROOT/sdk-dist/index.js"
           test -f "$GATEWAY_CLIENT_ROOT/sdk-dist/index.d.ts"
           ln -s "$GITHUB_WORKSPACE/packages/account-gateway/node_modules" "$GATEWAY_CLIENT_ROOT/sdk-dist/node_modules"
-          ln -s "$GATEWAY_CLIENT_ROOT/sdk-dist" packages/account-gateway/dist
+          mkdir packages/account-gateway/dist
+          cp -a "$GATEWAY_CLIENT_ROOT/sdk-dist/." packages/account-gateway/dist/
           pnpm --dir services/account-gateway run typecheck
           node --test services/account-gateway/test/fixtures/native-cli/joined-evidence.test.ts
           node --test services/account-gateway/test/fixtures/native-cli/execution-profile.test.ts
           git diff --exit-code -- pnpm-lock.yaml
+          test -z "$(git status --porcelain --untracked-files=all)"
       - name: Prepare exact Review Router source, real Action and its pinned Codex CLI
         run: |
           rr_source="$GATEWAY_CLIENT_ROOT/review-router-source"
@@ -147,6 +154,7 @@ jobs:
             REVIEW_ROUTER_REQUIRE_OFFLINE_PRISMA=1 node scripts/generate-prisma-offline.mjs
             pnpm compiler:prepare
             node scripts/local-checks/compiler-cli.ts --native --noEmit --incremental false -p tsconfig.provider-subscriptions-joined.json
+            node scripts/local-checks/compiler-cli.ts --native --noEmit --incremental false -p tsconfig.provider-subscriptions-extension.json
             git diff --exit-code -- package.json pnpm-lock.yaml
           )
           node --input-type=module <<'NODE'
@@ -315,6 +323,7 @@ jobs:
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/joined-clients/network.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/execution-host.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/execution-preflight.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/execution-command-failure.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/execution.apparmor
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/execution.apparmor.bin
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/execution-seccomp.json
@@ -344,6 +353,7 @@ jobs:
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-connections/run.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-connections/*/native-receipt.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-connections/*/gateway-rr-receipt.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-connections/*/gateway-old-reader-build.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-connections/*/joined-transcript.jsonl
           if-no-files-found: error
           retention-days: 3

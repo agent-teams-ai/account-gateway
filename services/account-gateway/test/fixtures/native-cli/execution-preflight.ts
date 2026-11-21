@@ -376,21 +376,35 @@ async function main() {
   assert.ok(success);
   // This is the original joined runner and arguments. Its six provider receipts,
   // own CLI read/write/network/NNP proof and SQL closure gate remain mandatory.
-  process.stdout.write(
-    await command(process.execPath, config.joinedArguments, process.env, {
-      timeout: 600000,
-    }),
-  );
+  const runQualifiedCommand = async (
+    invocationStage: "joined-clients" | "native-connections",
+    args: string[],
+    timeout: number,
+  ) => {
+    try {
+      process.stdout.write(await command(process.execPath, args, process.env, { timeout }));
+    } catch (error) {
+      // Preserve process status without exporting stderr, request material, or
+      // arbitrary exception text. The matrix runner owns its phase receipt.
+      writeFileSync(
+        join(root, "artifacts/execution-command-failure.json"),
+        JSON.stringify({
+          kind: "gateway-execution-command-failure/v1",
+          stage: invocationStage,
+          ...(error instanceof CommandFailure ? { status: error.status } : { startFailed: true }),
+        }) + "\n",
+        { mode: 0o600, flag: "wx" },
+      );
+      throw error;
+    }
+  };
+  await runQualifiedCommand("joined-clients", config.joinedArguments, 600000);
   if (process.versions.node === "26.11.1") {
     assert.ok(
       config.connectionArguments,
       "the primary runtime requires the complete native provider matrix",
     );
-    process.stdout.write(
-      await command(process.execPath, config.connectionArguments, process.env, {
-        timeout: 6_300_000,
-      }),
-    );
+    await runQualifiedCommand("native-connections", config.connectionArguments, 6_480_000);
   } else {
     assert.equal(process.versions.node, "24.21.0");
     assert.equal(config.connectionArguments, undefined);

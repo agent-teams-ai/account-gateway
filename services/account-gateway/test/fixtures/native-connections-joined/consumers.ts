@@ -29,7 +29,11 @@ type RROperation = {
   nonce: string;
   state: c.Operation["state"];
   cleanup: "unresolved";
-  native?: { connection: c.ConnectionBinding; credential?: c.CredentialAttestation };
+  native?: {
+    connection: c.ConnectionBinding;
+    method: { methodId: string; interaction: { kind: string } };
+    credential?: c.CredentialAttestation;
+  };
 };
 type RRResult<T> = { status: "ok"; value: T } | { status: "unavailable" };
 type RRNativeClient = Pick<
@@ -90,6 +94,19 @@ type RRAdapter = {
   ): Promise<RRResult<RROperation>>;
   read(context: string, nonce: string): Promise<RRResult<RROperation>>;
 };
+type JoinedDispatchTrace = Readonly<{
+  runOperationId: string;
+  policySubjectRef: string;
+  invocationRef: string;
+  attemptRef: string;
+  executionRef: string;
+  requestRef: string;
+  accountRef: string;
+  profileId: string;
+  modelId: string;
+  occurredAt: string;
+  serviceTier: "default";
+}>;
 type JoinedReviewInput = {
   origin: string;
   token: string;
@@ -97,6 +114,7 @@ type JoinedReviewInput = {
   profileId: string;
   model: string;
   reviewProof?: { reasoningEffort: "medium"; maxOutputTokens: 8192 };
+  beforeDispatch?: (trace: JoinedDispatchTrace) => Promise<void>;
   limits: {
     requests: number;
     concurrency: number;
@@ -104,6 +122,37 @@ type JoinedReviewInput = {
     outputBytes: number;
     tokens: number;
   };
+};
+type ExtensionObserver = {
+  beforeReview: () => Promise<Readonly<Record<string, unknown>>>;
+  beforeDispatch: (trace: JoinedDispatchTrace) => Promise<void>;
+  afterReview: () => Promise<Readonly<Record<string, unknown>>>;
+  afterRetirement: () => Promise<Readonly<Record<string, unknown>>>;
+};
+type ExtensionConsumer = {
+  submitSetup: (input: {
+    profile: c.ConnectionProfileV3;
+    selection: c.ConnectionBinding;
+    begin: (submission: {
+      intent: { connection: c.ConnectionBinding; label?: string };
+      inputFields: Record<string, string>;
+      interaction: string;
+    }) => Promise<void>;
+  }) => Promise<{
+    formSubmitted: true;
+    methodId: string;
+    interaction: string;
+    environment: "dom_integration";
+  }>;
+  createExtensionObserver: (input: {
+    origin: string;
+    managementToken: string;
+    consumerToken: string;
+    ownerRef: string;
+    accountRef: string;
+    profile: c.ConnectionProfileV3;
+    modelId: string;
+  }) => Promise<ExtensionObserver>;
 };
 type JoinedReviewReceipt = Readonly<{
   profileId: string;
@@ -167,6 +216,9 @@ export async function loadQualifiedConnectionConsumers(input: {
   for (const path of [archive, sdkRoot, rrRoot]) {
     assert.ok(isAbsolute(path));
   }
+  // Start the Node child with the shared RR JSX configuration. The web-only
+  // include list does not cover the production workspace UI package in tsx.
+  assert.equal(process.env.TSX_TSCONFIG_PATH, join(rrRoot, "tsconfig.base.json"));
   assert.match(sdkSHA256, /^[a-f0-9]{64}$/);
   assert.equal(digest(await readFile(archive)), sdkSHA256);
   const rrAdapterPath = join(rrRoot, "apps/web/src/server/native-connection-adapter.ts");
@@ -177,6 +229,10 @@ export async function loadQualifiedConnectionConsumers(input: {
     "scripts/review-investigation-paired-e2e/support/provider-subscriptions-joined.ts",
   );
   const rrRelayPath = join(rrRoot, "apps/api/src/review-run-gateway-relay.ts");
+  const rrExtensionPath = join(
+    rrRoot,
+    "scripts/review-investigation-paired-e2e/support/provider-subscriptions-extension.ts",
+  );
   const rrRequire = createRequire(rrAdapterPath);
   const rrSDKRoot = join(dirname(rrRequire.resolve("@agent-teams/account-gateway/http")), "../..");
   const packedFiles = execFileSync("tar", ["-tzf", archive], { encoding: "utf8", timeout: 5000 })
@@ -226,12 +282,44 @@ export async function loadQualifiedConnectionConsumers(input: {
       joinedProviderReceipts: readonly JoinedReviewReceipt[];
     };
   }
+  async function extensionConsumer(): Promise<ExtensionConsumer> {
+    return (await import(pathToFileURL(rrExtensionPath).href)) as ExtensionConsumer;
+  }
+  const extensionFiles = {
+    rrSetupDigest: "apps/web/app/dashboard/native-connection-form.tsx",
+    rrSetupDomainDigest: "apps/web/src/features/account-gateway/domain/native-connection.ts",
+    rrModelsDigest: "apps/web/src/server/native-account-models.ts",
+    rrLimitsDigest: "apps/web/src/server/account-limits-composition.ts",
+    rrLimitsProjectionDigest:
+      "packages/features/provider-accounts/src/account-limits/domain/account-limits.ts",
+    rrUsageSourceDigest: "apps/api/src/provider-usage-gateway-source.ts",
+    rrUsageProjectionDigest: "packages/features/provider-usage/src/domain/usage.ts",
+    rrUsageReportDigest: "packages/features/provider-usage/src/application/report-usage.ts",
+    rrUsageViewDigest: "apps/web/src/server/provider-usage-view-model.ts",
+    rrExtensionSetupDigest:
+      "scripts/review-investigation-paired-e2e/support/provider-subscriptions-extension-setup.ts",
+    rrExtensionUsageDigest:
+      "scripts/review-investigation-paired-e2e/support/provider-subscriptions-extension-usage.ts",
+    rrDispatchTraceDigest:
+      "scripts/review-investigation-paired-e2e/support/provider-subscriptions-dispatch-trace.ts",
+    rrConsumerLockfileDigest: "pnpm-lock.yaml",
+    rrWebCompilerDigest: "apps/web/tsconfig.json",
+    rrBaseCompilerDigest: "tsconfig.base.json",
+  };
+  const extensionProvenance: Record<string, string> = Object.fromEntries(
+    await Promise.all(
+      Object.entries(extensionFiles).map(
+        async ([name, relative]) => [name, digest(await readFile(join(rrRoot, relative)))] as const,
+      ),
+    ),
+  );
   return {
     sdk,
     createNativeConnectionAdapter,
     nativeConnectionProfileView,
     createNativeConnectionManagementClient,
     reviewConsumer,
+    extensionConsumer,
     reviewSchemaDigest: qualifiedReviewSchemaDigest,
     provenance: {
       sdkSHA256,
@@ -241,6 +329,8 @@ export async function loadQualifiedConnectionConsumers(input: {
       rrClientDigest: digest(await readFile(rrClientPath)),
       rrReviewDigest: digest(await readFile(rrReviewPath)),
       rrRelayDigest: digest(await readFile(rrRelayPath)),
+      rrExtensionDigest: digest(await readFile(rrExtensionPath)),
+      ...extensionProvenance,
     },
   };
 }

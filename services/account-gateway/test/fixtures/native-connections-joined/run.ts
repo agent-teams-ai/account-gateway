@@ -23,6 +23,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath }
 type Options = {
   gatewayRoot: string;
   gatewayCommit: string;
+  gatewayReaderRoot: string;
   nativeRoot: string;
   nativeCommit: string;
   rrRoot: string;
@@ -33,9 +34,26 @@ type Options = {
   go: string;
   output: string;
 };
+const extensionOracle = {
+  rowId: "fixture-native-extension-responses-v1/fixture_browser_v1/same_consumer_build",
+  profileId: "fixture-native-extension-responses-v1",
+  providerId: "fixture-native-extension",
+  methodId: "fixture_browser_v1",
+} as const;
+// One native compilation is shared by all batches. The extension receives
+// three minutes including its process startup; it is not another 36min matrix.
+const timeBudget = {
+  nativeCompileMilliseconds: 30 * 60_000,
+  baselineBatchMilliseconds: 36 * 60_000,
+  baselineBatchCount: 2,
+  extensionBatchMilliseconds: 3 * 60_000,
+  sharedStartupCleanupMilliseconds: 3 * 60_000,
+  totalUpperBoundMilliseconds: 108 * 60_000,
+} as const;
 const flags = new Map([
   ["--gateway-root", "gatewayRoot"],
   ["--gateway-commit", "gatewayCommit"],
+  ["--gateway-reader-root", "gatewayReaderRoot"],
   ["--native-root", "nativeRoot"],
   ["--native-commit", "nativeCommit"],
   ["--rr-root", "rrRoot"],
@@ -170,6 +188,7 @@ async function main() {
   const options = values as Options;
   for (const path of [
     options.gatewayRoot,
+    options.gatewayReaderRoot,
     options.nativeRoot,
     options.rrRoot,
     options.sdkArchive,
@@ -182,40 +201,17 @@ async function main() {
   assert.match(options.sdkSHA256, /^[a-f0-9]{64}$/);
   assert.equal(process.platform, "linux");
   assert.equal(process.versions.node, "26.11.1");
-  phase = "clean-source-provenance";
+  phase = "source-roots";
   const roots = [
     [await realpath(options.gatewayRoot), options.gatewayCommit],
     [await realpath(options.nativeRoot), options.nativeCommit],
     [await realpath(options.rrRoot), options.rrCommit],
   ] as const;
-  for (const [root, commit] of roots) {
-    cleanPin(root, commit);
-  }
-  assert.equal(sha256(await readFile(options.sdkArchive)), options.sdkSHA256);
-  const actionArchive = process.env.RR_PROVIDER_JOINED_ACTION_ARCHIVE;
-  const codexBinary = process.env.RR_PROVIDER_JOINED_CODEX_BINARY;
-  assert.ok(
-    actionArchive !== undefined &&
-      codexBinary !== undefined &&
-      isAbsolute(actionArchive) &&
-      isAbsolute(codexBinary),
-  );
-  assert.equal(
-    sha256(await readFile(actionArchive)),
-    "42e8d844bd451655ff171dc4093a872fc471675c90b3997697261ba4153807b4",
-  );
-  assert.equal(
-    sha256(await readFile(codexBinary)),
-    "524396258c974948334eabe6f2c6b1d8e1979dfd048d67d535ad9e4550fa5b26",
-  );
-  assert.match(smallCommand(options.go, ["version"]), /^go version go1\.27\.4 /);
-  assert.match(
-    smallCommand(join(options.pgBin, "postgres"), ["--version"]),
-    /^postgres \(PostgreSQL\) 17\.10(?: \([^)]+\))?$/,
-  );
+  const gatewayReaderRoot = await realpath(options.gatewayReaderRoot);
+  phase = "evidence-directory";
   const requestedOutput = resolvePath(options.output);
   output = join(await realpath(dirname(requestedOutput)), basename(requestedOutput));
-  for (const [root] of roots) {
+  for (const root of [...roots.map(([path]) => path), gatewayReaderRoot]) {
     const child = relative(root, output);
     assert.ok(child.startsWith("../"), "evidence must be outside qualified source checkouts");
   }
@@ -230,8 +226,49 @@ async function main() {
     rrCommit: options.rrCommit,
     sdkSHA256: options.sdkSHA256,
     expectedInventoryRows: 53,
+    expectedExtensionRows: 1,
+    timeBudget,
     batches: [],
   };
+  // Initialize bounded evidence before validating toolchains and source pins.
+  // A failed prerequisite still records its closed phase, without retaining
+  // Git output, environment values, child stderr, or assertion diffs.
+  const sourcePhases = ["gateway-source-pin", "native-source-pin", "rr-source-pin"] as const;
+  for (const [index, [root, commit]] of roots.entries()) {
+    phase = sourcePhases[index];
+    cleanPin(root, commit);
+  }
+  phase = "gateway-reader-source-pin";
+  cleanPin(gatewayReaderRoot, "bcfcde2d06d7bbdb941258e1908986b9f5718feb");
+  phase = "sdk-archive-provenance";
+  assert.equal(sha256(await readFile(options.sdkArchive)), options.sdkSHA256);
+  const actionArchive = process.env.RR_PROVIDER_JOINED_ACTION_ARCHIVE;
+  const codexBinary = process.env.RR_PROVIDER_JOINED_CODEX_BINARY;
+  phase = "review-runtime-configuration";
+  assert.ok(
+    actionArchive !== undefined &&
+      codexBinary !== undefined &&
+      isAbsolute(actionArchive) &&
+      isAbsolute(codexBinary),
+  );
+  phase = "action-archive-provenance";
+  assert.equal(
+    sha256(await readFile(actionArchive)),
+    "42e8d844bd451655ff171dc4093a872fc471675c90b3997697261ba4153807b4",
+  );
+  phase = "codex-binary-provenance";
+  assert.equal(
+    sha256(await readFile(codexBinary)),
+    "524396258c974948334eabe6f2c6b1d8e1979dfd048d67d535ad9e4550fa5b26",
+  );
+  phase = "go-toolchain";
+  assert.match(smallCommand(options.go, ["version"]), /^go version go1\.27\.4 /);
+  phase = "postgres-toolchain";
+  assert.match(
+    smallCommand(join(options.pgBin, "postgres"), ["--version"]),
+    /^postgres \(PostgreSQL\) 17\.10(?: \([^)]+\))?$/,
+  );
+  phase = "fixture-workspace";
   owned = await mkdtemp("/tmp/gateway-native-connections-");
   await chmod(owned, 0o755);
   const temp = join(owned, "tmp"),
@@ -266,6 +303,8 @@ async function main() {
     driverSHA256: sha256(await readFile(new URL(import.meta.url))),
     loaderSHA256: sha256(await readFile(loader)),
     consumerLoaderSHA256: sha256(await readFile(new URL("./consumers.ts", import.meta.url))),
+    rollbackLoaderSHA256: sha256(await readFile(new URL("./rollback.ts", import.meta.url))),
+    rollbackReaderSHA256: sha256(await readFile(new URL("./rollback-reader.ts", import.meta.url))),
   };
   Object.assign(qualification, sources);
   const inheritedGitConfigCount = Number(process.env.GIT_CONFIG_COUNT ?? "0");
@@ -289,6 +328,10 @@ async function main() {
     GOPROXY: "off",
     TMPDIR: temp,
     GIN_MODE: "release",
+    // The actual RR base configuration owns JSX for both apps/web and its
+    // workspace UI packages. Apply it before the loader registers any module,
+    // with identical settings for the known and newly discovered providers.
+    TSX_TSCONFIG_PATH: join(options.rrRoot, "tsconfig.base.json"),
     RR_PROVIDER_JOINED_WORK_ROOT: runtimeWork,
     PGPASSFILE: "/dev/null",
   };
@@ -307,7 +350,7 @@ async function main() {
       "-mod=readonly",
       "-buildvcs=true",
       "-tags",
-      "gatewaycustody",
+      "gatewaycustody,gatewayextension",
       "-gcflags=github.com/Wei-Shaw/sub2api/ent=-l -c=1",
       "-gcflags=github.com/Wei-Shaw/sub2api/internal/service=-N -l -c=1",
       "./internal/gatewaybootstrap",
@@ -315,7 +358,7 @@ async function main() {
     join(options.nativeRoot, "backend"),
     environment,
     join(output, "compile.log"),
-    30 * 60_000,
+    timeBudget.nativeCompileMilliseconds,
   );
   assert.equal(compile, 0, "native bootstrap compilation failed; see compile.log");
   for (const [root, commit] of roots) {
@@ -334,6 +377,7 @@ async function main() {
         binarySHA256: sha256(await readFile(binary)),
         goVersion: "go1.27.4",
         nodeVersion: process.versions.node,
+        timeBudget,
       },
       null,
       2,
@@ -392,18 +436,35 @@ async function main() {
     batch: string;
     exitCode: number;
     receipt?: {
+      contract: string;
       qualified: boolean;
       expectedInventoryRows: number;
+      expectedExtensionRows?: number;
       batchRows: number;
-      rows: { rowId: string; enrolled: boolean; outcome: string }[];
+      rows: { rowId: string; enrolled: boolean; outcome: string; pendingRecovery?: boolean }[];
+      discoveredProviders: { profileId: string; providerId: string; methodIds: string[] }[];
+      consumerBuildDigestBefore: string;
+      consumerBuildDigestAfter: string;
       passed: number;
       failed: number;
       blocked: number;
       enrolled: number;
       reviewPassed: number;
+      gatewayCompatibility: {
+        qualified: boolean;
+        readerSHA?: string;
+        bundleSHA256?: string;
+        dependencySHA256?: string;
+        oldSourceGraphSHA256?: string;
+        cases: {
+          gatewayState: string;
+          durableTablesUnchanged: boolean;
+          oldReaderPreserved: boolean;
+        }[];
+      };
     };
   }[] = [];
-  for (const batch of ["standard", "express"] as const) {
+  for (const batch of ["standard", "express", "extensibility"] as const) {
     const nativeDatabase = "native_connection_joined_" + batch;
     const gatewayDatabase = "ag_kernel_test_connections_joined_" + batch;
     for (const database of [nativeDatabase, gatewayDatabase]) {
@@ -428,12 +489,13 @@ async function main() {
         "^TestNativeConnectionsJoinedPrivateHTTPPostgres$",
         "-test.v",
         "-test.timeout",
-        "35m",
+        batch === "extensibility" ? "170s" : "35m",
       ],
       join(options.nativeRoot, "backend"),
       {
         ...environment,
         AG_NATIVE_CONNECTION_JOINED_ALLOW: "disposable_pg17_10",
+        AG_NATIVE_CONNECTION_JOINED_GATEWAY_READER_ROOT: gatewayReaderRoot,
         GATEWAY_NATIVE_CONNECTION_JOINED_BATCH: batch,
         GATEWAY_NATIVE_CONNECTION_JOINED_DSN: dsn(nativeDatabase),
         AG_NATIVE_CONNECTION_JOINED_KERNEL_DSN: dsn(gatewayDatabase),
@@ -448,7 +510,9 @@ async function main() {
         RR_NATIVE_CONNECTION_JOINED_ROOT: options.rrRoot,
       },
       join(batchOutput, "native-joined.log"),
-      36 * 60_000,
+      batch === "extensibility"
+        ? timeBudget.extensionBatchMilliseconds
+        : timeBudget.baselineBatchMilliseconds,
     );
     const item: (typeof batches)[number] = { batch, exitCode: result };
     batches.push(item);
@@ -460,23 +524,91 @@ async function main() {
       assert.equal(receipt.batchRows, batch === "standard" ? 52 : 1);
       assert.equal(receipt.rows.length, receipt.batchRows);
       assert.equal(new Set(receipt.rows.map((row) => row.rowId)).size, receipt.batchRows);
+      assert.match(receipt.consumerBuildDigestBefore, /^[a-f0-9]{64}$/);
+      assert.equal(receipt.consumerBuildDigestAfter, receipt.consumerBuildDigestBefore);
+      if (batch === "extensibility") {
+        assert.equal(receipt.contract, "native-provider-extension-gateway-sdk-rr/v1");
+        assert.equal(receipt.expectedExtensionRows, 1);
+        assert.equal(receipt.rows[0].rowId, extensionOracle.rowId);
+        assert.equal(receipt.rows[0].pendingRecovery, true);
+        assert.deepEqual(receipt.discoveredProviders, [
+          {
+            profileId: extensionOracle.profileId,
+            providerId: extensionOracle.providerId,
+            methodIds: [extensionOracle.methodId],
+          },
+        ]);
+      } else {
+        assert.equal(receipt.contract, "native-connections-gateway-sdk-rr-joined/v1");
+      }
       item.receipt = receipt;
     } catch {
       item.exitCode = item.exitCode || 1;
     }
-    // Failure in standard must not silently drop the separate Vertex Express row.
+    // A failed baseline batch must not drop Express or the independent
+    // extensibility proof. Neither extension counts nor outcomes alter G0.
     for (const [root, commit] of roots) {
       cleanPin(root, commit);
     }
     await rm(join(batchOutput, "private-fixture.json"), { force: true });
     await rm(join(batchOutput, "private-exchange.json"), { force: true });
   }
-  const rows = batches.flatMap((batch) => batch.receipt?.rows ?? []);
-  const qualified =
-    batches.every((batch) => batch.exitCode === 0 && batch.receipt?.qualified === true) &&
+  const baseline = batches.filter((batch) => batch.batch !== "extensibility");
+  const extension = batches.find((batch) => batch.batch === "extensibility");
+  const rows = baseline.flatMap((batch) => batch.receipt?.rows ?? []);
+  const baselineQualified =
+    baseline.every((batch) => batch.exitCode === 0 && batch.receipt?.qualified === true) &&
     rows.length === 53 &&
     new Set(rows.map((row) => row.rowId)).size === 53 &&
     rows.every((row) => row.outcome === "passed");
+  const identity = baseline[0].receipt?.consumerBuildDigestBefore;
+  const unchangedConsumerBuild =
+    identity !== undefined &&
+    batches.every(
+      (batch) =>
+        batch.receipt?.consumerBuildDigestBefore === identity &&
+        batch.receipt.consumerBuildDigestAfter === identity,
+    );
+  const baselineCatalog = baseline.flatMap((batch) => batch.receipt?.discoveredProviders ?? []);
+  const absentFromBaseline =
+    rows.length === 53 &&
+    baselineCatalog.length > 0 &&
+    baselineCatalog.every(
+      (profile) =>
+        profile.profileId !== extensionOracle.profileId &&
+        profile.providerId !== extensionOracle.providerId &&
+        !profile.methodIds.includes(extensionOracle.methodId),
+    );
+  const extensionQualified =
+    extension?.exitCode === 0 &&
+    extension.receipt?.qualified === true &&
+    extension.receipt.rows.length === 1 &&
+    extension.receipt.rows[0].outcome === "passed" &&
+    absentFromBaseline &&
+    unchangedConsumerBuild;
+  const readerReceipts = batches
+    .filter((batch) => batch.batch !== "express")
+    .map((batch) => batch.receipt?.gatewayCompatibility);
+  const compatibilityCases = readerReceipts.flatMap((receipt) => receipt?.cases ?? []);
+  const gatewayCompatibility = {
+    readerSHA: "bcfcde2d06d7bbdb941258e1908986b9f5718feb",
+    qualified:
+      readerReceipts.every(
+        (receipt) =>
+          receipt?.qualified === true &&
+          receipt.readerSHA === "bcfcde2d06d7bbdb941258e1908986b9f5718feb",
+      ) &&
+      JSON.stringify(compatibilityCases.map((entry) => entry.gatewayState).toSorted()) ===
+        JSON.stringify(["applied", "pending", "unknown"]) &&
+      compatibilityCases.every(
+        (entry) => entry.durableTablesUnchanged && entry.oldReaderPreserved,
+      ) &&
+      new Set(readerReceipts.map((receipt) => receipt?.bundleSHA256)).size === 1 &&
+      new Set(readerReceipts.map((receipt) => receipt?.dependencySHA256)).size === 1 &&
+      new Set(readerReceipts.map((receipt) => receipt?.oldSourceGraphSHA256)).size === 1,
+    cases: compatibilityCases,
+  };
+  const qualified = baselineQualified && extensionQualified && gatewayCompatibility.qualified;
   qualification = {
     contract: "native-connections-joined-qualification/v1",
     qualified,
@@ -486,6 +618,22 @@ async function main() {
     sdkSHA256: options.sdkSHA256,
     ...sources,
     expectedInventoryRows: 53,
+    expectedExtensionRows: 1,
+    timeBudget,
+    baselineQualified,
+    consumerBuildDigest: identity,
+    unchangedConsumerBuild,
+    gatewayCompatibility,
+    extension: {
+      contract: "native-provider-extension-qualification/v1",
+      qualified: extensionQualified,
+      rows: extension?.receipt?.rows ?? [],
+      absentFromBaseline,
+      unchangedConsumerBuild,
+      enrolled: extension?.receipt?.enrolled ?? 0,
+      reviewPassed: extension?.receipt?.reviewPassed ?? 0,
+      exitCode: extension?.exitCode ?? 1,
+    },
     enrolled: rows.filter((row) => row.enrolled).length,
     passed: rows.filter((row) => row.outcome === "passed").length,
     blocked: rows.filter((row) => row.outcome === "blocked").length,
