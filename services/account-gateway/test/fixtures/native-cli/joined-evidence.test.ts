@@ -417,13 +417,57 @@ void test("provider evidence requires six real RR tool/schema receipts and remov
       extra: "private-request",
     }) + "\n";
   const proof = JSON.stringify(value) + "\n";
-  const safe = joinedProviderReceipt(diagnostic + shape + proof, expected);
+  const toolOutput = {
+    phase: "actual-cli-tool-output-shape",
+    profileId: joinedProviderProfiles[0][1],
+    functionOutputs: 1,
+    workspaceObserved: true,
+    exitZeroObserved: true,
+    unknownToolObserved: false,
+    invalidArgumentsObserved: false,
+    sandboxFailureObserved: false,
+  };
+  const toolShape = JSON.stringify(toolOutput) + "\n";
+  const safe = joinedProviderReceipt(diagnostic + shape + toolShape + proof, expected);
   assert.equal(safe.rrReceipts.length, 6);
   assert.equal(safe.rrReceipts[5]?.structuredOutputRequests, 2);
   for (const receipt of safe.rrReceipts) {
     assert.deepEqual(receipt.sandboxQualification, sandboxQualification);
   }
   assert.equal(JSON.stringify(safe).includes("private-"), false);
+  assert.equal(JSON.stringify(safe).includes("workspaceObserved"), false);
+  for (const patch of [
+    { profileId: "unqualified-profile" },
+    { functionOutputs: 0 },
+    { functionOutputs: 129 },
+    { functionOutputs: 1.5 },
+    { functionOutputs: "1" },
+    { privateOutput: "private-tool-output" },
+  ]) {
+    assert.throws(
+      () =>
+        joinedProviderReceipt(JSON.stringify({ ...toolOutput, ...patch }) + "\n" + proof, expected),
+      /joined-proof-invalid/,
+    );
+  }
+  for (const key of [
+    "workspaceObserved",
+    "exitZeroObserved",
+    "unknownToolObserved",
+    "invalidArgumentsObserved",
+    "sandboxFailureObserved",
+  ]) {
+    for (const invalid of [undefined, null, "private-diagnostic"]) {
+      assert.throws(
+        () =>
+          joinedProviderReceipt(
+            JSON.stringify({ ...toolOutput, [key]: invalid }) + "\n" + proof,
+            expected,
+          ),
+        /joined-proof-invalid/,
+      );
+    }
+  }
   for (let omitted = 0; omitted < value.rrReceipts.length; omitted++) {
     assert.throws(
       () =>
@@ -491,9 +535,14 @@ void test("provider evidence requires six real RR tool/schema receipts and remov
   for (const raw of [
     proof + proof,
     proof + shape,
+    proof + toolShape,
+    toolShape,
+    toolShape.repeat(64) + proof,
     diagnostic,
     "private-plaintext\n" + proof,
     JSON.stringify({ phase: "unapproved-phase" }) + "\n" + proof,
+    JSON.stringify({ phase: "actual-cli-relay-error" }) + "\n" + proof,
+    JSON.stringify({ phase: "actual-cli-sdk-error" }) + "\n" + proof,
     " ".repeat(131_073),
   ]) {
     assert.throws(() => joinedProviderReceipt(raw, expected), /joined-proof-invalid/);
