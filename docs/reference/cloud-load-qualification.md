@@ -35,7 +35,7 @@ unreconciled effect fail the job. The operator never converts these into skips.
 | Compatibility Node | 24.21.0 |
 | Package manager | pnpm 11.28.2, frozen lockfile and strict engines |
 | Go | 1.27.3; `CGO_ENABLED=0`, Linux amd64, `-mod=readonly -trimpath` |
-| Native source | `agent-teams-ai/sub2api@b813197871c3d7a2ae07fa9cabe97b9862856653` |
+| Native source | `agent-teams-ai/sub2api-standalone@14f500eb4db78b47b5d028a8a811ec62b348ac92` |
 | Native target | `backend/cmd/account-gateway` |
 | PostgreSQL | 17.10; native production migrations and all gateway migrations |
 | CI PostgreSQL image | `postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317` |
