@@ -1,8 +1,9 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import type { Pool } from "pg";
-import { usageObservation } from "@agent-teams/account-gateway/contracts";
+import { usageObservation, usageObservationV2, projectUsageV1, nativeUsageContext, observedUsageCost } from "@agent-teams/account-gateway/contracts";
 import type {
   UsageObservation,
+  UsageObservationV2,
   UsagePage,
   UsageQuery,
 } from "@agent-teams/account-gateway/contracts";
@@ -15,6 +16,11 @@ const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const numeric = (value: unknown): number | null =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+export type UsageObservationFact = UsageObservation | UsageObservationV2;
+export type UsagePageFacts = Omit<UsagePage, "observations"> & { observations: UsageObservationFact[] };
+function captureObservation(value: unknown): UsageObservationFact {
+  return record(value) && value.schemaVersion === 2 ? usageObservationV2.parse(value) : usageObservation.parse(value);
+}
 
 /** Stable request identity shared by the proxy and native-public ingress adapters. */
 export function executionUsageBase(
@@ -58,12 +64,16 @@ function incompleteness(counters: UsageCounters): "unknown" | "partial" {
  * replay of the same revision across that change is the same observation, not
  * a conflict; the stored fact is kept as written.
  */
-function sameObservation(stored: UsageObservation, fact: UsageObservation): boolean {
-  const current = (observation: UsageObservation): UsageObservation =>
+function sameObservation(stored: UsageObservationFact, fact: UsageObservationFact): boolean {
+  const current = (observation: UsageObservationFact): UsageObservationFact =>
     observation.completeness === "partial"
       ? { ...observation, completeness: incompleteness(observation) }
       : observation;
-  return JSON.stringify(current(stored)) === JSON.stringify(current(fact));
+  // Contract upgrades do not rewrite an immutable observation. A cross-version
+  // replay is the same fact only when its complete old projection is identical.
+  // Two v2 observations still compare all native context and cost evidence.
+  return JSON.stringify(current(stored.schemaVersion === fact.schemaVersion ? stored : projectUsageV1(stored))) ===
+    JSON.stringify(current(stored.schemaVersion === fact.schemaVersion ? fact : projectUsageV1(fact)));
 }
 
 /** Native counters are observations; absent values remain unknown in both paths. */
@@ -81,15 +91,25 @@ export function nativeUsageFields(
     ...counters,
   };
 }
+export function nativeUsageObservation(
+  base: ReturnType<typeof executionUsageBase> & Pick<UsageObservation, "revision" | "effect">,
+  observed?: NativeUsage,
+): UsageObservationFact {
+  const common = { ...base, ...nativeUsageFields(observed) };
+  return observed?.nativeContext !== undefined || observed?.cost !== undefined
+    ? usageObservationV2.parse({ ...common, schemaVersion: 2, nativeContext: observed.nativeContext ?? null,
+      cost: observed.cost ?? null })
+    : usageObservation.parse(common);
+}
 
 export interface UsageJournal {
   observe(
     context: TrustedContext,
     executionRef: string,
     requestRef: string,
-  ): Promise<UsageObservation | null>;
-  append(context: TrustedContext, fact: UsageObservation): Promise<void>;
-  list(context: TrustedContext, query: UsageQuery): Promise<UsagePage>;
+  ): Promise<UsageObservationFact | null>;
+  append(context: TrustedContext, fact: UsageObservationFact): Promise<void>;
+  list(context: TrustedContext, query: UsageQuery): Promise<UsagePageFacts>;
 }
 // Only transaction rollback codes qualify for one analytics-only retry.
 // Unknown commit outcomes, authority failures and invalid facts are not retried.
@@ -166,7 +186,7 @@ export class PostgresUsageJournal implements UsageJournal {
     context: TrustedContext,
     executionRef: string,
     requestRef: string,
-  ): Promise<UsageObservation | null> {
+  ): Promise<UsageObservationFact | null> {
     const db = await this.#checkout();
     const health = { failed: false };
     const failed = (): boolean => health.failed;
@@ -183,16 +203,16 @@ export class PostgresUsageJournal implements UsageJournal {
         throw new KernelError("unavailable");
       }
       const row = result.rows.at(0);
-      return row === undefined ? null : usageObservation.parse(row.fact);
+      return row === undefined ? null : captureObservation(row.fact);
     } finally {
       db.removeListener("error", onError);
       db.release(failed());
     }
   }
-  async append(context: TrustedContext, input: UsageObservation): Promise<void> {
-    let fact: UsageObservation;
+  async append(context: TrustedContext, input: UsageObservationFact): Promise<void> {
+    let fact: UsageObservationFact;
     try {
-      fact = Object.freeze(usageObservation.parse(input));
+      fact = Object.freeze(captureObservation(input));
     } catch (error) {
       emitUsageAppendFailure("parse", "invalid", 1);
       throw error;
@@ -211,7 +231,7 @@ export class PostgresUsageJournal implements UsageJournal {
       }
     }
   }
-  async #append(context: TrustedContext, fact: UsageObservation): Promise<void> {
+  async #append(context: TrustedContext, fact: UsageObservationFact): Promise<void> {
     const db = await this.#checkout();
     let transaction = false;
     const health = { destroy: false };
@@ -230,7 +250,7 @@ export class PostgresUsageJournal implements UsageJournal {
       );
       const previousRow = previous.rows.at(0);
       if (previousRow !== undefined) {
-        if (!sameObservation(usageObservation.parse(previousRow.fact), fact)) {
+        if (!sameObservation(captureObservation(previousRow.fact), fact)) {
           throw new KernelError("conflict");
         }
       } else {
@@ -315,7 +335,7 @@ export class PostgresUsageJournal implements UsageJournal {
     }
     return [after, high];
   }
-  async list(context: TrustedContext, query: UsageQuery): Promise<UsagePage> {
+  async list(context: TrustedContext, query: UsageQuery): Promise<UsagePageFacts> {
     const limit = query.limit ?? 100;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
       throw new KernelError("invalid");
@@ -361,11 +381,11 @@ export class PostgresUsageJournal implements UsageJournal {
       );
       // Facade control responses have a hard 64KiB bound. A full count-based
       // page can exceed it with valid maximal references; never skip those rows.
-      const observations: UsageObservation[] = [];
+      const observations: UsageObservationFact[] = [];
       let bytes = 0,
         last = after;
       for (const row of rows.rows) {
-        const fact = usageObservation.parse(row.fact),
+        const fact = captureObservation(row.fact),
           size = Buffer.byteLength(JSON.stringify(fact)) + 1;
         if (bytes + size > 55_000) {
           break;
@@ -474,7 +494,12 @@ export interface NativeUsage {
   outputTokens?: number;
   cachedInputTokens?: number;
   reasoningOutputTokens?: number;
-  costState: "unknown";
+  costState: "unknown" | "known";
+  nativeContext?: {
+    providerId: string; productId: string; profileId: string; modelId: string;
+    billing: { status: "unknown" } | { status: "known"; kind: "subscription" | "credits" | "free" | "payg" | "mixed" };
+  };
+  cost?: { currency: string; amountDecimal: string };
   finalized: boolean;
 }
 function optionalCounter(value: unknown): asserts value is number | undefined {
@@ -491,7 +516,7 @@ function validateNativeUsage(value: unknown): asserts value is NativeUsage {
   }
   const r = value;
   const required = ["source", "state", "costState", "finalized"],
-    optional = ["inputTokens", "outputTokens", "cachedInputTokens", "reasoningOutputTokens"];
+    optional = ["inputTokens", "outputTokens", "cachedInputTokens", "reasoningOutputTokens", "nativeContext", "cost"];
   if (
     required.some((key) => !Object.hasOwn(r, key)) ||
     Object.keys(r).some((key) => !required.includes(key) && !optional.includes(key))
@@ -501,7 +526,7 @@ function validateNativeUsage(value: unknown): asserts value is NativeUsage {
   if (
     r.source !== "native_provider_response" ||
     (r.state !== "unknown" && r.state !== "partial" && r.state !== "complete") ||
-    r.costState !== "unknown" ||
+    (r.costState !== "unknown" && r.costState !== "known") ||
     typeof r.finalized !== "boolean"
   ) {
     throw new KernelError("invalid");
@@ -510,6 +535,8 @@ function validateNativeUsage(value: unknown): asserts value is NativeUsage {
   optionalCounter(r.outputTokens);
   optionalCounter(r.cachedInputTokens);
   optionalCounter(r.reasoningOutputTokens);
+  if (r.nativeContext !== undefined && !nativeUsageContext.safeParse(r.nativeContext).success) throw new KernelError("invalid");
+  if (r.costState === "known" ? !observedUsageCost.safeParse(r.cost).success : r.cost !== undefined) throw new KernelError("invalid");
   if (
     (r.state === "complete" && (r.inputTokens === undefined || r.outputTokens === undefined)) ||
     (r.cachedInputTokens !== undefined &&
@@ -531,6 +558,11 @@ export function nativeUsage(value: unknown): NativeUsage {
     throw new KernelError("invalid");
   }
   validateNativeUsage(snapshot);
+  if (snapshot.nativeContext !== undefined) {
+    const context = nativeUsageContext.parse(snapshot.nativeContext);
+    snapshot.nativeContext = Object.freeze({ ...context, billing: Object.freeze(context.billing) });
+  }
+  if (snapshot.cost !== undefined) snapshot.cost = Object.freeze(observedUsageCost.parse(snapshot.cost));
   // Return the same validated snapshot, preserving own-key and symbol semantics.
   return Object.freeze(snapshot);
 }

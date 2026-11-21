@@ -327,6 +327,7 @@ export interface BridgeConfig {
     outputBytes: number;
     tokens: number;
     providerTokenUpperBound: number;
+    nativeConnection?: true;
   }[];
   timeoutMs?: number;
   closureWaitMs?: number;
@@ -366,7 +367,7 @@ export function config(input: BridgeConfig) {
     !input.consumers.length ||
     input.consumers.length > 128 ||
     !input.profiles.length ||
-    input.profiles.length > 16
+    input.profiles.length > 128
   ) {
     return denied();
   }

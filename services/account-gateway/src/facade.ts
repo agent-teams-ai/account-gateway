@@ -3,7 +3,7 @@ import {
   executionUsageBase,
   reportUsageObservationFailure,
   nativeUsage,
-  nativeUsageFields,
+  nativeUsageObservation,
   ResponsesUsageCapture,
   type NativeUsage,
   type UsageJournal,
@@ -54,6 +54,8 @@ import { providerConnectionDefinition } from "./provider-connections.ts";
 import {
   projectProviderConnections,
   projectProviderConnectionsV1,
+  projectNativeConnectionsV2,
+  compatibleLegacyConnection,
 } from "./provider-connection-capabilities.ts";
 import type { ProviderConnectionSource } from "./provider-connection-capabilities.ts";
 import { strictJSON, validateResponses } from "./facade-ingress.ts";
@@ -64,8 +66,11 @@ import {
   configuredAccountModelSource,
   readAccountModels,
   accountModelAdmission,
+  readAccountModelsV2,
+  accountModelAdmissionV2,
 } from "./models-port.ts";
-import type { AccountModelsSource } from "./models-port.ts";
+import type { AccountModelsSource, AccountModelsV2Source } from "./models-port.ts";
+import type { NativeConnectionProfile, LegacyConnectionKind } from "./native-client-connections.ts";
 import { parse, type Schema } from "./facade-contract-parse.ts";
 import {
   FacadeBearers,
@@ -170,6 +175,7 @@ export interface FacadeOptions {
   readonly accountInfo?: AccountInfoReader;
   readonly providerConnections?: ProviderConnectionSource;
   readonly accountModels?: AccountModelsSource;
+  readonly accountModelsV2?: AccountModelsV2Source;
   readonly accountLimits?: {
     getAccountLimitsCapabilities(): Promise<c.AccountLimitsCapabilities>;
     readAccountLimits(input: c.AccountLimitsRequest): Promise<c.AccountLimits>;
@@ -181,6 +187,10 @@ export interface FacadeOptions {
   readonly accountLimitsV2?: {
     getAccountLimitsCapabilities(): Promise<c.AccountLimitsV2Capabilities>;
     readAccountLimits(input: c.AccountLimitsRequest): Promise<c.AccountLimitsV2>;
+  };
+  readonly accountLimitsV3?: {
+    getAccountLimitsCapabilities(): Promise<c.AccountLimitsV3Capabilities>;
+    readAccountLimits(input: c.AccountLimitsRequest): Promise<c.AccountLimitsV3>;
   };
   // Native limits observed at preparation; exhausted accounts are skipped.
   readonly admissionLimits?: AdmissionLimits;
@@ -195,6 +205,7 @@ export interface FacadeOptions {
     readonly dto: c.Profile;
     readonly maxOutputTokens: number;
     readonly limits?: Readonly<ApprovedLimits>;
+    readonly nativeProfile?: NativeConnectionProfile;
   }[];
   readonly intentHmacKey: Uint8Array;
   readonly enrollment?: NativeEnrollment;
@@ -214,6 +225,7 @@ import {
   requestDTO,
   accountDTO,
   lifecycleAccountDTO,
+  lifecycleAccountV3DTO,
   retirementDTO,
   executionState,
 } from "./facade-wire.ts";
@@ -258,21 +270,27 @@ export function createFacade(options: FacadeOptions): Server {
   bearers.configureExecutionKey(hmac);
   const profiles = new Map<
     string,
-    { dto: c.Profile; maxOutputTokens: number; limits?: Readonly<ApprovedLimits> }
+    { dto: c.Profile; maxOutputTokens: number; limits?: Readonly<ApprovedLimits>; nativeProfile?: NativeConnectionProfile }
   >();
   for (const entry of options.profiles) {
-    const dto = c.profile.parse(entry.dto);
+    const nativeProfile = entry.nativeProfile;
+    const capability = nativeProfile ? c.connectionProfileV3.parse(nativeProfile.capability) : undefined;
+    const dto = capability ? {
+      profileId: capability.profileId, protocol: capability.protocol, modelIds: [nativeProfile!.mount.model],
+      authKinds: [...new Set(nativeProfile!.legacyAliases.map((alias) => alias.kind === "api_key" ? "api_key" as const : "oauth" as const))],
+    } : c.profile.parse(entry.dto);
     const oauth = dto.authKinds[0] === "oauth",
       definition = oauthProfileDefinition(dto.profileId);
     if (
       dto.protocol !== "openai-responses" ||
       dto.modelIds.length !== 1 ||
-      dto.authKinds.length !== 1 ||
-      (oauth
+      (!nativeProfile && (dto.authKinds.length !== 1 || (oauth
         ? !management.supportsOAuthProfile(dto.profileId) ||
           !definition ||
           dto.modelIds[0] !== definition.model
-        : dto.authKinds[0] !== "api_key" || !!definition) ||
+        : dto.authKinds[0] !== "api_key" || !!definition))) ||
+      (nativeProfile && (!management.supportsConnectionProfile(dto.profileId) ||
+        nativeProfile.mount.profile !== dto.profileId || entry.dto.profileId !== dto.profileId)) ||
       profiles.has(dto.profileId) ||
       !Number.isSafeInteger(entry.maxOutputTokens) ||
       entry.maxOutputTokens < 1 ||
@@ -290,6 +308,7 @@ export function createFacade(options: FacadeOptions): Server {
       ...(entry.limits === undefined
         ? {}
         : { limits: Object.freeze(parse(c.limits, entry.limits)) }),
+      ...(nativeProfile === undefined ? {} : { nativeProfile: Object.freeze({ ...nativeProfile, capability: capability! }) }),
     });
   }
   if (!profiles.size || profiles.size > 128) {
@@ -326,11 +345,12 @@ export function createFacade(options: FacadeOptions): Server {
     }
   };
   async function operationDTO(context: TrustedContext, op: OperationStatus): Promise<c.Operation> {
+    const oauthMethod = op.oauthMethod ?? (op.legacyConnectionKind === "device_code" ? "device_code" : undefined);
     if (op.state !== "applied") {
       return c.operation.parse({
         operationRef: op.operationRef,
         state: op.state,
-        ...(op.oauthMethod === undefined ? {} : { oauthMethod: op.oauthMethod }),
+        ...(oauthMethod === undefined ? {} : { oauthMethod }),
         ...(op.state === "unknown" || op.state === "rejected"
           ? {
               error: safe(
@@ -364,7 +384,7 @@ export function createFacade(options: FacadeOptions): Server {
       return c.accountOperation.parse({
         operationRef: op.operationRef,
         state: "applied",
-        ...(op.oauthMethod === undefined ? {} : { oauthMethod: op.oauthMethod }),
+        ...(oauthMethod === undefined ? {} : { oauthMethod }),
         result: {
           kind: "account",
           accountRef: op.accountRef,
@@ -692,7 +712,7 @@ export function createFacade(options: FacadeOptions): Server {
           if (
             !nonempty(req.url) ||
             req.url.length > 2048 ||
-            !/^\/(?:v1|v2|internal\/v1)\//.test(req.url) ||
+            !/^\/(?:v1|v2|v3|internal\/v1)\//.test(req.url) ||
             req.url.includes("#")
           ) {
             throw new KernelError("invalid");
@@ -719,13 +739,13 @@ export function createFacade(options: FacadeOptions): Server {
           if (
             url.search &&
             !(
-              (path === "/v1/accounts" || path === "/v2/accounts" || path === "/v1/usage") &&
+              (path === "/v1/accounts" || path === "/v2/accounts" || path === "/v3/accounts" || path === "/v1/usage" || path === "/v2/usage") &&
               method === "GET"
             )
           ) {
             throw new KernelError("invalid");
           }
-          if (path === "/v1/account-info/read" && method === "POST") {
+          if ((path === "/v1/account-info/read" || path === "/v2/account-info/read") && method === "POST") {
             const input = parse(
               c.accountInfoReadRequest,
               strictJSON(
@@ -739,7 +759,7 @@ export function createFacade(options: FacadeOptions): Server {
             ) {
               throw new KernelError("denied");
             }
-            const result = await accountInfo.read(
+            const result = await accountInfo.readV2(
               {
                 observe: async (selector) => {
                   requireCurrent(grant);
@@ -764,7 +784,14 @@ export function createFacade(options: FacadeOptions): Server {
               { consumerId: context.consumerId, signal: controller.signal },
             );
             requireCurrent(grant);
-            send(res, c.accountInfoReadResponse, result, 200, true, c.ACCOUNT_INFO_RESPONSE_BYTES);
+            if (path === "/v1/account-info/read") {
+              send(res, c.accountInfoReadResponse, {
+                contract: c.ACCOUNT_INFO_CONTRACT,
+                accounts: result.accounts.map((row) => ({ ...row, info: c.accountInfoToV1(row.info) })),
+              }, 200, true, c.ACCOUNT_INFO_RESPONSE_BYTES);
+            } else {
+              send(res, c.accountInfoReadResponseV2, result, 200, true, c.ACCOUNT_INFO_RESPONSE_BYTES);
+            }
             return;
           }
           if (path === "/v1/capabilities/account-limits-refresh" && method === "GET") {
@@ -819,21 +846,21 @@ export function createFacade(options: FacadeOptions): Server {
             );
             return;
           }
-          if (path === "/v2/capabilities/account-limits" && method === "GET") {
+          if ((path === "/v2/capabilities/account-limits" || path === "/v3/capabilities/account-limits") && method === "GET") {
             if (grant.role !== "consumer-control" && grant.role !== "management") {
               throw new KernelError("denied");
             }
-            let capabilities: c.AccountLimitsV2Capabilities = {
-              contract: c.ACCOUNT_LIMITS_V2_CONTRACT,
+            const v3 = path.startsWith("/v3/");
+            const schema = v3 ? c.accountLimitsV3Capabilities : c.accountLimitsV2Capabilities;
+            let capabilities: c.AccountLimitsV2Capabilities | c.AccountLimitsV3Capabilities = {
+              contract: v3 ? c.ACCOUNT_LIMITS_V3_CONTRACT : c.ACCOUNT_LIMITS_V2_CONTRACT,
               cachedRead: false,
               quotaOnlyRefresh: false,
             };
             try {
-              if (options.accountLimitsV2) {
-                capabilities = parse(
-                  c.accountLimitsV2Capabilities,
-                  await options.accountLimitsV2.getAccountLimitsCapabilities(),
-                );
+              const source = v3 ? options.accountLimitsV3 : options.accountLimitsV2;
+              if (source) {
+                capabilities = parse<c.AccountLimitsV2Capabilities | c.AccountLimitsV3Capabilities>(schema, await source.getAccountLimitsCapabilities());
               }
             } catch {
               /* Missing/incompatible source never advertises a read capability. */
@@ -841,14 +868,14 @@ export function createFacade(options: FacadeOptions): Server {
             requireCurrent(grant);
             send(
               res,
-              c.accountLimitsV2Capabilities,
+              schema,
               { ...capabilities, quotaOnlyRefresh: false },
               200,
               true,
             );
             return;
           }
-          if (path === "/v1/account-models/read" && method === "POST") {
+          if ((path === "/v1/account-models/read" || path === "/v2/account-models/read") && method === "POST") {
             const input = parse(
               c.accountModelsRequest,
               strictJSON(await body(req, Math.min(ingressBytes, 1024)), true),
@@ -870,6 +897,14 @@ export function createFacade(options: FacadeOptions): Server {
               throw new KernelError("denied");
             }
             requireCurrent(grant);
+            if (path === "/v2/account-models/read") {
+              const native = profiles.get(input.profileId)?.nativeProfile;
+              const result = native ? await readAccountModelsV2(options.accountModelsV2, input,
+                native.capability.modelPolicy, () => accountLimitsTarget(kernel, store, context, input)) : { status: "unsupported" as const };
+              requireCurrent(grant);
+              send(res, c.accountModelsV2, result, 200, true, 2 * 1024 * 1024);
+              return;
+            }
             const result = configuredAccountModelSource(input.profileId)
               ? await readAccountModels(options.accountModels, input, () =>
                   accountLimitsTarget(kernel, store, context, input),
@@ -880,7 +915,7 @@ export function createFacade(options: FacadeOptions): Server {
             return;
           }
           const limitsRead = async (
-            contract: "account-limits/v1" | "account-limits/v2",
+            contract: "account-limits/v1" | "account-limits/v2" | "account-limits/v3",
             refresh = false,
           ) => {
             const input = parse(
@@ -888,6 +923,7 @@ export function createFacade(options: FacadeOptions): Server {
               strictJSON(await body(req, Math.min(ingressBytes, 1024)), true),
             );
             const definition = providerConnectionDefinition(input.profileId);
+            const native = profiles.get(input.profileId)?.nativeProfile;
             if (grant.role !== "management" && grant.role !== "consumer-control") {
               throw new KernelError("denied");
             }
@@ -906,9 +942,8 @@ export function createFacade(options: FacadeOptions): Server {
             requireCurrent(grant);
             const limitsProvider = c.providerIdentity.safeParse(definition?.provider.identity);
             if (
-              !definition ||
-              !limitsProvider.success ||
-              definition.limitsContract !== contract ||
+              (contract === "account-limits/v3" ? native?.capability.limitsContract !== contract :
+                !definition || !limitsProvider.success || definition.limitsContract !== contract) ||
               (refresh && input.profileId !== "openai-codex-oauth-responses-v1")
             ) {
               return { input, result: { status: "unsupported" as const } };
@@ -934,7 +969,14 @@ export function createFacade(options: FacadeOptions): Server {
               },
             };
             const source =
-              contract === "account-limits/v1"
+              contract === "account-limits/v3" ? {
+                contract: "account-limits/v3" as const,
+                read: async (selector: c.AccountLimitsRequest): Promise<c.AccountLimitsV3> => {
+                  if (!options.accountLimitsV3) return { status: "unavailable" };
+                  const caps = parse(c.accountLimitsV3Capabilities, await options.accountLimitsV3.getAccountLimitsCapabilities());
+                  return caps.cachedRead ? options.accountLimitsV3.readAccountLimits(selector) : { status: "unavailable" };
+                },
+              } : contract === "account-limits/v1"
                 ? {
                     contract: "account-limits/v1" as const,
                     read: async (selector: c.AccountLimitsRequest): Promise<c.AccountLimits> => {
@@ -988,7 +1030,7 @@ export function createFacade(options: FacadeOptions): Server {
                   };
             const result = await readCachedAccountLimits(authority, source, input, {
               contract,
-              provider: limitsProvider.data,
+              provider: contract === "account-limits/v3" ? native!.capability.provider.id : limitsProvider.success ? limitsProvider.data : undefined,
             });
             requireCurrent(grant);
             if (
@@ -1020,7 +1062,12 @@ export function createFacade(options: FacadeOptions): Server {
             send(res, c.accountLimitsV2, result as c.AccountLimitsV2, 200, true);
             return;
           }
-          const usageMatch = /^\/v1\/usage\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/.exec(path);
+          if (path === "/v3/account-limits/read" && method === "POST") {
+            const { result } = await limitsRead("account-limits/v3");
+            send(res, c.accountLimitsV3, result as c.AccountLimitsV3, 200, true);
+            return;
+          }
+          const usageMatch = /^\/v[12]\/usage\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/.exec(path);
           if (usageMatch && method === "GET") {
             if (grant.role !== "consumer-control" || !options.usage) {
               throw new KernelError("denied");
@@ -1030,10 +1077,11 @@ export function createFacade(options: FacadeOptions): Server {
             uuid(executionRef);
             const observation = await options.usage.observe(context, executionRef, requestRef);
             requireCurrent(grant);
-            send(res, c.usageRead, { observation });
+            if (path.startsWith("/v2/")) send(res, c.usageReadV2, { observation: observation === null ? null : c.projectUsageV2(observation) });
+            else send(res, c.usageRead, { observation: observation === null ? null : c.projectUsageV1(observation) });
             return;
           }
-          if (path === "/v1/usage" && method === "GET") {
+          if ((path === "/v1/usage" || path === "/v2/usage") && method === "GET") {
             if (grant.role !== "consumer-control" || !options.usage) {
               throw new KernelError("denied");
             }
@@ -1046,7 +1094,8 @@ export function createFacade(options: FacadeOptions): Server {
             }
             const page = await options.usage.list(context, parse(c.usageQuery, values));
             requireCurrent(grant);
-            send(res, c.usagePage, page);
+            if (path.startsWith("/v2/")) send(res, c.usagePageV2, { ...page, observations: page.observations.map(c.projectUsageV2) });
+            else send(res, c.usagePage, { ...page, observations: page.observations.map(c.projectUsageV1) });
             return;
           }
           if (path === "/internal/v1/run-access") {
@@ -1356,7 +1405,7 @@ export function createFacade(options: FacadeOptions): Server {
               models: providerConnectionDefinition(saved.admission.profileId)?.models,
               enforceCapabilities: false,
             };
-            if (configuredAccountModelSource(saved.admission.profileId)) {
+            if (profile.nativeProfile || configuredAccountModelSource(saved.admission.profileId)) {
               requireCurrent(grant);
               const selected = await kernel.account(context, saved.admission.accountRef);
               const selector: c.AccountModelsRequest = {
@@ -1365,23 +1414,19 @@ export function createFacade(options: FacadeOptions): Server {
                 profileId: saved.admission.profileId,
                 expectedAuthorizationEpoch: saved.admission.authorizationEpoch,
               };
-              const catalogue = await readAccountModels(
-                options.accountModels,
-                selector,
-                async () => {
+              const currentIdentity = async () => {
                   const current = await accountLimitsTarget(kernel, store, context, selector);
                   if (current.nativePhysicalIdentity !== saved.generation) {
                     throw new KernelError("denied");
                   }
                   return current;
-                },
-              );
+                };
+              admittedModels = profile.nativeProfile
+                ? accountModelAdmissionV2(await readAccountModelsV2(options.accountModelsV2, selector,
+                  profile.nativeProfile.capability.modelPolicy, currentIdentity), profile.dto.modelIds[0], profile.nativeProfile.capability.modelPolicy)
+                : accountModelAdmission(await readAccountModels(options.accountModels, selector, currentIdentity),
+                  profile.dto.modelIds[0], configuredAccountModelSource(saved.admission.profileId));
               requireCurrent(grant);
-              admittedModels = accountModelAdmission(
-                catalogue,
-                profile.dto.modelIds[0],
-                configuredAccountModelSource(saved.admission.profileId),
-              );
             }
             const requestedModel = validateResponses(
               raw,
@@ -1439,12 +1484,11 @@ export function createFacade(options: FacadeOptions): Server {
               async (observed) => {
                 if (options.usage && recordedClaim) {
                   const status = await kernel.request(context, ref, identity.requestRef!);
-                  await options.usage.append(context, {
+                  await options.usage.append(context, nativeUsageObservation({
                     ...factBase,
                     revision: 2,
                     effect: status.effect,
-                    ...nativeUsageFields(observed),
-                  });
+                  }, observed));
                   nativeObserved = true;
                 }
               },
@@ -1578,9 +1622,101 @@ export function createFacade(options: FacadeOptions): Server {
           if (path === "/v1/profiles" && method === "GET") {
             reply(c.profiles, {
               profiles: [...profiles.values()]
-                .filter((p) => permitsProfile(grant, p.dto.profileId))
+                .filter((p) => permitsProfile(grant, p.dto.profileId) && p.dto.authKinds.length > 0)
                 .map((p) => p.dto),
             });
+            return;
+          }
+          const connectionSnapshot = (selection: c.ConnectionBinding, action: "create" | "reconnect") => {
+            const native = profiles.get(selection.profileId)?.nativeProfile;
+            const selected = native?.capability.methods.find((entry) => entry.methodId === selection.methodId &&
+              entry.revision === selection.methodRevision && entry.configurationGeneration === selection.configurationGeneration);
+            if (!native || native.capability.availability !== "enabled" || !selected || !c.supportsConnectionMethod(selected) ||
+              selected.availability !== "enabled" || !selected[action] || !permitsProfile(grant, selection.profileId)) throw new KernelError("denied");
+            if (selected.allowedCredentialPolicies.some((policy) => policy !== "provider_key") &&
+              !permitsOAuthProfile(grant, selection.profileId)) throw new KernelError("denied");
+            return c.connectionSnapshot.parse({ connection: selection, method: selected });
+          };
+          const connectionResult = async (op: OperationStatus) => c.connectionOperation.parse({ operation: await operationDTO(context, op),
+            connection: (await management.connectionSnapshot(context, op)) ?? null });
+          const legacySelection = (profileId: string, kind: LegacyConnectionKind, action: "create" | "reconnect") => {
+            const native = profiles.get(profileId)?.nativeProfile;
+            const alias = native && compatibleLegacyConnection(native, kind);
+            if (!alias) throw new KernelError("denied");
+            return { snapshot: connectionSnapshot(alias.connection, action), legacyConnectionKind: alias.kind,
+              inputFieldId: alias.inputFieldId };
+          };
+          const replyOAuthBegin = async (result: Awaited<ReturnType<AccountManagement["beginOAuth"]>>) => {
+            reply(c.oauthBeginResponse, { operation: await operationDTO(context, result.operation),
+              ...(result.authorizationURL === undefined ? {} : { authorizationURL: result.authorizationURL }),
+              ...(result.deviceAuthorization === undefined ? {} : { deviceAuthorization: result.deviceAuthorization }),
+            }, result.operation.state === "pending" ? 202 : 200);
+          };
+          if (path === "/v3/provider-connection-capabilities" && method === "GET") {
+            reply(c.providerConnectionCapabilitiesV3, { contract: c.PROVIDER_CONNECTIONS_V3_CONTRACT,
+              capabilities: [...profiles.values()].filter((p) => p.nativeProfile && permitsProfile(grant, p.dto.profileId))
+                .map((p) => p.nativeProfile!.capability) });
+            return;
+          }
+          const connectionReconnectMatch = /^\/v3\/accounts\/([A-Za-z0-9_-]+)\/connections\/reconnect$/.exec(path);
+          if (method === "POST" && (path === "/v3/accounts/connections/begin" || connectionReconnectMatch)) {
+            const raw = strictJSON(await body(req, Math.min(ingressBytes, 80 * 1024)), true);
+            let result: Awaited<ReturnType<AccountManagement["beginConnection"]>>;
+            if (connectionReconnectMatch) {
+              const input = parse(secretSubmission.connectionReconnect, raw);
+              const accountRef = parse(c.reference, connectionReconnectMatch[1]);
+              const account = await management.account(context, accountRef);
+              if (!permitsOwner(grant, account.ownerRef) || account.profile !== input.connection.profileId) throw new KernelError("denied");
+              const snapshot = connectionSnapshot(input.connection, "reconnect");
+              identity = { operationRef: input.operationId }; requireCurrent(grant); uncertain = true;
+              result = await management.reconnectConnection(context, { operationId: input.operationId, accountRef,
+                expectedRevision: input.expectedMetadataRevision, snapshot, inputFields: input.inputFields });
+            } else {
+              const input = parse(secretSubmission.connectionBegin, raw);
+              if (!permitsOwner(grant, input.ownerRef)) throw new KernelError("denied");
+              const snapshot = connectionSnapshot(input.connection, "create");
+              identity = { operationRef: input.operationId }; requireCurrent(grant); uncertain = true;
+              result = await management.beginConnection(context, { operationId: input.operationId, ownerRef: input.ownerRef,
+                displayName: input.displayName, snapshot, inputFields: input.inputFields });
+            }
+            const safe = await connectionResult(result.operation);
+            reply(c.connectionBeginResponse, c.connectionBeginResponse.parse({ ...safe,
+              ...(result.authorizationURL === undefined ? {} : { challenge: { kind: "browser", authorizationURL: result.authorizationURL } }),
+              ...(result.deviceAuthorization === undefined ? {} : { challenge: { kind: "device", ...result.deviceAuthorization } }),
+            }), result.operation.state === "pending" ? 202 : 200);
+            return;
+          }
+          if (method === "POST" && (path === "/v3/accounts/connections/submit" || path === "/v3/accounts/connections/poll")) {
+            const raw = strictJSON(await body(req, Math.min(ingressBytes, 80 * 1024)), true);
+            const input = path.endsWith("/submit") ? parse(secretSubmission.connectionSubmit, raw) : parse(c.connectionOperationRequest, raw);
+            const original = await kernel.operation(context, input.operationId);
+            if (!original.connection || !original.accountRef) throw new KernelError("denied");
+            const account = await management.account(context, original.accountRef);
+            if (account.ownerRef !== input.ownerRef || !permitsOwner(grant, account.ownerRef) || !permitsProfile(grant, account.profile)) throw new KernelError("denied");
+            identity = { operationRef: input.operationId }; requireCurrent(grant); uncertain = true;
+            let operation: OperationStatus;
+            if ("inputFields" in input) {
+              const fields = parse(secretSubmission.connectionSubmit, raw).inputFields;
+              if (original.connection.method.interaction.kind !== "browser" || Object.keys(fields).length !== 1 ||
+                typeof fields.completion !== "string" || !fields.completion.length) throw new KernelError("invalid");
+              operation = await management.completeOAuth(context, { operationId: input.operationId, ownerRef: input.ownerRef,
+                authorizationCode: fields.completion });
+            } else {
+              if (original.connection.method.interaction.kind !== "device") throw new KernelError("denied");
+              operation = await management.pollDeviceOAuth(context, input);
+            }
+            reply(c.connectionOperation, await connectionResult(operation), operation.state === "pending" ? 202 : 200);
+            return;
+          }
+          const connectionOperationMatch = /^\/v3\/operations\/([A-Za-z0-9_-]+)$/.exec(path);
+          if (connectionOperationMatch && method === "GET") {
+            const operationId = parse(c.reference, connectionOperationMatch[1]);
+            const original = await kernel.operation(context, operationId);
+            if (!original.accountRef || original.executionRef) throw new KernelError("denied");
+            const account = await management.account(context, original.accountRef);
+            if (!permitsOwner(grant, account.ownerRef) || !permitsProfile(grant, account.profile)) throw new KernelError("denied");
+            requireCurrent(grant);
+            reply(c.connectionOperation, await connectionResult(await management.operation(context, operationId)));
             return;
           }
           if (
@@ -1591,11 +1727,13 @@ export function createFacade(options: FacadeOptions): Server {
             const visible = [...profiles.values()]
               .filter((p) => permitsProfile(grant, p.dto.profileId))
               .map((p) => p.dto);
-            if (!options.providerConnections) {
+            if (!options.providerConnections && ![...profiles.values()].some((p) => p.nativeProfile)) {
               throw new KernelError("unavailable");
             }
             const snapshot = projectProviderConnections(
-              await options.providerConnections.getProviderConnectionCapabilities(),
+              [...profiles.values()].some((p) => p.nativeProfile)
+                ? projectNativeConnectionsV2([...profiles.values()].flatMap((p) => p.nativeProfile ? [p.nativeProfile] : []))
+                : await options.providerConnections!.getProviderConnectionCapabilities(),
               visible,
             );
             if (path.startsWith("/v2/")) {
@@ -1605,12 +1743,18 @@ export function createFacade(options: FacadeOptions): Server {
             }
             return;
           }
+          const lifecycleVersion = path.startsWith("/v3/") ? 3 : 2;
           const lifecycleGate =
             singleton(req, c.LIFECYCLE_CAPABILITY_HEADER, false) ===
-              c.LIFECYCLE_CAPABILITY_CONTRACT &&
-            singleton(req, c.LIFECYCLE_CLIENT_HEADER, false) === c.LIFECYCLE_CLIENT_CONTRACT;
+              (lifecycleVersion === 3 ? c.LIFECYCLE_V3_CAPABILITY_CONTRACT : c.LIFECYCLE_CAPABILITY_CONTRACT) &&
+            singleton(req, c.LIFECYCLE_CLIENT_HEADER, false) ===
+              (lifecycleVersion === 3 ? c.LIFECYCLE_V3_CLIENT_CONTRACT : c.LIFECYCLE_CLIENT_CONTRACT);
+          const lifecycleAccountProjection = (r: Parameters<typeof lifecycleAccountDTO>[0]): c.LifecycleAccount | c.LifecycleAccountV3 =>
+            lifecycleVersion === 3 ? lifecycleAccountV3DTO(r) : lifecycleAccountDTO(r);
+          const lifecycleAccountSchema = lifecycleVersion === 3 ? c.lifecycleAccountV3 : c.lifecycleAccount;
+          const lifecycleOperationSchema = lifecycleVersion === 3 ? c.lifecycleOperationV3 : c.lifecycleOperation;
           if (
-            (path === "/v1/accounts" || (lifecycleGate && path === "/v2/accounts")) &&
+            (path === "/v1/accounts" || (lifecycleGate && (path === "/v2/accounts" || path === "/v3/accounts"))) &&
             method === "GET"
           ) {
             const query = new Map<string, unknown>();
@@ -1642,13 +1786,13 @@ export function createFacade(options: FacadeOptions): Server {
                   : [input.ownerRef!],
             });
             const visible = page.accounts.filter((a) => permitsProfile(grant, a.profile));
-            if (path === "/v2/accounts") {
+            if (path === "/v2/accounts" || path === "/v3/accounts") {
               const accounts = await Promise.all(
                 visible.map((a) =>
-                  management.lifecycle(context, a.accountRef).then(lifecycleAccountDTO),
+                  management.lifecycle(context, a.accountRef).then(lifecycleAccountProjection),
                 ),
               );
-              reply(c.lifecycleAccounts, {
+              reply(lifecycleVersion === 3 ? c.lifecycleAccountsV3 : c.lifecycleAccounts, {
                 accounts,
                 ...(nonempty(page.nextCursor) ? { nextCursor: page.nextCursor } : {}),
               });
@@ -1664,13 +1808,11 @@ export function createFacade(options: FacadeOptions): Server {
             return;
           }
           if (lifecycleGate) {
-            const lifecycleAccountDTOWithReadback = async (
-              ref: string,
-            ): Promise<c.LifecycleAccount> =>
-              lifecycleAccountDTO(await management.lifecycle(context, ref));
+            const lifecycleAccountDTOWithReadback = async (ref: string) =>
+              lifecycleAccountProjection(await management.lifecycle(context, ref));
             const lifecycleOperationDTO = async (
               op: OperationStatus,
-            ): Promise<c.LifecycleOperation> => {
+            ): Promise<c.LifecycleOperation | c.LifecycleOperationV3> => {
               if (
                 !nonempty(op.accountRef) ||
                 !op.lifecycle ||
@@ -1679,9 +1821,13 @@ export function createFacade(options: FacadeOptions): Server {
                 throw new KernelError("conflict");
               }
               const original = op.lifecycle.account;
-              const account = lifecycleAccountDTO({
+              const credential = op.lifecycle.publication?.credential;
+              const legacy = profiles.get(original.profile);
+              const account = lifecycleAccountProjection({
                 account: original,
-                authKind: oauthProfileDefinition(original.profile) ? "oauth" : "api_key",
+                authKind: credential?.credentialKind ?? (legacy && !legacy.nativeProfile
+                  ? oauthProfileDefinition(original.profile) ? "oauth" : "api_key" : "unknown"),
+                ...(credential === undefined ? {} : { credential }),
                 resumeCustody:
                   original.state === "suspended" ? "attention_required" : "not_applicable",
               });
@@ -1692,14 +1838,14 @@ export function createFacade(options: FacadeOptions): Server {
                 expectedMetadataRevision: op.lifecycle.expectedRevision,
               };
               if (op.state === "applied") {
-                return c.lifecycleOperation.parse({
+                return lifecycleOperationSchema.parse({
                   operationRef: op.operationRef,
                   intent,
                   state: "applied",
                   result: { kind: "account_lifecycle", account },
                 });
               }
-              return c.lifecycleOperation.parse({
+              return lifecycleOperationSchema.parse({
                 operationRef: op.operationRef,
                 intent,
                 state: op.state,
@@ -1715,22 +1861,24 @@ export function createFacade(options: FacadeOptions): Server {
                     }),
               });
             };
-            if (path === "/v2/capabilities/account-lifecycle" && method === "GET") {
-              reply(c.lifecycleCapability, {
-                contract: c.LIFECYCLE_CAPABILITY_CONTRACT,
-                clientContract: c.LIFECYCLE_CLIENT_CONTRACT,
+            if ((path === "/v2/capabilities/account-lifecycle" || path === "/v3/capabilities/account-lifecycle") && method === "GET") {
+              const schema = lifecycleVersion === 3 ? c.lifecycleCapabilityV3 : c.lifecycleCapability;
+              reply<c.LifecycleCapability | c.LifecycleCapabilityV3>(schema, schema.parse({
+                contract: lifecycleVersion === 3 ? c.LIFECYCLE_V3_CAPABILITY_CONTRACT : c.LIFECYCLE_CAPABILITY_CONTRACT,
+                clientContract: lifecycleVersion === 3 ? c.LIFECYCLE_V3_CLIENT_CONTRACT : c.LIFECYCLE_CLIENT_CONTRACT,
                 writeGate: lifecycleWriteGate,
                 operations: ["suspend", "resume"],
                 custody: {
-                  contract: "native-retained-custody/v1",
+                  contract: lifecycleVersion === 3 ? "native-retained-custody/v2" : "native-retained-custody/v1",
                   api_key: "native-attestation-required",
                   oauth: "native-attestation-required",
+                  ...(lifecycleVersion === 3 ? { native: "native-attestation-required" } : {}),
                 },
-              });
+              }));
               return;
             }
             const lifecycleAccountMatch =
-              /^\/v2\/accounts\/([A-Za-z0-9_-]+)(?:\/(suspend|resume))?$/.exec(path);
+              /^\/v[23]\/accounts\/([A-Za-z0-9_-]+)(?:\/(suspend|resume))?$/.exec(path);
             if (lifecycleAccountMatch) {
               const ref = parse(c.reference, lifecycleAccountMatch[1]);
               const account = await management.account(context, ref);
@@ -1741,12 +1889,17 @@ export function createFacade(options: FacadeOptions): Server {
                 throw new KernelError("denied");
               }
               if (method === "GET" && !lifecycleAccountMatch[2]) {
-                reply(c.lifecycleAccount, await lifecycleAccountDTOWithReadback(ref));
+                reply(lifecycleAccountSchema, await lifecycleAccountDTOWithReadback(ref));
                 return;
               }
               if (method === "POST" && lifecycleAccountMatch[2]) {
                 if (lifecycleWriteGate !== "enabled") {
                   throw new KernelError("denied");
+                }
+                if (lifecycleVersion === 2) {
+                  // A strict old client must never mutate an account whose result
+                  // it cannot represent. Both versions enter the same kernel below.
+                  await lifecycleAccountDTOWithReadback(ref);
                 }
                 const input = parse(
                   c.lifecycleTransition,
@@ -1769,14 +1922,16 @@ export function createFacade(options: FacadeOptions): Server {
                       });
                 requireCurrent(grant);
                 reply(
-                  c.lifecycleOperation,
+                  lifecycleOperationSchema,
                   await lifecycleOperationDTO(op),
                   op.state === "pending" ? 202 : 200,
                 );
                 return;
               }
             }
-            const lifecycleOperationMatch = /^\/v2\/operations\/([A-Za-z0-9_-]+)$/.exec(path);
+            const lifecycleOperationMatch = (lifecycleVersion === 3
+              ? /^\/v3\/lifecycle\/operations\/([A-Za-z0-9_-]+)$/
+              : /^\/v2\/operations\/([A-Za-z0-9_-]+)$/).exec(path);
             if (lifecycleOperationMatch && method === "GET") {
               identity = { operationRef: parse(c.reference, lifecycleOperationMatch[1]) };
               requireCurrent(grant);
@@ -1792,7 +1947,7 @@ export function createFacade(options: FacadeOptions): Server {
                 throw new KernelError("denied");
               }
               requireCurrent(grant);
-              reply(c.lifecycleOperation, await lifecycleOperationDTO(op));
+              reply(lifecycleOperationSchema, await lifecycleOperationDTO(op));
               return;
             }
           }
@@ -1804,6 +1959,15 @@ export function createFacade(options: FacadeOptions): Server {
             const input = Object.freeze({ ...parsed });
             identity = { operationRef: input.operationId };
             const profile = profiles.get(input.profileId);
+            if (profile?.nativeProfile) {
+              if (!permitsOwner(grant, input.ownerRef)) throw new KernelError("denied");
+              const selection = legacySelection(input.profileId, input.method === "device_code" ? "device_code" : "browser", "create");
+              requireCurrent(grant); uncertain = true;
+              await replyOAuthBegin(await management.beginConnection(context, { operationId: input.operationId,
+                ownerRef: input.ownerRef, displayName: input.displayName, snapshot: selection.snapshot,
+                legacyConnectionKind: selection.legacyConnectionKind }));
+              return;
+            }
             if (
               !permitsOwner(grant, input.ownerRef) ||
               !permitsProfile(grant, input.profileId) ||
@@ -1854,7 +2018,7 @@ export function createFacade(options: FacadeOptions): Server {
             if (
               !nonempty(original.accountRef) ||
               nonempty(original.executionRef) ||
-              original.oauthMethod !== "device_code"
+              (original.oauthMethod !== "device_code" && original.legacyConnectionKind !== "device_code")
             ) {
               throw new KernelError("denied");
             }
@@ -1863,10 +2027,10 @@ export function createFacade(options: FacadeOptions): Server {
             if (
               account.ownerRef !== input.ownerRef ||
               !permitsOwner(grant, account.ownerRef) ||
+              !permitsProfile(grant, account.profile) ||
               !permitsOAuthProfile(grant, account.profile) ||
-              !profile ||
-              profile.dto.authKinds[0] !== "oauth" ||
-              !management.supportsOAuthProfile(account.profile)
+              (original.connection ? original.legacyConnectionKind !== "device_code" || original.connection.method.interaction.kind !== "device" :
+                !profile || profile.dto.authKinds[0] !== "oauth" || !management.supportsOAuthProfile(account.profile))
             ) {
               throw new KernelError("denied");
             }
@@ -1893,15 +2057,16 @@ export function createFacade(options: FacadeOptions): Server {
             if (
               account.ownerRef !== input.ownerRef ||
               !permitsOwner(grant, account.ownerRef) ||
+              !permitsProfile(grant, account.profile) ||
               !permitsOAuthProfile(grant, account.profile) ||
-              !profile ||
-              profile.dto.authKinds[0] !== "oauth" ||
-              !management.supportsOAuthProfile(account.profile)
+              (original.connection ? original.legacyConnectionKind !== "browser" || original.connection.method.interaction.kind !== "browser" :
+                !profile || profile.dto.authKinds[0] !== "oauth" || !management.supportsOAuthProfile(account.profile))
             ) {
               throw new KernelError("denied");
             }
             const definition = oauthProfileDefinition(account.profile);
             const oauthCallback =
+              original.connection ? { authorizationCode: "authorizationCode" in input ? input.authorizationCode : input.callbackURL } :
               definition?.family === "claude"
                 ? "authorizationCode" in input
                   ? secretSubmission.parseClaudeOAuthAuthorizationCode(input.authorizationCode)
@@ -1941,6 +2106,18 @@ export function createFacade(options: FacadeOptions): Server {
             identity = { operationRef: input.operationId };
             if (!permitsOwner(grant, input.ownerRef) || !permitsProfile(grant, input.profileId)) {
               throw new KernelError("denied");
+            }
+            if (profiles.get(input.profileId)?.nativeProfile) {
+              if (input.credential.kind === "oauth") throw new KernelError("invalid");
+              const kind: LegacyConnectionKind = input.credential.kind === "api_key" ? "api_key" : `credential_import:${input.credential.method}`;
+              const selection = legacySelection(input.profileId, kind, "create");
+              if (!selection.inputFieldId) throw new KernelError("denied");
+              requireCurrent(grant); uncertain = true;
+              const result = await management.beginConnection(context, { operationId: input.operationId, ownerRef: input.ownerRef,
+                displayName: input.displayName, snapshot: selection.snapshot, legacyConnectionKind: selection.legacyConnectionKind,
+                inputFields: { [selection.inputFieldId]: input.credential.value } });
+              reply(c.accountOperation, await operationDTO(context, result.operation), result.operation.state === "pending" ? 202 : 200);
+              return;
             }
             const auth = profiles.get(input.profileId)?.dto.authKinds[0];
             if (
@@ -2052,6 +2229,28 @@ export function createFacade(options: FacadeOptions): Server {
               const profile = profiles.get(account.profile);
               const bytes = await body(req, Math.max(ingressBytes, 400 * 1024));
               const raw = strictJSON(bytes, true);
+              if (profile?.nativeProfile) {
+                const credential = secretSubmission.reconnect.safeParse(raw);
+                if (credential.success) {
+                  const input = credential.data;
+                  if (input.credential.kind === "oauth") throw new KernelError("invalid");
+                  const kind: LegacyConnectionKind = input.credential.kind === "api_key" ? "api_key" : `credential_import:${input.credential.method}`;
+                  const selection = legacySelection(account.profile, kind, "reconnect");
+                  if (!selection.inputFieldId) throw new KernelError("denied");
+                  identity = { operationRef: input.operationId }; requireCurrent(grant); uncertain = true;
+                  const result = await management.reconnectConnection(context, { operationId: input.operationId, accountRef: ref,
+                    expectedRevision: input.expectedMetadataRevision, snapshot: selection.snapshot, legacyConnectionKind: selection.legacyConnectionKind,
+                    inputFields: { [selection.inputFieldId]: input.credential.value } });
+                  reply(c.accountOperation, await operationDTO(context, result.operation), result.operation.state === "pending" ? 202 : 200);
+                } else {
+                  const input = parse(c.oauthReconnect, raw);
+                  const selection = legacySelection(account.profile, input.method === "device_code" ? "device_code" : "browser", "reconnect");
+                  identity = { operationRef: input.operationId }; requireCurrent(grant); uncertain = true;
+                  await replyOAuthBegin(await management.reconnectConnection(context, { operationId: input.operationId, accountRef: ref,
+                    expectedRevision: input.expectedMetadataRevision, snapshot: selection.snapshot, legacyConnectionKind: selection.legacyConnectionKind }));
+                }
+                return;
+              }
               const credentialInput = secretSubmission.reconnect.safeParse(raw);
               if (
                 credentialInput.success &&

@@ -249,7 +249,7 @@ void test("cancelled metadata waiter immediately makes room for another read wit
   const peer = createServer((req, res) => {
     req.resume();
     received++;
-    assert.equal(req.url, "/private/native/v1/account-info/read");
+    assert.equal(req.url, "/private/native/v2/account-info/read");
     res.writeHead(200, { "content-type": "application/json", connection: "close" });
     res.end(JSON.stringify({ info: { status: "unavailable" } }));
   });

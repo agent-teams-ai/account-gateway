@@ -1,11 +1,8 @@
-import { executionUsageBase, nativeUsageFields } from "./usage.ts";
+import { executionUsageBase, nativeUsageObservation } from "./usage.ts";
 import type { UsageJournal } from "./usage.ts";
 import * as publicContracts from "@agent-teams/account-gateway/contracts";
 import { oauthProfileDefinition } from "./oauth-profiles.ts";
-import {
-  providerConnectionDefinition,
-  providerConnectionRegistry,
-} from "./provider-connections.ts";
+import { providerConnectionDefinition } from "./provider-connections.ts";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
@@ -29,6 +26,10 @@ import {
   accountModelAdmission,
 } from "./models-port.ts";
 import type { AccountModelsSource } from "./models-port.ts";
+import { readAccountModelsV2, accountModelAdmissionV2 } from "./models-port.ts";
+import type { AccountModelsV2Source } from "./models-port.ts";
+import type { NativeConnectionProfile } from "./native-client-connections.ts";
+import type { ManagedProfile } from "./candidate-identity.ts";
 import {
   admission,
   binding,
@@ -73,6 +74,8 @@ export interface Association {
 }
 export interface AuthorityOptions {
   readonly accountModels?: AccountModelsSource;
+  readonly accountModelsV2?: AccountModelsV2Source;
+  readonly nativeConnections?: readonly NativeConnectionProfile[];
   readonly config: BridgeConfig;
   readonly kernel: DurableKernel & ExecutionRead;
   readonly store: Pick<ManagementStore, "mapping">;
@@ -84,14 +87,14 @@ export interface AuthorityOptions {
   }[];
   readonly oauthOwners?: {
     readonly store: Pick<ManagementStore, "readJournal" | "pendingOAuthRefresh">;
-    readonly bearers: Pick<FacadeBearers, "authorizesOwner">;
+    readonly bearers: Pick<FacadeBearers, "authorizesOwner"> & Partial<Pick<FacadeBearers, "authorizesConnectionOwner">>;
   };
   readonly oauthRefreshOwners?: {
     readonly store: Pick<
       ManagementStore,
       "readJournal" | "activeOAuthRefresh" | "pendingOAuthRefresh"
     >;
-    readonly bearers: Pick<FacadeBearers, "authorizesOwner">;
+    readonly bearers: Pick<FacadeBearers, "authorizesOwner"> & Partial<Pick<FacadeBearers, "authorizesConnectionOwner">>;
   };
   readonly accountLimitsOwners?: {
     readonly bearers: Pick<FacadeBearers, "authorizesAccountLimits">;
@@ -118,6 +121,8 @@ export class NativeAuthority {
   readonly #executionBearers?: Pick<FacadeBearers, "resolveExecution" | "current">;
   readonly #usage?: UsageJournal;
   readonly #accountModels: AccountModelsSource | undefined;
+  readonly #accountModelsV2: AccountModelsV2Source | undefined;
+  readonly #nativeConnections: ReadonlyMap<string, NativeConnectionProfile>;
   readonly #store: Pick<ManagementStore, "mapping">;
   readonly #owners: AuthorityOptions["oauthOwners"];
   readonly #accountLimitsOwners: AuthorityOptions["accountLimitsOwners"];
@@ -131,7 +136,7 @@ export class NativeAuthority {
     // profile. Validate each tuple with its own receipt, retaining the original
     // enrollment ACK receipt and all shared transport/control bounds.
     const base = config({ ...options.config, profiles: options.config.profiles.slice(0, 1) });
-    if (options.config.profiles.length > providerConnectionRegistry.length) {
+    if (options.config.profiles.length > 128) {
       denied();
     }
     const profiles = options.config.profiles.map(
@@ -174,6 +179,8 @@ export class NativeAuthority {
     this.#owners = options.oauthOwners;
     this.#accountLimitsOwners = options.accountLimitsOwners;
     this.#accountModels = options.accountModels;
+    this.#accountModelsV2 = options.accountModelsV2;
+    this.#nativeConnections = new Map((options.nativeConnections ?? []).map((p) => [p.capability.profileId, p]));
     this.#refreshOwners = options.oauthRefreshOwners;
     this.#cleanupOwners = options.oauthCleanupOwners;
     this.#callers = this.configuration.consumers.map((c) => ({
@@ -331,25 +338,31 @@ export class NativeAuthority {
     if (bytes.byteLength > fresh.admission.limits.requestBytes) {
       return denied();
     }
-    let models: ReturnType<typeof accountModelAdmission> = {
+    let models: { modelIds: readonly string[]; models?: Parameters<typeof validateResponses>[3]; enforceCapabilities: boolean } = {
       modelIds: [profile.model],
       models: undefined,
       enforceCapabilities: false,
     };
-    if (configuredAccountModelSource(profile.profile)) {
+    const nativeProfile = this.#nativeConnections.get(profile.profile);
+    if (nativeProfile || configuredAccountModelSource(profile.profile)) {
       const selector = {
         ownerRef: mapping.ownerRef,
         accountRef: fresh.admission.accountRef,
         profileId: fresh.admission.profileId,
         expectedAuthorizationEpoch: fresh.admission.authorizationEpoch,
       };
-      const catalogue = await readAccountModels(this.#accountModels, selector, async () => {
+      const identity = async () => {
         const current = await accountLimitsTarget(this.kernel, this.#store, a.context, selector);
         if (current.nativePhysicalIdentity !== fresh.generation) {
           return denied();
         }
         return current;
-      });
+      };
+      models = nativeProfile
+        ? accountModelAdmissionV2(await readAccountModelsV2(this.#accountModelsV2, selector,
+          nativeProfile.capability.modelPolicy, identity), profile.model, nativeProfile.capability.modelPolicy)
+        : accountModelAdmission(await readAccountModels(this.#accountModels, selector, identity), profile.model,
+          configuredAccountModelSource(profile.profile));
       const after = saved(
         await this.kernel.savedExecution(a.context, fresh.admission.executionRef),
       );
@@ -363,11 +376,6 @@ export class NativeAuthority {
       ) {
         return denied();
       }
-      models = accountModelAdmission(
-        catalogue,
-        profile.model,
-        configuredAccountModelSource(profile.profile),
-      );
     }
     validateResponses(
       bytes,
@@ -386,9 +394,13 @@ export class NativeAuthority {
   }
   // Resolve the original source-owned tuple from durable custody, never from
   // caller-selected provider fields or the ordering of configured profiles.
-  #oauthProfile(journal: CandidateJournal | undefined, cleanupOnly = false) {
+  #oauthProfile(journal: CandidateJournal | undefined, cleanupOnly = false): ManagedProfile | undefined {
     if (!journal) {
       return;
+    }
+    if (journal.connectionSnapshot) {
+      if (journal.connectionSnapshot.connection.profileId !== journal.profile.profile || journal.profile.nativeConnection !== true) return;
+      return journal.profile;
     }
     const definition = oauthProfileDefinition(journal.profile.profile);
     const profile = this.configuration.profiles.find((p) => p.profile === journal.profile.profile);
@@ -407,6 +419,12 @@ export class NativeAuthority {
     }
     return profile;
   }
+  #ownerAllowed(journal: CandidateJournal, context: TrustedContext,
+    bearers: NonNullable<AuthorityOptions["oauthOwners"]>["bearers"]): boolean {
+    return journal.connectionSnapshot ? bearers.authorizesConnectionOwner?.(context, journal.ownerRef, journal.profile.profile,
+      journal.connectionSnapshot.method.allowedCredentialPolicies) === true :
+      bearers.authorizesOwner(context, journal.ownerRef, journal.profile.profile);
+  }
   // Cached quota and model reads share owner authority and permit suspended custody.
   async #accountReadOwner(
     ctx: TrustedContext,
@@ -424,10 +442,6 @@ export class NativeAuthority {
       r.consumerId !== ctx.consumerId ||
       !this.#accountLimitsOwners ||
       typeof r.profileId !== "string" ||
-      !providerConnectionDefinition(r.profileId) ||
-      (purpose === "limits" &&
-        providerConnectionDefinition(r.profileId)?.limitsContract === "none" &&
-        !configuredAccountModelSource(r.profileId)) ||
       !this.#accountLimitsOwners.bearers.authorizesAccountLimits(
         ctx,
         r.ownerRef as string,
@@ -507,7 +521,7 @@ export class NativeAuthority {
     if (
       current.generation !== j.generation ||
       current.nativePhysicalIdentity !== mapping.descriptor.nativePhysicalIdentity ||
-      !this.#owners.bearers.authorizesOwner(ctx, j.ownerRef, j.profile.profile)
+      !this.#ownerAllowed(j, ctx, this.#owners.bearers)
     ) {
       return denied();
     }
@@ -594,7 +608,7 @@ export class NativeAuthority {
       return denied();
     }
     // No external await after inspecting the live replacement-sensitive grant.
-    if (!this.#owners.bearers.authorizesOwner(ctx, j.ownerRef, j.profile.profile)) {
+    if (!this.#ownerAllowed(j, ctx, this.#owners.bearers)) {
       return denied();
     }
     return { ok: true, ownerRef: j.ownerRef };
@@ -659,7 +673,7 @@ export class NativeAuthority {
     }
     identifier(j.ownerRef);
     // Final synchronous lookup observes replacement during the SQL await.
-    if (!this.#refreshOwners.bearers.authorizesOwner(ctx, j.ownerRef, j.profile.profile)) {
+    if (!this.#ownerAllowed(j, ctx, this.#refreshOwners.bearers)) {
       return denied();
     }
     return { ok: true, ownerRef: j.ownerRef };
@@ -712,7 +726,8 @@ export class NativeAuthority {
       owned.journal.generation !== r.generation ||
       owned.journal.profile.profile !== p.profile ||
       owned.journal.profile.baseURL !== p.baseURL ||
-      !oauthProfileDefinition(p.profile)!.cleanupModels.includes(owned.journal.profile.model) ||
+      !(owned.journal.connectionSnapshot ? owned.journal.profile.model === p.model :
+        oauthProfileDefinition(p.profile)!.cleanupModels.includes(owned.journal.profile.model)) ||
       owned.journal.profile.qualificationRef !== p.qualificationRef ||
       instant(owned.leaseExpiresAt) <= now()
     ) {
@@ -899,7 +914,7 @@ export class NativeAuthority {
       !profile ||
       typeof value !== "string" ||
       !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(value) ||
-      (configuredAccountModelSource(profileId) === undefined && value !== profile.model)
+      (!this.#nativeConnections.has(profileId) && configuredAccountModelSource(profileId) === undefined && value !== profile.model)
     ) {
       return denied();
     }
@@ -1016,7 +1031,7 @@ export class NativeAuthority {
       return denied();
     }
     const observed = closed?.nativeUsage;
-    await this.#usage.append(ctx, {
+    await this.#usage.append(ctx, nativeUsageObservation({
       ...executionUsageBase(
         a,
         requestRef,
@@ -1025,8 +1040,7 @@ export class NativeAuthority {
       ),
       revision: closed ? 2 : 0,
       effect,
-      ...nativeUsageFields(observed),
-    });
+    }, observed));
   }
   async #publicSettle(ctx: TrustedContext, value: unknown): Promise<void> {
     const r = object(value, ["consumerId", "proof", "receipt", "requestedModel"]);

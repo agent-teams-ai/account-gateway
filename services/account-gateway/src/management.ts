@@ -33,6 +33,7 @@ import type {
   PolicyUseClosureReadback,
   RetainedCustodyProof,
 } from "./domain.ts";
+import type { ConnectionBinding, ConnectionSnapshot, CredentialAttestation } from "./connection-domain.ts";
 
 // Private consumer-owned ports. They are not SDK DTOs or an inference authority.
 export interface CandidateNative {
@@ -50,6 +51,7 @@ export interface OAuthScope {
   readonly ownerRef: string;
   readonly accountRef: string;
   readonly generation: string;
+  readonly connection?: ConnectionBinding;
 }
 export interface OAuthReadback {
   readonly operationId: string;
@@ -74,6 +76,26 @@ export interface OAuthEnrollmentNative {
   read(scope: OAuthScope): Promise<OAuthReadback>;
   complete(scope: OAuthScope, callback: OAuthCallback): Promise<OAuthReadback>;
   poll(scope: OAuthScope): Promise<OAuthReadback>;
+}
+export interface ConnectionEnrollmentNative extends OAuthEnrollmentNative {
+  beginConnection(scope: OAuthScope, inputFields?: Readonly<Record<string, string>>): Promise<OAuthBeginReadback>;
+}
+export interface NativeConnectionAdapter extends ConnectionEnrollmentNative, OAuthDescriptorBoundary, OAuthRefreshNative, OAuthLifecycleNative {}
+export interface ConnectionBeginInput {
+  readonly operationId: string;
+  readonly ownerRef: string;
+  readonly displayName: string;
+  readonly snapshot: ConnectionSnapshot;
+  readonly inputFields?: Readonly<Record<string, string>>;
+  readonly legacyConnectionKind?: import("./connection-domain.ts").LegacyConnectionKind;
+}
+export interface ConnectionReconnectInput {
+  readonly operationId: string;
+  readonly accountRef: string;
+  readonly expectedRevision: number;
+  readonly snapshot: ConnectionSnapshot;
+  readonly inputFields?: Readonly<Record<string, string>>;
+  readonly legacyConnectionKind?: import("./connection-domain.ts").LegacyConnectionKind;
 }
 export interface CredentialImportNative {
   importCredential(
@@ -142,6 +164,7 @@ export interface OAuthEnrollmentOptions {
   readonly descriptor?: OAuthDescriptorBoundary;
   readonly lifecycle?: OAuthLifecycleNative;
   readonly refresh?: OAuthRefreshNative;
+  readonly connection?: ConnectionEnrollmentNative;
 }
 export type OAuthCallback =
   | { readonly state: string; readonly code: string }
@@ -193,7 +216,8 @@ export interface RetainedCustodyVerifier {
 export type ResumeCustodyState = "not_applicable" | "verified" | "attention_required";
 export interface AccountLifecycleReadback {
   account: AccountStatus;
-  authKind: "api_key" | "oauth";
+  authKind: "api_key" | "oauth" | "native" | "unknown";
+  credential?: CredentialAttestation;
   resumeCustody: ResumeCustodyState;
 }
 export interface AcceptedIntent {
@@ -201,6 +225,7 @@ export interface AcceptedIntent {
   readonly intent: AccountIntent;
   readonly apiKey?: string;
   readonly credentialImportValue?: string;
+  readonly connectionInputFields?: Readonly<Record<string, string>>;
 }
 export interface IntentCustody {
   digest(accepted: AcceptedIntent): string;
@@ -227,8 +252,10 @@ export interface ManagementStore extends AccountRetirementRead, PolicyUseClosure
     generation: string,
     worker: string,
     profile: ManagedProfile,
+    connection?: ConnectionSnapshot,
   ): Promise<CandidateJournal>;
   readJournal(context: TrustedContext, operationId: string): Promise<CandidateJournal | undefined>;
+  readGeneration?(context: TrustedContext, generation: string): Promise<CandidateJournal | undefined>;
   credential(scope: CandidateScope): Promise<string | undefined>;
   eraseIntent(scope: CandidateScope): Promise<void>;
   saveMapping(mapping: CandidateMapping): Promise<void>;
