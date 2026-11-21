@@ -26,7 +26,7 @@ jobs:
     env:
       NPM_CONFIG_ENGINE_STRICT: 'true'
       LOAD_SUITE: ${{ matrix.suite }}
-      NATIVE_COMMIT: 14f500eb4db78b47b5d028a8a811ec62b348ac92
+      NATIVE_COMMIT: 2d5f681a627aa1410d08a6d2e568c86f47fca449
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
       GATEWAY_LOAD_IMAGE: account-gateway-fullstack:qualified
     steps:
@@ -48,7 +48,7 @@ jobs:
           node-version: ${{ matrix.node }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: false
       - name: Prepare task-owned tool, dependency and build directories
         run: |

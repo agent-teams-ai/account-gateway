@@ -18,7 +18,7 @@ jobs:
         node: ['26.11.1', '24.21.0']
     env:
       NPM_CONFIG_ENGINE_STRICT: 'true'
-      NATIVE_COMMIT: 14f500eb4db78b47b5d028a8a811ec62b348ac92
+      NATIVE_COMMIT: 2d5f681a627aa1410d08a6d2e568c86f47fca449
       REVIEW_ROUTER_COMMIT: 901e16100520699910658ad147eee72727e7c1fa
       REVIEW_ACTION_COMMIT: 0454fc0a3af15f94522c7c31cce59c0c62af6567
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
@@ -41,7 +41,7 @@ jobs:
           node-version: ${{ matrix.node }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: false
       - name: Prepare exact source and pinned real clients
         run: |

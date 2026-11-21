@@ -76,7 +76,7 @@ try {
   );
   check(command("git", ["rev-parse", "HEAD"], repo) === gatewayCommit, "joined-build-gateway-pin");
   check(
-    command(go, ["version"], native).startsWith("go version go1.27.3 "),
+    command(go, ["version"], native).startsWith("go version go1.27.4 "),
     "joined-build-go-version",
   );
   check(!existsSync(join(output, "joined-build.json")), "joined-build-fresh-output");
@@ -150,7 +150,7 @@ try {
     kind: "gateway-joined-client-build/v1",
     nativeCommit,
     gatewayCommit,
-    goVersion: "go1.27.3",
+    goVersion: "go1.27.4",
     sourceHashes: hashes,
     binaries,
   };

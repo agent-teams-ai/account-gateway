@@ -153,7 +153,7 @@ async function main() {
     build.kind === "gateway-joined-client-build/v1" &&
       build.nativeCommit === nativeCommit &&
       build.gatewayCommit === gatewayCommit &&
-      build.goVersion === "go1.27.3" &&
+      build.goVersion === "go1.27.4" &&
       JSON.stringify(build.sourceHashes) === JSON.stringify(sourceHashes),
     "joined-build-receipt",
   );

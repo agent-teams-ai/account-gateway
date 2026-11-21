@@ -76,7 +76,7 @@ exact gateway/native commits, binary hashes, dependency manifests and runtimes.
 
 ### Qualification gates
 
-Use pinned Node 26.11.1 and compatibility Node 24.21.0, Go 1.27.3 and disposable
+Use pinned Node 26.11.1 and compatibility Node 24.21.0, Go 1.27.4 and disposable
 PostgreSQL 17.10. Reuse the frozen dependency lockfiles. Tests use sandbox accounts
 and controlled TLS providers; external provider traffic is not a load fixture.
 
