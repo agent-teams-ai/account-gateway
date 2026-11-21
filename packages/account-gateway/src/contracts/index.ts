@@ -1,5 +1,6 @@
 export * from "../features/facade-client/contracts/connections-v3.js";
 export * from "../features/facade-client/contracts/native-observations.js";
+export * from "../features/facade-client/contracts/lifecycle-v3.js";
 export {
   ACCOUNT_INFO_V2_CONTRACT,
   accountInfoFieldsV2,

@@ -1,4 +1,6 @@
 export { createAccountLimitsRefreshClient, createAccountLimitsV3Client } from "./http/index.js";
+export { createLifecycleV3Client } from "./http/index.js";
+export type { LifecycleV3Client, LifecycleV3Config } from "./http/index.js";
 export type {
   AccountLimitsV3Client, AccountLimitsV3Config, ConnectionBegin, ConnectionReconnect, ConnectionSubmit,
 } from "./http/index.js";

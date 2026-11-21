@@ -153,7 +153,7 @@ export const connectionSnapshot = z.strictObject({
   (v.credential === undefined || v.method.allowedCredentialPolicies.includes(v.credential.credentialPolicy)));
 export const connectionOperation = z.strictObject({
   operation: accountOperation,
-  connection: connectionSnapshot,
+  connection: connectionSnapshot.nullable(),
 });
 const handoffURL = z.string().max(4096).url().refine((value) => {
   const url = new URL(value);
@@ -170,6 +170,7 @@ export const connectionChallenge = z.discriminatedUnion("kind", [
   }),
 ]);
 export const connectionBeginResponse = connectionOperation.extend({
+  connection: connectionSnapshot,
   challenge: connectionChallenge.optional(),
 }).refine((v) => v.challenge === undefined ||
   (v.operation.state === "pending" && v.challenge.kind === v.connection.method.interaction.kind));

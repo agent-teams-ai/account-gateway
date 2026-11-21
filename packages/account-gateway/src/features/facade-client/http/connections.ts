@@ -10,9 +10,9 @@ function checked<T extends c.ConnectionOperation>(
   operationId: string,
   selection?: c.ConnectionBinding,
 ): T {
-  const bound = result.connection.connection;
+  const bound = result.connection?.connection;
   if (result.operation.operationRef !== operationId || (selection &&
-    (bound.profileId !== selection.profileId || bound.methodId !== selection.methodId ||
+    (!bound || bound.profileId !== selection.profileId || bound.methodId !== selection.methodId ||
       bound.methodRevision !== selection.methodRevision ||
       bound.configurationGeneration !== selection.configurationGeneration))) {
     throw new GatewayError("invalid_response", "effect_unknown", operationId);
