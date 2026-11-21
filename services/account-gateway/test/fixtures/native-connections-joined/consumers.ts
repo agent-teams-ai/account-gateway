@@ -120,7 +120,9 @@ type JoinedReviewReceipt = Readonly<{
 
 const digest = (value: Uint8Array) => createHash("sha256").update(value).digest("hex");
 function canonicalSchema(value: unknown): string {
-  if (Array.isArray(value)) return "[" + value.map(canonicalSchema).join(",") + "]";
+  if (Array.isArray(value)) {
+    return "[" + value.map(canonicalSchema).join(",") + "]";
+  }
   if (value !== null && typeof value === "object") {
     return (
       "{" +
@@ -138,7 +140,7 @@ function canonicalSchema(value: unknown): string {
 async function qualifiedReviewSchemaDigest() {
   const archive = process.env.RR_PROVIDER_JOINED_ACTION_ARCHIVE;
   const work = process.env.RR_PROVIDER_JOINED_WORK_ROOT;
-  assert.ok(archive && work && isAbsolute(archive) && isAbsolute(work));
+  assert.ok(archive !== undefined && work !== undefined && isAbsolute(archive) && isAbsolute(work));
   assert.equal(
     digest(await readFile(archive)),
     "42e8d844bd451655ff171dc4093a872fc471675c90b3997697261ba4153807b4",
@@ -162,7 +164,9 @@ export async function loadQualifiedConnectionConsumers(input: {
   rrRoot: string;
 }) {
   const { archive, sdkRoot, sdkSHA256, rrRoot } = input;
-  for (const path of [archive, sdkRoot, rrRoot]) assert.ok(isAbsolute(path));
+  for (const path of [archive, sdkRoot, rrRoot]) {
+    assert.ok(isAbsolute(path));
+  }
   assert.match(sdkSHA256, /^[a-f0-9]{64}$/);
   assert.equal(digest(await readFile(archive)), sdkSHA256);
   const rrAdapterPath = join(rrRoot, "apps/web/src/server/native-connection-adapter.ts");
@@ -180,7 +184,7 @@ export async function loadQualifiedConnectionConsumers(input: {
     .filter(Boolean);
   assert.ok(packedFiles.length > 10);
   for (const name of packedFiles) {
-    assert.match(name, /^package\/[a-zA-Z0-9_.\/-]+$/);
+    assert.match(name, /^package\/[a-zA-Z0-9_./-]+$/);
     assert.equal(name.split("/").includes(".."), false);
     const expected = digest(
       execFileSync("tar", ["-xOzf", archive, name], { timeout: 5000, maxBuffer: 8 << 20 }),
@@ -199,17 +203,17 @@ export async function loadQualifiedConnectionConsumers(input: {
   const sdkPath = join(rrSDKRoot, "dist/http/index.js");
   const sdk = (await import(pathToFileURL(sdkPath).href)) as typeof SDK;
   const { createNativeConnectionAdapter } = (await import(pathToFileURL(rrAdapterPath).href)) as {
-    createNativeConnectionAdapter(input: RRAdapterInput): RRAdapter;
+    createNativeConnectionAdapter: (input: RRAdapterInput) => RRAdapter;
   };
   const { nativeConnectionProfileView } = (await import(pathToFileURL(rrViewPath).href)) as {
-    nativeConnectionProfileView(input: c.ConnectionProfileV3): RRProfile;
+    nativeConnectionProfileView: (input: c.ConnectionProfileV3) => RRProfile;
   };
   const { createNativeConnectionManagementClient } = (await import(
     pathToFileURL(rrClientPath).href
   )) as {
-    createNativeConnectionManagementClient(
+    createNativeConnectionManagementClient: (
       input: Omit<SDK.ManagementConfig, "timeoutMs">,
-    ): SDK.ManagementClient;
+    ) => SDK.ManagementClient;
   };
   // This is the existing real Action/Codex qualification, with its mandatory
   // pinned binary, archive, sandbox proof, tool roundtrip and execution closure.

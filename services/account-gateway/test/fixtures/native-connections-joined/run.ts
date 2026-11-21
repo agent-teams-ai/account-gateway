@@ -18,7 +18,7 @@ import {
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath } from "node:path";
 
 type Options = {
   gatewayRoot: string;
@@ -52,8 +52,7 @@ let phase = "arguments";
 let output: string | undefined;
 let pgData: string | undefined;
 let pgBin: string | undefined;
-let pgStarted = false;
-let pgStartAttempted = false;
+const pgState = { started: false, startAttempted: false };
 let owned: string | undefined;
 let pgUID: number | undefined;
 let qualification: Record<string, unknown> | undefined;
@@ -111,20 +110,26 @@ async function command(
       }
     };
     let force: ReturnType<typeof setTimeout> | undefined;
-    let timedOut = false;
+    const timeout = { expired: false };
     const timer = setTimeout(() => {
-      timedOut = true;
+      timeout.expired = true;
       terminate("SIGTERM");
-      force = setTimeout(() => terminate("SIGKILL"), 5000);
+      force = setTimeout(() => {
+        terminate("SIGKILL");
+      }, 5000);
     }, timeoutMs);
     try {
       return await new Promise<number>((resolve, reject) => {
         child.once("error", reject);
-        child.once("exit", (code) => resolve(timedOut ? 124 : (code ?? 1)));
+        child.once("exit", (code) => {
+          resolve(timeout.expired ? 124 : (code ?? 1));
+        });
       });
     } finally {
       clearTimeout(timer);
-      if (timedOut) terminate("SIGKILL");
+      if (timeout.expired) {
+        terminate("SIGKILL");
+      }
       clearTimeout(force);
     }
   } finally {
@@ -138,18 +143,27 @@ async function availablePort(): Promise<number> {
     listener.listen(0, "127.0.0.1", resolve);
   });
   const address = listener.address();
-  assert.ok(address && typeof address === "object" && address.port !== 5432);
-  await new Promise<void>((resolve, reject) =>
-    listener.close((error) => (error ? reject(error) : resolve())),
-  );
+  assert.ok(address !== null && typeof address === "object" && address.port !== 5432);
+  await new Promise<void>((resolve, reject) => {
+    listener.close((error) => {
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    });
+  });
   return address.port;
 }
 async function main() {
   const values: Record<string, string> = {};
   for (let i = 2; i < process.argv.length; i += 2) {
     const key = flags.get(process.argv[i]),
-      value = process.argv[i + 1];
-    assert.ok(key && value && !(key in values), "unknown, repeated, or missing option");
+      value = process.argv.at(i + 1);
+    assert.ok(
+      key !== undefined && value !== undefined && value.length > 0 && !(key in values),
+      "unknown, repeated, or missing option",
+    );
     values[key] = value;
   }
   assert.equal(Object.keys(values).length, flags.size);
@@ -162,8 +176,9 @@ async function main() {
     options.pgBin,
     options.go,
     options.output,
-  ])
+  ]) {
     assert.ok(isAbsolute(path));
+  }
   assert.match(options.sdkSHA256, /^[a-f0-9]{64}$/);
   assert.equal(process.platform, "linux");
   assert.equal(process.versions.node, "26.11.1");
@@ -173,11 +188,18 @@ async function main() {
     [await realpath(options.nativeRoot), options.nativeCommit],
     [await realpath(options.rrRoot), options.rrCommit],
   ] as const;
-  for (const [root, commit] of roots) cleanPin(root, commit);
+  for (const [root, commit] of roots) {
+    cleanPin(root, commit);
+  }
   assert.equal(sha256(await readFile(options.sdkArchive)), options.sdkSHA256);
   const actionArchive = process.env.RR_PROVIDER_JOINED_ACTION_ARCHIVE;
   const codexBinary = process.env.RR_PROVIDER_JOINED_CODEX_BINARY;
-  assert.ok(actionArchive && codexBinary && isAbsolute(actionArchive) && isAbsolute(codexBinary));
+  assert.ok(
+    actionArchive !== undefined &&
+      codexBinary !== undefined &&
+      isAbsolute(actionArchive) &&
+      isAbsolute(codexBinary),
+  );
   assert.equal(
     sha256(await readFile(actionArchive)),
     "42e8d844bd451655ff171dc4093a872fc471675c90b3997697261ba4153807b4",
@@ -191,7 +213,7 @@ async function main() {
     smallCommand(join(options.pgBin, "postgres"), ["--version"]),
     /^postgres \(PostgreSQL\) 17\.10(?: \([^)]+\))?$/,
   );
-  const requestedOutput = resolve(options.output);
+  const requestedOutput = resolvePath(options.output);
   output = join(await realpath(dirname(requestedOutput)), basename(requestedOutput));
   for (const [root] of roots) {
     const child = relative(root, output);
@@ -223,7 +245,7 @@ async function main() {
   const entries = smallCommand("tar", ["-tzf", options.sdkArchive]).split("\n");
   assert.ok(entries.length > 10);
   for (const entry of entries) {
-    assert.match(entry, /^package\/[a-zA-Z0-9_.\/-]+$/);
+    assert.match(entry, /^package\/[a-zA-Z0-9_./-]+$/);
     assert.equal(entry.split("/").includes(".."), false);
   }
   smallCommand("tar", ["-xzf", options.sdkArchive, "--strip-components=1", "-C", sdkRoot]);
@@ -296,7 +318,9 @@ async function main() {
     30 * 60_000,
   );
   assert.equal(compile, 0, "native bootstrap compilation failed; see compile.log");
-  for (const [root, commit] of roots) cleanPin(root, commit);
+  for (const [root, commit] of roots) {
+    cleanPin(root, commit);
+  }
   await writeFile(
     join(output, "build.json"),
     JSON.stringify(
@@ -321,7 +345,9 @@ async function main() {
   pgData = join(owned, "postgres-data");
   pgUID = process.getuid?.() === 0 ? 65534 : undefined;
   await mkdir(pgData, { mode: 0o700 });
-  if (pgUID !== undefined) await chown(pgData, pgUID, pgUID);
+  if (pgUID !== undefined) {
+    await chown(pgData, pgUID, pgUID);
+  }
   const port = await availablePort();
   assert.equal(
     await command(
@@ -335,7 +361,7 @@ async function main() {
     ),
     0,
   );
-  pgStartAttempted = true;
+  pgState.startAttempted = true;
   assert.equal(
     await command(
       join(pgBin, "pg_ctl"),
@@ -359,7 +385,7 @@ async function main() {
     ),
     0,
   );
-  pgStarted = true;
+  pgState.started = true;
   const dsn = (database: string) =>
     `postgresql://postgres@127.0.0.1:${port}/${database}?sslmode=disable`;
   const batches: {
@@ -380,7 +406,7 @@ async function main() {
   for (const batch of ["standard", "express"] as const) {
     const nativeDatabase = "native_connection_joined_" + batch;
     const gatewayDatabase = "ag_kernel_test_connections_joined_" + batch;
-    for (const database of [nativeDatabase, gatewayDatabase])
+    for (const database of [nativeDatabase, gatewayDatabase]) {
       smallCommand(join(pgBin, "createdb"), [
         "-h",
         "127.0.0.1",
@@ -390,6 +416,7 @@ async function main() {
         "postgres",
         database,
       ]);
+    }
     const batchOutput = join(output, batch);
     await mkdir(batchOutput, { mode: 0o700 });
     phase = "actual-native-gateway-sdk-rr-" + batch;
@@ -438,7 +465,9 @@ async function main() {
       item.exitCode = item.exitCode || 1;
     }
     // Failure in standard must not silently drop the separate Vertex Express row.
-    for (const [root, commit] of roots) cleanPin(root, commit);
+    for (const [root, commit] of roots) {
+      cleanPin(root, commit);
+    }
     await rm(join(batchOutput, "private-fixture.json"), { force: true });
     await rm(join(batchOutput, "private-exchange.json"), { force: true });
   }
@@ -471,22 +500,31 @@ async function main() {
       reviewPassed: receipt?.reviewPassed ?? 0,
     })),
   };
-  if (!qualified) process.exitCode = 1;
+  if (!qualified) {
+    process.exitCode = 1;
+  }
 }
 try {
   await main();
 } catch (error) {
   report({ phase: "failed", at: phase, error: error instanceof Error ? error.name : "failure" });
-  if (qualification)
+  if (qualification) {
     qualification.failure = { at: phase, code: error instanceof Error ? error.name : "failure" };
+  }
   process.exitCode = 1;
 } finally {
-  let postgresStopped = !pgStartAttempted;
+  let postgresStopped = !pgState.startAttempted;
   try {
-    if (pgData && pgBin && output && owned && pgStartAttempted) {
+    if (
+      pgData !== undefined &&
+      pgBin !== undefined &&
+      output !== undefined &&
+      owned !== undefined &&
+      pgState.startAttempted
+    ) {
       // pg_ctl can time out after spawning the server. A failed start still
       // owns that cluster and must establish that it stopped before deletion.
-      const status = pgStarted
+      const status = pgState.started
         ? 0
         : await command(
             join(pgBin, "pg_ctl"),
@@ -509,7 +547,7 @@ try {
             20_000,
             pgUID,
           )) === 0;
-        if (!postgresStopped)
+        if (!postgresStopped) {
           postgresStopped =
             (await command(
               join(pgBin, "pg_ctl"),
@@ -520,17 +558,22 @@ try {
               20_000,
               pgUID,
             )) === 0;
+        }
       }
       await copyFile(join(pgData, "postgres.log"), join(output, "postgres.log")).catch(() => {});
     }
   } catch {
     postgresStopped = false;
   }
-  if (!postgresStopped) process.exitCode = 1;
+  if (!postgresStopped) {
+    process.exitCode = 1;
+  }
   // Private cluster data, compiled binaries and CLI workspaces live in the
   // owned /tmp directory, outside the allowlisted CI evidence directory.
-  if (owned && postgresStopped) await rm(owned, { recursive: true, force: true });
-  if (qualification && output) {
+  if (owned !== undefined && postgresStopped) {
+    await rm(owned, { recursive: true, force: true });
+  }
+  if (qualification && output !== undefined) {
     qualification.postgresStopped = postgresStopped;
     qualification.qualified = qualification.qualified === true && postgresStopped;
     qualification.exitCode = process.exitCode ?? 0;
@@ -539,7 +582,12 @@ try {
       flag: "wx",
     });
     report({
-      phase: qualification.failure ? "failed" : qualification.qualified ? "completed" : "blocked",
+      phase:
+        qualification.failure !== undefined
+          ? "failed"
+          : qualification.qualified === true
+            ? "completed"
+            : "blocked",
       ...qualification,
     });
   }

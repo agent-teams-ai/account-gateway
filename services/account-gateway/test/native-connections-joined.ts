@@ -29,7 +29,7 @@ import { loadQualifiedConnectionConsumers } from "./fixtures/native-connections-
 const report = (value: object) => process.stdout.write(JSON.stringify(value) + "\n");
 const required = (name: string) => {
   const value = process.env[name];
-  assert.ok(value && isAbsolute(value), name + " must be an absolute path");
+  assert.ok(value !== undefined && isAbsolute(value), name + " must be an absolute path");
   return value;
 };
 const servers: Server[] = [];
@@ -74,7 +74,8 @@ type RowReceipt = {
   failure?: { at: string; error: string; code?: string; locations?: string[] };
 };
 function safeFailure(error: unknown, at: string): NonNullable<RowReceipt["failure"]> {
-  const raw = error && typeof error === "object" && "code" in error ? error.code : undefined;
+  const raw =
+    error !== null && typeof error === "object" && "code" in error ? error.code : undefined;
   return {
     at,
     error: error instanceof Error ? error.name : "failure",
@@ -95,8 +96,23 @@ async function listen(server: Server) {
     server.listen(0, "127.0.0.1", resolve);
   });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   return "http://127.0.0.1:" + address.port;
+}
+async function measuredBytes(url: string, credential: string) {
+  const response = await fetch(url, {
+    headers: {
+      authorization: "Bearer " + credential,
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    redirect: "error",
+    signal: AbortSignal.timeout(5000),
+  });
+  assert.equal(response.status, 200);
+  const bytes = await response.arrayBuffer();
+  assert.ok(bytes.byteLength > 0 && bytes.byteLength <= 2_097_152);
+  return bytes.byteLength;
 }
 async function main() {
   assert.equal(process.env.AG_NATIVE_CONNECTION_JOINED_ALLOW, "disposable_pg17_10");
@@ -124,8 +140,9 @@ async function main() {
   assert.equal(fixture.rows.length, fixture.batch === "standard" ? 52 : 1);
   assert.equal(new Set(fixture.rows.map((row) => row.id)).size, fixture.rows.length);
   assert.ok(isAbsolute(fixture.exchangePath));
-  for (const row of fixture.rows)
+  for (const row of fixture.rows) {
     assert.equal(row.id, `${row.profileId}/${row.methodId}/${row.variant}`);
+  }
   const native = new URL(fixture.nativeOrigin);
   assert.equal(native.protocol, "http:");
   assert.equal(native.hostname, "127.0.0.1");
@@ -148,7 +165,7 @@ async function main() {
   });
   phase = "gateway-postgres";
   const dsn = process.env.AG_NATIVE_CONNECTION_JOINED_KERNEL_DSN;
-  assert.ok(dsn);
+  assert.ok(dsn !== undefined && dsn.length > 0);
   const database = new URL(dsn);
   assert.equal(database.hostname, "127.0.0.1");
   assert.equal(database.username, "postgres");
@@ -173,18 +190,18 @@ async function main() {
   );
   const migrations = new URL("../migrations/", import.meta.url);
   for (const name of (await readdir(migrations))
-    .filter((name) => /^\d{3}_.*\.sql$/.test(name))
+    .filter((candidate) => /^\d{3}_.*\.sql$/.test(candidate))
     .toSorted()) {
     await pool.query(await readFile(new URL(name, migrations), "utf8"));
   }
   const kernel = new PostgresKernel(pool),
     secrets = new IntentSecrets(randomBytes(32), randomBytes(32));
   const store = new PostgresManagementStore(pool, secrets);
-  const context = { consumerId: fixture.consumerId },
+  const kernelContext = { consumerId: fixture.consumerId },
     worker = randomUUID();
-  await kernel.issuer(context);
-  await kernel.heartbeat(context, worker);
-  heartbeat = startWorkerHeartbeat(() => kernel.heartbeat(context, worker));
+  await kernel.issuer(kernelContext);
+  await kernel.heartbeat(kernelContext, worker);
+  heartbeat = startWorkerHeartbeat(() => kernel.heartbeat(kernelContext, worker));
   const ownerRef = "joined-rr-owner",
     token = randomBytes(32).toString("base64url"),
     consumerToken = randomBytes(32).toString("base64url");
@@ -374,26 +391,11 @@ async function main() {
     const discovered = profiles.find((profile) => profile.id === "deepseek-responses-apikey-v1");
     assert.equal(discovered?.connection?.provider, "deepseek");
     assert.ok(
-      discovered.connection?.nativeMethods?.some(
+      discovered.connection.nativeMethods?.some(
         (method) => method.methodId === "api_key" && method.create,
-      ),
+      ) === true,
     );
   }
-  const measuredBytes = async (url: string, credential: string) => {
-    const response = await fetch(url, {
-      headers: {
-        authorization: "Bearer " + credential,
-        "content-type": "application/json",
-        accept: "application/json",
-      },
-      redirect: "error",
-      signal: AbortSignal.timeout(5000),
-    });
-    assert.equal(response.status, 200);
-    const bytes = await response.arrayBuffer();
-    assert.ok(bytes.byteLength > 0 && bytes.byteLength <= 2_097_152);
-    return bytes.byteLength;
-  };
   const nativeCatalogBytes = await measuredBytes(
     fixture.nativeOrigin + "/private/native/v2/account-capabilities",
     fixture.managementCredential,
@@ -412,9 +414,9 @@ async function main() {
   });
   // These are the production cleanup orchestration and native cancellation
   // paths, including real CLI execution transports and replaced generations.
-  const cleanupTurn = composeServiceCleanupTurn(kernel, context, worker, async (claim) => {
+  const cleanupTurn = composeServiceCleanupTurn(kernel, kernelContext, worker, async (claim) => {
     if (claim.scope.kind === "generation") {
-      assert.equal(await control.management.cleanupClaim(context, claim), "erased");
+      assert.equal(await control.management.cleanupClaim(kernelContext, claim), "erased");
     } else {
       for (const item of claim.scope.transports) {
         assert.ok(item.native && typeof item.token === "string" && item.token.length > 0);
@@ -422,12 +424,12 @@ async function main() {
         assert.equal(item.native.engineIncarnation, enrollment.engineIncarnation);
         await cancelFacadeTransport(
           facadeOptions,
-          context,
+          kernelContext,
           { ...item, native: item.native, token: item.token },
           claim,
         );
       }
-      await kernel.settleCleanup(context, claim.cleanupRef, worker, claim.token, true);
+      await kernel.settleCleanup(kernelContext, claim.cleanupRef, worker, claim.token, true);
     }
     return true;
   });
@@ -436,7 +438,9 @@ async function main() {
     for (let turns = 0; turns < 64; turns++) {
       const acquired = await cleanupTurn();
       idle = acquired ? 0 : idle + 1;
-      if (idle === 2) return;
+      if (idle === 2) {
+        return;
+      }
     }
     throw new Error("joined_cleanup_did_not_drain");
   }
@@ -445,9 +449,11 @@ async function main() {
     step: Completion,
     authorizationURL: string | undefined,
   ) {
-    if (!step.fromAuthorizationURL) return step.fields;
+    if (step.fromAuthorizationURL !== true) {
+      return step.fields;
+    }
     assert.equal(step.action, "submit");
-    assert.ok(authorizationURL);
+    assert.ok(authorizationURL !== undefined && authorizationURL.length > 0);
     await writeFile(fixture.exchangePath, JSON.stringify({ rowId: row.id, authorizationURL }), {
       mode: 0o600,
     });
@@ -455,16 +461,15 @@ async function main() {
     assert.ok(info.isFile() && (info.mode & 0o777) === 0o600 && info.size <= 16_384);
     report({ phase: "authorize", rowId: row.id });
     await handshake({ phase: "authorization-ready", rowId: row.id });
-    const returned = JSON.parse(await readFile(fixture.exchangePath, "utf8")) as {
-      rowId: string;
-      fields: Record<string, string>;
-    };
+    const returned: unknown = JSON.parse(await readFile(fixture.exchangePath, "utf8"));
     await rm(fixture.exchangePath);
+    assert.ok(returned !== null && typeof returned === "object" && !Array.isArray(returned));
+    assert.ok("rowId" in returned && "fields" in returned);
     assert.equal(returned.rowId, row.id);
-    assert.ok(
-      returned.fields && Object.values(returned.fields).every((value) => typeof value === "string"),
-    );
-    return returned.fields;
+    const fields = returned.fields;
+    assert.ok(fields !== null && typeof fields === "object" && !Array.isArray(fields));
+    assert.ok(Object.values(fields).every((value) => typeof value === "string"));
+    return fields as Record<string, string>;
   }
   const receipts: RowReceipt[] = [];
   const reviews: unknown[] = [];
@@ -498,7 +503,7 @@ async function main() {
       const profile = profiles.find((candidate) => candidate.id === row.profileId);
       assert.ok(profile, "every source inventory row remains present in native discovery");
       assert.equal(profile.connection?.provider, row.provider);
-      const method = profile.connection?.nativeMethods?.find(
+      const method = profile.connection.nativeMethods?.find(
         (candidate) => candidate.methodId === row.methodId,
       );
       assert.ok(method);
@@ -514,9 +519,9 @@ async function main() {
       const begun = await adapter.begin(
         "authorized",
         { nonce, connection: selection, label: "Joined " + row.methodId },
-        row.fields ?? {},
+        row.fields,
       );
-      if (row.blocker) {
+      if (row.blocker !== undefined && row.blocker.length > 0) {
         assert.notEqual(method.availability, "enabled");
         assert.equal(
           begun.status,
@@ -528,7 +533,6 @@ async function main() {
         continue;
       }
       assert.equal(begun.status, "ok");
-      if (begun.status !== "ok") throw new Error("rr_enrollment_failed");
       let operation = begun.value.operation;
       for (const step of row.completion ?? []) {
         phase = "rr-completion";
@@ -544,12 +548,12 @@ async function main() {
           step.action === "submit" ? fields : undefined,
         );
         assert.equal(completed.status, "ok");
-        if (completed.status !== "ok") throw new Error("rr_completion_failed");
         operation = completed.value;
       }
       assert.equal(operation.state, "applied");
-      assert.deepEqual(operation.native?.connection, selection);
-      assert.deepEqual(operation.native?.credential, {
+      assert.ok(operation.native);
+      assert.deepEqual(operation.native.connection, selection);
+      assert.deepEqual(operation.native.credential, {
         credentialKind: row.credentialKind,
         credentialPolicy: row.credentialPolicy,
         refreshPolicy: row.refreshPolicy,
@@ -565,7 +569,6 @@ async function main() {
       const saved = await client.readConnection("rr-joined-" + nonce);
       assert.equal(saved.operation.state, "applied");
       assert.equal(saved.operation.result?.kind, "account");
-      if (saved.operation.result?.kind !== "account") throw new Error("account_missing");
       accountRef = saved.operation.result.accountRef;
       ownedAccounts.set(accountRef, { accountRef, profileId: row.profileId });
       assert.ok(
@@ -579,7 +582,6 @@ async function main() {
       const reads = catalogReads;
       const recovered = await adapter.read("authorized", nonce);
       assert.equal(recovered.status, "ok");
-      if (recovered.status !== "ok") throw new Error("rr_recovery_failed");
       assert.deepEqual(recovered.value.native, operation.native);
       assert.equal(catalogReads, reads);
       receipt.recovery = true;
@@ -611,7 +613,7 @@ async function main() {
             );
             assert.equal(proof.executionClosureAcknowledged, true);
             assert.equal(proof.sandboxQualification?.contract, "codex-read-only-sandbox/v1");
-            assert.equal(proof.sandboxQualification?.childExecuted, true);
+            assert.equal(proof.sandboxQualification.childExecuted, true);
             if (row.reviewProof) {
               assert.equal(proof.reasoningOmitted, false);
               assert.equal(proof.reasoningEffort, row.reviewProof.reasoningEffort);
@@ -623,8 +625,9 @@ async function main() {
           } catch (error) {
             receipt.review = "failed";
             receipt.failure = safeFailure(error, phase);
-            if (receipt.failure.code?.includes("cli_sandbox_preflight"))
+            if (receipt.failure.code?.includes("cli_sandbox_preflight") === true) {
               reviewEnvironmentBlocker = receipt.failure;
+            }
           }
         }
       }
@@ -670,7 +673,6 @@ async function main() {
           row.reconnectFields ?? {},
         );
         assert.equal(replacement.status, "ok");
-        if (replacement.status !== "ok") throw new Error("rr_reconnect_failed");
         let replaced = replacement.value.operation;
         for (const step of row.reconnectCompletion ?? []) {
           assert.equal(replaced.state, "pending");
@@ -685,7 +687,6 @@ async function main() {
             step.action === "submit" ? fields : undefined,
           );
           assert.equal(completed.status, "ok");
-          if (completed.status !== "ok") throw new Error("rr_reconnect_completion_failed");
           replaced = completed.value;
         }
         assert.equal(replaced.state, "applied");
@@ -693,10 +694,8 @@ async function main() {
         const savedReplacement = await client.readConnection("rr-joined-" + replacementNonce);
         assert.equal(savedReplacement.operation.state, "applied");
         assert.equal(savedReplacement.operation.result?.kind, "account");
-        if (savedReplacement.operation.result?.kind !== "account")
-          throw new Error("replacement_missing");
         assert.equal(savedReplacement.operation.result.accountRef, accountRef);
-        assert.deepEqual(replaced.native?.credential, operation.native?.credential);
+        assert.deepEqual(replaced.native.credential, operation.native.credential);
         receipt.reconnect = "passed";
       }
       phase = "canonical-native-erasure";
@@ -728,7 +727,7 @@ async function main() {
       receipt.failure = safeFailure(error, phase);
     } finally {
       discovery = true;
-      if (accountRef && !retired) {
+      if (accountRef !== undefined && accountRef.length > 0 && !retired) {
         try {
           const current = await client.get(accountRef);
           await client.disable(accountRef, {
@@ -754,7 +753,7 @@ async function main() {
       await handshake({ phase: "case-ready", rowId: row.id });
       const method = profiles
         .find((profile) => profile.id === row.profileId)
-        ?.connection?.nativeMethods?.find((method) => method.methodId === row.methodId);
+        ?.connection?.nativeMethods?.find((candidate) => candidate.methodId === row.methodId);
       assert.ok(method);
       const nonce = randomUUID();
       const unknown = await adapter.begin(
@@ -771,13 +770,11 @@ async function main() {
         { refresh_token: fixture.private.grokLostRefresh },
       );
       assert.equal(unknown.status, "ok");
-      if (unknown.status !== "ok") throw new Error("unknown_operation_missing");
       assert.equal(unknown.value.operation.state, "unknown");
       discovery = false;
       for (let attempt = 0; attempt < 2; attempt++) {
         const recovered = await adapter.read("authorized", nonce);
         assert.equal(recovered.status, "ok");
-        if (recovered.status !== "ok") throw new Error("unknown_readback_missing");
         assert.equal(recovered.value.state, "unknown");
         assert.equal(recovered.value.native?.connection.methodId, row.methodId);
       }
@@ -828,7 +825,9 @@ async function main() {
     reviewPassed: receipt.reviewPassed,
     lostGrantNotReplayed,
   });
-  if (!qualified) process.exitCode = 1;
+  if (!qualified) {
+    process.exitCode = 1;
+  }
 }
 try {
   await main();
@@ -851,9 +850,13 @@ try {
 } finally {
   frames?.close();
   await heartbeat?.();
-  for (const server of servers.reverse()) {
+  for (const server of servers.toReversed()) {
     server.closeAllConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        resolve();
+      });
+    });
   }
   await pool?.end();
 }
