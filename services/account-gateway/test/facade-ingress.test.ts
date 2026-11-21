@@ -1604,6 +1604,7 @@ async function sourceHTTP(
           },
         ];
   const cfg = {
+    accountInfoContract: "account-info/v2" as const,
     native: {
       executable: "/unused",
       sha256: "unused",
