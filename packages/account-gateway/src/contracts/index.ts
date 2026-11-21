@@ -1,3 +1,20 @@
+export * from "../features/facade-client/contracts/connections-v3.js";
+export * from "../features/facade-client/contracts/native-observations.js";
+export {
+  ACCOUNT_INFO_V2_CONTRACT,
+  accountInfoFieldsV2,
+  accountInfoV2,
+  accountInfoAccountV2,
+  accountInfoReadResponseV2,
+  accountInfoFromV1,
+  accountInfoToV1,
+} from "../features/facade-client/contracts/account-info.js";
+export type {
+  AccountInfoV2,
+  AccountInfoFieldsV2,
+  AccountInfoAccountV2,
+  AccountInfoReadResponseV2,
+} from "../features/facade-client/contracts/account-info.js";
 export {
   reference,
   revision,

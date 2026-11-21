@@ -1,6 +1,9 @@
 // Curated public SDK surface: never export internal transport wiring.
 export * as secretSubmission from "./ingress.js";
 export { GatewayError, operationPath, requestPath } from "./transport.js";
+export { createAccountLimitsV3Client } from "./clients.js";
+export type { AccountLimitsV3Client, AccountLimitsV3Config } from "./clients.js";
+export type { ConnectionBegin, ConnectionReconnect, ConnectionSubmit } from "./connection-ingress.js";
 export type {
   ManagementConfig,
   ConsumerControlConfig,

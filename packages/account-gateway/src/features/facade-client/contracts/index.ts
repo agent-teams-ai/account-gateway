@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { limitsWindow } from "./limits-window.js";
 import { deadline, reference, revision } from "./primitives.js";
 export { deadline, reference, revision } from "./primitives.js";
 export * from "./account-info.js";
@@ -1196,43 +1197,7 @@ export const accountLimitsV2Capabilities = z.strictObject({
   cachedRead: z.boolean(),
   quotaOnlyRefresh: z.literal(false),
 });
-const accountLimitsV2Window = z
-  .strictObject({
-    id: z.enum([
-      "five_hour",
-      "weekly",
-      "monthly",
-      "primary",
-      "secondary",
-      "unknown",
-      "request_rate",
-      "token_rate",
-    ]),
-    provider: z.enum(["kimi", "glm", "minimax", "grok"]),
-    dimension: z.enum(["plan_quota", "rate_limit"]),
-    unit: z.enum(["credits", "tokens", "requests", "unknown"]),
-    period: z.discriminatedUnion("kind", [
-      z.strictObject({
-        kind: z.literal("duration"),
-        durationSeconds: z.number().positive().max(Number.MAX_SAFE_INTEGER),
-      }),
-      z.strictObject({ kind: z.literal("monthly_billing_cycle") }),
-      z.strictObject({ kind: z.literal("unknown") }),
-    ]),
-    label: z.enum(["5h", "Week", "Month"]).nullable(),
-    usedPercent: z.number().nonnegative().nullable(),
-    observedAt: limitsInstant.nullable(),
-    resetAt: limitsInstant.nullable(),
-  })
-  .refine(
-    (v) => v.label !== "5h" || (v.period.kind === "duration" && v.period.durationSeconds === 18000),
-  )
-  .refine(
-    (v) =>
-      v.label !== "Week" || (v.period.kind === "duration" && v.period.durationSeconds === 604800),
-  )
-  .refine((v) => v.label !== "Month" || v.period.kind === "monthly_billing_cycle")
-  .refine((v) => v.period.kind !== "unknown" || v.label === null);
+const accountLimitsV2Window = limitsWindow(z.enum(["kimi", "glm", "minimax", "grok"]));
 export const accountLimitsV2 = z.discriminatedUnion("status", [
   z.strictObject({
     status: z.literal("snapshot"),
