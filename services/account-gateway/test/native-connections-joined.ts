@@ -237,7 +237,7 @@ async function main() {
     createNativeConnectionManagementClient,
     reviewConsumer,
     extensionConsumer,
-    reviewSchemaDigest,
+    reviewSchema: loadReviewSchema,
     provenance,
   } = await loadConsumers();
   const consumerBuildDigestBefore = consumerBuildDigest(provenance);
@@ -386,8 +386,8 @@ async function main() {
   const origin = await listen(createFacade(facadeOptions));
   frames = createInterface({ input: process.stdin, crlfDelay: Infinity });
   const next = frames[Symbol.asyncIterator]();
-  const reviewSchemaSHA256 = await reviewSchemaDigest();
-  report({ phase: "ready", callbackOrigin, reviewSchemaSHA256 });
+  const { schema: reviewSchema, sha256: reviewSchemaSHA256 } = await loadReviewSchema();
+  report({ phase: "ready", callbackOrigin, reviewSchemaSHA256, reviewSchema });
   const frame = await next.next();
   assert.equal(frame.done, false);
   assert.deepEqual(JSON.parse(frame.value), { phase: "continue" });

@@ -186,7 +186,7 @@ function canonicalSchema(value: unknown): string {
   assert.equal(typeof encoded, "string");
   return encoded.replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
 }
-async function qualifiedReviewSchemaDigest() {
+async function qualifiedReviewSchema() {
   const archive = process.env.RR_PROVIDER_JOINED_ACTION_ARCHIVE;
   const work = process.env.RR_PROVIDER_JOINED_WORK_ROOT;
   assert.ok(archive !== undefined && work !== undefined && isAbsolute(archive) && isAbsolute(work));
@@ -201,7 +201,11 @@ async function qualifiedReviewSchemaDigest() {
     const action = (await import(pathToFileURL(schemaPath).href)) as {
       buildReviewFindingsSchema(): unknown;
     };
-    return digest(Buffer.from(canonicalSchema(action.buildReviewFindingsSchema())));
+    const schema = action.buildReviewFindingsSchema();
+    assert.ok(schema !== null && typeof schema === "object" && !Array.isArray(schema));
+    const encoded = Buffer.from(canonicalSchema(schema));
+    assert.ok(encoded.length <= 64 << 10);
+    return { schema, sha256: digest(encoded) };
   } finally {
     await rm(source, { recursive: true, force: true });
   }
@@ -320,7 +324,7 @@ export async function loadQualifiedConnectionConsumers(input: {
     createNativeConnectionManagementClient,
     reviewConsumer,
     extensionConsumer,
-    reviewSchemaDigest: qualifiedReviewSchemaDigest,
+    reviewSchema: qualifiedReviewSchema,
     provenance: {
       sdkSHA256,
       sdkHTTPDigest: digest(await readFile(sdkPath)),
