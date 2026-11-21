@@ -2,6 +2,8 @@ import { z } from "zod";
 import * as c from "../contracts/index.js";
 import { connect, reconnect, oauthComplete } from "./ingress.js";
 import type { OAuthComplete } from "./ingress.js";
+import { connectionMethods, usageV2Methods } from "./connections.js";
+import * as observed from "../contracts/native-observations.js";
 import {
   config,
   transport,
@@ -42,6 +44,7 @@ function accountClient(
   return {
     json,
     client: Object.freeze({
+      ...connectionMethods(json),
       readAccountInfo: async (
         input: c.AccountInfoReadRequest,
         options?: CallOptions,
@@ -63,6 +66,22 @@ function accountClient(
           ) ||
           result.accounts.length !== captured.accountRefs.length
         ) {
+          throw new GatewayError("invalid_response", "effect_unknown");
+        }
+        return result;
+      },
+      readAccountInfoV2: async (
+        input: c.AccountInfoReadRequest,
+        options?: CallOptions,
+      ): Promise<c.AccountInfoReadResponseV2> => {
+        const captured = valid(c.accountInfoReadRequest, input);
+        const result = await json(
+          "/v2/account-info/read", c.accountInfoReadResponseV2, "POST", captured,
+          options, {}, {}, c.ACCOUNT_INFO_RESPONSE_BYTES,
+        );
+        if (result.accounts.length !== captured.accountRefs.length || result.accounts.some(
+          (value, index) => value.accountRef !== captured.accountRefs[index],
+        )) {
           throw new GatewayError("invalid_response", "effect_unknown");
         }
         return result;
@@ -351,6 +370,7 @@ export function createConsumerControlClient(settings: ConsumerControlConfig) {
   const { client, json } = accountClient(settings, "consumer-control");
   return Object.freeze({
     ...client,
+    ...usageV2Methods(json),
     observeUsage: (
       executionRef: string,
       requestRef: string,
@@ -523,3 +543,20 @@ export function createAccountLimitsV2Client(settings: AccountLimitsV2Config) {
   });
 }
 export type AccountLimitsV2Client = ReturnType<typeof createAccountLimitsV2Client>;
+
+const accountLimitsV3Config = accountLimitsConfig.extend({
+  contract: z.literal(observed.ACCOUNT_LIMITS_V3_CONTRACT),
+});
+export type AccountLimitsV3Config = z.input<typeof accountLimitsV3Config>;
+export function createAccountLimitsV3Client(settings: AccountLimitsV3Config) {
+  const captured = valid(accountLimitsV3Config, settings);
+  const { contract: _contract, ...transportConfig } = captured;
+  const { json } = transport(transportConfig, captured.role);
+  return Object.freeze({
+    getAccountLimitsCapabilities: (options?: CallOptions): Promise<observed.AccountLimitsV3Capabilities> =>
+      json("/v3/capabilities/account-limits", observed.accountLimitsV3Capabilities, "GET", undefined, options),
+    readAccountLimits: (input: c.AccountLimitsRequest, options?: CallOptions): Promise<observed.AccountLimitsV3> =>
+      json("/v3/account-limits/read", observed.accountLimitsV3, "POST", valid(c.accountLimitsRequest, input), options),
+  });
+}
+export type AccountLimitsV3Client = ReturnType<typeof createAccountLimitsV3Client>;

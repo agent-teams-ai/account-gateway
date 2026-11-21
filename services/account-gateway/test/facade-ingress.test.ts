@@ -75,7 +75,7 @@ void test("source HTTP: metadata traverses SDK, facade, native adapter and indep
     assert.ok(operation.result?.kind === "account");
     const accountRef = operation.result.accountRef;
     const unknown = { status: "unknown" } as const;
-    const info: lifecycleWire.AccountInfo = {
+    const info: lifecycleWire.AccountInfoV2 = {
       status: "available",
       infoRevision: "6",
       fields: {
@@ -89,7 +89,7 @@ void test("source HTTP: metadata traverses SDK, facade, native adapter and indep
         accountLabel: unknown,
         subscription: unknown,
         credentialExpiresAt: unknown,
-        privacyMode: unknown,
+        trainingUsage: unknown,
       },
     };
     f.accountInfoResult(info);
@@ -102,14 +102,17 @@ void test("source HTTP: metadata traverses SDK, facade, native adapter and indep
     });
     const input = { ownerRef: "owner-one", accountRefs: [accountRef] };
     const beforeReads = f.seen.length;
-    const result = await client.readAccountInfo(input);
+    const result = await client.readAccountInfoV2(input);
     assert.deepEqual(result.accounts[0].info, info);
     assert.deepEqual(
       f.seen.slice(beforeReads).map((read) => read.path),
-      ["POST /private/native/v1/account-info/read"],
+      ["POST /private/native/v2/account-info/read"],
     );
     assert.equal(JSON.stringify(result).includes("fixture-principal"), false);
     assert.equal(JSON.stringify(result).includes("physicalGeneration"), false);
+    const legacy = await client.readAccountInfo(input);
+    assert.deepEqual(legacy.accounts[0].info, lifecycleWire.accountInfoToV1(info));
+    assert.equal(JSON.stringify(legacy).includes("trainingUsage"), false);
     const reads = f.seen.length;
     assert.equal(
       (await f.publicCall("/v1/account-info/read", { ...input, ownerRef: "owner-two" })).status,
@@ -1124,7 +1127,7 @@ async function sourceHTTP(
   let modelResult: unknown = { status: "unavailable" };
   let modelHTTPStatus = 200;
   let modelRead: (() => Promise<void>) | undefined;
-  let infoResult: lifecycleWire.AccountInfo = { status: "unavailable" };
+  let infoResult: lifecycleWire.AccountInfoV2 = { status: "unavailable" };
   let infoRead: (() => Promise<void>) | undefined;
   const peer = createServer((req, res) => {
     const settled = (async () => {
@@ -1172,7 +1175,7 @@ async function sourceHTTP(
         });
         return;
       }
-      if (req.method === "POST" && path === "/private/native/v1/account-info/read") {
+      if (req.method === "POST" && path === "/private/native/v2/account-info/read") {
         assert.equal(req.headers.authorization, "Bearer " + consumer.managementCredential);
         const grant = await callback("account-info-authority", { consumerId, ...tuple });
         if (grant.status !== 200) {
@@ -1764,7 +1767,7 @@ async function sourceHTTP(
         modelResult = value;
         modelRead = enter;
       },
-      accountInfoResult: (value: lifecycleWire.AccountInfo, enter?: () => Promise<void>) => {
+      accountInfoResult: (value: lifecycleWire.AccountInfoV2, enter?: () => Promise<void>) => {
         infoResult = value;
         infoRead = enter;
       },
@@ -3924,8 +3927,8 @@ void test("source HTTP: Claude browser completion follows saved profile and qual
 // effect authority, including after the execution capability is revoked.
 void test("source HTTP: public execution callbacks hydrate authority, claim once and settle after revoke without pending routing state", async () => {
   let usageFault = true,
-    recorded: lifecycleWire.UsageObservation | null = null;
-  const currentRecorded = (): lifecycleWire.UsageObservation | null => recorded;
+    recorded: lifecycleWire.UsageObservation | lifecycleWire.UsageObservationV2 | null = null;
+  const currentRecorded = (): lifecycleWire.UsageObservation | lifecycleWire.UsageObservationV2 | null => recorded;
   const callbackGate = new NativeControlAdmission(1, 0);
   const usage: UsageJournal = {
     observe: async () => recorded,

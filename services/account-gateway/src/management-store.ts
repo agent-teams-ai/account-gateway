@@ -18,6 +18,8 @@ import type {
 } from "./management.ts";
 import { scopeCopy } from "./intent-secrets.ts";
 import type { IntentEnvelope, IntentSecrets } from "./intent-secrets.ts";
+import { captureConnectionSnapshot, capturePublication, samePublication } from "./connection-domain.ts";
+import type { ConnectionSnapshot, ConnectionPublication } from "./connection-domain.ts";
 import {
   journalRow,
   journalValues,
@@ -32,7 +34,7 @@ export type { IntentEnvelope } from "./intent-secrets.ts";
 
 // Both selection and the protected callback use the same active physical scope.
 // The journal's worker is historical; the CURRENT service lease gates maintenance.
-const activeOAuthMapping = `SELECT j.*,m.native_physical_identity,m.native_id,m.native_created_at
+const activeOAuthMapping = `SELECT j.*,m.native_physical_identity,m.native_id,m.native_created_at,m.publication
   FROM ag_kernel.accounts a JOIN ag_kernel.candidates c
     ON c.consumer=a.consumer AND c.account_ref=a.ref AND c.generation=a.active_generation
   JOIN ag_management.candidate_journal j
@@ -219,6 +221,7 @@ export class PostgresManagementStore implements ManagementStore {
     generation: string,
     worker: string,
     source: ManagedProfile,
+    connection?: ConnectionSnapshot,
   ): Promise<CandidateJournal> {
     const s = scopeCopy(scope);
     const profile = Object.freeze({
@@ -226,12 +229,14 @@ export class PostgresManagementStore implements ManagementStore {
       baseURL: source.baseURL,
       model: source.model,
       qualificationRef: source.qualificationRef,
+      ...(connection === undefined ? {} : { nativeConnection: true as const }),
     });
     uuid(generation);
     uuid(worker);
     identifier(profile.profile, 64);
     identifier(profile.qualificationRef);
-    const journal = Object.freeze({ ...s, generation, worker, profile });
+    const journal = Object.freeze({ ...s, generation, worker, profile,
+      ...(connection === undefined ? {} : { connectionSnapshot: captureConnectionSnapshot(connection) }) });
     return this.tx(s.consumerId, async (db) => {
       const owned = await db.query(
         `SELECT 1 FROM ag_kernel.candidates c JOIN ag_kernel.accounts a
@@ -252,8 +257,8 @@ export class PostgresManagementStore implements ManagementStore {
       }
       await db.query(
         `INSERT INTO ag_management.candidate_journal
-        (consumer,operation_id,account_ref,owner_ref,purpose,generation,worker,profile,base_url,model,qualification_ref)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING`,
+        (consumer,operation_id,account_ref,owner_ref,purpose,generation,worker,profile,base_url,model,qualification_ref,connection_snapshot)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT DO NOTHING`,
         [...journalValues(journal)],
       );
       const stored = (
@@ -298,6 +303,14 @@ export class PostgresManagementStore implements ManagementStore {
       return r ? this.secrets.open(s, r) : undefined;
     });
   }
+  async readGeneration(context: TrustedContext, generation: string): Promise<CandidateJournal | undefined> {
+    const ctx = captureContext(context); uuid(generation);
+    return this.read(ctx.consumerId, async (db) => {
+      const row = (await db.query<JournalRow>(
+        "SELECT * FROM ag_management.candidate_journal WHERE consumer=$1 AND generation=$2", [ctx.consumerId, generation])).rows.at(0);
+      return row === undefined ? undefined : journalRow(row);
+    });
+  }
   async eraseIntent(scope: CandidateScope): Promise<void> {
     const s = scopeCopy(scope);
     return this.tx(s.consumerId, async (db) => {
@@ -320,7 +333,9 @@ export class PostgresManagementStore implements ManagementStore {
         baseURL: input.profile.baseURL,
         model: input.profile.model,
         qualificationRef: input.profile.qualificationRef,
+        ...(input.connectionSnapshot === undefined ? {} : { nativeConnection: true as const }),
       }),
+      ...(input.connectionSnapshot === undefined ? {} : { connectionSnapshot: captureConnectionSnapshot(input.connectionSnapshot) }),
     };
     if (!exactCandidate(j, d)) {
       throw new KernelError("conflict");
@@ -337,13 +352,13 @@ export class PostgresManagementStore implements ManagementStore {
       }
       await db.query(
         `INSERT INTO ag_management.physical_mappings
-        (consumer,generation,native_physical_identity,native_id,native_created_at) VALUES ($1,$2,$3,$4,$5)
+        (consumer,generation,native_physical_identity,native_id,native_created_at,publication) VALUES ($1,$2,$3,$4,$5,$6)
         ON CONFLICT DO NOTHING`,
-        [s.consumerId, j.generation, d.nativePhysicalIdentity, d.nativeId, d.createdAt],
+        [s.consumerId, j.generation, d.nativePhysicalIdentity, d.nativeId, d.createdAt, d.publication ?? null],
       );
       const row = (
         await db.query<
-          Pick<MappingRow, "native_physical_identity" | "native_id" | "native_created_at">
+          Pick<MappingRow, "native_physical_identity" | "native_id" | "native_created_at" | "publication">
         >("SELECT * FROM ag_management.physical_mappings WHERE consumer=$1 AND generation=$2", [
           s.consumerId,
           j.generation,
@@ -353,7 +368,8 @@ export class PostgresManagementStore implements ManagementStore {
         !row ||
         row.native_physical_identity !== d.nativePhysicalIdentity ||
         Number(row.native_id) !== d.nativeId ||
-        row.native_created_at !== d.createdAt
+        row.native_created_at !== d.createdAt ||
+        !samePublication(row.publication == null ? undefined : capturePublication(row.publication as ConnectionPublication), d.publication)
       ) {
         throw new KernelError("conflict");
       }
@@ -372,9 +388,10 @@ export class PostgresManagementStore implements ManagementStore {
             native_physical_identity: string;
             native_id: string;
             native_created_at: string;
+            publication: unknown;
           }
         >(
-          `SELECT j.*,m.native_physical_identity,m.native_id,m.native_created_at
+          `SELECT j.*,m.native_physical_identity,m.native_id,m.native_created_at,m.publication
         FROM ag_management.candidate_journal j JOIN ag_management.physical_mappings m
         ON m.consumer=j.consumer AND m.generation=j.generation WHERE j.consumer=$1 AND j.generation=$2`,
           [ctx.consumerId, generation],
@@ -392,6 +409,7 @@ export class PostgresManagementStore implements ManagementStore {
         profile: j.profile.profile,
         baseURL: j.profile.baseURL,
         model: j.profile.model,
+        ...(r.publication == null ? {} : { publication: capturePublication(r.publication as ConnectionPublication) }),
       });
       if (!exactCandidate(j, descriptor)) {
         throw new KernelError("conflict");
@@ -831,7 +849,7 @@ export class PostgresManagementStore implements ManagementStore {
           JournalRow & JoinedMapping & { native_identity: string | null; lease_expires_at: string }
         >(
           `
-        SELECT j.*,m.native_physical_identity,m.native_id,m.native_created_at,c.native_identity,
+        SELECT j.*,m.native_physical_identity,m.native_id,m.native_created_at,m.publication,c.native_identity,
           to_char(l.lease_until AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS lease_expires_at
         FROM ag_kernel.cleanup l JOIN ag_kernel.candidates c ON c.consumer=l.consumer AND c.generation=l.generation
         JOIN ag_management.candidate_journal j ON j.consumer=c.consumer AND j.generation=c.generation
@@ -858,7 +876,7 @@ export class PostgresManagementStore implements ManagementStore {
             authority.cleanupToken,
             p.profile,
             p.baseURL,
-            oauthProfileDefinition(p.profile)!.cleanupModels,
+            p.nativeConnection ? [p.model] : oauthProfileDefinition(p.profile)!.cleanupModels,
             p.qualificationRef,
             s?.operationId ?? null,
             s?.accountRef ?? null,

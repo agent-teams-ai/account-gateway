@@ -1,4 +1,9 @@
 import { z } from "zod";
+export {
+  connectionInputFields, connectionBegin, connectionReconnect,
+  connectionSubmit, validateConnectionFields,
+} from "./connection-ingress.js";
+export type { ConnectionBegin, ConnectionReconnect, ConnectionSubmit } from "./connection-ingress.js";
 import * as c from "../contracts/index.js";
 const hasControl = (value: string): boolean => {
   for (let index = 0; index < value.length; index += 1) {

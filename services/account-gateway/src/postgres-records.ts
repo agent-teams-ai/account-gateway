@@ -1,6 +1,8 @@
 // Pure projections of persisted SQL rows and native dispatch evidence.
 // No SQL driver, connection, transaction, HTTP, or framework dependency.
 import { KernelError, identifier, revision, uuid } from "./domain.ts";
+import { captureConnectionSnapshot, capturePublication, captureLegacyConnectionKind } from "./connection-domain.ts";
+import type { ConnectionSnapshot, ConnectionPublication } from "./connection-domain.ts";
 import type {
   AccountStatus,
   OperationStatus,
@@ -147,8 +149,11 @@ const lifecycle = (r: OperationRow): OperationStatus["lifecycle"] => {
   ) {
     throw new KernelError("unavailable");
   }
+  const publication = a.publication === undefined ? undefined : capturePublication(a.publication as ConnectionPublication);
+  if (publication && publication.connection.profileId !== a.profile) throw new KernelError("unavailable");
   return {
     kind: intent.kind,
+    ...(publication === undefined ? {} : { publication }),
     expectedRevision: intent.expectedRevision,
     account: {
       accountRef: a.accountRef,
@@ -183,6 +188,10 @@ export const operationStatus = (r: OperationRow): OperationStatus => {
       ? { credentialImportMethod: r.intent.credentialImportMethod }
       : {}),
     ...(saved === undefined ? {} : { lifecycle: saved }),
+    ...(record(r.intent) && Object.hasOwn(r.intent, "connection")
+      ? { connection: captureConnectionSnapshot(r.intent.connection as ConnectionSnapshot) } : {}),
+    ...(record(r.intent) && Object.hasOwn(r.intent, "legacyConnectionKind")
+      ? { legacyConnectionKind: captureLegacyConnectionKind(r.intent.legacyConnectionKind) } : {}),
   };
 };
 export const requestStatus = (r: Pick<RequestRow, "id" | "effect" | "code">): RequestStatus => ({
@@ -311,7 +320,7 @@ export const validateOAuthMethod = (method: unknown): void => {
   }
 };
 export const retainedContract = (contract: unknown): boolean =>
-  contract === "native-retained-custody/v1";
+  contract === "native-retained-custody/v1" || contract === "native-retained-custody/v2";
 export const requireNonEntry = (entered: unknown): void => {
   if (entered !== false) {
     throw new KernelError("invalid");

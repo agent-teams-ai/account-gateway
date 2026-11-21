@@ -91,6 +91,8 @@ export interface AccountIntent {
   displayName?: string;
   oauthMethod?: "device_code";
   credentialImportMethod?: CredentialImportMethod;
+  connection?: import("./connection-domain.ts").ConnectionSnapshot;
+  legacyConnectionKind?: import("./connection-domain.ts").LegacyConnectionKind;
 }
 export interface AccountStatus {
   accountRef: string;
@@ -105,10 +107,11 @@ export interface AccountStatus {
 // Produced only by a trusted retained-custody adapter after inert native
 // readback. It is never accepted from ingress and is not part of an intent.
 export interface RetainedCustodyProof {
-  contract: "native-retained-custody/v1";
+  contract: "native-retained-custody/v1" | "native-retained-custody/v2";
   generation: string;
   nativePhysicalIdentity: string;
-  credentialKinds: readonly ("api_key" | "oauth")[];
+  credentialKinds: readonly ("api_key" | "oauth" | "native")[];
+  publication?: import("./connection-domain.ts").ConnectionPublication;
 }
 export interface ResumeCustodyAuthority extends RetainedCustodyProof {
   metadataRevision: number;
@@ -189,7 +192,10 @@ export interface OperationStatus {
   deadline?: string;
   oauthMethod?: "device_code";
   credentialImportMethod?: CredentialImportMethod;
-  lifecycle?: { kind: "suspend" | "resume"; expectedRevision: number; account: AccountStatus };
+  connection?: import("./connection-domain.ts").ConnectionSnapshot;
+  legacyConnectionKind?: import("./connection-domain.ts").LegacyConnectionKind;
+  lifecycle?: { kind: "suspend" | "resume"; expectedRevision: number; account: AccountStatus;
+    publication?: import("./connection-domain.ts").ConnectionPublication };
 }
 // Protected-private proof. An actual native adapter must qualify the physical
 // identity mechanism before accepting this proof. Never send it in a safe DTO.

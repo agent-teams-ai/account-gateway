@@ -1,6 +1,8 @@
 import { KernelError, identifier, uuid, revision, credentialImportMethod } from "./domain.ts";
 import { oauthProfileDefinition } from "./oauth-profiles.ts";
 import { exactCandidate, sameCandidate, physicalCandidate } from "./candidate-identity.ts";
+import { captureConnectionSnapshot, acceptsConnectionInputs, sameConnection, samePublication } from "./connection-domain.ts";
+import type { ConnectionSnapshot } from "./connection-domain.ts";
 import type {
   AccountIntent,
   AccountPage,
@@ -48,6 +50,9 @@ import type {
   DisableInput,
   SuspendInput,
   ResumeInput,
+  ConnectionBeginInput,
+  ConnectionReconnectInput,
+  NativeConnectionAdapter,
 } from "./management.ts";
 
 // Management application: no direct SQL, HTTP or provider DTO dependencies.
@@ -92,6 +97,7 @@ function oauthScope(j: CandidateJournal): OAuthScope {
     ownerRef: j.ownerRef,
     accountRef: j.accountRef,
     generation: j.generation,
+    ...(j.connectionSnapshot === undefined ? {} : { connection: j.connectionSnapshot.connection }),
   });
 }
 function exactOAuthReadback(scope: OAuthScope, r: OAuthReadback): boolean {
@@ -141,6 +147,7 @@ export class AccountManagement {
   private readonly worker: string;
   private readonly profiles: ReadonlyMap<string, ManagedProfile>;
   private readonly oauthProviders: ReadonlyMap<string, Readonly<OAuthEnrollmentOptions>>;
+  private readonly connectionAdapter?: NativeConnectionAdapter;
   private readonly refreshCursors = new Map<string, string>();
   private refreshProfileCursor = 0;
   private refreshInFlight = false;
@@ -156,9 +163,10 @@ export class AccountManagement {
     oauthProviders?: readonly OAuthEnrollmentOptions[];
     refresh?: OAuthRefreshNative;
     retainedCustody?: RetainedCustodyVerifier;
+    connectionAdapter?: NativeConnectionAdapter;
   }) {
     uuid(options.worker);
-    if (!options.profiles.length || options.profiles.length > 128) {
+    if (options.profiles.length > 128) {
       throw new KernelError("invalid");
     }
     const profiles = new Map<string, ManagedProfile>();
@@ -171,9 +179,10 @@ export class AccountManagement {
     ]) {
       const definition = oauthProfileDefinition(entry.profile.profile);
       if (
-        !definition ||
+        (!entry.connection && (!definition ||
         entry.profile.baseURL !== definition.baseURL ||
-        entry.profile.model !== definition.model ||
+        entry.profile.model !== definition.model)) ||
+        (!!entry.connection && (!options.connectionAdapter || entry.profile.nativeConnection !== true)) ||
         oauthProviders.has(entry.profile.profile)
       ) {
         throw new KernelError("invalid");
@@ -192,6 +201,7 @@ export class AccountManagement {
         baseURL: source.baseURL,
         model: source.model,
         qualificationRef: source.qualificationRef,
+        ...(source.nativeConnection === true ? { nativeConnection: true as const } : {}),
       });
       identifier(p.profile, 64);
       identifier(p.qualificationRef);
@@ -208,7 +218,7 @@ export class AccountManagement {
       profiles.set(p.profile, p);
     }
     if (
-      profiles.size > 128 ||
+      !profiles.size || profiles.size > 128 ||
       [...profiles.keys()].some(
         (id) => truthy(oauthProfileDefinition(id)) && !oauthProviders.has(id),
       )
@@ -224,6 +234,7 @@ export class AccountManagement {
     this.profiles = profiles;
     this.retainedCustody = options.retainedCustody;
     this.oauthProviders = oauthProviders;
+    this.connectionAdapter = options.connectionAdapter;
   }
   async refreshOAuth(
     context: TrustedContext,
@@ -293,6 +304,53 @@ export class AccountManagement {
   }
   supportsOAuthProfile(profile: string): boolean {
     return this.oauthProviders.has(profile);
+  }
+  supportsConnectionProfile(profile: string): boolean {
+    return !!this.connectionAdapter && !!this.oauthProviders.get(profile)?.connection;
+  }
+  private enrollmentFor(journal: CandidateJournal): Readonly<OAuthEnrollmentOptions> | undefined {
+    if (!journal.connectionSnapshot) return this.oauthProviders.get(journal.profile.profile);
+    const adapter = this.connectionAdapter;
+    return adapter && { profile: journal.profile, native: adapter, connection: adapter,
+      descriptor: adapter, refresh: adapter, lifecycle: adapter };
+  }
+  async beginConnection(context: TrustedContext, input: ConnectionBeginInput): Promise<OAuthBeginResult> {
+    const ctx = captureContext(context), snapshot = captureConnectionSnapshot(input.snapshot);
+    if (!snapshot.method.create || snapshot.method.availability !== "enabled" ||
+      !this.supportsConnectionProfile(snapshot.connection.profileId) || !acceptsConnectionInputs(snapshot.method, input.inputFields)) {
+      throw new KernelError("denied");
+    }
+    const intent: AccountIntent = { kind: "create", operationId: input.operationId, ownerRef: input.ownerRef,
+      profile: snapshot.connection.profileId, displayName: input.displayName, intentDigest: "", connection: snapshot,
+      ...(input.legacyConnectionKind === undefined ? {} : { legacyConnectionKind: input.legacyConnectionKind }) };
+    identifier(intent.operationId); identifier(intent.ownerRef); name(intent.displayName);
+    return this.beginOAuthIntent(ctx, intent, undefined, input.inputFields);
+  }
+  async connectionSnapshot(context: TrustedContext, operation: OperationStatus): Promise<ConnectionSnapshot | undefined> {
+    if (!operation.connection) return undefined;
+    const ctx = captureContext(context);
+    const journal = await this.store.readJournal(ctx, operation.operationRef);
+    if (!journal) return captureConnectionSnapshot(operation.connection);
+    if (journal.accountRef !== operation.accountRef ||
+      !sameConnection(journal.connectionSnapshot?.connection, operation.connection.connection)) throw new KernelError("conflict");
+    const mapping = await this.store.mapping(ctx, journal.generation);
+    if (!mapping) return captureConnectionSnapshot(operation.connection);
+    if (mapping.ownerRef !== journal.ownerRef || mapping.operationId !== journal.operationId ||
+      !exactCandidate(journal, mapping.descriptor)) throw new KernelError("conflict");
+    return captureConnectionSnapshot({ ...operation.connection, credential: mapping.descriptor.publication?.credential });
+  }
+  async reconnectConnection(context: TrustedContext, input: ConnectionReconnectInput): Promise<OAuthBeginResult> {
+    const ctx = captureContext(context), snapshot = captureConnectionSnapshot(input.snapshot);
+    identifier(input.operationId); uuid(input.accountRef); revision(input.expectedRevision);
+    if (!snapshot.method.reconnect || snapshot.method.availability !== "enabled" ||
+      !this.supportsConnectionProfile(snapshot.connection.profileId) || !acceptsConnectionInputs(snapshot.method, input.inputFields)) {
+      throw new KernelError("denied");
+    }
+    const account = await this.kernel.account(ctx, input.accountRef);
+    if (account.profile !== snapshot.connection.profileId) throw new KernelError("denied");
+    return this.beginOAuthIntent(ctx, { kind: "reconnect", operationId: input.operationId, accountRef: input.accountRef,
+      expectedRevision: input.expectedRevision, intentDigest: "", connection: snapshot,
+      ...(input.legacyConnectionKind === undefined ? {} : { legacyConnectionKind: input.legacyConnectionKind }) }, undefined, input.inputFields);
   }
   async beginOAuth(context: TrustedContext, input: OAuthBeginInput): Promise<OAuthBeginResult> {
     const ctx = captureContext(context);
@@ -401,9 +459,10 @@ export class AccountManagement {
     ctx: TrustedContext,
     intent: AccountIntent,
     credentialImportValue?: string,
+    connectionInputFields?: Readonly<Record<string, string>>,
   ): Promise<OAuthBeginResult> {
     // No secret is staged in TS SQL. Native owns exchange and token custody.
-    intent.intentDigest = this.custody.digest({ context: ctx, intent, credentialImportValue });
+    intent.intentDigest = this.custody.digest({ context: ctx, intent, credentialImportValue, connectionInputFields });
     const operation = await this.kernel.beginAccount(ctx, Object.freeze(intent));
     if (operation.state !== "pending") {
       return Object.freeze({ operation });
@@ -449,10 +508,13 @@ export class AccountManagement {
         purpose: intent.kind === "reconnect" ? "reconnect" : "create",
       });
       // Commit original accountRef + immutable birth UUID before the sole Begin.
-      const journal = await this.store.journal(scope, permit.candidate, this.worker, oauth.profile);
+      const journal = await this.store.journal(scope, permit.candidate, this.worker, oauth.profile, operation.connection);
       let begun: OAuthBeginReadback;
       try {
-        if (intent.credentialImportMethod !== undefined) {
+        if (intent.connection !== undefined) {
+          if (!oauth.connection) throw new KernelError("denied");
+          begun = await oauth.connection.beginConnection(oauthScope(journal), connectionInputFields);
+        } else if (intent.credentialImportMethod !== undefined) {
           if (!oauth.credentialImport || credentialImportValue === undefined) {
             throw new KernelError("denied");
           }
@@ -477,7 +539,7 @@ export class AccountManagement {
       const handoff =
         intent.credentialImportMethod !== undefined
           ? {}
-          : intent.oauthMethod === "device_code"
+          : intent.oauthMethod === "device_code" || intent.connection?.method.interaction.kind === "device"
             ? begun.deviceAuthorization === undefined
               ? {}
               : { deviceAuthorization: begun.deviceAuthorization }
@@ -515,11 +577,12 @@ export class AccountManagement {
       throw new KernelError("invalid");
     }
     const operation = await this.kernel.operation(ctx, operationId);
-    if (operation.oauthMethod === "device_code" || operation.credentialImportMethod !== undefined) {
+    if (operation.oauthMethod === "device_code" || operation.credentialImportMethod !== undefined ||
+      (operation.connection && operation.connection.method.interaction.kind !== "browser")) {
       throw new KernelError("denied");
     }
     const journal = await this.store.readJournal(ctx, operationId);
-    const oauth = journal && this.oauthProviders.get(journal.profile.profile);
+    const oauth = journal && this.enrollmentFor(journal);
     if (
       !oauth ||
       !truthy(journal) ||
@@ -538,6 +601,7 @@ export class AccountManagement {
     }
     if (
       "authorizationCode" in callback &&
+      !journal.connectionSnapshot &&
       oauthProfileDefinition(journal.profile.profile)?.family !== "grok"
     ) {
       throw new KernelError("denied");
@@ -602,11 +666,11 @@ export class AccountManagement {
     identifier(ownerRef);
     const operation = await this.kernel.operation(ctx, operationId);
     const journal = await this.store.readJournal(ctx, operationId);
-    const oauth = journal && this.oauthProviders.get(journal.profile.profile);
+    const oauth = journal && this.enrollmentFor(journal);
     if (
       !oauth ||
-      !truthy(oauthProfileDefinition(oauth.profile.profile)?.deviceCode) ||
-      operation.oauthMethod !== "device_code" ||
+      (journal?.connectionSnapshot ? journal.connectionSnapshot.method.interaction.kind !== "device" :
+        (!truthy(oauthProfileDefinition(oauth.profile.profile)?.deviceCode) || operation.oauthMethod !== "device_code")) ||
       !truthy(journal) ||
       journal.consumerId !== ctx.consumerId ||
       journal.operationId !== operationId ||
@@ -656,11 +720,11 @@ export class AccountManagement {
     begin?: OAuthReadback,
     allowRefresh = true,
   ): Promise<OperationStatus> {
-    const oauth = this.oauthProviders.get(journal.profile.profile);
+    const oauth = this.enrollmentFor(journal);
     try {
       if (
         !oauth ||
-        !this.supportsOAuthProfile(journal.profile.profile) ||
+        (!journal.connectionSnapshot && !this.supportsOAuthProfile(journal.profile.profile)) ||
         journal.consumerId !== ctx.consumerId ||
         journal.profile.baseURL !== oauth.profile.baseURL ||
         journal.profile.model !== oauth.profile.model ||
@@ -673,7 +737,7 @@ export class AccountManagement {
       const current = await this.kernel.operation(ctx, journal.operationId);
       if (
         current.operationRef !== journal.operationId ||
-        current.accountRef !== journal.accountRef
+        current.accountRef !== journal.accountRef || !sameConnection(current.connection?.connection, journal.connectionSnapshot?.connection)
       ) {
         throw new KernelError("conflict");
       }
@@ -987,7 +1051,7 @@ export class AccountManagement {
     if (!journal) {
       return operation;
     }
-    if (this.supportsOAuthProfile(journal.profile.profile)) {
+    if (journal.connectionSnapshot || this.supportsOAuthProfile(journal.profile.profile)) {
       return this.oauthReadback(ctx, journal);
     }
     await this.store.eraseIntent(journal);
@@ -1078,14 +1142,15 @@ export class AccountManagement {
         return undefined;
       }
       const proof = await this.retainedCustody.verify(mapping);
-      const authKind = oauthProfileDefinition(account.profile) ? "oauth" : "api_key";
+      const authKind = mapping.descriptor.publication?.credential.credentialKind ??
+        (oauthProfileDefinition(account.profile) ? "oauth" : "api_key");
       if (
         !proof ||
-        retainedContract(proof) !== "native-retained-custody/v1" ||
+        retainedContract(proof) !== (mapping.connectionSnapshot ? "native-retained-custody/v2" : "native-retained-custody/v1") ||
         proof.generation !== identity.generation ||
         proof.nativePhysicalIdentity !== identity.nativePhysicalIdentity ||
         proof.credentialKinds.length !== 1 ||
-        proof.credentialKinds[0] !== authKind
+        proof.credentialKinds[0] !== authKind || !samePublication(proof.publication, mapping.descriptor.publication)
       ) {
         return undefined;
       }
@@ -1103,13 +1168,27 @@ export class AccountManagement {
     const ctx = captureContext(context);
     uuid(accountRef);
     const account = await this.kernel.account(ctx, accountRef);
-    const authKind = oauthProfileDefinition(account.profile) ? "oauth" : "api_key";
+    let credential: AccountLifecycleReadback["credential"];
+    if ((account.state === "active" || account.state === "suspended") && this.kernel.accountLimitsIdentity) {
+      try {
+        const identity = await this.kernel.accountLimitsIdentity(ctx, accountRef);
+        const mapping = await this.store.mapping(ctx, identity.generation);
+        if (mapping && mapping.accountRef === accountRef && mapping.ownerRef === account.ownerRef &&
+          mapping.profile.profile === account.profile && identity.revision === account.revision && identity.epoch === account.epoch &&
+          exactCandidate(mapping, mapping.descriptor)) credential = mapping.descriptor.publication?.credential;
+      } catch { /* An absent observation cannot invent a credential class. */ }
+    }
     const proof =
       account.state === "suspended" ? await this.retainedProof(ctx, account) : undefined;
     const current = await this.kernel.account(ctx, accountRef);
+    if (current.revision !== account.revision || current.epoch !== account.epoch) credential = undefined;
+    const legacy = this.profiles.get(account.profile);
+    const authKind = credential?.credentialKind ?? (legacy && !legacy.nativeConnection
+      ? oauthProfileDefinition(account.profile) ? "oauth" : "api_key" : "unknown");
     return Object.freeze({
       account: current,
       authKind,
+      ...(credential === undefined ? {} : { credential }),
       resumeCustody:
         current.state !== "suspended"
           ? "not_applicable"
@@ -1178,7 +1257,7 @@ export class AccountManagement {
       return operation;
     }
     const journal = await this.store.readJournal(ctx, id);
-    return journal && this.supportsOAuthProfile(journal.profile.profile)
+    return journal && (journal.connectionSnapshot || this.supportsOAuthProfile(journal.profile.profile))
       ? this.oauthReadback(
           ctx,
           journal,
@@ -1238,13 +1317,16 @@ export class AccountManagement {
     }
     let succeeded = false;
     try {
-      if (oauthProfileDefinition(claim.scope.profile)) {
+      const retainedJournal = await this.store.readGeneration?.(ctx, claim.scope.generation);
+      if (this.supportsOAuthProfile(claim.scope.profile) ||
+        retainedJournal?.connectionSnapshot) {
         succeeded = await this.cleanupOAuth(
           ctx,
           claim.cleanupRef,
           claim.token,
           claim.scope.generation,
           claim.scope.profile,
+          retainedJournal,
         );
         await this.kernel.settleCleanup(ctx, claim.cleanupRef, this.worker, claim.token, succeeded);
         return succeeded ? "erased" : "quarantined";
@@ -1321,8 +1403,9 @@ export class AccountManagement {
     cleanupToken: string,
     generation: string,
     profile: string,
+    retainedJournal?: CandidateJournal,
   ): Promise<boolean> {
-    const oauth = this.oauthProviders.get(profile);
+    const oauth = retainedJournal?.connectionSnapshot ? this.enrollmentFor(retainedJournal) : this.oauthProviders.get(profile);
     if (!oauth?.lifecycle || !this.store.oauthCleanup) {
       return false;
     }
@@ -1338,7 +1421,8 @@ export class AccountManagement {
       !["create", "reconnect"].includes(journal.purpose) ||
       journal.profile.profile !== oauth.profile.profile ||
       journal.profile.baseURL !== oauth.profile.baseURL ||
-      !oauthProfileDefinition(profile)!.cleanupModels.includes(journal.profile.model) ||
+      !(journal.connectionSnapshot ? journal.profile.model === oauth.profile.model :
+        oauthProfileDefinition(profile)!.cleanupModels.includes(journal.profile.model)) ||
       journal.profile.qualificationRef !== oauth.profile.qualificationRef
     ) {
       throw new KernelError("conflict");

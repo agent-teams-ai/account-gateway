@@ -5,10 +5,10 @@ import { AccountInfoReader } from "../src/account-info-port.ts";
 import type { AccountInfoSource } from "../src/account-info-port.ts";
 import { KernelError } from "../src/domain.ts";
 import type { AccountInfoIdentity } from "../src/domain.ts";
-import type { AccountInfo } from "@agent-teams/account-gateway/contracts";
+import type { AccountInfoV2 } from "@agent-teams/account-gateway/contracts";
 
 const missing = { status: "unknown" } as const;
-const info: Extract<AccountInfo, { status: "available" }> = {
+const info: Extract<AccountInfoV2, { status: "available" }> = {
   status: "available",
   infoRevision: "1",
   fields: {
@@ -22,7 +22,7 @@ const info: Extract<AccountInfo, { status: "available" }> = {
     accountLabel: missing,
     subscription: missing,
     credentialExpiresAt: missing,
-    privacyMode: missing,
+    trainingUsage: missing,
   },
 };
 const identity = (): AccountInfoIdentity => ({
@@ -57,7 +57,7 @@ void test("independent backend shares the safe contract without native/profile i
       return { info, generation: row.generation! };
     },
   };
-  const result = await new AccountInfoReader(source).read(
+  const result = await new AccountInfoReader(source).readV2(
     { observe: async () => [row] },
     { ownerRef: "owner", accountRefs: [row.accountRef] },
     options(),
@@ -87,7 +87,7 @@ void test("final batch fence rejects a fast row revoked while another row waits"
     },
   };
   const reader = new AccountInfoReader(source);
-  const work = reader.read(
+  const work = reader.readV2(
     { observe: async () => rows.map((row) => ({ ...row })) },
     { ownerRef: "owner", accountRefs: rows.map((row) => row.accountRef) },
     options(),
@@ -114,7 +114,7 @@ void test("wrong generation, backend failure and unavailable metadata preserve a
       return { info: { status: "unsupported" } };
     },
   };
-  const result = await new AccountInfoReader(source).read(
+  const result = await new AccountInfoReader(source).readV2(
     { observe: async () => rows },
     { ownerRef: "owner", accountRefs: rows.map((row) => row.accountRef) },
     options(),
@@ -150,7 +150,7 @@ void test("owner source concurrency is bounded across concurrent batches and rel
   };
   const reader = new AccountInfoReader(source),
     input = { ownerRef: "owner", accountRefs: [row.accountRef] };
-  const read = () => reader.read({ observe: async () => [row] }, input, options());
+  const read = () => reader.readV2({ observe: async () => [row] }, input, options());
   const first = read(),
     second = read();
   await entered.promise;
@@ -175,7 +175,7 @@ void test("cancelled account info reads do not start an authority observation", 
   });
   abort.abort();
   await assert.rejects(
-    reader.read(
+    reader.readV2(
       {
         async observe() {
           observations++;
@@ -204,7 +204,7 @@ void test("cancellation during source work skips final authority read and return
       return { info, generation: row.generation! };
     },
   });
-  const work = reader.read(
+  const work = reader.readV2(
     {
       async observe() {
         observations++;
