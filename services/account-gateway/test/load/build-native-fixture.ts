@@ -7,7 +7,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isNonemptyString } from "./model.ts";
 
-export const nativeSourceCommit = "14f500eb4db78b47b5d028a8a811ec62b348ac92";
+export const nativeSourceCommit = "2d5f681a627aa1410d08a6d2e568c86f47fca449";
 export const migrationAdapterSource =
   [
     "// Disposable local fixture provisioning only. Production migration authority is",
@@ -104,7 +104,7 @@ function main() {
     run("git", ["status", "--porcelain", "--untracked-files=all"], source) === "",
     "clean-native-source-required",
   );
-  check(run(go, ["version"], source).startsWith("go version go1.27.3 "), "go-1-27-3-required");
+  check(run(go, ["version"], source).startsWith("go version go1.27.4 "), "go-1-27-4-required");
   mkdirSync(output, { recursive: true, mode: 0o700 });
   const receiptPath = join(output, "build-receipt.json");
   check(!existsSync(receiptPath), "fresh-output-required");
@@ -136,7 +136,7 @@ function main() {
       migrator,
       migratorSha256: digest(migrator),
       migrationAdapterSha256: createHash("sha256").update(migrationAdapterSource).digest("hex"),
-      goVersion: "go1.27.3",
+      goVersion: "go1.27.4",
       flags,
       target: "./cmd/account-gateway",
       CGO_ENABLED: "0",

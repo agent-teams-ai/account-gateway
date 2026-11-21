@@ -514,7 +514,7 @@ async function main() {
   check(
     build.kind === "native-fullstack-build-v1" &&
       build.sourceCommit === nativeSourceCommit &&
-      build.goVersion === "go1.27.3" &&
+      build.goVersion === "go1.27.4" &&
       build.migrationAdapterSha256 === sha256(migrationAdapterSource),
     "operator-native-build-receipt",
   );
