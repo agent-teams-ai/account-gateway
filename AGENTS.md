@@ -29,17 +29,20 @@
 - Sub2API is the single source of truth for account state, quota, rate-limit
   and cooldown. Do not rebuild account scheduling, rotation, cooldown or
   failover in the gateway service, the SDK or any consumer. If the native layer
-  lacks a behavior, extend the Sub2API fork (for example mark an account paused
+  lacks a behavior, extend Sub2API (for example mark an account paused
   with its native `rate_limit_reset_at` on a provider 429 and skip paused
   accounts at admission) and expose the result through the existing contract as
   a typed busy outcome with a retry-after. Consumers only list candidate
   accounts; they never keep their own copy of account health.
-- Provider logic is owned by the Sub2API fork, not by this repository or its
-  consumers: provider HTTP, parsers, codecs, model catalogs and
-  provider-specific request admission live in native. The Gateway keeps
-  contracts, identity, fences and policy, and its own admission checks stay.
-  Reuse an existing Sub2API capability before writing anything; if it is
-  missing, extend the fork. A model joins a catalog only with evidence it
+- Provider logic is owned by Sub2API, not by this repository or its
+  consumers. Since 2026-11-21 the Sub2API source lives in
+  `agent-teams-ai/sub2api-standalone` (not a GitHub fork, same `main`
+  history); the old `agent-teams-ai/sub2api` fork is retired and gets
+  archived, so do not open PRs there. Provider HTTP, parsers, codecs, model
+  catalogs and provider-specific request admission live in native. The
+  Gateway keeps contracts, identity, fences and policy, and its own admission
+  checks stay. Reuse an existing Sub2API capability before writing anything;
+  if it is missing, extend Sub2API. A model joins a catalog only with evidence it
   belongs to the plan, except where the owner chose the provider's own list
   (the coding plans and NVIDIA Build), and the catalog has exactly one source
   in native. Design: `ai-docs/architecture/64-gateway-native-ownership-and-model-catalog.md`,

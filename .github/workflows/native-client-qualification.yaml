@@ -18,7 +18,7 @@ jobs:
         node: ['26.11.1', '24.21.0']
     env:
       NPM_CONFIG_ENGINE_STRICT: 'true'
-      NATIVE_COMMIT: af418a6a6709d2c324348a80568c5abac76d7d95
+      NATIVE_COMMIT: 14f500eb4db78b47b5d028a8a811ec62b348ac92
       REVIEW_ROUTER_COMMIT: 901e16100520699910658ad147eee72727e7c1fa
       REVIEW_ACTION_COMMIT: 0454fc0a3af15f94522c7c31cce59c0c62af6567
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
@@ -62,7 +62,7 @@ jobs:
           printf '#!/bin/sh\nexec "%s" "%s" pnpm "$@"\n' "$(command -v node)" "$GATEWAY_CLIENT_COREPACK" > "$cli_root/shim/pnpm"
           chmod 755 "$cli_root/shim/pnpm"
           echo "$cli_root/shim" >> "$GITHUB_PATH"
-          git clone --no-checkout https://github.com/agent-teams-ai/sub2api.git "$cli_root/native-source"
+          git clone --no-checkout https://github.com/agent-teams-ai/sub2api-standalone.git "$cli_root/native-source"
           git -C "$cli_root/native-source" checkout --detach "$NATIVE_COMMIT"
           test "$(git -C "$cli_root/native-source" rev-parse HEAD)" = "$NATIVE_COMMIT"
           test -z "$(git -C "$cli_root/native-source" status --porcelain)"
