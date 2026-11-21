@@ -462,6 +462,22 @@ async function main() {
           oldReaderPreserved: boolean;
         }[];
       };
+      accountInfoCompatibility?: {
+        qualified: boolean;
+        sdkSourceCommit: string;
+        archiveSHA256: string;
+        bundleSHA256: string;
+        oldSourceGraphSHA256: string;
+        dependencySHA256: string;
+        oldV1Contract: boolean;
+        v2MethodAbsent: boolean;
+        currentV2Read: boolean;
+        oldV1Read: boolean;
+        nativeFactsPreserved: boolean;
+        identityPreserved: boolean;
+        noV2Probe: boolean;
+        factualProvenance: boolean;
+      };
     };
   }[] = [];
   for (const batch of ["standard", "express", "extensibility"] as const) {
@@ -608,7 +624,39 @@ async function main() {
       new Set(readerReceipts.map((receipt) => receipt?.oldSourceGraphSHA256)).size === 1,
     cases: compatibilityCases,
   };
-  const qualified = baselineQualified && extensionQualified && gatewayCompatibility.qualified;
+  const metadataProofs = batches.map((batch) => batch.receipt?.accountInfoCompatibility);
+  const accountInfoCompatibility = {
+    sdkSourceCommit: "f2690a3c9cfd0cf61bfb7ca31b802d249105d751",
+    archiveSHA256: "34562d43668a1ca09e95666da3237206b3744d0d0766039fd2b8acbce241483f",
+    qualified:
+      metadataProofs.every(
+        (proof) =>
+          proof?.qualified === true &&
+          proof.sdkSourceCommit === "f2690a3c9cfd0cf61bfb7ca31b802d249105d751" &&
+          proof.archiveSHA256 ===
+            "34562d43668a1ca09e95666da3237206b3744d0d0766039fd2b8acbce241483f" &&
+          proof.oldV1Contract &&
+          proof.v2MethodAbsent &&
+          proof.currentV2Read &&
+          proof.oldV1Read &&
+          proof.nativeFactsPreserved &&
+          proof.identityPreserved &&
+          proof.noV2Probe &&
+          /^[a-f0-9]{64}$/.test(proof.bundleSHA256) &&
+          /^[a-f0-9]{64}$/.test(proof.oldSourceGraphSHA256) &&
+          /^[a-f0-9]{64}$/.test(proof.dependencySHA256),
+      ) &&
+      baseline[0].receipt?.accountInfoCompatibility?.factualProvenance === true &&
+      new Set(metadataProofs.map((proof) => proof?.bundleSHA256)).size === 1 &&
+      new Set(metadataProofs.map((proof) => proof?.oldSourceGraphSHA256)).size === 1 &&
+      new Set(metadataProofs.map((proof) => proof?.dependencySHA256)).size === 1,
+    cases: metadataProofs,
+  };
+  const qualified =
+    baselineQualified &&
+    extensionQualified &&
+    gatewayCompatibility.qualified &&
+    accountInfoCompatibility.qualified;
   qualification = {
     contract: "native-connections-joined-qualification/v1",
     qualified,
@@ -624,6 +672,7 @@ async function main() {
     consumerBuildDigest: identity,
     unchangedConsumerBuild,
     gatewayCompatibility,
+    accountInfoCompatibility,
     extension: {
       contract: "native-provider-extension-qualification/v1",
       qualified: extensionQualified,

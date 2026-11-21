@@ -143,6 +143,117 @@ void test("source HTTP: metadata traverses SDK, facade, native adapter and indep
     await f.close();
   }
 });
+
+void test("explicit old-native metadata v1 adapter never probes v2 or falls back and retains authority fences", async () => {
+  const f = await sourceHTTP(
+    false,
+    false,
+    undefined,
+    undefined,
+    undefined,
+    false,
+    false,
+    undefined,
+    undefined,
+    "account-info/v1",
+  );
+  try {
+    const connected = await f.publicCall("/v1/accounts", {
+      operationId: randomUUID(),
+      ownerRef: "owner-one",
+      profileId: f.profile.profile,
+      displayName: "Old native metadata fixture",
+      credential: { kind: "api_key", value: "fixture-write-only" },
+    });
+    assert.equal(connected.status, 200);
+    const operation = lifecycleWire.accountOperation.parse(await connected.json());
+    assert.equal(operation.state, "applied");
+    assert.ok(operation.result?.kind === "account");
+    const unknown = { status: "unknown" } as const;
+    const email = {
+      status: "known" as const,
+      value: "old-source@example.invalid",
+      source: "provider_api" as const,
+      observedAt: "2026-11-19T10:00:00Z",
+      freshness: "stale" as const,
+    };
+    const info: lifecycleWire.AccountInfo = {
+      status: "available",
+      infoRevision: "old-native-7",
+      fields: {
+        email,
+        accountLabel: unknown,
+        subscription: unknown,
+        credentialExpiresAt: unknown,
+        privacyMode: { ...email, value: "private" },
+      },
+    };
+    f.accountInfoResult(info);
+    const bearer = f.cfg.bearers.find((candidate) => candidate.role === "management");
+    assert.ok(bearer);
+    const client = createManagementClient({
+      role: "management",
+      origin: f.facadeOrigin,
+      token: bearer.token,
+    });
+    const input = { ownerRef: "owner-one", accountRefs: [operation.result.accountRef] };
+    const nativeReads = () => f.seen.filter((entry) => entry.path.endsWith("/account-info/read"));
+    const current = await client.readAccountInfoV2(input);
+    assert.deepEqual(current.accounts[0].info, {
+      status: "available",
+      infoRevision: info.infoRevision,
+      fields: {
+        email,
+        accountLabel: unknown,
+        subscription: unknown,
+        credentialExpiresAt: unknown,
+        trainingUsage: { status: "unsupported" },
+      },
+    });
+    const legacy = await client.readAccountInfo(input);
+    assert.equal(legacy.accounts[0].info.status, "available");
+    assert.deepEqual(legacy.accounts[0].info.fields.privacyMode, { status: "unsupported" });
+    assert.equal(JSON.stringify(current).includes("fixture-principal"), false);
+    assert.equal(JSON.stringify(current).includes("physicalGeneration"), false);
+    const reads = nativeReads().length;
+    assert.equal(
+      (await f.publicCall("/v2/account-info/read", { ...input, ownerRef: "owner-two" })).status,
+      403,
+    );
+    assert.equal(nativeReads().length, reads, "foreign ownership cannot enter the old source");
+    f.accountInfoResult(info, undefined, randomUUID());
+    assert.deepEqual((await client.readAccountInfoV2(input)).accounts[0].info, {
+      status: "unavailable",
+    });
+    f.accountInfoResult(info, undefined, undefined, 404);
+    assert.deepEqual((await client.readAccountInfoV2(input)).accounts[0].info, {
+      status: "unavailable",
+    });
+    let entered!: () => void, release!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.accountInfoResult(info, async () => {
+      entered();
+      await gate;
+    });
+    const pending = f.publicCall("/v2/account-info/read", input);
+    await waiting;
+    f.control.bearers.replace([]);
+    release();
+    assert.equal((await pending).status, 403, "in-flight revocation drops the old source snapshot");
+    assert.deepEqual(
+      nativeReads().map((entry) => entry.path),
+      Array.from({ length: 5 }, () => "POST /private/native/v1/account-info/read"),
+      "explicit v1 selection neither probes v2 nor retries a failed v1 read",
+    );
+  } finally {
+    await f.close();
+  }
+});
 const valid = {
   model: "fixture-model",
   stream: true,
@@ -666,6 +777,7 @@ async function sourceHTTP(
   quotaFailure = false,
   limitsRefresh?: () => Promise<void>,
   streamTiming?: { idleMs: number; quietMs: number },
+  accountInfoContract: "account-info/v1" | "account-info/v2" = "account-info/v2",
 ) {
   let earlyStreamCloses = 0;
   const oauthProfile =
@@ -1127,8 +1239,12 @@ async function sourceHTTP(
   let modelResult: unknown = { status: "unavailable" };
   let modelHTTPStatus = 200;
   let modelRead: (() => Promise<void>) | undefined;
-  let infoResult: lifecycleWire.AccountInfoV2 = { status: "unavailable" };
+  let infoResult: lifecycleWire.AccountInfo | lifecycleWire.AccountInfoV2 = {
+    status: "unavailable",
+  };
   let infoRead: (() => Promise<void>) | undefined;
+  let infoGeneration: string | undefined;
+  let infoHTTPStatus = 200;
   const peer = createServer((req, res) => {
     const settled = (async () => {
       const chunks: Buffer[] = [];
@@ -1175,7 +1291,13 @@ async function sourceHTTP(
         });
         return;
       }
-      if (req.method === "POST" && path === "/private/native/v2/account-info/read") {
+      if (
+        req.method === "POST" &&
+        path ===
+          (accountInfoContract === "account-info/v1"
+            ? "/private/native/v1/account-info/read"
+            : "/private/native/v2/account-info/read")
+      ) {
         assert.equal(req.headers.authorization, "Bearer " + consumer.managementCredential);
         const grant = await callback("account-info-authority", { consumerId, ...tuple });
         if (grant.status !== 200) {
@@ -1184,12 +1306,16 @@ async function sourceHTTP(
           return;
         }
         const proof = (await grant.json()) as { native: { generation: string } };
+        if (infoHTTPStatus !== 200) {
+          reply({ code: "unavailable" }, infoHTTPStatus);
+          return;
+        }
         await infoRead?.();
         reply(
           infoResult.status === "available"
             ? {
                 info: infoResult,
-                physicalGeneration: proof.native.generation,
+                physicalGeneration: infoGeneration ?? proof.native.generation,
                 principalVersion: "fixture-principal",
               }
             : { info: infoResult },
@@ -1604,7 +1730,7 @@ async function sourceHTTP(
           },
         ];
   const cfg = {
-    accountInfoContract: "account-info/v2" as const,
+    accountInfoContract,
     native: {
       executable: "/unused",
       sha256: "unused",
@@ -1768,9 +1894,16 @@ async function sourceHTTP(
         modelResult = value;
         modelRead = enter;
       },
-      accountInfoResult: (value: lifecycleWire.AccountInfoV2, enter?: () => Promise<void>) => {
+      accountInfoResult: (
+        value: lifecycleWire.AccountInfo | lifecycleWire.AccountInfoV2,
+        enter?: () => Promise<void>,
+        generation?: string,
+        httpStatus = 200,
+      ) => {
         infoResult = value;
         infoRead = enter;
+        infoGeneration = generation;
+        infoHTTPStatus = httpStatus;
       },
       responseBytes: (value: number) => {
         responseBytes = value;

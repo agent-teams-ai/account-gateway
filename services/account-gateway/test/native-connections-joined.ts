@@ -78,6 +78,22 @@ type RowReceipt = {
   failure?: { at: string; error: string; code?: string; locations?: string[] };
 };
 type CredentialScanReceipt = Awaited<ReturnType<typeof assertCredentialsAbsent>>;
+type AccountInfoCompatibilityReceipt = {
+  qualified: true;
+  sdkSourceCommit: string;
+  archiveSHA256: string;
+  bundleSHA256: string;
+  oldSourceGraphSHA256: string;
+  dependencySHA256: string;
+  oldV1Contract: true;
+  v2MethodAbsent: true;
+  currentV2Read: true;
+  oldV1Read: true;
+  nativeFactsPreserved: true;
+  identityPreserved: true;
+  noV2Probe: true;
+  factualProvenance: boolean;
+};
 type ExtensionProof = {
   setup?: {
     formSubmitted: true;
@@ -237,6 +253,7 @@ async function main() {
     createNativeConnectionManagementClient,
     reviewConsumer,
     extensionConsumer,
+    oldAccountInfoClient,
     reviewSchema: loadReviewSchema,
     provenance,
   } = await loadConsumers();
@@ -383,7 +400,15 @@ async function main() {
     intentHmacKey: randomBytes(32),
     lifecycle: { contract: c.LIFECYCLE_CAPABILITY_CONTRACT, writeGate: "enabled" },
   } satisfies FacadeOptions;
-  const origin = await listen(createFacade(facadeOptions));
+  const facade = createFacade(facadeOptions);
+  const metadataRequests: string[] = [];
+  facade.on("request", (request) => {
+    if (request.url === "/v1/account-info/read" || request.url === "/v2/account-info/read") {
+      metadataRequests.push(request.method + " " + request.url);
+    }
+  });
+  const origin = await listen(facade);
+  let accountInfoCompatibility: AccountInfoCompatibilityReceipt | undefined;
   frames = createInterface({ input: process.stdin, crlfDelay: Infinity });
   const next = frames[Symbol.asyncIterator]();
   const { schema: reviewSchema, sha256: reviewSchemaSHA256 } = await loadReviewSchema();
@@ -756,6 +781,74 @@ async function main() {
         ),
         "legacy inventory retains every newly discovered native account",
       );
+      if (
+        accountInfoCompatibility === undefined &&
+        (fixture.batch !== "standard" ||
+          (row.profileId === "openai-codex-oauth-responses-v1" && row.methodId === "browser"))
+      ) {
+        phase = "immutable-old-sdk-account-info-compatibility";
+        const current = await client.readAccountInfoV2({ ownerRef, accountRefs: [accountRef] });
+        const currentRow = current.accounts[0];
+        assert.equal(current.contract, "account-info/v2");
+        assert.ok(currentRow.info.status === "available");
+        const factualProvenance = currentRow.info.fields.email.status === "known";
+        if (fixture.batch === "standard") {
+          assert.equal(
+            factualProvenance,
+            true,
+            "the Codex browser row has an observed native identity",
+          );
+        }
+        const old = await oldAccountInfoClient({ role: "management", origin, token });
+        try {
+          await writeFile(
+            join(
+              required("GATEWAY_NATIVE_CONNECTION_JOINED_ARTIFACTS"),
+              "account-info-old-sdk-build.json",
+            ),
+            JSON.stringify(old.build, null, 2) + "\n",
+            { mode: 0o600, flag: "wx" },
+          );
+          const before = metadataRequests.length;
+          const legacy = await old.client.readAccountInfo({ ownerRef, accountRefs: [accountRef] });
+          assert.deepEqual(old.parse(legacy), legacy);
+          assert.deepEqual(metadataRequests.slice(before), ["POST /v1/account-info/read"]);
+          assert.equal(legacy.contract, "account-info/v1");
+          assert.equal(legacy.accounts.length, 1);
+          const oldRow = legacy.accounts[0];
+          assert.equal(oldRow.accountRef, currentRow.accountRef);
+          assert.equal(oldRow.metadataRevision, currentRow.metadataRevision);
+          assert.equal(oldRow.authorizationEpoch, currentRow.authorizationEpoch);
+          assert.ok(oldRow.info.status === "available");
+          assert.equal(oldRow.info.infoRevision, currentRow.info.infoRevision);
+          assert.deepEqual(oldRow.info.fields, {
+            email: currentRow.info.fields.email,
+            accountLabel: currentRow.info.fields.accountLabel,
+            subscription: currentRow.info.fields.subscription,
+            credentialExpiresAt: currentRow.info.fields.credentialExpiresAt,
+            privacyMode: { status: "unsupported" },
+          });
+          assert.equal(Object.hasOwn(oldRow.info.fields, "trainingUsage"), false);
+          accountInfoCompatibility = {
+            qualified: true,
+            sdkSourceCommit: old.build.sdkSourceCommit,
+            archiveSHA256: old.build.archiveSHA256,
+            bundleSHA256: old.build.bundleSHA256,
+            oldSourceGraphSHA256: old.build.oldSourceGraphSHA256,
+            dependencySHA256: old.build.dependencySHA256,
+            oldV1Contract: true,
+            v2MethodAbsent: true,
+            currentV2Read: true,
+            oldV1Read: true,
+            nativeFactsPreserved: true,
+            identityPreserved: true,
+            noV2Probe: true,
+            factualProvenance,
+          };
+        } finally {
+          await old.close();
+        }
+      }
       phase = "rr-original-operation-recovery";
       discovery = false;
       const reads = catalogReads;
@@ -1043,6 +1136,7 @@ async function main() {
     blocked === 0 &&
     negativeFailures.length === 0 &&
     extensionComplete &&
+    accountInfoCompatibility?.qualified === true &&
     gatewayCompatibility.qualified;
   const consumerBuildDigestAfter = consumerBuildDigest((await loadConsumers()).provenance);
   assert.equal(consumerBuildDigestAfter, consumerBuildDigestBefore);
@@ -1068,6 +1162,7 @@ async function main() {
     consumerBuildDigestBefore,
     consumerBuildDigestAfter,
     gatewayCompatibility,
+    accountInfoCompatibility,
     ...(isExtensibility ? { extensionComplete, extensionProof } : {}),
     reviewSchemaSHA256,
     lostGrantNotReplayed,

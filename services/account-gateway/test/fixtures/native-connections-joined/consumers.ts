@@ -4,9 +4,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import type * as c from "@agent-teams/account-gateway/contracts";
 import type * as SDK from "@agent-teams/account-gateway/http";
@@ -168,6 +168,12 @@ type JoinedReviewReceipt = Readonly<{
 }>;
 
 const digest = (value: Uint8Array) => createHash("sha256").update(value).digest("hex");
+const oldAccountInfoArchive = "agent-teams-account-gateway-0.1.0-native-imports-f2690a3c9cfd.tgz";
+const oldAccountInfoArchiveSHA256 =
+  "34562d43668a1ca09e95666da3237206b3744d0d0766039fd2b8acbce241483f";
+const oldAccountInfoSourceCommit = "f2690a3c9cfd0cf61bfb7ca31b802d249105d751";
+const oldAccountInfoEsbuildSHA256 =
+  "0c6588b092a2c291a72bab90659f3c9e0e25e0fe59c9ac12b4dae4d945e5548c";
 function canonicalSchema(value: unknown): string {
   if (Array.isArray(value)) {
     return "[" + value.map(canonicalSchema).join(",") + "]";
@@ -186,6 +192,178 @@ function canonicalSchema(value: unknown): string {
   assert.equal(typeof encoded, "string");
   return encoded.replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
 }
+
+async function qualifiedOldAccountInfoClient(
+  rrRoot: string,
+  sdkRoot: string,
+  configuration: SDK.ManagementConfig,
+) {
+  const archive = join(rrRoot, "vendor/account-gateway", oldAccountInfoArchive);
+  const archiveBytes = await readFile(archive);
+  assert.equal(digest(archiveBytes), oldAccountInfoArchiveSHA256);
+  const association = JSON.parse(
+    await readFile(
+      join(rrRoot, "vendor/account-gateway/native-account-info-sdk-provenance.json"),
+      "utf8",
+    ),
+  ) as Record<string, unknown>;
+  assert.equal(association.archive, oldAccountInfoArchive);
+  assert.equal(association.sha256, oldAccountInfoArchiveSHA256);
+  assert.equal(association.sdkSourceRepository, "agent-teams-ai/account-gateway");
+  assert.equal(association.sdkSourceCommit, oldAccountInfoSourceCommit);
+  assert.equal(association.uncommittedSource, false);
+  const workRoot = process.env.RR_PROVIDER_JOINED_WORK_ROOT;
+  assert.ok(workRoot !== undefined && isAbsolute(workRoot));
+  const work = await mkdtemp(join(workRoot, "joined-old-account-info-sdk-"));
+  try {
+    const names = execFileSync("tar", ["-tzf", archive], { encoding: "utf8", timeout: 5000 })
+      .split("\n")
+      .filter(Boolean);
+    assert.equal(names.length, 50);
+    assert.equal(new Set(names).size, names.length);
+    for (const name of names) {
+      assert.match(name, /^package\/[a-zA-Z0-9_./-]+$/);
+      assert.equal(name.split("/").includes(".."), false);
+    }
+    execFileSync("tar", ["-xzf", archive, "-C", work], { timeout: 5000 });
+    const oldRoot = join(work, "package");
+    for (const name of names) {
+      const path = join(work, name);
+      assert.equal(await realpath(path), path);
+      const archived = execFileSync("tar", ["-xOzf", archive, name], {
+        timeout: 5000,
+        maxBuffer: 8 << 20,
+      });
+      assert.equal(digest(await readFile(path)), digest(archived));
+      await chmod(path, 0o400);
+    }
+    const oldPackage = JSON.parse(await readFile(join(oldRoot, "package.json"), "utf8")) as {
+      name: string;
+      dependencies: Record<string, string>;
+    };
+    assert.equal(oldPackage.name, "@agent-teams/account-gateway");
+    assert.deepEqual(oldPackage.dependencies, {
+      "@get-modular/assembly": "0.2.0",
+      "@get-modular/core": "0.2.0",
+      zod: "4.6.7",
+    });
+    const sdkRequire = createRequire(join(sdkRoot, "package.json"));
+    const zodMetadata = await realpath(sdkRequire.resolve("zod/package.json"));
+    const zodRoot = dirname(zodMetadata);
+    const zod = JSON.parse(await readFile(zodMetadata, "utf8")) as {
+      name: string;
+      version: string;
+    };
+    assert.equal(zod.name, "zod");
+    assert.equal(zod.version, "4.6.7");
+    const lock = await readFile(join(rrRoot, "pnpm-lock.yaml"));
+    assert.ok(lock.toString("utf8").includes("\n  zod@4.6.7:"));
+    const rrRequire = createRequire(join(rrRoot, "package.json"));
+    const esbuildRequire = createRequire(rrRequire.resolve("esbuild/package.json"));
+    const esbuild = esbuildRequire.resolve("@esbuild/linux-x64/bin/esbuild");
+    assert.equal(digest(await readFile(esbuild)), oldAccountInfoEsbuildSHA256);
+    const bundle = join(work, "old-account-info-sdk.mjs");
+    const metadata = join(work, "old-account-info-sdk-meta.json");
+    execFileSync(
+      esbuild,
+      [
+        "--bundle",
+        "--platform=node",
+        "--target=node24",
+        "--format=esm",
+        "--tree-shaking=false",
+        "--loader=js",
+        "--outfile=" + bundle,
+        "--metafile=" + metadata,
+        "--alias:zod=" + sdkRequire.resolve("zod"),
+        "--log-level=silent",
+      ],
+      {
+        cwd: oldRoot,
+        input:
+          'export * as http from "./dist/http/index.js";\nexport * as contracts from "./dist/contracts/index.js";\n',
+        timeout: 15_000,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    const graph = JSON.parse(await readFile(metadata, "utf8")) as {
+      inputs: Record<string, unknown>;
+      outputs: Record<string, { imports: { path: string; external?: boolean }[] }>;
+    };
+    const sourceFiles: Record<string, string> = {};
+    const dependencyFiles: Record<string, string> = {
+      "package.json": digest(await readFile(zodMetadata)),
+    };
+    for (const name of Object.keys(graph.inputs)) {
+      if (name === "<stdin>") {
+        continue;
+      }
+      const absolute = resolvePath(oldRoot, name);
+      assert.equal(await realpath(absolute), absolute);
+      const source = relative(oldRoot, absolute);
+      const dependency = relative(zodRoot, absolute);
+      if (/^dist\/.+\.js$/.test(source)) {
+        assert.ok(names.includes("package/" + source));
+        sourceFiles[source] = digest(await readFile(absolute));
+      } else {
+        assert.ok(!dependency.startsWith("..") && !isAbsolute(dependency));
+        dependencyFiles[dependency] = digest(await readFile(absolute));
+      }
+    }
+    assert.ok(Object.hasOwn(sourceFiles, "dist/http/index.js"));
+    assert.ok(Object.hasOwn(sourceFiles, "dist/features/facade-client/contracts/account-info.js"));
+    for (const output of Object.values(graph.outputs)) {
+      assert.ok(
+        output.imports.every((entry) => entry.external === true && entry.path.startsWith("node:")),
+        "old SDK runtime has no external package or current SDK fallback",
+      );
+    }
+    const bundleSHA256 = digest(await readFile(bundle));
+    await chmod(bundle, 0o400);
+    const old = (await import(pathToFileURL(bundle).href)) as {
+      http: {
+        createManagementClient(
+          input: SDK.ManagementConfig,
+        ): Pick<SDK.ManagementClient, "readAccountInfo">;
+      };
+      contracts: {
+        ACCOUNT_INFO_CONTRACT: string;
+        accountInfoReadResponse: { parse(input: unknown): c.AccountInfoReadResponse };
+      };
+    };
+    assert.equal(old.contracts.ACCOUNT_INFO_CONTRACT, "account-info/v1");
+    assert.equal(Object.hasOwn(old.contracts, "ACCOUNT_INFO_V2_CONTRACT"), false);
+    const client = old.http.createManagementClient(configuration);
+    assert.equal(Object.hasOwn(client, "readAccountInfoV2"), false);
+    assert.equal(typeof client.readAccountInfo, "function");
+    assert.equal(digest(await readFile(bundle)), bundleSHA256);
+    return {
+      client,
+      parse: (value: unknown) => old.contracts.accountInfoReadResponse.parse(value),
+      build: {
+        contract: "gateway-account-info-pre-v2-sdk-build/v1",
+        sdkSourceCommit: oldAccountInfoSourceCommit,
+        archive: oldAccountInfoArchive,
+        archiveSHA256: oldAccountInfoArchiveSHA256,
+        bundleSHA256,
+        esbuildSHA256: oldAccountInfoEsbuildSHA256,
+        oldSourceGraphSHA256: digest(Buffer.from(canonicalSchema(sourceFiles))),
+        zodVersion: zod.version,
+        dependencySHA256: digest(Buffer.from(canonicalSchema(dependencyFiles))),
+        consumerLockfileSHA256: digest(lock),
+        sourceFiles,
+        dependencyFiles,
+        oldV1Contract: true,
+        v2MethodAbsent: true,
+      },
+      close: () => rm(work, { recursive: true, force: true }),
+    };
+  } catch (error) {
+    await rm(work, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 async function qualifiedReviewSchema() {
   const archive = process.env.RR_PROVIDER_JOINED_ACTION_ARCHIVE;
   const work = process.env.RR_PROVIDER_JOINED_WORK_ROOT;
@@ -313,7 +491,8 @@ export async function loadQualifiedConnectionConsumers(input: {
   const extensionProvenance: Record<string, string> = Object.fromEntries(
     await Promise.all(
       Object.entries(extensionFiles).map(
-        async ([name, relative]) => [name, digest(await readFile(join(rrRoot, relative)))] as const,
+        async ([name, relativePath]) =>
+          [name, digest(await readFile(join(rrRoot, relativePath)))] as const,
       ),
     ),
   );
@@ -324,6 +503,8 @@ export async function loadQualifiedConnectionConsumers(input: {
     createNativeConnectionManagementClient,
     reviewConsumer,
     extensionConsumer,
+    oldAccountInfoClient: (configuration: SDK.ManagementConfig) =>
+      qualifiedOldAccountInfoClient(rrRoot, rrSDKRoot, configuration),
     reviewSchema: qualifiedReviewSchema,
     provenance: {
       sdkSHA256,

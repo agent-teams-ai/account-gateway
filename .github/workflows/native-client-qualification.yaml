@@ -10,9 +10,9 @@ concurrency:
 jobs:
   native_account_consumer:
     name: Pinned RR account browser and TypeScript 7 qualification
-    uses: 777genius/review-router-ai/.github/workflows/native-accounts-browser.yml@3f2ef337d7f397c2c5fbfbf29602e1013c12b075
+    uses: 777genius/review-router-ai/.github/workflows/native-accounts-browser.yml@07d227c0ddb8339093771db78691ac85bb89c536
     with:
-      source_revision: 3f2ef337d7f397c2c5fbfbf29602e1013c12b075
+      source_revision: 07d227c0ddb8339093771db78691ac85bb89c536
   native_clients:
     name: native clients (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
@@ -23,9 +23,9 @@ jobs:
         node: ["26.11.1", "24.21.0"]
     env:
       NPM_CONFIG_ENGINE_STRICT: "true"
-      NATIVE_COMMIT: 32211d703946d1f95248285cc928988031e82522
+      NATIVE_COMMIT: 83fcb31d068047e6db7621f5bd58dfd251cb1286
       GATEWAY_READER_COMMIT: bcfcde2d06d7bbdb941258e1908986b9f5718feb
-      REVIEW_ROUTER_COMMIT: 3f2ef337d7f397c2c5fbfbf29602e1013c12b075
+      REVIEW_ROUTER_COMMIT: 07d227c0ddb8339093771db78691ac85bb89c536
       REVIEW_ACTION_COMMIT: 0454fc0a3af15f94522c7c31cce59c0c62af6567
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
     steps:
@@ -354,6 +354,7 @@ jobs:
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-connections/*/native-receipt.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-connections/*/gateway-rr-receipt.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-connections/*/gateway-old-reader-build.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-connections/*/account-info-old-sdk-build.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/native-connections/*/joined-transcript.jsonl
           if-no-files-found: error
           retention-days: 3
