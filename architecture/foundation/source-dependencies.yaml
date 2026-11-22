@@ -205,7 +205,7 @@ boundaries:
     roots: [services/account-gateway/test/native-connections-joined.ts]
     entrypoints: [services/account-gateway/test/native-connections-joined.ts]
     # Actual native HTTP/PG and packed SDK are qualified with the unchanged RR consumer.
-    allow: {boundaries: [contracts, kernel-postgres, native-management-postgres, private-facade, foreground-service-entry, native-client-fixture, native-connections-consumer-fixture, native-connections-rollback-fixture, usage-journal], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:path', 'node:readline', 'node:http', 'node:timers/promises'], runtimeReferences: []}
+    allow: {boundaries: [contracts, kernel-postgres, native-management-postgres, private-facade, foreground-service-entry, native-client-fixture, native-connections-consumer-fixture, native-connections-rollback-fixture, native-connections-acceptance, usage-journal], packages: [pg, '@agent-teams/account-gateway'], builtins: ['node:assert/strict', 'node:crypto', 'node:fs/promises', 'node:path', 'node:readline', 'node:http', 'node:timers/promises'], runtimeReferences: []}
   - id: native-connections-consumer-fixture
     dependencyMode: runtime
     roots: [services/account-gateway/test/fixtures/native-connections-joined/consumers.ts]
@@ -219,7 +219,13 @@ boundaries:
     roots: [services/account-gateway/test/fixtures/native-connections-joined/run.ts]
     entrypoints: [services/account-gateway/test/fixtures/native-connections-joined/run.ts]
     # Exact clean source pins, one exclusive output, and a driver-owned PG cluster.
-    allow: {boundaries: [], packages: [], builtins: ['node:assert/strict', 'node:child_process', 'node:crypto', 'node:fs', 'node:fs/promises', 'node:module', 'node:net', 'node:path'], runtimeReferences: []}
+    allow: {boundaries: [native-connections-acceptance], packages: [], builtins: ['node:assert/strict', 'node:child_process', 'node:crypto', 'node:fs', 'node:fs/promises', 'node:module', 'node:net', 'node:path'], runtimeReferences: []}
+  - id: native-connections-acceptance
+    dependencyMode: runtime
+    roots: [services/account-gateway/test/fixtures/native-connections-joined/acceptance.ts, services/account-gateway/test/fixtures/native-connections-joined/acceptance.test.ts]
+    entrypoints: [services/account-gateway/test/fixtures/native-connections-joined/acceptance.ts, services/account-gateway/test/fixtures/native-connections-joined/acceptance.test.ts]
+    # Shared qualification predicate and its negative contract checks.
+    allow: {boundaries: [], packages: [], builtins: ['node:test', 'node:assert/strict'], runtimeReferences: []}
   - id: native-connections-rollback-fixture
     dependencyMode: runtime
     roots: [services/account-gateway/test/fixtures/native-connections-joined/rollback.ts, services/account-gateway/test/fixtures/native-connections-joined/rollback-reader.ts]
