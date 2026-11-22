@@ -1203,7 +1203,9 @@ export function createFacade(options: FacadeOptions): Server {
             throw new KernelError("denied");
           }
           if (closeOperationMatch && method === "GET") {
-            if (grant.role !== "consumer-control") throw new KernelError("denied");
+            if (grant.role !== "consumer-control") {
+              throw new KernelError("denied");
+            }
             const executionRef = parse(c.reference, closeOperationMatch[1]);
             const operationId = parse(c.reference, closeOperationMatch[2]);
             identity = { operationRef: operationId };
@@ -1212,7 +1214,9 @@ export function createFacade(options: FacadeOptions): Server {
               throw new KernelError("denied");
             }
             requireCurrent(grant);
-            if (!kernel.closeOperation) throw new KernelError("unavailable");
+            if (!kernel.closeOperation) {
+              throw new KernelError("unavailable");
+            }
             uncertain = true;
             const proof = await kernel.closeOperation(context, operationId, executionRef);
             requireCurrent(grant);

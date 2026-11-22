@@ -1402,7 +1402,7 @@ void test("typed close proof survives expiry and safe intent compaction without 
         [f.context.consumerId, id],
       )
     ).rows[0];
-    assert.equal(compacted?.compacted, true);
+    assert.equal(compacted.compacted, true);
     assert.deepEqual(await client.closeOperation(f.executionRef, id), {
       kind: "close",
       operationRef: id,

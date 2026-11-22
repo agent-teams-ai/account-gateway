@@ -413,8 +413,12 @@ export class PostgresKernel implements DurableKernel {
       // The permanent hash proves the original kind and subject even after safe
       // compaction removes redundant intent JSON. A generic ACK is insufficient.
       const operation = await this.existing(tx, id, { kind: "close", execution: ref });
-      if (!operation) throw new KernelError("unknown");
-      if (operation.executionRef !== ref) throw new KernelError("conflict");
+      if (!operation) {
+        throw new KernelError("unknown");
+      }
+      if (operation.executionRef !== ref) {
+        throw new KernelError("conflict");
+      }
       return {
         kind: "close" as const,
         operationRef: id,

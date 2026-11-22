@@ -18,9 +18,11 @@ void test("typed close SDK refuses generic or misbound ACKs and retains non-appl
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify(body));
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", resolve);
+  });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   const client = createConsumerControlClient({
     role: "consumer-control",
     origin: `http://127.0.0.1:${address.port}`,
@@ -44,6 +46,10 @@ void test("typed close SDK refuses generic or misbound ACKs and retains non-appl
     }
   } finally {
     server.closeAllConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        resolve();
+      });
+    });
   }
 });
