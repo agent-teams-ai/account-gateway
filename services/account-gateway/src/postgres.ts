@@ -208,7 +208,11 @@ export class PostgresKernel implements DurableKernel {
     }
     return row;
   }
-  private async existing(tx: Tx, id: string, intent: object): Promise<OperationStatus | undefined> {
+  private async existing(
+    tx: ReadTx,
+    id: string,
+    intent: object,
+  ): Promise<OperationStatus | undefined> {
     const r = await tx.db.query<OperationRow & { matches: boolean }>(
       `SELECT *, intent_hash=sha256(convert_to($3::jsonb::text,'UTF8')) AS matches
       FROM operations WHERE consumer=$1 AND id=$2`,
@@ -401,6 +405,23 @@ export class PostgresKernel implements DurableKernel {
   async operation(context: TrustedContext, id: string): Promise<OperationStatus> {
     identifier(id);
     return this.read(context, (tx) => this.op(tx, id));
+  }
+  async closeOperation(context: TrustedContext, id: string, ref: string) {
+    identifier(id);
+    uuid(ref);
+    return this.read(context, async (tx) => {
+      // The permanent hash proves the original kind and subject even after safe
+      // compaction removes redundant intent JSON. A generic ACK is insufficient.
+      const operation = await this.existing(tx, id, { kind: "close", execution: ref });
+      if (!operation) throw new KernelError("unknown");
+      if (operation.executionRef !== ref) throw new KernelError("conflict");
+      return {
+        kind: "close" as const,
+        operationRef: id,
+        executionRef: ref,
+        state: operation.state,
+      };
+    });
   }
   // Fresh reauthorization may replace fully erased generations without undoing
   // disable's epoch fence. The current operation/candidate is excluded only

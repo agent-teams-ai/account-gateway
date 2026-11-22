@@ -716,6 +716,8 @@ export function createFacade(options: FacadeOptions): Server {
               path,
             );
           const opMatch = /^\/v1\/operations\/([A-Za-z0-9_-]+)$/.exec(path);
+          const closeOperationMatch =
+            /^\/v1\/executions\/([A-Za-z0-9_-]+)\/close-operations\/([A-Za-z0-9_-]+)$/.exec(path);
           if (
             url.search &&
             !(
@@ -1199,6 +1201,26 @@ export function createFacade(options: FacadeOptions): Server {
           }
           if (grant.role === "run-control") {
             throw new KernelError("denied");
+          }
+          if (closeOperationMatch && method === "GET") {
+            if (grant.role !== "consumer-control") throw new KernelError("denied");
+            const executionRef = parse(c.reference, closeOperationMatch[1]);
+            const operationId = parse(c.reference, closeOperationMatch[2]);
+            identity = { operationRef: operationId };
+            const saved = await kernel.savedExecution(context, executionRef);
+            if (!grant.profileIds.includes(saved.admission.profileId)) {
+              throw new KernelError("denied");
+            }
+            requireCurrent(grant);
+            if (!kernel.closeOperation) throw new KernelError("unavailable");
+            uncertain = true;
+            const proof = await kernel.closeOperation(context, operationId, executionRef);
+            requireCurrent(grant);
+            if (proof.operationRef !== operationId || proof.executionRef !== executionRef) {
+              throw new KernelError("unavailable");
+            }
+            send(res, c.closeOperationProof, proof);
+            return;
           }
           if (grant.role === "execution") {
             if (!match && !(opMatch && method === "GET")) {

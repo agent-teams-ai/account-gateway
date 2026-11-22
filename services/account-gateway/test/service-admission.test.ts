@@ -20,6 +20,14 @@ void test("control-only drain retains account retirement readback", () => {
     false,
   );
   assert.equal(facadeControlRoute("GET", "/v1/policy-fences/operation-a/closure"), true);
+  assert.equal(
+    facadeControlRoute("GET", "/v1/executions/execution-a/close-operations/operation-a"),
+    true,
+  );
+  assert.equal(
+    facadeControlRoute("POST", "/v1/executions/execution-a/close-operations/operation-a"),
+    false,
+  );
   assert.equal(facadeControlRoute("POST", "/v1/policy-fences/operation-a/closure"), false);
 });
 

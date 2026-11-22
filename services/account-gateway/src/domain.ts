@@ -4,6 +4,12 @@ export interface TrustedContext {
   readonly consumerId: string;
 }
 export type OperationState = "pending" | "applied" | "rejected" | "unknown";
+export interface CloseOperationProof {
+  readonly kind: "close";
+  readonly operationRef: string;
+  readonly executionRef: string;
+  readonly state: OperationState;
+}
 export type Effect =
   | "not_dispatched"
   | "dispatch_started"
@@ -528,6 +534,12 @@ export interface DurableKernel {
   accountCustody?(context: TrustedContext, accountRef: string): Promise<AccountCustodyIdentity>;
   accounts(context: TrustedContext, query?: AccountPageQuery): Promise<AccountPage>;
   operation(context: TrustedContext, operationId: string): Promise<OperationStatus>;
+  // Historical adapters may omit this read. Absence never proves a close.
+  closeOperation?(
+    context: TrustedContext,
+    operationId: string,
+    executionRef: string,
+  ): Promise<CloseOperationProof>;
   beginAccount(
     context: TrustedContext,
     intent: AccountIntent,
