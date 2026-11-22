@@ -426,6 +426,12 @@ void test("provider evidence requires six real RR tool/schema receipts and remov
     unknownToolObserved: false,
     invalidArgumentsObserved: false,
     sandboxFailureObserved: false,
+    runningSessionObserved: false,
+    execCommandFailureObserved: false,
+    createProcessFailureObserved: false,
+    resourceExhaustionObserved: false,
+    approvalFailureObserved: false,
+    nonzeroExitObserved: false,
   };
   const toolShape = JSON.stringify(toolOutput) + "\n";
   const safe = joinedProviderReceipt(diagnostic + shape + toolShape + proof, expected);
@@ -456,6 +462,12 @@ void test("provider evidence requires six real RR tool/schema receipts and remov
     "unknownToolObserved",
     "invalidArgumentsObserved",
     "sandboxFailureObserved",
+    "runningSessionObserved",
+    "execCommandFailureObserved",
+    "createProcessFailureObserved",
+    "resourceExhaustionObserved",
+    "approvalFailureObserved",
+    "nonzeroExitObserved",
   ]) {
     for (const invalid of [undefined, null, "private-diagnostic"]) {
       assert.throws(

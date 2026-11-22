@@ -204,6 +204,12 @@ function joinedToolOutputDiagnostic(value: Record<string, unknown>): boolean {
     "unknownToolObserved",
     "invalidArgumentsObserved",
     "sandboxFailureObserved",
+    "runningSessionObserved",
+    "execCommandFailureObserved",
+    "createProcessFailureObserved",
+    "resourceExhaustionObserved",
+    "approvalFailureObserved",
+    "nonzeroExitObserved",
   ] as const;
   const keys = ["phase", "profileId", "functionOutputs", ...flags];
   return (

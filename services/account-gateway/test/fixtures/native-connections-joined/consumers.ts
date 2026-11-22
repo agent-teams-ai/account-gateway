@@ -468,6 +468,8 @@ export async function loadQualifiedConnectionConsumers(input: {
     return (await import(pathToFileURL(rrExtensionPath).href)) as ExtensionConsumer;
   }
   const extensionFiles = {
+    rrReviewProofDigest:
+      "scripts/review-investigation-paired-e2e/support/provider-subscriptions-review-proof.ts",
     rrSetupDigest: "apps/web/app/dashboard/native-connection-form.tsx",
     rrSetupDomainDigest: "apps/web/src/features/account-gateway/domain/native-connection.ts",
     rrModelsDigest: "apps/web/src/server/native-account-models.ts",
