@@ -312,6 +312,7 @@ export function facadeControlRoute(method: string | undefined, path: string | un
         /^\/v1\/accounts\/[A-Za-z0-9_-]+\/retirement\/[A-Za-z0-9_-]+$/.test(path) ||
         /^\/v1\/policy-fences\/[A-Za-z0-9_-]+\/closure$/.test(path) ||
         /^\/v1\/executions\/[A-Za-z0-9_-]+\/close-operations\/[A-Za-z0-9_-]+$/.test(path) ||
+        /^\/v1\/executions\/[A-Za-z0-9_-]+\/cleanup-proof\/[A-Za-z0-9_-]+$/.test(path) ||
         /^\/v1\/executions\/[A-Za-z0-9_-]+(?:\/requests\/[A-Za-z0-9_-]+)?$/.test(path)))
   );
 }

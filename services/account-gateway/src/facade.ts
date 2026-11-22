@@ -716,6 +716,8 @@ export function createFacade(options: FacadeOptions): Server {
               path,
             );
           const opMatch = /^\/v1\/operations\/([A-Za-z0-9_-]+)$/.exec(path);
+          const cleanupProofMatch =
+            /^\/v1\/executions\/([A-Za-z0-9_-]+)\/cleanup-proof\/([A-Za-z0-9_-]+)$/.exec(path);
           const closeOperationMatch =
             /^\/v1\/executions\/([A-Za-z0-9_-]+)\/close-operations\/([A-Za-z0-9_-]+)$/.exec(path);
           if (
@@ -1201,6 +1203,46 @@ export function createFacade(options: FacadeOptions): Server {
           }
           if (grant.role === "run-control") {
             throw new KernelError("denied");
+          }
+          if (cleanupProofMatch && method === "GET") {
+            if (grant.role !== "consumer-control") {
+              throw new KernelError("denied");
+            }
+            const ref = parse(c.reference, cleanupProofMatch[1]);
+            const preparationId = parse(c.reference, cleanupProofMatch[2]);
+            identity = { operationRef: preparationId };
+            const before = await kernel.savedExecution(context, ref);
+            if (!grant.profileIds.includes(before.admission.profileId)) {
+              throw new KernelError("denied");
+            }
+            requireCurrent(grant);
+            if (!kernel.executionCleanup) {
+              throw new KernelError("unavailable");
+            }
+            uncertain = true;
+            const proof = await kernel.executionCleanup(context, ref, preparationId);
+            requireCurrent(grant);
+            if (
+              proof.preparationOperationRef !== preparationId ||
+              proof.saved.admission.executionRef !== ref ||
+              !grant.profileIds.includes(proof.saved.admission.profileId)
+            ) {
+              throw new KernelError("unavailable");
+            }
+            const {
+              executionRef: _ref,
+              issuerEpoch: _issuer,
+              ...projection
+            } = proof.saved.admission;
+            send(res, c.executionCleanupProof, {
+              kind: proof.kind,
+              preparationOperationRef: preparationId,
+              executionRef: ref,
+              admission: projection,
+              state: proof.saved.state,
+              cleanup: proof.cleanup,
+            });
+            return;
           }
           if (closeOperationMatch && method === "GET") {
             if (grant.role !== "consumer-control") {

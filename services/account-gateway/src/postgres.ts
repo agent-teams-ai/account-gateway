@@ -1136,6 +1136,33 @@ export class PostgresKernel implements DurableKernel {
       JOIN candidates c ON c.consumer=e.consumer AND c.generation=e.generation
       JOIN policy_fences f ON f.consumer=e.consumer AND f.subject=e.policy_subject
       JOIN consumers i ON i.consumer=e.consumer`;
+  async executionCleanup(context: TrustedContext, ref: string, preparationId: string) {
+    uuid(ref);
+    identifier(preparationId);
+    return this.read(context, async (tx) => {
+      // One read-only snapshot binds the original prepare, terminal execution
+      // and durable exact cleanup ownership. JSON compaction preserves hashes.
+      const e = await this.one<ExecutionRow & { allowed: boolean }>(
+        tx,
+        `SELECT e.*,false AS allowed FROM executions e
+         JOIN operations p ON p.consumer=e.consumer AND p.execution_ref=e.ref
+         JOIN cleanup j ON j.consumer=e.consumer AND j.execution_ref=e.ref
+         WHERE e.consumer=$1 AND e.ref=$2 AND p.id=$3
+           AND p.state='applied' AND p.account_ref=e.account_ref
+           AND p.epoch=e.account_epoch AND p.deadline=e.deadline
+           AND p.intent_hash=e.intent_hash
+           AND e.state IN ('closed','fenced') AND e.deadline<=clock_timestamp()
+           AND j.generation IS NULL AND j.state IN ('pending','claimed','done')`,
+        [tx.consumer, ref, preparationId],
+      );
+      return {
+        kind: "execution-cleanup-handoff" as const,
+        preparationOperationRef: preparationId,
+        saved: this.saved(e),
+        cleanup: "scheduled" as const,
+      };
+    });
+  }
   async savedExecution(context: TrustedContext, ref: string): Promise<SavedExecution> {
     uuid(ref);
     return this.read(context, async (tx) =>

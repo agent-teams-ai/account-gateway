@@ -1543,6 +1543,268 @@ void test("typed close proof refuses a consumer-control grant replaced during re
   }
 });
 
+function cleanupControl(f: Awaited<ReturnType<typeof fixture>>) {
+  const control = {
+    role: "consumer-control" as const,
+    consumerId: f.context.consumerId,
+    token: "synthetic-execution-cleanup-proof-control",
+    profileIds: [profile.profile],
+    limits,
+    maxRunMs: 60_000,
+  };
+  f.bearers.replace([f.managementGrant, f.executionGrant, control]);
+  return {
+    control,
+    client: createConsumerControlClient({
+      role: "consumer-control",
+      origin: f.origin,
+      token: control.token,
+    }),
+  };
+}
+void test("typed execution cleanup handoff requires expired terminal state and durable ownership, including compacted intent", async () => {
+  const f = await fixture("normal", false, { deadlineMs: 1100 });
+  const { client } = cleanupControl(f);
+  try {
+    await assert.rejects(client.executionCleanupProof(f.executionRef, f.preparedInput.operationId));
+    await f.kernel.close(f.context, "synthetic-cleanup-handoff-close", f.executionRef);
+    await assert.rejects(
+      client.executionCleanupProof(f.executionRef, f.preparedInput.operationId),
+      "a queued close before the original deadline is not expiry handoff",
+    );
+    await delay(Math.max(1, Date.parse(f.saved.admission.expiresAt) - Date.now() + 20));
+    const proof = await client.executionCleanupProof(f.executionRef, f.preparedInput.operationId);
+    assert.deepEqual(proof, {
+      kind: "execution-cleanup-handoff",
+      preparationOperationRef: f.preparedInput.operationId,
+      executionRef: f.executionRef,
+      admission: f.admission,
+      state: "closed",
+      cleanup: "scheduled",
+    });
+    const job = await f.kernel.claimCleanup(f.context, f.worker);
+    assert.ok(job && job.scope.kind === "execution");
+    await f.kernel.settleCleanup(f.context, job.cleanupRef, f.worker, job.token, true);
+    await f.kernel.reconcile(f.context);
+    const compacted = (
+      await pool.query<{ prepare_compacted: boolean; execution_compacted: boolean }>(
+        "SELECT p.intent IS NULL AS prepare_compacted,e.intent IS NULL AS execution_compacted FROM ag_kernel.operations p JOIN ag_kernel.executions e ON e.consumer=p.consumer AND e.ref=p.execution_ref WHERE p.consumer=$1 AND p.id=$2",
+        [f.context.consumerId, f.preparedInput.operationId],
+      )
+    ).rows[0];
+    assert.deepEqual(compacted, { prepare_compacted: true, execution_compacted: true });
+    const versions = () =>
+      pool.query(
+        "SELECT e.xmin::text AS execution_version,p.xmin::text AS prepare_version,j.xmin::text AS cleanup_version FROM ag_kernel.executions e JOIN ag_kernel.operations p ON p.consumer=e.consumer AND p.execution_ref=e.ref JOIN ag_kernel.cleanup j ON j.consumer=e.consumer AND j.execution_ref=e.ref WHERE e.consumer=$1 AND e.ref=$2 AND p.id=$3",
+        [f.context.consumerId, f.executionRef, f.preparedInput.operationId],
+      );
+    const before = (await versions()).rows;
+    assert.deepEqual(
+      await client.executionCleanupProof(f.executionRef, f.preparedInput.operationId),
+      proof,
+    );
+    assert.deepEqual((await versions()).rows, before, "all three durable facts remain read-only");
+    await assert.rejects(
+      f.execution.close(f.executionRef, { operationId: "expired-no-upgrade", reason: "deadline" }),
+      denied(),
+    );
+    await f.kernel.restore(f.context, f.saved.admission.issuerEpoch, randomUUID());
+    const fenced = await client.executionCleanupProof(f.executionRef, f.preparedInput.operationId);
+    assert.equal(fenced.state, "fenced");
+    assert.deepEqual(fenced.admission, f.admission);
+    assert.equal((await f.kernel.savedExecution(f.context, f.executionRef)).dispatchAllowed, false);
+    Object.defineProperty(f.kernel, "executionCleanup", { value: undefined, configurable: true });
+    await assert.rejects(client.executionCleanupProof(f.executionRef, f.preparedInput.operationId));
+    assert.equal(f.stats().entries, 0);
+  } finally {
+    await f.stop();
+  }
+});
+void test("typed execution cleanup handoff denies wrong preparation, foreign execution and closed execution without cleanup", async () => {
+  const f = await fixture("normal", false, { deadlineMs: 1100 });
+  const { control, client } = cleanupControl(f);
+  try {
+    const secondInput = {
+      ...f.preparedInput,
+      operationId: randomUUID(),
+      invocationRef: randomUUID(),
+    };
+    const second = await f.client.prepare(secondInput);
+    assert.ok(second.state === "applied" && second.result?.kind === "execution");
+    const thirdInput = {
+      ...f.preparedInput,
+      operationId: randomUUID(),
+      invocationRef: randomUUID(),
+    };
+    const third = await f.client.prepare(thirdInput);
+    assert.ok(third.state === "applied" && third.result?.kind === "execution");
+    // Deliberate isolated bad-state injection: a terminal bit is insufficient.
+    await pool.query(
+      "UPDATE ag_kernel.executions SET state='closed' WHERE consumer=$1 AND ref=$2",
+      [f.context.consumerId, third.result.executionRef],
+    );
+    await delay(Math.max(1, Date.parse(f.saved.admission.expiresAt) - Date.now() + 20));
+    await f.kernel.reconcile(f.context);
+    assert.equal(
+      (await client.executionCleanupProof(f.executionRef, f.preparedInput.operationId)).cleanup,
+      "scheduled",
+    );
+    await assert.rejects(
+      client.executionCleanupProof(second.result.executionRef, f.preparedInput.operationId),
+    );
+    await assert.rejects(client.executionCleanupProof(f.executionRef, secondInput.operationId));
+    await assert.rejects(
+      client.executionCleanupProof(third.result.executionRef, thirdInput.operationId),
+    );
+    assert.equal(
+      (
+        await pool.query<{ n: number }>(
+          "SELECT count(*)::int AS n FROM ag_kernel.cleanup WHERE consumer=$1 AND execution_ref=$2",
+          [f.context.consumerId, third.result.executionRef],
+        )
+      ).rows[0].n,
+      0,
+    );
+    const foreign = {
+      ...control,
+      token: "synthetic-cleanup-proof-foreign",
+      consumerId: "foreign-" + randomUUID(),
+    };
+    const narrow = {
+      ...control,
+      token: "synthetic-cleanup-proof-narrow",
+      profileIds: ["other-profile"],
+    };
+    f.bearers.replace([f.managementGrant, f.executionGrant, control, foreign, narrow]);
+    for (const token of [foreign.token, narrow.token]) {
+      await assert.rejects(
+        createConsumerControlClient({
+          role: "consumer-control",
+          origin: f.origin,
+          token,
+        }).executionCleanupProof(f.executionRef, f.preparedInput.operationId),
+      );
+    }
+    const response = await f.raw(
+      `/v1/executions/${f.executionRef}/cleanup-proof/${f.preparedInput.operationId}`,
+      "GET",
+      undefined,
+      f.executionGrant.token,
+    );
+    assert.equal(response.status, 403);
+    // An operation with a forged prepare-looking envelope cannot replace hash authority.
+    const forged = "synthetic-forged-preparation";
+    await pool.query(
+      "INSERT INTO ag_kernel.operations(consumer,id,intent,state,account_ref,execution_ref,epoch,deadline) SELECT consumer,$3,'{\"kind\":\"fence\"}'::jsonb,'applied',account_ref,ref,account_epoch,deadline FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
+      [f.context.consumerId, f.executionRef, forged],
+    );
+    await assert.rejects(client.executionCleanupProof(f.executionRef, forged));
+    assert.equal(f.stats().entries, 0);
+  } finally {
+    await f.stop();
+  }
+});
+void test("typed execution cleanup handoff denies a grant revoked while the real SQL proof is held", async () => {
+  const f = await fixture("normal", false, { deadlineMs: 600 });
+  const { client } = cleanupControl(f);
+  let entered!: () => void, release!: () => void;
+  const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    }),
+    held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+  try {
+    await delay(Math.max(1, Date.parse(f.saved.admission.expiresAt) - Date.now() + 20));
+    await f.kernel.reconcile(f.context);
+    const original = f.kernel.executionCleanup.bind(f.kernel);
+    f.kernel.executionCleanup = async (...args: Parameters<typeof original>) => {
+      const proof = await original(...args);
+      entered();
+      await held;
+      return proof;
+    };
+    const pending = client.executionCleanupProof(f.executionRef, f.preparedInput.operationId);
+    await started;
+    f.bearers.replace([f.managementGrant, f.executionGrant]);
+    release();
+    await assert.rejects(pending, denied());
+    await assert.rejects(
+      client.executionCleanupProof(f.executionRef, f.preparedInput.operationId),
+      denied(),
+    );
+    assert.equal(f.stats().entries, 0);
+  } finally {
+    release();
+    await f.stop();
+  }
+});
+void test("typed execution cleanup handoff observes reconcile atomically and never fabricates a close ACK", async () => {
+  const f = await fixture("normal", false, { deadlineMs: 600 });
+  const { client } = cleanupControl(f);
+  let entered!: () => void, release!: () => void;
+  const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    }),
+    held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+  let reconcile: Promise<void> | undefined;
+  let instrumentedPool: Pool | undefined;
+  try {
+    await delay(Math.max(1, Date.parse(f.saved.admission.expiresAt) - Date.now() + 20));
+    instrumentedPool = new Pool({ connectionString: process.env.AG_FACADE_TEST_DSN, max: 1 });
+    instrumentedPool.on("connect", (db) => {
+      const query = db.query.bind(db);
+      db.query = (async (...args: unknown[]) => {
+        const result = await (query as (...args: unknown[]) => Promise<unknown>)(...args);
+        if (
+          typeof args[0] === "string" &&
+          args[0].startsWith("UPDATE executions SET state='closed'")
+        ) {
+          entered();
+          await held;
+        }
+        return result;
+      }) as typeof db.query;
+    });
+    const instrumented = new PostgresKernel(instrumentedPool);
+    reconcile = instrumented.reconcile(f.context);
+    await started;
+    await assert.rejects(
+      client.executionCleanupProof(f.executionRef, f.preparedInput.operationId),
+      "uncommitted terminal state and missing cleanup cannot be observed as handoff",
+    );
+    release();
+    await reconcile;
+    assert.equal(
+      (await client.executionCleanupProof(f.executionRef, f.preparedInput.operationId)).kind,
+      "execution-cleanup-handoff",
+    );
+    const closeId =
+      "rr-close-" + createHash("sha256").update(f.preparedInput.operationId).digest("hex");
+    await assert.rejects(
+      client.closeOperation(f.executionRef, closeId),
+      "reconcile never attests an original close operation",
+    );
+    assert.equal(
+      (
+        await pool.query<{ n: number }>(
+          "SELECT count(*)::int AS n FROM ag_kernel.operations WHERE consumer=$1 AND id=$2",
+          [f.context.consumerId, closeId],
+        )
+      ).rows[0].n,
+      0,
+    );
+    assert.equal(f.stats().entries, 0);
+  } finally {
+    release();
+    await reconcile;
+    await instrumentedPool?.end();
+    await f.stop();
+  }
+});
+
 void test("expired persisted deadline and restored issuer independently prevent native entry", async () => {
   for (const kind of ["deadline", "restore"] as const) {
     const f = await fixture();
