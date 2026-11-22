@@ -325,6 +325,7 @@ try {
   assert.match(image, /^sha256:[a-f0-9]{64}$/);
   const args = [
     "create",
+    "--init",
     "--name",
     name,
     "--network",

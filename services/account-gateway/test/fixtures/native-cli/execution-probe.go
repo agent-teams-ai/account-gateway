@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -89,7 +90,133 @@ func userNamespaceDenied() bool {
 	return denied(err)
 }
 
+type reapingReceipt struct {
+	Kind   string          `json:"kind"`
+	Checks map[string]bool `json:"checks"`
+	Pass   bool            `json:"pass"`
+}
+
+// Only inspect the descendant PID delivered by our own intermediate child.
+// A start-time comparison also avoids mistaking PID reuse for a retained child.
+func ownedProcess(pid int) (int, string, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, "", err
+	}
+	end := strings.LastIndex(string(data), ")")
+	fields := strings.Fields(string(data)[end+1:])
+	if end < 0 || len(fields) < 20 {
+		return 0, "", syscall.EINVAL
+	}
+	parent, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return 0, "", err
+	}
+	if _, err := strconv.ParseUint(fields[19], 10, 64); err != nil {
+		return 0, "", err
+	}
+	return parent, fields[19], nil
+}
+
+func checkReaping() reapingReceipt {
+	checks := map[string]bool{
+		"initPID1": false, "initReadOnly": false, "ownedOrphanStarted": false,
+		"ownedOrphanAdopted": false, "ownedOrphanReaped": false,
+	}
+	receipt := reapingReceipt{"gateway-execution-reaping-probe/v1", checks, false}
+	// Moby d3298094 daemon/oci_linux.go mounts DefaultInitBinary here read-only.
+	// Debian usrmerge resolves /sbin to /usr/sbin. Accept only these two exact
+	// canonical locations, then bind both observations to the resolved file.
+	// Existing AppArmor inheritance applies; no new execute grant is needed.
+	const initPath = "/sbin/docker-init"
+	canonicalInit, pathErr := filepath.EvalSymlinks(initPath)
+	knownInitPath := pathErr == nil && (canonicalInit == initPath || canonicalInit == "/usr/sbin/docker-init")
+	init, err := os.Readlink("/proc/1/exe")
+	checks["initPID1"] = knownInitPath && err == nil && init == canonicalInit
+	if data, err := os.ReadFile("/proc/self/mountinfo"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(line)
+			if knownInitPath && len(fields) > 5 && fields[4] == canonicalInit {
+				checks["initReadOnly"] = strings.Contains(","+fields[5]+",", ",ro,")
+			}
+		}
+	}
+	input, release, err := os.Pipe()
+	if err != nil {
+		return receipt
+	}
+	defer input.Close()
+	defer release.Close()
+	parent := exec.Command(os.Args[0], "orphan-parent")
+	parent.Stdin = input
+	output, err := parent.StdoutPipe()
+	if err != nil || parent.Start() != nil {
+		return receipt
+	}
+	defer func() { _ = parent.Process.Kill(); _ = parent.Wait() }()
+	// This manually owned pipe stays open after the intermediate parent exits.
+	// Its child cannot exit until adoption has been observed by this controller.
+	_ = input.Close()
+	line, err := bufio.NewReader(io.LimitReader(output, 32)).ReadString('\n')
+	if err != nil || parent.Wait() != nil {
+		return receipt
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil || pid <= 1 || pid == parent.Process.Pid {
+		return receipt
+	}
+	checks["ownedOrphanStarted"] = true
+	ppid, started, err := ownedProcess(pid)
+	if err != nil {
+		return receipt
+	}
+	checks["ownedOrphanAdopted"] = ppid == 1
+	_ = release.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		_, currentStart, err := ownedProcess(pid)
+		if os.IsNotExist(err) || (err == nil && currentStart != started) {
+			checks["ownedOrphanReaped"] = true
+			break
+		}
+		if err != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	receipt.Pass = true
+	for _, check := range checks {
+		receipt.Pass = receipt.Pass && check
+	}
+	return receipt
+}
+
 func main() {
+	if len(os.Args) == 2 {
+		switch os.Args[1] {
+		case "orphan-parent":
+			child := exec.Command(os.Args[0], "orphan-child")
+			child.Stdin = os.Stdin
+			if child.Start() != nil {
+				fatal()
+			}
+			fmt.Println(child.Process.Pid)
+			return
+		case "orphan-child":
+			var release [1]byte
+			_, _ = os.Stdin.Read(release[:])
+			return
+		case "reaping":
+			receipt := checkReaping()
+			if json.NewEncoder(os.Stdout).Encode(receipt) != nil {
+				fatal()
+			}
+			if !receipt.Pass {
+				os.Exit(1)
+			}
+			return
+		}
+	}
 	if len(os.Args) == 2 && os.Args[1] == "target" {
 		// A retained procfs can use an ancestor PID namespace. Its own self link
 		// identifies this child in that mount without guessing another task's PID.

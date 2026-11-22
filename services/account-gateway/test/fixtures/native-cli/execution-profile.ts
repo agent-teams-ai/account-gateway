@@ -181,6 +181,7 @@ type ContainerInspectionField =
   | "name"
   | "image"
   | "privileged"
+  | "init"
   | "network"
   | "pid"
   | "ipc"
@@ -248,6 +249,8 @@ export function requireContainer(actual: unknown, expected: ContainerContract): 
     assert.equal(data.Image, expected.image);
     field = "privileged";
     assert.equal(host.Privileged, false);
+    field = "init";
+    assert.equal(host.Init, true);
     field = "network";
     assert.equal(host.NetworkMode, "none");
     field = "pid";

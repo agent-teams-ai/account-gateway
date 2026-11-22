@@ -1,7 +1,15 @@
 // Runs inside the exact joined container, before PostgreSQL or any provider flow.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { createConnection, createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { command, CommandFailure } from "./joined-command.ts";
@@ -49,6 +57,7 @@ type ProbeReportField =
   | "profile"
   | "pass"
   | "checks"
+  | "pids"
   | "proc-memory";
 export class ProbeReportError extends Error {
   readonly field: ProbeReportField;
@@ -156,6 +165,82 @@ export function requireProbe(
   assert.equal(result.pass, true);
   assert.ok(Object.values(result.checks).every((value) => value));
   return result;
+}
+
+interface ReapingReceipt {
+  readonly kind: "gateway-execution-reaping-probe/v1";
+  readonly checks: Record<string, boolean>;
+  readonly pass: boolean;
+}
+function parseReaping(raw: string): ReapingReceipt {
+  let field: ProbeReportField = "empty";
+  try {
+    assert.ok(raw.trim().length > 0);
+    field = "size";
+    assert.ok(Buffer.byteLength(raw) <= 8192);
+    field = "json";
+    const result = object(JSON.parse(raw) as unknown);
+    field = "identity";
+    assert.deepEqual(Object.keys(result).toSorted(), ["checks", "kind", "pass"]);
+    assert.equal(result.kind, "gateway-execution-reaping-probe/v1");
+    field = "checks";
+    const keys = [
+      "initPID1",
+      "initReadOnly",
+      "ownedOrphanStarted",
+      "ownedOrphanAdopted",
+      "ownedOrphanReaped",
+    ];
+    const checks = object(result.checks);
+    assert.deepEqual(Object.keys(checks).toSorted(), keys.toSorted());
+    assert.ok(keys.every((key) => typeof checks[key] === "boolean"));
+    field = "pass";
+    assert.equal(
+      result.pass,
+      keys.every((key) => checks[key] === true),
+    );
+    return {
+      kind: "gateway-execution-reaping-probe/v1",
+      checks: Object.fromEntries(keys.map((key) => [key, checks[key] === true])),
+      pass: result.pass,
+    };
+  } catch {
+    throw new ProbeReportError(field);
+  }
+}
+export function requireReaping(raw: string): ReapingReceipt {
+  const result = parseReaping(raw);
+  if (!result.pass) {
+    throw new ProbeReportError("pass");
+  }
+  return result;
+}
+function pidCount(raw: string): number {
+  assert.match(raw, /^(?:0|[1-9][0-9]*)\n?$/);
+  const result = Number(raw);
+  assert.ok(Number.isSafeInteger(result) && result >= 0);
+  return result;
+}
+export function parsePIDPressure(
+  current: string,
+  maximum: string,
+  events: string,
+  peak: string | null,
+) {
+  try {
+    const match = /^max ([0-9]+)\n?$/.exec(events);
+    assert.ok(match);
+    const max = pidCount(maximum);
+    assert.equal(max, 256);
+    return {
+      current: pidCount(current),
+      max,
+      peak: peak === null ? null : pidCount(peak),
+      eventsMax: pidCount(match[1]),
+    };
+  } catch {
+    throw new ProbeReportError("pids");
+  }
 }
 
 async function main() {
@@ -374,6 +459,80 @@ async function main() {
     );
   }
   assert.ok(success);
+  const reaping: Array<{
+    phase: "before" | "after";
+    pids: ReturnType<typeof parsePIDPressure> | null;
+    receipt: ReapingReceipt | null;
+    exitCode: number | null;
+    signal: NodeJS.Signals | null;
+    timedOut: boolean;
+    failure: ProbeReportField | "process" | null;
+    pass: boolean;
+  }> = [];
+  const checkReaping = (phase: "before" | "after") => {
+    const entry: (typeof reaping)[number] = {
+      phase,
+      pids: null,
+      receipt: null,
+      exitCode: null,
+      signal: null,
+      timedOut: false,
+      failure: null,
+      pass: false,
+    };
+    reaping.push(entry);
+    try {
+      const cgroup = "/sys/fs/cgroup/";
+      entry.pids = parsePIDPressure(
+        readFileSync(cgroup + "pids.current", "utf8"),
+        readFileSync(cgroup + "pids.max", "utf8"),
+        readFileSync(cgroup + "pids.events", "utf8"),
+        existsSync(cgroup + "pids.peak") ? readFileSync(cgroup + "pids.peak", "utf8") : null,
+      );
+      const run = spawnSync(probe, ["reaping"], {
+        encoding: "utf8",
+        env: environment,
+        timeout: 15000,
+        maxBuffer: 8192,
+      });
+      entry.exitCode = run.status;
+      entry.signal = run.signal;
+      entry.timedOut =
+        run.error !== undefined && "code" in run.error && run.error.code === "ETIMEDOUT";
+      entry.receipt = parseReaping(run.stdout);
+      requireReaping(run.stdout);
+      assert.equal(run.error, undefined);
+      assert.equal(run.status, 0);
+      assert.equal(run.signal, null);
+      entry.pass = true;
+    } catch (error) {
+      entry.failure = error instanceof ProbeReportError ? error.field : "process";
+      throw error;
+    } finally {
+      writeFileSync(
+        join(root, "artifacts/execution-reaping.json"),
+        JSON.stringify(
+          {
+            kind: "gateway-execution-reaping/v1",
+            outcome: reaping.some((item) => !item.pass)
+              ? "fail"
+              : reaping.length === 2
+                ? "pass"
+                : "pending",
+            gatewayCommit: config.gatewayCommit,
+            nativeCommit: config.nativeCommit,
+            reviewRouterCommit: config.reviewRouterCommit,
+            profileSHA256: config.profileSHA256,
+            probeSHA256: config.probeSHA256,
+            observations: reaping,
+          },
+          null,
+          2,
+        ) + "\n",
+        { mode: 0o600 },
+      );
+    }
+  };
   // This is the original joined runner and arguments. Its six provider receipts,
   // own CLI read/write/network/NNP proof and SQL closure gate remain mandatory.
   const runQualifiedCommand = async (
@@ -398,16 +557,31 @@ async function main() {
       throw error;
     }
   };
-  await runQualifiedCommand("joined-clients", config.joinedArguments, 600000);
-  if (process.versions.node === "26.11.1") {
-    assert.ok(
-      config.connectionArguments,
-      "the primary runtime requires the complete native provider matrix",
-    );
-    await runQualifiedCommand("native-connections", config.connectionArguments, 6_480_000);
-  } else {
-    assert.equal(process.versions.node, "24.21.0");
-    assert.equal(config.connectionArguments, undefined);
+  checkReaping("before");
+  let reapingFailure: { error: unknown } | undefined;
+  try {
+    await runQualifiedCommand("joined-clients", config.joinedArguments, 600000);
+    if (process.versions.node === "26.11.1") {
+      assert.ok(
+        config.connectionArguments,
+        "the primary runtime requires the complete native provider matrix",
+      );
+      await runQualifiedCommand("native-connections", config.connectionArguments, 6_480_000);
+    } else {
+      assert.equal(process.versions.node, "24.21.0");
+      assert.equal(config.connectionArguments, undefined);
+    }
+  } finally {
+    try {
+      checkReaping("after");
+    } catch (error) {
+      reapingFailure = { error };
+    }
+  }
+  // An original matrix exception skips this statement and remains primary.
+  // The reaping failure and bounded PID pressure are still in their receipt.
+  if (reapingFailure) {
+    throw reapingFailure.error;
   }
 }
 if (process.argv[1]?.endsWith("/execution-preflight.ts")) {

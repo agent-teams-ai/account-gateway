@@ -323,6 +323,7 @@ jobs:
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/joined-clients/network.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/execution-host.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/execution-preflight.json
+            ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/execution-reaping.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/artifacts/execution-command-failure.json
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/execution.apparmor
             ${{ env.GATEWAY_CLIENT_ROOT }}/build/execution.apparmor.bin

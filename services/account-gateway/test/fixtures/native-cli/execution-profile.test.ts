@@ -13,7 +13,12 @@ import {
   safeProfileName,
   type ContainerContract,
 } from "./execution-profile.ts";
-import { ProbeReportError, requireProbe } from "./execution-preflight.ts";
+import {
+  parsePIDPressure,
+  ProbeReportError,
+  requireProbe,
+  requireReaping,
+} from "./execution-preflight.ts";
 import { payloadCommandFailure } from "./execution-diagnostics.ts";
 import { command, CommandFailure } from "./joined-command.ts";
 
@@ -91,6 +96,7 @@ function fixture(seccomp: string) {
     Config: { User: "0:0" },
     HostConfig: {
       Privileged: false,
+      Init: true,
       NetworkMode: "none",
       PidMode: "",
       IpcMode: "private",
@@ -135,6 +141,35 @@ function fixture(seccomp: string) {
   return { expected, actual };
 }
 type Inspection = ReturnType<typeof fixture>["actual"];
+void test("container requires an explicitly enabled init process", () => {
+  const scratch = mkdtempSync(join(tmpdir(), "gateway-profile-init-"));
+  try {
+    const seccomp = join(scratch, "seccomp.json");
+    writeFileSync(seccomp, JSON.stringify(createSeccomp()));
+    for (const init of [false, undefined, null, "true", 1]) {
+      const { actual, expected } = fixture(seccomp);
+      assert.doesNotThrow(() => {
+        requireContainer(actual, expected);
+      });
+      const host: Record<string, unknown> = actual.HostConfig;
+      if (init === undefined) {
+        delete host.Init;
+      } else {
+        host.Init = init;
+      }
+      assert.throws(
+        () => {
+          requireContainer(actual, expected);
+        },
+        (error: unknown) =>
+          error instanceof ContainerInspectionError &&
+          error.message === "container-inspection:init",
+      );
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
 const mutations: Array<[string, (value: Inspection) => void, ContainerInspectionError["field"]]> = [
   [
     "privileged",
@@ -283,6 +318,71 @@ for (const [label, mutate, field] of mutations) {
     }
   });
 }
+
+void test("owned orphan proof rejects a retained zombie or a different adopting parent", () => {
+  const receipt = {
+    kind: "gateway-execution-reaping-probe/v1",
+    checks: {
+      initPID1: true,
+      initReadOnly: true,
+      ownedOrphanStarted: true,
+      ownedOrphanAdopted: true,
+      ownedOrphanReaped: true,
+    },
+    pass: true,
+  };
+  assert.deepEqual(requireReaping(JSON.stringify(receipt)), receipt);
+  for (const key of Object.keys(receipt.checks)) {
+    const failed = { ...receipt, checks: { ...receipt.checks, [key]: false } };
+    // Neither a claimed PASS nor an honestly failed probe can qualify.
+    assert.throws(() => requireReaping(JSON.stringify(failed)), ProbeReportError);
+    assert.throws(
+      () => requireReaping(JSON.stringify({ ...failed, pass: false })),
+      ProbeReportError,
+    );
+  }
+  for (const changed of [
+    { ...receipt, checks: { ...receipt.checks, pid: 1 } },
+    { ...receipt, checks: { ...receipt.checks, ownedOrphanReaped: "true" } },
+    { ...receipt, kind: "unrelated-probe" },
+    { ...receipt, command: "PRIVATE_COMMAND" },
+  ]) {
+    assert.throws(() => requireReaping(JSON.stringify(changed)), ProbeReportError);
+  }
+});
+
+void test("PID pressure stays numeric and preserves exhaustion evidence and absent peak", () => {
+  assert.deepEqual(parsePIDPressure("19\n", "256\n", "max 4\n", "256\n"), {
+    current: 19,
+    max: 256,
+    eventsMax: 4,
+    peak: 256,
+  });
+  assert.deepEqual(parsePIDPressure("12", "256", "max 0", null), {
+    current: 12,
+    max: 256,
+    eventsMax: 0,
+    peak: null,
+  });
+  for (const args of [
+    ["PRIVATE_DATA", "256", "max 0", null],
+    ["12", "max", "max 0", null],
+    ["12", "512", "max 0", null],
+    ["12", "256", "max 0\nother 1", null],
+    ["12", "256", "max -1", null],
+    ["12", "256", "max 0", "9007199254740992"],
+  ] as const) {
+    assert.throws(
+      () => parsePIDPressure(args[0], args[1], args[2], args[3]),
+      (error: unknown) => {
+        assert.ok(error instanceof ProbeReportError);
+        assert.equal(error.message, "execution-probe-report:pids");
+        assert.equal(JSON.stringify(error).includes("PRIVATE"), false);
+        return true;
+      },
+    );
+  }
+});
 
 void test("probe receipt requires every independent denial and exact enforced phase", () => {
   const profile = name + "-bwrap//&" + name + "-payload";
