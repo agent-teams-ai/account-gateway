@@ -10,9 +10,9 @@ concurrency:
 jobs:
   native_account_consumer:
     name: Pinned RR account browser and TypeScript 7 qualification
-    uses: 777genius/review-router-ai/.github/workflows/native-accounts-browser.yml@096b48d31dcf28b7d11af1aae3c29fb2abde3dad
+    uses: 777genius/review-router-ai/.github/workflows/native-accounts-browser.yml@6c1634d23f697db784b33503a03253c966b58e04
     with:
-      source_revision: 096b48d31dcf28b7d11af1aae3c29fb2abde3dad
+      source_revision: 6c1634d23f697db784b33503a03253c966b58e04
   native_clients:
     name: native clients (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
@@ -25,7 +25,7 @@ jobs:
       NPM_CONFIG_ENGINE_STRICT: "true"
       NATIVE_COMMIT: 6cba3a92980b1981e011e4534d87896a63b6f325
       GATEWAY_READER_COMMIT: bcfcde2d06d7bbdb941258e1908986b9f5718feb
-      REVIEW_ROUTER_COMMIT: 096b48d31dcf28b7d11af1aae3c29fb2abde3dad
+      REVIEW_ROUTER_COMMIT: 6c1634d23f697db784b33503a03253c966b58e04
       REVIEW_ACTION_COMMIT: 0454fc0a3af15f94522c7c31cce59c0c62af6567
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
     steps:
