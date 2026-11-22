@@ -10,6 +10,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Server } from "node:http";
 import { Pool } from "pg";
+import type { QueryResult } from "pg";
 import * as c from "@agent-teams/account-gateway/contracts";
 import { PostgresKernel } from "../src/postgres.ts";
 import { IntentSecrets, PostgresManagementStore } from "../src/management-store.ts";
@@ -54,6 +55,7 @@ type Row = {
   completion?: Completion[];
   reconnectFields?: Record<string, string>;
   reconnectCompletion?: Completion[];
+  reconnectCustody?: boolean;
   credentialKind: c.CredentialAttestation["credentialKind"];
   credentialPolicy: c.CredentialAttestation["credentialPolicy"];
   refreshPolicy: c.CredentialAttestation["refreshPolicy"];
@@ -615,10 +617,7 @@ async function main() {
       enrolled: false,
       recovery: false,
       lifecycle: false,
-      reconnect:
-        row.reconnectFields !== undefined || row.reconnectCompletion !== undefined
-          ? "failed"
-          : "not_requested",
+      reconnect: "failed",
       review: row.execute ? "not_run" : "not_requested",
       erased: false,
     };
@@ -640,6 +639,31 @@ async function main() {
         (candidate) => candidate.methodId === row.methodId,
       );
       assert.ok(method);
+      const rawProfile = rawProfiles.find((candidate) => candidate.profileId === row.profileId);
+      const rawMethod = rawProfile?.methods.find(
+        (candidate) => candidate.methodId === row.methodId,
+      );
+      assert.ok(rawMethod && c.supportsConnectionMethod(rawMethod));
+      assert.equal(method.reconnect, rawMethod.reconnect);
+      receipt.reconnect = method.reconnect ? "failed" : "not_requested";
+      assert.ok(method.create, "every baseline row must support creation");
+      if (method.reconnect) {
+        assert.ok(
+          row.reconnectFields !== undefined || row.reconnectCompletion !== undefined,
+          "advertised reconnect requires an executable fixture before enrollment",
+        );
+        if (rawMethod.interaction.kind === "credential_form") {
+          assert.ok(
+            rawMethod.interaction.inputFields.some(
+              (field) =>
+                (field.kind === "secret" || field.kind === "document") &&
+                row.reconnectFields?.[field.fieldId] !== undefined &&
+                row.reconnectFields[field.fieldId] !== row.fields[field.fieldId],
+            ),
+            "credential reconnect must replace secret material",
+          );
+        }
+      }
       const selection = {
         profileId: row.profileId,
         methodId: row.methodId,
@@ -650,7 +674,6 @@ async function main() {
         started = Date.now();
       phase = "rr-enrollment";
       const beginning: { result?: Awaited<ReturnType<typeof adapter.begin>> } = {};
-      const rawProfile = rawProfiles.find((candidate) => candidate.profileId === row.profileId);
       if (extensionModule) {
         assert.ok(rawProfile);
         assert.ok(extensionProof);
@@ -958,6 +981,14 @@ async function main() {
         phase = "rr-native-reconnect";
         const current = await client.get(accountRef),
           replacementNonce = randomUUID();
+        const beforeGeneration: QueryResult<{ active_generation: string }> = await pool.query<{
+          active_generation: string;
+        }>("SELECT active_generation FROM ag_kernel.accounts WHERE consumer=$1 AND ref=$2", [
+          fixture.consumerId,
+          accountRef,
+        ]);
+        assert.equal(beforeGeneration.rowCount, 1);
+        assert.ok(beforeGeneration.rows[0].active_generation);
         const replacement = await adapter.begin(
           "authorized",
           {
@@ -995,6 +1026,28 @@ async function main() {
         assert.equal(savedReplacement.operation.result?.kind, "account");
         assert.equal(savedReplacement.operation.result.accountRef, accountRef);
         assert.deepEqual(replaced.native.credential, operation.native.credential);
+        const afterGeneration: QueryResult<{ active_generation: string }> = await pool.query<{
+          active_generation: string;
+        }>("SELECT active_generation FROM ag_kernel.accounts WHERE consumer=$1 AND ref=$2", [
+          fixture.consumerId,
+          accountRef,
+        ]);
+        assert.equal(afterGeneration.rowCount, 1);
+        assert.ok(afterGeneration.rows[0].active_generation);
+        assert.notEqual(
+          afterGeneration.rows[0].active_generation,
+          beforeGeneration.rows[0].active_generation,
+          "reconnect must replace the physical generation of the same logical account",
+        );
+        if (row.reconnectCustody === true) {
+          report({
+            phase: "reconnect-custody",
+            rowId: row.id,
+            accountRef,
+            generation: afterGeneration.rows[0].active_generation,
+          });
+          await handshake({ phase: "reconnect-custody-verified", rowId: row.id });
+        }
         receipt.reconnect = "passed";
       }
       phase = "canonical-native-erasure";
@@ -1014,6 +1067,14 @@ async function main() {
       const retirementStatus = await client.retirement(accountRef, retirement);
       assert.equal(retirementStatus.state, "completed");
       assert.equal(retirementStatus.inert, true);
+      if (receipt.reconnect === "passed") {
+        assert.equal(retirementStatus.counts.retainedGenerations, 2);
+        assert.equal(retirementStatus.counts.settledNativeErasureGenerations, 2);
+      }
+      if (row.reconnectCustody === true) {
+        report({ phase: "reconnect-erasure", rowId: row.id });
+        await handshake({ phase: "reconnect-erasure-verified", rowId: row.id });
+      }
       receipt.erased = true;
       if (extensionProof) {
         phase = "retired-gateway-provider-credential-scan";
