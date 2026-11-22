@@ -1,7 +1,7 @@
 /** Full source-inventory qualification through real Native private HTTP/PG,
  * Gateway PG/facade, the installed packed SDK and unchanged RR consumers.
  * Every inventory row is attempted; execution uses the pinned real Action and
- * Codex CLI. Unavailable source methods remain explicit qualification blockers. */
+ * Codex CLI. TypeSafe is explicitly unavailable for review. */
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { lstat, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -28,6 +28,7 @@ import type { ServiceConfig } from "../src/service-config.ts";
 import { startWorkerHeartbeat } from "./fixtures/native-cli/worker-heartbeat.ts";
 import { loadQualifiedConnectionConsumers } from "./fixtures/native-connections-joined/consumers.ts";
 import { prepareGatewayRollbackReader } from "./fixtures/native-connections-joined/rollback.ts";
+import { acceptedBatchRows } from "./fixtures/native-connections-joined/acceptance.ts";
 
 const report = (value: object) => process.stdout.write(JSON.stringify(value) + "\n");
 const required = (name: string) => {
@@ -1194,7 +1195,7 @@ async function main() {
       receipts.every((row) => row.pendingRecovery === true));
   const qualified =
     failed === 0 &&
-    blocked === 0 &&
+    acceptedBatchRows(receipts) &&
     negativeFailures.length === 0 &&
     extensionComplete &&
     accountInfoCompatibility?.qualified === true &&

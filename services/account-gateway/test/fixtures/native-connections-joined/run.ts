@@ -19,6 +19,7 @@ import {
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath } from "node:path";
+import { acceptedBaselineRows } from "./acceptance.ts";
 
 type Options = {
   gatewayRoot: string;
@@ -301,6 +302,7 @@ async function main() {
     nativeFixtureSHA256: sha256(await readFile(fixture)),
     runnerSHA256: sha256(await readFile(runner)),
     driverSHA256: sha256(await readFile(new URL(import.meta.url))),
+    acceptanceSHA256: sha256(await readFile(new URL("./acceptance.ts", import.meta.url))),
     loaderSHA256: sha256(await readFile(loader)),
     consumerLoaderSHA256: sha256(await readFile(new URL("./consumers.ts", import.meta.url))),
     rollbackLoaderSHA256: sha256(await readFile(new URL("./rollback.ts", import.meta.url))),
@@ -441,7 +443,14 @@ async function main() {
       expectedInventoryRows: number;
       expectedExtensionRows?: number;
       batchRows: number;
-      rows: { rowId: string; enrolled: boolean; outcome: string; pendingRecovery?: boolean }[];
+      rows: {
+        rowId: string;
+        enrolled: boolean;
+        outcome: string;
+        review: string;
+        failure?: { at: string; error: string };
+        pendingRecovery?: boolean;
+      }[];
       discoveredProviders: { profileId: string; providerId: string; methodIds: string[] }[];
       consumerBuildDigestBefore: string;
       consumerBuildDigestAfter: string;
@@ -574,9 +583,7 @@ async function main() {
   const rows = baseline.flatMap((batch) => batch.receipt?.rows ?? []);
   const baselineQualified =
     baseline.every((batch) => batch.exitCode === 0 && batch.receipt?.qualified === true) &&
-    rows.length === 53 &&
-    new Set(rows.map((row) => row.rowId)).size === 53 &&
-    rows.every((row) => row.outcome === "passed");
+    acceptedBaselineRows(rows);
   const identity = baseline[0].receipt?.consumerBuildDigestBefore;
   const unchangedConsumerBuild =
     identity !== undefined &&

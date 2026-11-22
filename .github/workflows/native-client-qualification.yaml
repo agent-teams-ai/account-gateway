@@ -110,6 +110,7 @@ jobs:
           mkdir packages/account-gateway/dist
           cp -a "$GATEWAY_CLIENT_ROOT/sdk-dist/." packages/account-gateway/dist/
           pnpm --dir services/account-gateway run typecheck
+          node --test services/account-gateway/test/fixtures/native-connections-joined/acceptance.test.ts
           node --test services/account-gateway/test/fixtures/native-cli/joined-evidence.test.ts
           node --test services/account-gateway/test/fixtures/native-cli/execution-profile.test.ts
           git diff --exit-code -- pnpm-lock.yaml
