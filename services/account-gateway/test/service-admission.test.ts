@@ -13,6 +13,14 @@ const flush = async () => {
   await Promise.resolve();
 };
 void test("control-only drain retains account retirement readback", () => {
+  assert.equal(
+    facadeControlRoute("GET", "/v1/executions/execution-a/cleanup-proof/prepare-a"),
+    true,
+  );
+  assert.equal(
+    facadeControlRoute("POST", "/v1/executions/execution-a/cleanup-proof/prepare-a"),
+    false,
+  );
   assert.equal(facadeControlRoute("GET", "/v1/accounts/account-a/retirement/operation-a"), true);
   assert.equal(facadeControlRoute("POST", "/v1/accounts/account-a/retirement/operation-a"), false);
   assert.equal(

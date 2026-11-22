@@ -217,6 +217,7 @@ export function transport(
           response.status === 404 &&
           (path.startsWith("/v1/operations/") ||
             /^\/v1\/executions\/[A-Za-z0-9_-]+\/close-operations\/[A-Za-z0-9_-]+$/.test(path) ||
+            /^\/v1\/executions\/[A-Za-z0-9_-]+\/cleanup-proof\/[A-Za-z0-9_-]+$/.test(path) ||
             path.startsWith("/v2/operations/") ||
             path.includes("/requests/") ||
             (method === "GET" &&

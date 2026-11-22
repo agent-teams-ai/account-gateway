@@ -273,6 +273,13 @@ export interface SavedExecution {
 }
 // A single committed SQL observation for the native boundary. This is read
 // authority only: a claim still grants the sole first-dispatch permission.
+// Logical ownership of cleanup only; this does not prove native teardown.
+export interface ExecutionCleanupProof {
+  readonly kind: "execution-cleanup-handoff";
+  readonly preparationOperationRef: string;
+  readonly saved: SavedExecution;
+  readonly cleanup: "scheduled";
+}
 export interface DispatchSnapshot {
   readonly saved: SavedExecution;
   readonly issuerEpoch: string;
@@ -288,6 +295,12 @@ export interface ExecutionRead {
     requestId?: string,
   ): Promise<DispatchSnapshot>;
   savedExecution(context: TrustedContext, executionRef: string): Promise<SavedExecution>;
+  // Historical adapters cannot attest this positive handoff; omission denies.
+  executionCleanup?(
+    context: TrustedContext,
+    executionRef: string,
+    preparationOperationId: string,
+  ): Promise<ExecutionCleanupProof>;
   currentWorkerLease(context: TrustedContext, worker: string): Promise<string>;
   // Read an already claimed execution cleanup lease, without renewal/creation.
   currentCleanupLease(

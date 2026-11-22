@@ -674,6 +674,16 @@ export const admission = z.strictObject({
   limits,
   expiresAt: deadline,
 });
+// Distinct from an operation ACK: Gateway durably owns exact execution cleanup.
+export const executionCleanupProof = z.strictObject({
+  kind: z.literal("execution-cleanup-handoff"),
+  preparationOperationRef: reference,
+  executionRef: reference,
+  admission,
+  state: z.enum(["closed", "fenced"]),
+  cleanup: z.literal("scheduled"),
+});
+export type ExecutionCleanupProof = z.infer<typeof executionCleanupProof>;
 export type Profile = z.infer<typeof profile>;
 export type Account = z.infer<typeof account>;
 export type AccountRetirement = z.infer<typeof accountRetirement>;

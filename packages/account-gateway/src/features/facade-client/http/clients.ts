@@ -351,6 +351,26 @@ export function createConsumerControlClient(settings: ConsumerControlConfig) {
   const { client, json } = accountClient(settings, "consumer-control");
   return Object.freeze({
     ...client,
+    executionCleanupProof: async (
+      executionRef: string,
+      preparationOperationId: string,
+      options?: CallOptions,
+    ) => {
+      const proof = await json(
+        `/v1/executions/${id(executionRef)}/cleanup-proof/${id(preparationOperationId)}`,
+        c.executionCleanupProof,
+        "GET",
+        undefined,
+        options,
+      );
+      if (
+        proof.executionRef !== executionRef ||
+        proof.preparationOperationRef !== preparationOperationId
+      ) {
+        throw new GatewayError("invalid_response", "effect_unknown", preparationOperationId);
+      }
+      return proof;
+    },
     closeOperation: async (executionRef: string, operationId: string, options?: CallOptions) => {
       const result = await json(
         `/v1/executions/${id(executionRef)}/close-operations/${id(operationId)}`,
