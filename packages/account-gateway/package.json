@@ -35,8 +35,8 @@
     }
   },
   "dependencies": {
-    "@get-modular/assembly": "0.2.0",
-    "@get-modular/core": "0.2.0",
+    "@get-modular/assembly": "0.8.0",
+    "@get-modular/core": "0.8.0",
     "zod": "4.6.7"
   },
   "engines": {

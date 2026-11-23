@@ -15,14 +15,14 @@ importers:
         specifier: 0.6.2
         version: 0.6.2
       '@agent-teams/engineering-foundation':
-        specifier: 3.0.0
-        version: 3.0.0(@types/node@24.19.1)
+        specifier: 3.1.0
+        version: 3.1.0(@types/node@24.19.1)
       '@get-modular/assembly':
-        specifier: 0.2.0
-        version: 0.2.0
+        specifier: 0.8.0
+        version: 0.8.0
       '@get-modular/core':
-        specifier: 0.2.0
-        version: 0.2.0
+        specifier: 0.8.0
+        version: 0.8.0
       '@types/node':
         specifier: 24.19.1
         version: 24.19.1
@@ -36,11 +36,11 @@ importers:
   packages/account-gateway:
     dependencies:
       '@get-modular/assembly':
-        specifier: 0.2.0
-        version: 0.2.0
+        specifier: 0.8.0
+        version: 0.8.0
       '@get-modular/core':
-        specifier: 0.2.0
-        version: 0.2.0
+        specifier: 0.8.0
+        version: 0.8.0
       zod:
         specifier: 4.6.7
         version: 4.6.7
@@ -73,8 +73,8 @@ packages:
     resolution: {integrity: sha512-9oy6ojzGSq2KWcot3QBBkNItzXQ3S8kZjcCTZ163dtJ966vGWKRbfpSuwTasnXz/3jpQjbStILMhorvaLX4xsA==}
     engines: {node: ^24.18.0 || ^26.0.0, pnpm: '>=11.17.0 <12'}
 
-  '@agent-teams/engineering-foundation@3.0.0':
-    resolution: {integrity: sha512-FQYZjlU15ZasKWw0HpNJwh+GUuGgV9PfynP+I9kIPbSx0ydmtAWOzjOnJV57jcQ5PMVspah4zu7XhqgpFJiZXA==}
+  '@agent-teams/engineering-foundation@3.1.0':
+    resolution: {integrity: sha512-JNBE4o+8KS8KPx9fuUdYzFUJj4t6Io58qnDFbhBV+mEhlDk/H6wTGN0/DIItf/oPvXFmKCh0W5vIVKitpoKmeg==}
     engines: {node: ^24.18.0 || ^26.0.0, pnpm: '>=11.17.0 <12'}
     hasBin: true
 
@@ -95,12 +95,12 @@ packages:
   '@emnapi/wasi-threads@1.2.2':
     resolution: {integrity: sha512-c95qOXkHdydNKhscBTebqEC1CVAZpyqOfVfBzQ1qgzyl3gfeldUjIggDbIZgDKsHLgnsM+igH7TJ/eAasaVuMA==}
 
-  '@get-modular/assembly@0.2.0':
-    resolution: {integrity: sha512-xZTgfMUzHnA8DR7wk/3mAdLppTlwAsm6pfW5bgoW6lvGh8hYGBJwcwzbdynJduRVBVW7aFmchsrLTP5w4rcmlw==}
+  '@get-modular/assembly@0.8.0':
+    resolution: {integrity: sha512-UJjGxv+sXY6BzKXm+ffGAFC9gBK1CehDKQwz24LeLthUdhKT6WkZCjRPj8/Gr8XbFVx83pxdhxNtAXAdN/G5DQ==}
     engines: {node: '>=24.18.0 <25 || >=26.10.0 <27'}
 
-  '@get-modular/core@0.2.0':
-    resolution: {integrity: sha512-npn2dAR5TuVobDzuI7MRZS0p6/0qzTWbRbPo5y9EaDz4qFtBNF6+YBhU92QPwOkYzVjo9xAJtIgMkly7wlkdWw==}
+  '@get-modular/core@0.8.0':
+    resolution: {integrity: sha512-c2zLxvmvSAZPtHXbURkT4LNydqVY2YGRbcoF58hc2tvNe/JzH/6cVZbpO3XEQZXJ2z4W3eBPK9vpN8U9wmXMMQ==}
     engines: {node: '>=24.18.0 <25 || >=26.10.0 <27'}
 
   '@microsoft/api-extractor-model@7.33.10':
@@ -835,6 +835,10 @@ packages:
     resolution: {integrity: sha512-G9hgcgyv9eaD988TQ3DJ8p/LIvLKSFVtZQYQGLrNeDrPGinJ2QWAbfwa2G/QVvRHLx3jjRfAvUQ3z5rURUI8pg==}
     engines: {bun: '>=1.4.3', node: ^24.18.0 || ^26.0.0}
 
+  node-or-bun@0.2.5:
+    resolution: {integrity: sha512-oPk7oyOqj+5TUPVsmq9cpCBNobD/DEFiKHdhXyt9n0Ncr0cFcrQEO56dro8yK+DREog7mk4FULojIi8joTWp7w==}
+    engines: {bun: '>=1.4.3', node: ^24.18.0 || ^26.0.0}
+
   oxc-parser@0.142.0:
     resolution: {integrity: sha512-kKR+jPiRJYJDexVoziIg/FVGvr1fT1FZSSJOk6tVoMKKSlsf1Cso+cgGCJkOEDWOP174vRntCPFKg+AS7InWvw==}
     engines: {node: ^20.19.0 || >=22.12.0}
@@ -1021,7 +1025,7 @@ snapshots:
       ajv: 8.20.0
       yaml: 2.9.0
 
-  '@agent-teams/engineering-foundation@3.0.0(@types/node@24.19.1)':
+  '@agent-teams/engineering-foundation@3.1.0(@types/node@24.19.1)':
     dependencies:
       '@agent-teams/document-authoring': 0.3.6
       '@agent-teams/repository-mutation': 0.4.2
@@ -1030,7 +1034,7 @@ snapshots:
       ajv: 8.20.0
       ajv-formats: 3.0.1
       jsonc-parser: 3.3.1
-      node-or-bun: 0.2.2
+      node-or-bun: 0.2.5
       oxc-parser: 0.142.0
       proper-lockfile: 4.1.2
       typescript: 7.0.2
@@ -1058,11 +1062,11 @@ snapshots:
       tslib: 2.8.1
     optional: true
 
-  '@get-modular/assembly@0.2.0':
+  '@get-modular/assembly@0.8.0':
     dependencies:
-      '@get-modular/core': 0.2.0
+      '@get-modular/core': 0.8.0
 
-  '@get-modular/core@0.2.0': {}
+  '@get-modular/core@0.8.0': {}
 
   '@microsoft/api-extractor-model@7.33.10(@types/node@24.19.1)':
     dependencies:
@@ -1506,6 +1510,8 @@ snapshots:
   minisearch@7.2.0: {}
 
   node-or-bun@0.2.2: {}
+
+  node-or-bun@0.2.5: {}
 
   oxc-parser@0.142.0:
     dependencies:
