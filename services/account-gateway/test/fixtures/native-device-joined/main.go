@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -52,6 +53,76 @@ var deny = errors.New("joined fixture refused")
 
 // Deliberately differs from the immutable qualified descriptor anchor.
 const joinedCLIRequestedModel = "gpt-5.4"
+
+// Every successful account check authorizes exactly one authenticated settings
+// update. Keep this separate from the five public counters: duplicate settings
+// requests still increment unexpected, while missing updates fail a quiet
+// stats/close boundary rather than passing unnoticed as a cached read.
+type joinedTrainingSettings struct {
+	mu         sync.Mutex
+	pending    map[string]bool
+	completed  int64
+	unexpected *atomic.Int64
+}
+
+func (s *joinedTrainingSettings) checked(access string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if access == "" {
+		return false
+	}
+	if s.pending == nil {
+		s.pending = make(map[string]bool)
+	}
+	bearer := "Bearer " + access
+	if s.pending[bearer] {
+		return false
+	}
+	s.pending[bearer] = true
+	return true
+}
+
+func (s *joinedTrainingSettings) complete(checks int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.pending) == 0 && s.completed == checks
+}
+
+func (s *joinedTrainingSettings) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	accepted := func() bool {
+		if r.TLS == nil || r.Host != "chatgpt.com" || r.Method != http.MethodPatch ||
+			r.URL.EscapedPath() != "/backend-api/settings/account_user_setting" ||
+			r.URL.RawQuery != "feature=training_allowed&value=false" ||
+			len(r.Header.Values("Authorization")) != 1 || len(r.Header.Values("Cookie")) != 0 ||
+			r.Header.Get("Origin") != "https://chatgpt.com" || r.Header.Get("Referer") != "https://chatgpt.com/" ||
+			r.Header.Get("Accept") != "application/json" || r.Header.Get("Sec-Fetch-Mode") != "cors" ||
+			r.Header.Get("Sec-Fetch-Site") != "same-origin" || r.Header.Get("Sec-Fetch-Dest") != "empty" ||
+			r.ContentLength != 0 || len(r.TransferEncoding) != 0 {
+			return false
+		}
+		if r.Body != nil {
+			body, err := io.ReadAll(io.LimitReader(r.Body, 1))
+			if err != nil || len(body) != 0 {
+				return false
+			}
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		bearer := r.Header.Get("Authorization")
+		if !s.pending[bearer] {
+			return false
+		}
+		delete(s.pending, bearer)
+		s.completed++
+		return true
+	}()
+	if !accepted {
+		s.unexpected.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
 
 type fixtureHTTP struct{ client *http.Client }
 
@@ -131,6 +202,7 @@ func run() error {
 	subscriptionEnd := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second).Format(time.RFC3339)
 	verifier := strings.Repeat("v", 64)
 	var starts, polls, exchanges, checks, unexpected, inferenceEntries, modelReads atomic.Int64
+	trainingSettings := joinedTrainingSettings{unexpected: &unexpected}
 	var authorized atomic.Bool
 	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -202,12 +274,14 @@ func run() error {
 					selected = candidate
 				}
 			}
-			if r.Host != "chatgpt.com" || r.Method != "GET" || selected.access == "" {
+			if r.Host != "chatgpt.com" || r.Method != "GET" || selected.access == "" || !trainingSettings.checked(selected.access) {
 				unexpected.Add(1)
 				w.WriteHeader(400)
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"accounts": map[string]any{"fixture": map[string]any{"account": map[string]any{"account_id": selected.account, "is_default": true, "name": "Provider reviewer", "plan_type": "pro", "account_structure": "personal"}, "entitlement": map[string]any{"expires_at": subscriptionEnd}}}})
+		case "/backend-api/settings/account_user_setting":
+			trainingSettings.ServeHTTP(w, r)
 		case "/backend-api/codex/models":
 			if !cfg.CLI || r.Host != "chatgpt.com" || r.Method != "GET" ||
 				r.Header.Get("Authorization") != "Bearer "+access || r.Header.Get("ChatGPT-Account-Id") != providerAccount ||
@@ -432,7 +506,10 @@ func run() error {
 	var private atomic.Pointer[gatewaytransport.Handler]
 	var dropImportACK atomic.Bool
 	var droppedImportACKs atomic.Int64
+	var nativeRequests sync.RWMutex
 	native := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nativeRequests.RLock()
+		defer nativeRequests.RUnlock()
 		if cfg.CLI && strings.HasPrefix(r.URL.Path, "/private/native/v1/transports") {
 			handler := private.Load()
 			if handler == nil {
@@ -517,6 +594,15 @@ func run() error {
 			authorized.Store(true)
 		} else if r.Method != "GET" || r.URL.Path != "/stats" {
 			w.WriteHeader(404)
+			return
+		}
+		// Wait for accepted Native HTTP work to settle before checking for a
+		// missing settings call; never mistake its in-flight gap for a replay.
+		nativeRequests.Lock()
+		defer nativeRequests.Unlock()
+		if !trainingSettings.complete(checks.Load()) {
+			unexpected.Add(1)
+			w.WriteHeader(http.StatusConflict)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(counters{starts.Load(), polls.Load(), exchanges.Load(), checks.Load(), unexpected.Load()})
@@ -621,6 +707,12 @@ func run() error {
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(configured)
 	if !scan.Scan() || scan.Text() != "stop" {
+		return deny
+	}
+	nativeRequests.Lock()
+	defer nativeRequests.Unlock()
+	if !trainingSettings.complete(checks.Load()) {
+		unexpected.Add(1)
 		return deny
 	}
 	var secrets []string
