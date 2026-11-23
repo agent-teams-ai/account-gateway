@@ -1,7 +1,7 @@
 import { claudeOAuthProfile } from "../src/oauth-profiles.ts";
 import test, { before as beforeTests, after as afterTests } from "node:test";
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { connect as connectSocket } from "node:net";
 import { readFile, readdir } from "node:fs/promises";
@@ -1364,6 +1364,181 @@ void test("execution close is scoped, idempotent acknowledgement without a wrong
     assert.equal(c.execution.parse(await response.json()).state, "terminal");
     await assert.rejects(f.execution.request(f.executionRef, f.request()), denied());
   } finally {
+    await f.stop();
+  }
+});
+
+void test("typed close proof survives expiry and safe intent compaction without widening execution authority", async () => {
+  const f = await fixture("normal", false, { deadlineMs: 1800 });
+  const control = {
+    role: "consumer-control" as const,
+    consumerId: f.context.consumerId,
+    token: "synthetic-typed-close-proof-control",
+    profileIds: [profile.profile],
+    limits,
+    maxRunMs: 60_000,
+  };
+  f.bearers.replace([f.managementGrant, f.executionGrant, control]);
+  const client = createConsumerControlClient({
+    role: "consumer-control",
+    origin: f.origin,
+    token: control.token,
+  });
+  const id = "synthetic-typed-close-proof-operation";
+  try {
+    await f.execution.close(f.executionRef, { operationId: id, reason: "completed" });
+    const job = await f.kernel.claimCleanup(f.context, f.worker);
+    assert.ok(job && job.scope.kind === "execution");
+    await f.kernel.settleCleanup(f.context, job.cleanupRef, f.worker, job.token, true);
+    await delay(Math.max(1, Date.parse(f.saved.admission.expiresAt) - Date.now() + 10));
+    await assert.rejects(
+      f.execution.close(f.executionRef, { operationId: id, reason: "completed" }),
+      denied(),
+    );
+    await f.kernel.reconcile(f.context);
+    const compacted = (
+      await pool.query<{ compacted: boolean }>(
+        "SELECT intent IS NULL AS compacted FROM ag_kernel.operations WHERE consumer=$1 AND id=$2",
+        [f.context.consumerId, id],
+      )
+    ).rows[0];
+    assert.equal(compacted.compacted, true);
+    assert.deepEqual(await client.closeOperation(f.executionRef, id), {
+      kind: "close",
+      operationRef: id,
+      executionRef: f.executionRef,
+      state: "applied",
+    });
+    assert.equal(f.stats().entries, 0);
+    const before = (
+      await pool.query(
+        "SELECT xmin::text AS version FROM ag_kernel.operations WHERE consumer=$1 AND id=$2",
+        [f.context.consumerId, id],
+      )
+    ).rows;
+    await client.closeOperation(f.executionRef, id);
+    assert.deepEqual(
+      (
+        await pool.query(
+          "SELECT xmin::text AS version FROM ag_kernel.operations WHERE consumer=$1 AND id=$2",
+          [f.context.consumerId, id],
+        )
+      ).rows,
+      before,
+      "proof reads never mutate the close",
+    );
+    f.bearers.replace([f.managementGrant, f.executionGrant]);
+    await assert.rejects(client.closeOperation(f.executionRef, id), denied());
+  } finally {
+    await f.stop();
+  }
+});
+
+void test("typed close proof rejects applied fence substitution, wrong execution and authority scopes", async () => {
+  const f = await fixture();
+  const control = {
+    role: "consumer-control" as const,
+    consumerId: f.context.consumerId,
+    token: "synthetic-typed-close-proof-control",
+    profileIds: [profile.profile],
+    limits,
+    maxRunMs: 60_000,
+  };
+  const narrow = {
+    ...control,
+    token: "synthetic-typed-close-proof-narrow",
+    profileIds: ["different-profile"],
+  };
+  const foreign = {
+    ...control,
+    token: "synthetic-typed-close-proof-foreign",
+    consumerId: "foreign-" + randomUUID(),
+  };
+  f.bearers.replace([f.managementGrant, f.executionGrant, control, narrow, foreign]);
+  const client = (token = control.token) =>
+    createConsumerControlClient({ role: "consumer-control", origin: f.origin, token });
+  try {
+    const id = "rr-close-" + createHash("sha256").update(f.preparedInput.operationId).digest("hex");
+    await client().fence({ operationId: id, subjectRef: "different-policy", revision: 0 });
+    assert.equal(
+      (await client().operation(id)).state,
+      "applied",
+      "generic ACK cannot distinguish a fence",
+    );
+    await assert.rejects(
+      f.execution.close(f.executionRef, { operationId: id, reason: "completed" }),
+      denied(),
+    );
+    await assert.rejects(client().closeOperation(f.executionRef, id), denied());
+    assert.equal((await f.kernel.savedExecution(f.context, f.executionRef)).state, "open");
+    const second = await f.client.prepare({
+      ...f.preparedInput,
+      operationId: randomUUID(),
+      invocationRef: randomUUID(),
+    });
+    assert.ok(second.state === "applied" && second.result?.kind === "execution");
+    const otherClose = "synthetic-close-other-execution";
+    await f.kernel.close(f.context, otherClose, second.result.executionRef);
+    await assert.rejects(client().closeOperation(f.executionRef, otherClose), denied());
+    const ownClose = "synthetic-close-own-execution";
+    await f.execution.close(f.executionRef, { operationId: ownClose, reason: "completed" });
+    await assert.rejects(client(narrow.token).closeOperation(f.executionRef, ownClose), denied());
+    await assert.rejects(client(foreign.token).closeOperation(f.executionRef, ownClose));
+    await assert.rejects(client().closeOperation(f.executionRef, "synthetic-missing-close"));
+    const response = await f.raw(
+      `/v1/executions/${f.executionRef}/close-operations/${ownClose}`,
+      "GET",
+      undefined,
+      f.executionGrant.token,
+    );
+    assert.equal(response.status, 403, "execution grants do not gain control read authority");
+    assert.equal(f.stats().entries, 0);
+  } finally {
+    await f.stop();
+  }
+});
+
+void test("typed close proof refuses a consumer-control grant replaced during real SQL read", async () => {
+  const f = await fixture();
+  const control = {
+    role: "consumer-control" as const,
+    consumerId: f.context.consumerId,
+    token: "synthetic-typed-close-proof-control",
+    profileIds: [profile.profile],
+    limits,
+    maxRunMs: 60_000,
+  };
+  f.bearers.replace([f.managementGrant, f.executionGrant, control]);
+  const client = createConsumerControlClient({
+    role: "consumer-control",
+    origin: f.origin,
+    token: control.token,
+  });
+  let entered!: () => void, release!: () => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const original = f.kernel.closeOperation.bind(f.kernel);
+  try {
+    const id = "synthetic-typed-close-proof-revocation";
+    await f.execution.close(f.executionRef, { operationId: id, reason: "completed" });
+    f.kernel.closeOperation = async (...args: Parameters<typeof original>) => {
+      const proof = await original(...args);
+      entered();
+      await held;
+      return proof;
+    };
+    const pending = client.closeOperation(f.executionRef, id);
+    await started;
+    f.bearers.replace([f.managementGrant, f.executionGrant]);
+    release();
+    await assert.rejects(pending, denied());
+    assert.equal(f.stats().entries, 0);
+  } finally {
+    release();
     await f.stop();
   }
 });

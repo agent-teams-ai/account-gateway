@@ -501,6 +501,14 @@ export const preparationOperation = operation.refine(
   (v) => v.state !== "applied" || v.result?.kind === "execution",
 );
 export const acknowledgementOperation = operation.refine((v) => v.state !== "applied" || !v.result);
+// Positive close evidence must bind both the mutation kind and exact execution.
+// Its state is an observation of the original operation, never a new mutation.
+export const closeOperationProof = z.strictObject({
+  kind: z.literal("close"),
+  operationRef: reference,
+  executionRef: reference,
+  state: z.enum(["pending", "applied", "rejected", "unknown"]),
+});
 export const execution = z.strictObject({
   executionRef: reference,
   accountRef: reference,
@@ -671,6 +679,7 @@ export type Account = z.infer<typeof account>;
 export type AccountRetirement = z.infer<typeof accountRetirement>;
 export type PolicyUseClosure = z.infer<typeof policyUseClosure>;
 export type Operation = z.infer<typeof operation>;
+export type CloseOperationProof = z.infer<typeof closeOperationProof>;
 export type OAuthReconnect = z.infer<typeof oauthReconnect>;
 export type OAuthBegin = z.infer<typeof oauthBegin>;
 export type OAuthBeginResponse = z.infer<typeof oauthBeginResponse>;
