@@ -10,15 +10,15 @@ concurrency:
 jobs:
   native_provider_qualification:
     name: Native provider state and rollback qualification
-    uses: agent-teams-ai/sub2api-standalone/.github/workflows/account-gateway-native.yml@a2b01895fca2eb26ceea7fb0bfa3cce3d4340395
+    uses: agent-teams-ai/sub2api-standalone/.github/workflows/account-gateway-native.yml@1179f9b9092567e02d833228aebfecfc97d67bb8
     with:
-      source_revision: a2b01895fca2eb26ceea7fb0bfa3cce3d4340395
+      source_revision: 1179f9b9092567e02d833228aebfecfc97d67bb8
       base_revision: 330c3887febb011d9586375d94a905af90ce009e
   native_account_consumer:
     name: Pinned RR account browser and TypeScript 7 qualification
-    uses: 777genius/review-router-ai/.github/workflows/native-accounts-browser.yml@575f8564faa2f042f17d7744be7a1826435fbf25
+    uses: 777genius/review-router-ai/.github/workflows/native-accounts-browser.yml@a4e002dc94a5db0514a73937c999f77b85105bf5
     with:
-      source_revision: 575f8564faa2f042f17d7744be7a1826435fbf25
+      source_revision: a4e002dc94a5db0514a73937c999f77b85105bf5
   native_clients:
     name: native clients (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
@@ -29,9 +29,9 @@ jobs:
         node: ["26.11.1", "24.21.0"]
     env:
       NPM_CONFIG_ENGINE_STRICT: "true"
-      NATIVE_COMMIT: a2b01895fca2eb26ceea7fb0bfa3cce3d4340395
+      NATIVE_COMMIT: 1179f9b9092567e02d833228aebfecfc97d67bb8
       GATEWAY_READER_COMMIT: bcfcde2d06d7bbdb941258e1908986b9f5718feb
-      REVIEW_ROUTER_COMMIT: 575f8564faa2f042f17d7744be7a1826435fbf25
+      REVIEW_ROUTER_COMMIT: a4e002dc94a5db0514a73937c999f77b85105bf5
       REVIEW_ACTION_COMMIT: 0454fc0a3af15f94522c7c31cce59c0c62af6567
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
     steps:
