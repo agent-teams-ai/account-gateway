@@ -22,9 +22,9 @@
   "devDependencies": {
     "@agent-teams/account-gateway": "workspace:*",
     "@agent-teams/docs-protocol": "0.6.2",
-    "@agent-teams/engineering-foundation": "3.0.0",
-    "@get-modular/assembly": "0.2.0",
-    "@get-modular/core": "0.2.0",
+    "@agent-teams/engineering-foundation": "3.1.0",
+    "@get-modular/assembly": "0.8.0",
+    "@get-modular/core": "0.8.0",
     "@types/node": "24.19.1",
     "stack-toolchain": "0.1.1",
     "typescript": "7.0.2"

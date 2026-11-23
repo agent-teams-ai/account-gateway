@@ -4,13 +4,13 @@ Scope is the new SDK's optional construction entry only. Consumer application
 ports and policy stay consumer-owned; safe wire DTOs belong in adapters. The
 provided management/execution profiles select explicit Host config and HTTP
 client factories. Host config carries credentials only at construction time.
-Invalid slots are rejected by Core; missing factories are rejected by Assembly
+Invalid slots are rejected by Core; missing module entries are rejected by Assembly
 before any Host or client constructor runs. The Host owns stream cancellation.
 
-Selected installed public packages: Core/Assembly 0.2.0, ESM Node24.21.0,
-TypeScript7.0.2 with skipLibCheck false. SDK build/public dependencies are pinned
-in pnpm-lock.yaml. Registry provenance comes from the coordinator's installed
-seed and its integrity-bearing npm lock; artifact behavior still requires the
+Selected installed public packages: Core/Assembly 0.8.0, ESM Node26.11.1 by
+default with the required Node24.21.0 compatibility lane, and TypeScript7.0.2
+with skipLibCheck false. SDK build/public dependencies and registry integrity
+are pinned in the generated pnpm-lock.yaml. Artifact behavior still requires the
 exact packed SDK to pass the installed-consumer gate.
 
 The reviewed Get Modular Consumer Module Standard source revision is
@@ -19,9 +19,9 @@ The reviewed Get Modular Consumer Module Standard source revision is
 The [pending CMS profile](../architecture/consumer-module-adoption.json) and
 [full-document delta review](../architecture/evidence/cms-pin-review.json) bind
 that exact revision to retained non-authoritative bytes. This pin update reviews
-current guidance; it does not activate CMS adoption or upgrade the installed
-Core/Assembly 0.2.0 pair. The offline topology gate rejects pin/evidence drift,
-and `pnpm test:consumer-pin` checks its TypeScript and rejecting fixtures in both
+current guidance; it does not activate CMS adoption. The separately qualified
+Core/Assembly 0.8.0 refresh retains that reviewed standard pin. The offline
+topology gate rejects pin/evidence drift, and `pnpm test:consumer-pin` checks its TypeScript and rejecting fixtures in both
 `test:static` and `test`. These checks qualify document integrity only.
 The gate owns the approved revision tuple in code; changing it requires a reviewed pin update.
 
@@ -59,9 +59,9 @@ Checkpoint A runs public lint and format checks after SDK emission, and the
 configuration guard rejects removing either command or moving them before build.
 
 Current CMS activation remains pending: accept a local adoption decision and exact
-boundary/legacy/exception inventory, qualify descriptor/module-entry/group and
-`profileId` authoring with the package upgrade, map the current layout to CMS
-rules, and add consumer conformance and independent wiring-oracle checks. The
+boundary/legacy/exception inventory, qualify descriptor/group and `profileId`
+authoring beyond the bounded immutable module-entry migration, map the current
+layout to CMS rules, and add consumer conformance and independent wiring-oracle checks. The
 existing four-key `ClientCapabilities` manual map stays valid and unchanged.
 When concrete descriptor-derived feature maps are introduced, follow the pinned
 standard's complete descriptor unions and separate `CapabilitiesOf` bases; retain
@@ -127,13 +127,17 @@ adds root-file catalogs; do not change its parser or provide a substitute check.
 
 ## Dependency refresh qualification
 
-Issue #122 scopes the next installed-package qualification to the published
-Core/Assembly 0.8.0 pair and Foundation 3.1.0 as development-only tooling.
-The four Core/Assembly pins must advance together with the generated pnpm lock.
-Assembly's removed bound-factory API must move to immutable module entries and
-`prepare({ modules })` while preserving the explicit profiles, SDK construction
-results, role separation and rejection before any constructor runs. Existing
-SDK helper names and the experimental LLM entry remain available.
+Issue #122 advances the four Core/Assembly pins together to the published 0.8.0
+pair and Foundation to 3.1.0 as development-only tooling, with the generated pnpm
+lock. Assembly entries use `implement<ClientCapabilities>()` and
+`prepare({ composition, modules, roots })`; public Core still compiles the explicit
+management/execution profiles before preparation. The existing
+`bindManagementFactory(assembly)` and `bindExecutionFactory(assembly)` signatures
+remain available. Their compatibility argument is intentionally unused because
+immutable module entries do not belong to an Assembly instance. Construction
+results, role separation, rejection before construction and the experimental LLM
+entry remain available. Failed compilation, preparation or construction still
+becomes `GatewayError("invalid_input", "not_dispatched")`.
 
 The supported Node 26.11.1 and 24.21.0 lanes, TypeScript 7.0.2, focused
 composition regressions and both installed archive consumers qualify this
