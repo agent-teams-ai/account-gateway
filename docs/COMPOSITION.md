@@ -124,3 +124,23 @@ Docs Protocol 0.6.2 cannot express a repository-root file collection: a file roo
 requires a directory, and dot roots are rejected. This is an explicit adoption
 limit, not repository-wide document coverage. Revisit when the supported tool
 adds root-file catalogs; do not change its parser or provide a substitute check.
+
+## Dependency refresh qualification
+
+Issue #122 scopes the next installed-package qualification to the published
+Core/Assembly 0.8.0 pair and Foundation 3.1.0 as development-only tooling.
+The four Core/Assembly pins must advance together with the generated pnpm lock.
+Assembly's removed bound-factory API must move to immutable module entries and
+`prepare({ modules })` while preserving the explicit profiles, SDK construction
+results, role separation and rejection before any constructor runs. Existing
+SDK helper names and the experimental LLM entry remain available.
+
+The supported Node 26.11.1 and 24.21.0 lanes, TypeScript 7.0.2, focused
+composition regressions and both installed archive consumers qualify this
+change before merge. The existing Foundation source-dependency and dev-only
+checks remain authoritative; no formatting-profile opt-in, Effect dependency,
+new lifecycle owner or current CMS-conformance claim belongs to this refresh.
+Social Monitor's digest-pinned private SDK is a separate downstream change:
+replace it only after upstream qualification, two identical package builds and
+the consumer's runtime-identity, contract and end-to-end checks. No production
+cutover or public package publication is included.
