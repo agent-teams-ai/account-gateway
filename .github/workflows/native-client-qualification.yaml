@@ -8,11 +8,17 @@ concurrency:
   group: native-client-qualification-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  native_provider_qualification:
+    name: Native provider state and rollback qualification
+    uses: agent-teams-ai/sub2api-standalone/.github/workflows/account-gateway-native.yml@e96b09c7ffea378fcc3e0049240a78d92bd681a0
+    with:
+      source_revision: e96b09c7ffea378fcc3e0049240a78d92bd681a0
+      base_revision: 330c3887febb011d9586375d94a905af90ce009e
   native_account_consumer:
     name: Pinned RR account browser and TypeScript 7 qualification
-    uses: 777genius/review-router-ai/.github/workflows/native-accounts-browser.yml@fd0e0c6dfeca24934a60318bdc2b491d32d86b12
+    uses: 777genius/review-router-ai/.github/workflows/native-accounts-browser.yml@1d5c3d1df419e84b06671e3f174a69d3a18a1d45
     with:
-      source_revision: fd0e0c6dfeca24934a60318bdc2b491d32d86b12
+      source_revision: 1d5c3d1df419e84b06671e3f174a69d3a18a1d45
   native_clients:
     name: native clients (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
@@ -23,9 +29,9 @@ jobs:
         node: ["26.11.1", "24.21.0"]
     env:
       NPM_CONFIG_ENGINE_STRICT: "true"
-      NATIVE_COMMIT: 330c3887febb011d9586375d94a905af90ce009e
+      NATIVE_COMMIT: e96b09c7ffea378fcc3e0049240a78d92bd681a0
       GATEWAY_READER_COMMIT: bcfcde2d06d7bbdb941258e1908986b9f5718feb
-      REVIEW_ROUTER_COMMIT: fd0e0c6dfeca24934a60318bdc2b491d32d86b12
+      REVIEW_ROUTER_COMMIT: 1d5c3d1df419e84b06671e3f174a69d3a18a1d45
       REVIEW_ACTION_COMMIT: 0454fc0a3af15f94522c7c31cce59c0c62af6567
       PG_IMAGE: postgres:17.10@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317
     steps:
@@ -69,6 +75,7 @@ jobs:
           chmod 755 "$cli_root/shim/pnpm"
           echo "$cli_root/shim" >> "$GITHUB_PATH"
           git clone --no-checkout https://github.com/agent-teams-ai/sub2api-standalone.git "$cli_root/native-source"
+          git -C "$cli_root/native-source" fetch --no-tags origin "$NATIVE_COMMIT"
           git -C "$cli_root/native-source" checkout --detach "$NATIVE_COMMIT"
           test "$(git -C "$cli_root/native-source" rev-parse HEAD)" = "$NATIVE_COMMIT"
           test -z "$(git -C "$cli_root/native-source" status --porcelain)"
@@ -361,14 +368,16 @@ jobs:
           if-no-files-found: error
           retention-days: 3
   native_client_gate:
-    needs: [native_clients, native_account_consumer]
+    needs: [native_clients, native_account_consumer, native_provider_qualification]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Require client lanes and consumer qualification
+      - name: Require client lanes, consumer and Native state qualification
         env:
           LANE_RESULT: ${{ needs.native_clients.result }}
           CONSUMER_RESULT: ${{ needs.native_account_consumer.result }}
+          NATIVE_RESULT: ${{ needs.native_provider_qualification.result }}
         run: |
           test "$LANE_RESULT" = success
           test "$CONSUMER_RESULT" = success
+          test "$NATIVE_RESULT" = success
