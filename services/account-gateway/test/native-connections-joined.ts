@@ -1,7 +1,7 @@
 /** Full source-inventory qualification through real Native private HTTP/PG,
  * Gateway PG/facade, the installed packed SDK and unchanged RR consumers.
  * Every inventory row is attempted; execution uses the pinned real Action and
- * Codex CLI. TypeSafe is explicitly unavailable for review. */
+ * Codex CLI. Unavailable source methods remain explicit qualification blockers. */
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { lstat, readFile, readdir, rm, writeFile } from "node:fs/promises";

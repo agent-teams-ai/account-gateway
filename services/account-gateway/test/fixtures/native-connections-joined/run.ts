@@ -19,7 +19,7 @@ import {
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath } from "node:path";
-import { acceptedBaselineRows } from "./acceptance.ts";
+import { acceptedBaselineRows, baselineRowIds } from "./acceptance.ts";
 
 type Options = {
   gatewayRoot: string;
@@ -241,6 +241,16 @@ async function main() {
   }
   phase = "gateway-reader-source-pin";
   cleanPin(gatewayReaderRoot, "bcfcde2d06d7bbdb941258e1908986b9f5718feb");
+  phase = "native-baseline-inventory";
+  const baselineInventory = await readFile(
+    join(
+      options.nativeRoot,
+      "backend/internal/gatewaybootstrap/testdata/native_connection_g0_rows.json",
+    ),
+  );
+  const expectedBaselineRowIds = baselineRowIds(
+    JSON.parse(baselineInventory.toString("utf8")) as unknown,
+  );
   phase = "sdk-archive-provenance";
   assert.equal(sha256(await readFile(options.sdkArchive)), options.sdkSHA256);
   const actionArchive = process.env.RR_PROVIDER_JOINED_ACTION_ARCHIVE;
@@ -303,6 +313,7 @@ async function main() {
     runnerSHA256: sha256(await readFile(runner)),
     driverSHA256: sha256(await readFile(new URL(import.meta.url))),
     acceptanceSHA256: sha256(await readFile(new URL("./acceptance.ts", import.meta.url))),
+    baselineInventorySHA256: sha256(baselineInventory),
     loaderSHA256: sha256(await readFile(loader)),
     consumerLoaderSHA256: sha256(await readFile(new URL("./consumers.ts", import.meta.url))),
     rollbackLoaderSHA256: sha256(await readFile(new URL("./rollback.ts", import.meta.url))),
@@ -583,7 +594,7 @@ async function main() {
   const rows = baseline.flatMap((batch) => batch.receipt?.rows ?? []);
   const baselineQualified =
     baseline.every((batch) => batch.exitCode === 0 && batch.receipt?.qualified === true) &&
-    acceptedBaselineRows(rows);
+    acceptedBaselineRows(rows, expectedBaselineRowIds);
   const identity = baseline[0].receipt?.consumerBuildDigestBefore;
   const unchangedConsumerBuild =
     identity !== undefined &&
