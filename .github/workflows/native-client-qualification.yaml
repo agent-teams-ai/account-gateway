@@ -10,9 +10,9 @@ concurrency:
 jobs:
   native_provider_qualification:
     name: Native provider state and rollback qualification
-    uses: agent-teams-ai/sub2api-standalone/.github/workflows/account-gateway-native.yml@8936198eabe0fda870f43e9e510286695cafa11b
+    uses: agent-teams-ai/sub2api-standalone/.github/workflows/account-gateway-native.yml@ade680036b2797eedeead6d0cccb2da54085b353
     with:
-      source_revision: 8936198eabe0fda870f43e9e510286695cafa11b
+      source_revision: ade680036b2797eedeead6d0cccb2da54085b353
       base_revision: 330c3887febb011d9586375d94a905af90ce009e
   native_account_consumer:
     name: Pinned RR account browser and TypeScript 7 qualification
@@ -29,7 +29,7 @@ jobs:
         node: ["26.11.1", "24.21.0"]
     env:
       NPM_CONFIG_ENGINE_STRICT: "true"
-      NATIVE_COMMIT: 8936198eabe0fda870f43e9e510286695cafa11b
+      NATIVE_COMMIT: ade680036b2797eedeead6d0cccb2da54085b353
       GATEWAY_READER_COMMIT: bcfcde2d06d7bbdb941258e1908986b9f5718feb
       REVIEW_ROUTER_COMMIT: a4e002dc94a5db0514a73937c999f77b85105bf5
       REVIEW_ACTION_COMMIT: 0454fc0a3af15f94522c7c31cce59c0c62af6567
