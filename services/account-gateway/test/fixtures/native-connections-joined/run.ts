@@ -19,7 +19,11 @@ import {
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath } from "node:path";
-import { acceptedBaselineRows, baselineRowIds } from "./acceptance.ts";
+import {
+  acceptedBaselineRows,
+  baselineRowIds,
+  hasNativeSourcePostconditions,
+} from "./acceptance.ts";
 
 type Options = {
   gatewayRoot: string;
@@ -448,6 +452,7 @@ async function main() {
   const batches: {
     batch: string;
     exitCode: number;
+    sourcePostconditionsVerified: boolean;
     receipt?: {
       contract: string;
       qualified: boolean;
@@ -550,7 +555,11 @@ async function main() {
         ? timeBudget.extensionBatchMilliseconds
         : timeBudget.baselineBatchMilliseconds,
     );
-    const item: (typeof batches)[number] = { batch, exitCode: result };
+    const item: (typeof batches)[number] = {
+      batch,
+      exitCode: result,
+      sourcePostconditionsVerified: false,
+    };
     batches.push(item);
     try {
       const receipt = JSON.parse(
@@ -578,6 +587,17 @@ async function main() {
         assert.equal(receipt.contract, "native-connections-gateway-sdk-rr-joined/v1");
       }
       item.receipt = receipt;
+      // Keep observed review rows even when the separate Native proof is absent.
+      // A blocked child must still finish Native protocol and database checks.
+      const sourceReceipt: unknown = JSON.parse(
+        await readFile(join(batchOutput, "native-receipt.json"), "utf8"),
+      );
+      item.sourcePostconditionsVerified = hasNativeSourcePostconditions(sourceReceipt, {
+        batch,
+        runnerSHA256: sources.runnerSHA256,
+        rowIds: receipt.rows.map((row) => row.rowId),
+      });
+      assert.ok(item.sourcePostconditionsVerified, "native terminal source checks incomplete");
     } catch {
       item.exitCode = item.exitCode || 1;
     }
@@ -590,6 +610,9 @@ async function main() {
     await rm(join(batchOutput, "private-exchange.json"), { force: true });
   }
   const baseline = batches.filter((batch) => batch.batch !== "extensibility");
+  const nativeSourcePostconditionsVerified = batches.every(
+    (batch) => batch.sourcePostconditionsVerified,
+  );
   const extension = batches.find((batch) => batch.batch === "extensibility");
   const rows = baseline.flatMap((batch) => batch.receipt?.rows ?? []);
   const baselineQualified =
@@ -673,6 +696,7 @@ async function main() {
   const qualified =
     baselineQualified &&
     extensionQualified &&
+    nativeSourcePostconditionsVerified &&
     gatewayCompatibility.qualified &&
     accountInfoCompatibility.qualified;
   qualification = {
@@ -687,6 +711,7 @@ async function main() {
     expectedExtensionRows: 1,
     timeBudget,
     baselineQualified,
+    nativeSourcePostconditionsVerified,
     consumerBuildDigest: identity,
     unchangedConsumerBuild,
     gatewayCompatibility,
@@ -704,9 +729,10 @@ async function main() {
     enrolled: rows.filter((row) => row.enrolled).length,
     passed: rows.filter((row) => row.outcome === "passed").length,
     blocked: rows.filter((row) => row.outcome === "blocked").length,
-    batches: batches.map(({ batch, exitCode, receipt }) => ({
+    batches: batches.map(({ batch, exitCode, receipt, sourcePostconditionsVerified }) => ({
       batch,
       exitCode,
+      sourcePostconditionsVerified,
       qualified: receipt?.qualified ?? false,
       passed: receipt?.passed ?? 0,
       failed: receipt?.failed ?? 0,

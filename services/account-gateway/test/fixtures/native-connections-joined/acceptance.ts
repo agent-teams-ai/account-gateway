@@ -55,6 +55,41 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Terminal Native checks are independent of the child review outcome. */
+export function hasNativeSourcePostconditions(
+  receipt: unknown,
+  expected: {
+    batch: "standard" | "express" | "extensibility";
+    runnerSHA256: string;
+    rowIds: readonly string[];
+  },
+): boolean {
+  if (!isRecord(receipt) || !isRecord(receipt.rows)) {
+    return false;
+  }
+  const proof = receipt.sourcePostconditions;
+  const sourceRows = receipt.rows;
+  const rowIds = Object.keys(sourceRows);
+  return (
+    expected.rowIds.length > 0 &&
+    receipt.contract ===
+      (expected.batch === "extensibility"
+        ? "native-provider-extension-source/v1"
+        : "native-connections-joined-source/v1") &&
+    receipt.batch === expected.batch &&
+    receipt.runnerSHA256 === expected.runnerSHA256 &&
+    receipt.expectedInventoryRows === 53 &&
+    receipt.batchRows === expected.rowIds.length &&
+    rowIds.length === expected.rowIds.length &&
+    new Set(expected.rowIds).size === expected.rowIds.length &&
+    expected.rowIds.every((rowId) => Object.hasOwn(sourceRows, rowId)) &&
+    isRecord(proof) &&
+    Object.keys(proof).length === 2 &&
+    proof.contract === "native-connections-source-postconditions/v1" &&
+    proof.verified === true
+  );
+}
+
 function isRowIdPart(value: unknown): value is string {
   return typeof value === "string" && /^[a-zA-Z0-9_-]+$/.test(value);
 }

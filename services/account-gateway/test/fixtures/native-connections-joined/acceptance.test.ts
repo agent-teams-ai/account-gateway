@@ -4,6 +4,7 @@ import {
   acceptedBaselineRows,
   acceptedBatchRows,
   baselineRowIds,
+  hasNativeSourcePostconditions,
   isExpectedUnavailableReview,
   unavailableReviewRow,
 } from "./acceptance.ts";
@@ -133,5 +134,123 @@ await test("expected identities come from the independent Native inventory", () 
     },
   ]) {
     assert.throws(() => baselineRowIds(invalid));
+  }
+});
+
+const sourceExpectation = {
+  batch: "standard" as const,
+  runnerSHA256: "a".repeat(64),
+  rowIds: expectedRowIds.slice(0, 52),
+};
+const sourceReceipt = {
+  contract: "native-connections-joined-source/v1",
+  batch: sourceExpectation.batch,
+  runnerSHA256: sourceExpectation.runnerSHA256,
+  expectedInventoryRows: 53,
+  batchRows: sourceExpectation.rowIds.length,
+  childExitCode: 1,
+  rows: Object.fromEntries(sourceExpectation.rowIds.map((rowId) => [rowId, {}])),
+};
+const sourcePostconditions = {
+  contract: "native-connections-source-postconditions/v1",
+  verified: true,
+};
+
+await test("saved Native counters do not replace completed terminal source and database checks", () => {
+  const retained = structuredClone(sourceReceipt);
+  for (const proof of [
+    undefined,
+    null,
+    {},
+    [],
+    { ...sourcePostconditions, verified: false },
+    { ...sourcePostconditions, verified: "true" },
+    { ...sourcePostconditions, contract: "other" },
+    { ...sourcePostconditions, unchecked: true },
+  ]) {
+    assert.equal(
+      hasNativeSourcePostconditions(
+        { ...sourceReceipt, sourcePostconditions: proof },
+        sourceExpectation,
+      ),
+      false,
+    );
+  }
+  assert.deepEqual(sourceReceipt, retained, "failed proof admission preserves observed rows");
+});
+
+await test("Native completion evidence is bound to the exact batch, runner and observed identities", () => {
+  const verified = { ...sourceReceipt, sourcePostconditions };
+  assert.equal(hasNativeSourcePostconditions(verified, sourceExpectation), true);
+  for (const invalid of [
+    null,
+    { ...verified, contract: "native-provider-extension-source/v1" },
+    { ...verified, batch: "express" },
+    { ...verified, runnerSHA256: "b".repeat(64) },
+    { ...verified, expectedInventoryRows: 52 },
+    { ...verified, batchRows: 51 },
+    { ...verified, rows: null },
+    { ...verified, rows: {} },
+    {
+      ...verified,
+      rows: Object.fromEntries(
+        ["unlisted/api_key/provider_api_key", ...sourceExpectation.rowIds.slice(1)].map((rowId) => [
+          rowId,
+          {},
+        ]),
+      ),
+    },
+  ]) {
+    assert.equal(hasNativeSourcePostconditions(invalid, sourceExpectation), false);
+  }
+  assert.equal(
+    hasNativeSourcePostconditions(verified, {
+      ...sourceExpectation,
+      rowIds: [...sourceExpectation.rowIds.slice(1), sourceExpectation.rowIds[1]],
+    }),
+    false,
+  );
+  assert.equal(
+    hasNativeSourcePostconditions(
+      { ...verified, batchRows: 0, rows: {} },
+      { ...sourceExpectation, rowIds: [] },
+    ),
+    false,
+  );
+});
+
+await test("a verified Native postcondition receipt cannot turn the blocked original review into success", () => {
+  assert.equal(
+    hasNativeSourcePostconditions(
+      { ...sourceReceipt, childExitCode: 1, sourcePostconditions },
+      sourceExpectation,
+    ),
+    true,
+  );
+  assert.equal(acceptedBaselineRows([...passed.slice(0, 52), unavailable], expectedRowIds), false);
+  assert.equal(acceptedBaselineRows(passed, expectedRowIds), true);
+});
+
+await test("each independent batch admits its own completed Native source checks", () => {
+  for (const batch of ["standard", "express", "extensibility"] as const) {
+    const rowIds = batch === "standard" ? sourceExpectation.rowIds : [expectedRowIds[0]];
+    assert.equal(
+      hasNativeSourcePostconditions(
+        {
+          ...sourceReceipt,
+          contract:
+            batch === "extensibility"
+              ? "native-provider-extension-source/v1"
+              : "native-connections-joined-source/v1",
+          batch,
+          batchRows: rowIds.length,
+          rows: Object.fromEntries(rowIds.map((rowId) => [rowId, {}])),
+          childExitCode: batch === "standard" ? 1 : 0,
+          sourcePostconditions,
+        },
+        { ...sourceExpectation, batch, rowIds },
+      ),
+      true,
+    );
   }
 });
