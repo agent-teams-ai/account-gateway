@@ -1,5 +1,5 @@
 import { compileComposition, defineModule, required } from "@get-modular/core";
-import { assemblyFor } from "@get-modular/assembly";
+import { assemblyFor, implement } from "@get-modular/assembly";
 import type { Assembly, CapabilityContract } from "@get-modular/assembly";
 import { createManagementClient, createExecutionClient, GatewayError } from "../http/index.js";
 import type {
@@ -104,14 +104,16 @@ export type ClientCapabilities = {
   "account-gateway/management": CapabilityContract<ManagementClient, "account-gateway/v1">;
   "account-gateway/execution": CapabilityContract<ExecutionClient, "account-gateway/v1">;
 };
-export function bindManagementFactory(assembly: Assembly<ClientCapabilities>) {
-  return assembly.bindFactory(managementDeclaration, async ({ config }) => {
+/** Retains the Host helper signature; immutable entries are independent of an Assembly. */
+export function bindManagementFactory(_assembly: Assembly<ClientCapabilities>) {
+  return implement<ClientCapabilities>()(managementDeclaration, async ({ config }) => {
     const client = createManagementClient(config);
     return { instance: client, capabilities: { "account-gateway/management": client } };
   });
 }
-export function bindExecutionFactory(assembly: Assembly<ClientCapabilities>) {
-  return assembly.bindFactory(executionDeclaration, async ({ config }) => {
+/** Retains the Host helper signature; immutable entries are independent of an Assembly. */
+export function bindExecutionFactory(_assembly: Assembly<ClientCapabilities>) {
+  return implement<ClientCapabilities>()(executionDeclaration, async ({ config }) => {
     const client = createExecutionClient(config);
     return { instance: client, capabilities: { "account-gateway/execution": client } };
   });
@@ -121,7 +123,7 @@ export async function constructManagementClient(
   settings: ManagementConfig,
 ): Promise<ManagementClient> {
   const assembly = assemblyFor<ClientCapabilities>();
-  const host = assembly.bindFactory(managementHost, async () => ({
+  const host = implement<ClientCapabilities>()(managementHost, async () => ({
     instance: undefined,
     capabilities: { "account-gateway/management-config": settings },
   }));
@@ -135,7 +137,7 @@ export async function constructManagementClient(
   }
   const prepared = await assembly.prepare({
     composition,
-    factories: [host, client],
+    modules: [host, client],
     roots: { client },
   });
   if (prepared.status !== "prepared") {
@@ -151,7 +153,7 @@ export async function constructExecutionClient(
   settings: ExecutionConfig,
 ): Promise<ExecutionClient> {
   const assembly = assemblyFor<ClientCapabilities>();
-  const host = assembly.bindFactory(executionHost, async () => ({
+  const host = implement<ClientCapabilities>()(executionHost, async () => ({
     instance: undefined,
     capabilities: { "account-gateway/execution-config": settings },
   }));
@@ -165,7 +167,7 @@ export async function constructExecutionClient(
   }
   const prepared = await assembly.prepare({
     composition,
-    factories: [host, client],
+    modules: [host, client],
     roots: { client },
   });
   if (prepared.status !== "prepared") {

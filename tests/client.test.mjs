@@ -10,7 +10,7 @@ const gm = await import(
   process.env.GATEWAY_COMPOSITION ?? "../packages/account-gateway/dist/get-modular/index.js"
 );
 const { compileComposition } = await import("@get-modular/core");
-const { assemblyFor } = await import("@get-modular/assembly");
+const { assemblyFor, implement } = await import("@get-modular/assembly");
 const account = {
   accountRef: "account-a",
   ownerRef: "owner-a",
@@ -586,11 +586,11 @@ test("streaming exposes first bytes, propagates cancellation, bounds output, cou
   assert.equal(dispatches, 1);
 });
 
-// Regression: invalid graph or missing factory runs a configuration/resource constructor before validation.
-test("public Core/Assembly reject invalid slot and missing factory with zero construction", async () => {
+// Regression: invalid graph or missing module runs a configuration/resource constructor before validation.
+test("public Core/Assembly reject invalid slot and missing module with zero construction", async () => {
   let constructed = 0;
   const assembly = assemblyFor();
-  const host = assembly.bindFactory(gm.managementHost, async () => {
+  const host = implement()(gm.managementHost, async () => {
     constructed++;
     return {
       instance: undefined,
@@ -615,19 +615,20 @@ test("public Core/Assembly reject invalid slot and missing factory with zero con
     ).ok,
     false,
   );
+  assert.equal(constructed, 0);
   const composition = await compileComposition({
     declarations: [gm.managementHost, gm.managementDeclaration],
     profile: gm.managementProfile,
   });
   assert.equal(composition.ok, true);
   assert.equal(
-    (await assembly.prepare({ composition, factories: [client], roots: { client } })).status,
+    (await assembly.prepare({ composition, modules: [client], roots: { client } })).status,
     "failed",
   );
   assert.equal(constructed, 0);
   const prepared = await assembly.prepare({
     composition,
-    factories: [host, client],
+    modules: [host, client],
     roots: { client },
   });
   assert.equal(prepared.status, "prepared");

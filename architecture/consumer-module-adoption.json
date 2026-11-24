@@ -16,7 +16,7 @@
   "qualification": "Reviewed document identity and retained-byte integrity only; no current CMS conformance claim.",
   "outstanding": [
     "Accept a local CMS adoption decision and exact boundary, exception and legacy inventories.",
-    "Qualify an explicit package upgrade from the installed Core/Assembly 0.2.0 pair before adopting descriptors, module entries, groups and profileId roots.",
+    "Qualify descriptors, groups and profileId roots beyond the bounded Core/Assembly 0.8.0 immutable module-entry migration; the package refresh does not activate CMS adoption.",
     "Map the current facade/get-modular layout to current CMS layout and source rules without weakening the existing FMS v1 scope.",
     "Add consumer conformance, independent binding oracle and missing rejecting fixtures in fast/full gates before activating CMS adoption."
   ],
