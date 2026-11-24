@@ -95,14 +95,14 @@ function runtimeLockClosure(lock: string): string[][] {
   const names = [...Object.keys(versions), "zod"];
   const parts = lock.split("\npackages:\n");
   assert.equal(parts.length, 2);
-  const sections = parts[1]!.split("\nsnapshots:\n");
+  const sections = parts[1].split("\nsnapshots:\n");
   assert.equal(sections.length, 2);
   return sections.map((section) => {
     const entries = section.split(/(?=^  \S)/m);
     return names.toSorted().map((name) => {
       const matches = entries.filter((entry) => entry.startsWith("  " + name + "@"));
       assert.equal(matches.length, 1, "unique frozen lock entry for " + name);
-      return matches[0]!.trimEnd();
+      return matches[0].trimEnd();
     });
   });
 }
