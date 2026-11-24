@@ -1,6 +1,6 @@
 /** Current joined writer -> exact compatible-floor production readers.
  * Only the frozen old source graph is bundled. Runtime SQL dependencies are
- * copied from the identical frozen lock into an isolated, byte-checked closure. */
+ * copied from the frozen runtime lock closure into an isolated, byte-checked closure. */
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -89,6 +89,23 @@ const versions: Readonly<Record<string, string>> = {
   split2: "4.2.0",
   xtend: "4.0.2",
 };
+/** Compare the entire frozen runtime closure (package integrity and snapshot
+ * edges), not unrelated tooling in the writer workspace lock. */
+function runtimeLockClosure(lock: string): string[][] {
+  const names = [...Object.keys(versions), "zod"];
+  const parts = lock.split("\npackages:\n");
+  assert.equal(parts.length, 2);
+  const sections = parts[1]!.split("\nsnapshots:\n");
+  assert.equal(sections.length, 2);
+  return sections.map((section) => {
+    const entries = section.split(/(?=^  \S)/m);
+    return names.toSorted().map((name) => {
+      const matches = entries.filter((entry) => entry.startsWith("  " + name + "@"));
+      assert.equal(matches.length, 1, "unique frozen lock entry for " + name);
+      return matches[0]!.trimEnd();
+    });
+  });
+}
 async function fileTree(root: string): Promise<Record<string, string>> {
   const files: Record<string, string> = {};
   async function visit(directory: string) {
@@ -250,7 +267,9 @@ export async function prepareGatewayRollbackReader(input: {
   assert.equal(git(["rev-parse", "HEAD"]), gatewayCompatibleFloor);
   assert.equal(git(["status", "--porcelain", "--untracked-files=all"]), "");
   const lock = await readFile(join(readerRoot, "pnpm-lock.yaml"));
-  assert.deepEqual(await readFile(join(writerRoot, "pnpm-lock.yaml")), lock);
+  const writerLock = await readFile(join(writerRoot, "pnpm-lock.yaml"));
+  const runtimeClosure = runtimeLockClosure(lock.toString("utf8"));
+  assert.deepEqual(runtimeLockClosure(writerLock.toString("utf8")), runtimeClosure);
   const work = await mkdtemp(join(input.workRoot, "gateway-old-reader-"));
   try {
     const pg = await isolatedPostgresDependencies(work, lock.toString("utf8"));
@@ -333,6 +352,8 @@ export async function prepareGatewayRollbackReader(input: {
       bundleSHA256,
       dependencySHA256,
       lockfileSHA256: digest(lock),
+      writerLockfileSHA256: digest(writerLock),
+      runtimeLockClosureSHA256: digest(canonical(runtimeClosure)),
       oldSourceGraphSHA256: digest(canonical(sourceFiles)),
       sourceFiles,
     };
