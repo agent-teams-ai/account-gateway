@@ -240,9 +240,9 @@ export function facadeUsageReadRoute(
   }
   const query = path.indexOf("?");
   if (query < 0) {
-    return /^\/v1\/usage(?:\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+)?$/.test(path);
+    return /^\/v[12]\/usage(?:\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+)?$/.test(path);
   }
-  if (path.slice(0, query) !== "/v1/usage" || path.length - query > 1600) {
+  if (!["/v1/usage", "/v2/usage"].includes(path.slice(0, query)) || path.length - query > 1600) {
     return false;
   }
   const seen = new Set<string>();
@@ -267,12 +267,16 @@ export function facadeBoundedReadRoute(
     (method === "GET" &&
       (path === "/v1/provider-connection-capabilities" ||
         path === "/v2/provider-connection-capabilities")) ||
+    (method === "GET" && path === "/v3/provider-connection-capabilities") ||
     (method === "POST" &&
       (path === "/v1/account-info/read" ||
+        path === "/v2/account-info/read" ||
         path === "/v1/account-limits/read" ||
         path === "/v1/account-limits/refresh" ||
         path === "/v2/account-limits/read" ||
-        path === "/v1/account-models/read"))
+        path === "/v3/account-limits/read" ||
+        path === "/v1/account-models/read" ||
+        path === "/v2/account-models/read"))
   );
 }
 export function facadeControlRoute(method: string | undefined, path: string | undefined): boolean {
@@ -284,14 +288,19 @@ export function facadeControlRoute(method: string | undefined, path: string | un
       (path === "/v1/capabilities/account-limits" ||
         path === "/v1/capabilities/account-limits-refresh" ||
         path === "/v2/capabilities/account-limits" ||
+        path === "/v3/capabilities/account-limits" ||
+        path === "/v3/provider-connection-capabilities" ||
         path === "/v2/provider-connection-capabilities" ||
         path === "/v1/provider-connection-capabilities")) ||
     (method === "POST" &&
       (path === "/v1/account-info/read" ||
+        path === "/v2/account-info/read" ||
         path === "/v1/account-limits/read" ||
         path === "/v1/account-limits/refresh" ||
         path === "/v2/account-limits/read" ||
-        path === "/v1/account-models/read"))
+        path === "/v3/account-limits/read" ||
+        path === "/v1/account-models/read" ||
+        path === "/v2/account-models/read"))
   ) {
     return true;
   }
@@ -302,12 +311,17 @@ export function facadeControlRoute(method: string | undefined, path: string | un
     (method === "POST" &&
       (/^\/v1\/executions\/[A-Za-z0-9_-]+\/close$/.test(path) ||
         path === "/v1/policy-fences" ||
-        /^\/v2\/accounts\/[A-Za-z0-9_-]+\/(suspend|resume)$/.test(path) ||
+        /^\/v[23]\/accounts\/[A-Za-z0-9_-]+\/(suspend|resume)$/.test(path) ||
+        /^\/v3\/accounts\/connections\/(submit|poll)$/.test(path) ||
         /^\/v1\/accounts\/[A-Za-z0-9_-]+\/disable$/.test(path))) ||
     (method === "GET" &&
       (path === "/v2/capabilities/account-lifecycle" ||
+        path === "/v3/capabilities/account-lifecycle" ||
+        /^\/v3\/lifecycle\/operations\/[A-Za-z0-9_-]+$/.test(path) ||
+        /^\/v3\/(operations|accounts)\/[A-Za-z0-9_-]+$/.test(path) ||
         /^\/v2\/(operations|accounts)\/[A-Za-z0-9_-]+$/.test(path) ||
         path === "/v2/accounts" ||
+        path === "/v3/accounts" ||
         /^\/v1\/(operations|accounts)\/[A-Za-z0-9_-]+$/.test(path) ||
         /^\/v1\/accounts\/[A-Za-z0-9_-]+\/retirement\/[A-Za-z0-9_-]+$/.test(path) ||
         /^\/v1\/policy-fences\/[A-Za-z0-9_-]+\/closure$/.test(path) ||

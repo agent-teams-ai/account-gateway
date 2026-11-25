@@ -20,6 +20,8 @@ import {
   accountLimitsV2,
   accountLimitsV2Capabilities,
   accountInfo,
+  accountInfoV2,
+  accountInfoFromV1,
   reference,
   providerConnectionCapabilitiesV2,
   PROVIDER_CONNECTIONS_V2_CONTRACT,
@@ -53,8 +55,13 @@ export class NativeAccountCapabilitiesClient extends NativeControlHTTP {
 
 /** Native proof is checked and removed here; no administrative DTO leaves the adapter. */
 export class NativeAccountInfoClient extends NativeControlHTTP implements AccountInfoSource {
-  constructor(options: NativeManagementOptions) {
+  readonly #contract: "account-info/v1" | "account-info/v2";
+  constructor(
+    options: NativeManagementOptions,
+    contract: "account-info/v1" | "account-info/v2" = "account-info/v2",
+  ) {
     super({ ...options, deadlineMs: 2000, bodyBytes: 16 * 1024 });
+    this.#contract = contract;
   }
   async readAccountInfo(
     input: AccountLimitsRequest,
@@ -65,7 +72,9 @@ export class NativeAccountInfoClient extends NativeControlHTTP implements Accoun
         decode(
           await this.call(
             "POST",
-            "/private/native/v1/account-info/read",
+            this.#contract === "account-info/v1"
+              ? "/private/native/v1/account-info/read"
+              : "/private/native/v2/account-info/read",
             accountLimitsRequest.parse(input),
             options.deadlineMs,
             options.signal,
@@ -75,7 +84,10 @@ export class NativeAccountInfoClient extends NativeControlHTTP implements Accoun
         ["info"],
         ["physicalGeneration", "principalVersion"],
       );
-      const info = accountInfo.parse(wire.info);
+      const info =
+        this.#contract === "account-info/v1"
+          ? accountInfoFromV1(accountInfo.parse(wire.info))
+          : accountInfoV2.parse(wire.info);
       if (info.status === "available") {
         const generation = reference.parse(wire.physicalGeneration);
         if (

@@ -88,6 +88,7 @@ export function transport(
   const settings = valid(config, input);
   const explicitResponseBytes =
     input.responseBytes === undefined ? undefined : settings.responseBytes;
+  const explicitTimeoutMs = input.timeoutMs === undefined ? undefined : settings.timeoutMs;
   if (settings.role !== role) {
     throw new GatewayError("invalid_input", "not_dispatched");
   }
@@ -130,6 +131,7 @@ export function transport(
     options: CallOptions,
     identity: Identity,
     targetOrigin = origin,
+    defaultTimeoutMs = settings.timeoutMs,
   ) {
     if (options.signal?.aborted === true) {
       throw new GatewayError(
@@ -144,7 +146,7 @@ export function transport(
       controller.abort();
     };
     options.signal?.addEventListener("abort", abort, { once: true });
-    const timer = setTimeout(abort, settings.timeoutMs);
+    const timer = setTimeout(abort, explicitTimeoutMs ?? defaultTimeoutMs);
     const dispose = () => {
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", abort);
@@ -174,6 +176,7 @@ export function transport(
     identity: Identity = {},
     extraHeaders: Record<string, string> = {},
     responseBytes = settings.responseBytes,
+    defaultTimeoutMs = settings.timeoutMs,
   ): Promise<T> {
     const handle = await enter(
       path,
@@ -182,6 +185,8 @@ export function transport(
       { "content-type": "application/json", accept: "application/json", ...extraHeaders },
       options,
       identity,
+      origin,
+      defaultTimeoutMs,
     );
     try {
       const { response } = handle;
@@ -217,6 +222,8 @@ export function transport(
           response.status === 404 &&
           (path.startsWith("/v1/operations/") ||
             path.startsWith("/v2/operations/") ||
+            path.startsWith("/v3/operations/") ||
+            path.startsWith("/v3/lifecycle/operations/") ||
             path.includes("/requests/") ||
             (method === "GET" &&
               (/^\/v1\/accounts\/[A-Za-z0-9_-]+\/retirement\/[A-Za-z0-9_-]+$/.test(path) ||

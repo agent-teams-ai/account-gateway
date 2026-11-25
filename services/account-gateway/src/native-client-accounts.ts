@@ -11,6 +11,8 @@ import type {
   PhysicalCandidate,
 } from "./management.ts";
 import { NativeControlHTTP } from "./native-client-transport.ts";
+import { NativeConnectionClient } from "./native-client-connections.ts";
+import type { NativeManagementOptions } from "./native-client-transport.ts";
 import {
   NativeFailure,
   candidatesPath,
@@ -27,7 +29,15 @@ export class NativeRetainedCustodyClient
   extends NativeControlHTTP
   implements RetainedCustodyVerifier
 {
+  private readonly connections: NativeConnectionClient;
+  constructor(options: NativeManagementOptions) {
+    super(options);
+    this.connections = new NativeConnectionClient(options);
+  }
   async verify(input: CandidateMapping): Promise<RetainedCustodyProof> {
+    if (input.connectionSnapshot) {
+      return this.connections.verify(input);
+    }
     this.scope(input);
     const d = physicalCandidate(input.descriptor);
     if (!exactCandidate(input, d) || d.nativePhysicalIdentity !== d.generation) {

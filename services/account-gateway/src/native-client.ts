@@ -13,3 +13,12 @@ export {
   NativeAccountInfoClient,
   NativeAccountCapabilitiesClient,
 } from "./native-client-discovery.ts";
+
+export {
+  NativeConnectionCapabilitiesClient,
+  NativeConnectionClient,
+} from "./native-client-connections.ts";
+export {
+  NativeAccountModelsV2Client,
+  NativeAccountLimitsV3Client,
+} from "./native-client-observations.ts";

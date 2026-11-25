@@ -2,6 +2,8 @@ import { KernelError, identifier } from "./domain.ts";
 import { exactCandidate, physicalCandidate } from "./candidate-identity.ts";
 import { oauthProfileDefinition } from "./oauth-profiles.ts";
 import type { CandidateJournal, CandidateMapping, ManagedProfile } from "./candidate-identity.ts";
+import { captureConnectionSnapshot, capturePublication } from "./connection-domain.ts";
+import type { ConnectionSnapshot, ConnectionPublication } from "./connection-domain.ts";
 
 // Persisted row projections are fail-closed and own no SQL or network access.
 export interface JournalRow {
@@ -16,6 +18,7 @@ export interface JournalRow {
   base_url: string;
   model: string;
   qualification_ref: string;
+  connection_snapshot?: unknown;
 }
 export function journalRow(r: JournalRow): CandidateJournal {
   return Object.freeze({
@@ -31,7 +34,17 @@ export function journalRow(r: JournalRow): CandidateJournal {
       baseURL: r.base_url,
       model: r.model,
       qualificationRef: r.qualification_ref,
+      ...(r.connection_snapshot === null || r.connection_snapshot === undefined
+        ? {}
+        : { nativeConnection: true as const }),
     }),
+    ...(r.connection_snapshot === null || r.connection_snapshot === undefined
+      ? {}
+      : {
+          connectionSnapshot: captureConnectionSnapshot(
+            r.connection_snapshot as ConnectionSnapshot,
+          ),
+        }),
   });
 }
 export const journalValues = (j: CandidateJournal): readonly unknown[] => [
@@ -46,6 +59,7 @@ export const journalValues = (j: CandidateJournal): readonly unknown[] => [
   j.profile.baseURL,
   j.profile.model,
   j.profile.qualificationRef,
+  j.connectionSnapshot ?? null,
 ];
 export function sameJournal(a: CandidateJournal, b: CandidateJournal): boolean {
   return JSON.stringify(journalValues(a)) === JSON.stringify(journalValues(b));
@@ -54,6 +68,7 @@ export type MappingRow = JournalRow & {
   native_physical_identity: string;
   native_id: string;
   native_created_at: string;
+  publication?: unknown;
 };
 // SQL004's non-null mapping columns move together through this LEFT JOIN.
 // An absent mapping is SQL NULL, not a Partial row with undefined fields.
@@ -70,6 +85,9 @@ export function mappingRow(r: MappingRow): CandidateMapping {
     profile: j.profile.profile,
     baseURL: j.profile.baseURL,
     model: j.profile.model,
+    ...(r.publication === null || r.publication === undefined
+      ? {}
+      : { publication: capturePublication(r.publication as ConnectionPublication) }),
   });
   if (!exactCandidate(j, descriptor)) {
     throw new KernelError("conflict");
@@ -82,11 +100,24 @@ export function refreshProfile(source: ManagedProfile): ManagedProfile {
     baseURL: source.baseURL,
     model: source.model,
     qualificationRef: source.qualificationRef,
+    ...(source.nativeConnection === true ? { nativeConnection: true as const } : {}),
   });
   const definition = oauthProfileDefinition(p.profile);
-  if (!definition || p.baseURL !== definition.baseURL || p.model !== definition.model) {
+  if (
+    p.nativeConnection !== true &&
+    (!definition || p.baseURL !== definition.baseURL || p.model !== definition.model)
+  ) {
     throw new KernelError("invalid");
   }
   identifier(p.qualificationRef);
+  if (p.nativeConnection) {
+    physicalCandidate({
+      ...p,
+      nativeId: 1,
+      createdAt: "2000-01-01T00:00:00Z",
+      generation: "00000000-0000-4000-8000-000000000001",
+      nativePhysicalIdentity: "00000000-0000-4000-8000-000000000001",
+    });
+  }
   return p;
 }

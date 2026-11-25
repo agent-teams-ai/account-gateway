@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
 import { KernelError, identifier, uuid } from "./domain.ts";
 import type { AcceptedIntent, CandidateScope, IntentCustody } from "./management.ts";
+import { connectionInputCommitment } from "./connection-domain.ts";
 
 // Transient credential custody: no SQL, transport or logging dependencies.
 export interface IntentEnvelope {
@@ -76,6 +77,17 @@ export class IntentSecrets implements IntentCustody {
                 "credential-import/v1",
                 i.credentialImportMethod,
                 accepted.credentialImportValue ?? null,
+              ]),
+          ...(i.connection === undefined
+            ? []
+            : [
+                "native-connection/v1",
+                i.connection.connection.profileId,
+                i.connection.connection.methodId,
+                i.connection.connection.methodRevision,
+                i.connection.connection.configurationGeneration,
+                connectionInputCommitment(accepted.connectionInputFields),
+                i.legacyConnectionKind ?? null,
               ]),
         ]),
       )

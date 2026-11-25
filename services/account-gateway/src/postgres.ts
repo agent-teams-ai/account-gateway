@@ -1,4 +1,10 @@
 import { randomUUID } from "node:crypto";
+import {
+  captureConnectionSnapshot,
+  capturePublication,
+  captureLegacyConnectionKind,
+} from "./connection-domain.ts";
+import type { ConnectionPublication } from "./connection-domain.ts";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import {
   AccountsLimitedError,
@@ -210,7 +216,10 @@ export class PostgresKernel implements DurableKernel {
   }
   private async existing(tx: Tx, id: string, intent: object): Promise<OperationStatus | undefined> {
     const r = await tx.db.query<OperationRow & { matches: boolean }>(
-      `SELECT *, intent_hash=sha256(convert_to($3::jsonb::text,'UTF8')) AS matches
+      `SELECT *, CASE WHEN intent ? 'connection' AND $3::jsonb ? 'connection' THEN
+        (intent-'connection')=($3::jsonb-'connection') AND
+          intent->'connection'->'connection'=$3::jsonb->'connection'->'connection'
+        ELSE intent_hash=sha256(convert_to($3::jsonb::text,'UTF8')) END AS matches
       FROM operations WHERE consumer=$1 AND id=$2`,
       [tx.consumer, id, JSON.stringify(intent)],
     );
@@ -222,6 +231,25 @@ export class PostgresKernel implements DurableKernel {
       throw new KernelError("conflict");
     }
     return operationStatus(saved);
+  }
+  private async lifecycleSnapshot(tx: Tx, account: AccountRow): Promise<object> {
+    if (account.active_generation === null || account.active_generation === "") {
+      return accountStatus(account);
+    }
+    const row = (
+      await tx.db.query<{ publication: unknown }>(
+        "SELECT publication FROM ag_management.physical_mappings WHERE consumer=$1 AND generation=$2",
+        [tx.consumer, account.active_generation],
+      )
+    ).rows.at(0);
+    if (!row || row.publication === null || row.publication === undefined) {
+      return accountStatus(account);
+    }
+    const publication = capturePublication(row.publication as ConnectionPublication);
+    if (publication.connection.profileId !== account.profile) {
+      throw new KernelError("conflict");
+    }
+    return { ...accountStatus(account), publication };
   }
   private async insertOperation(
     tx: Tx,
@@ -458,6 +486,9 @@ export class PostgresKernel implements DurableKernel {
         metadataRevision: retainedCustody.metadataRevision,
         authorizationEpoch: retainedCustody.authorizationEpoch,
         credentialKinds: Object.freeze([...retainedCustody.credentialKinds]),
+        ...(retainedCustody.publication === undefined
+          ? {}
+          : { publication: capturePublication(retainedCustody.publication) }),
       });
     input = {
       operationId: input.operationId,
@@ -470,6 +501,12 @@ export class PostgresKernel implements DurableKernel {
       displayName: input.displayName,
       oauthMethod: input.oauthMethod,
       credentialImportMethod: input.credentialImportMethod,
+      ...(input.connection === undefined
+        ? {}
+        : { connection: captureConnectionSnapshot(input.connection) }),
+      ...(input.legacyConnectionKind === undefined
+        ? {}
+        : { legacyConnectionKind: captureLegacyConnectionKind(input.legacyConnectionKind) }),
     };
     identifier(input.operationId);
     identifier(input.intentDigest);
@@ -484,8 +521,21 @@ export class PostgresKernel implements DurableKernel {
       }
     }
     if (
-      (input.oauthMethod !== undefined || input.credentialImportMethod !== undefined) &&
+      (input.oauthMethod !== undefined ||
+        input.credentialImportMethod !== undefined ||
+        input.connection !== undefined) &&
       !["create", "reconnect"].includes(input.kind)
+    ) {
+      throw new KernelError("invalid");
+    }
+    if (input.legacyConnectionKind !== undefined && input.connection === undefined) {
+      throw new KernelError("invalid");
+    }
+    if (
+      input.connection !== undefined &&
+      (input.oauthMethod !== undefined ||
+        input.credentialImportMethod !== undefined ||
+        (input.kind === "create" && input.connection.connection.profileId !== input.profile))
     ) {
       throw new KernelError("invalid");
     }
@@ -521,6 +571,10 @@ export class PostgresKernel implements DurableKernel {
       ...(input.credentialImportMethod === undefined
         ? {}
         : { credentialImportMethod: input.credentialImportMethod }),
+      ...(input.connection === undefined ? {} : { connection: input.connection }),
+      ...(input.legacyConnectionKind === undefined
+        ? {}
+        : { legacyConnectionKind: input.legacyConnectionKind }),
     };
     return this.transaction(context, async (tx) => {
       const old = await this.existing(tx, input.operationId, intent);
@@ -588,15 +642,21 @@ export class PostgresKernel implements DurableKernel {
           retainedCustody.authorizationEpoch === a.epoch &&
           retainedCustody.generation === a.active_generation &&
           retainedCustody.credentialKinds.length === 1 &&
-          retainedCustody.credentialKinds[0] ===
-            (a.profile === "openai-codex-oauth-responses-v1" ? "oauth" : "api_key");
+          (retainedCustody.contract === "native-retained-custody/v2"
+            ? retainedCustody.publication?.connection.profileId === a.profile &&
+              retainedCustody.credentialKinds[0] ===
+                retainedCustody.publication.credential.credentialKind
+            : retainedCustody.publication === undefined &&
+              ["api_key", "oauth"].includes(retainedCustody.credentialKinds[0]));
         const candidate =
           proof === true
             ? await tx.db.query<{ native_identity: string }>(
-                `SELECT native_identity FROM candidates
-          WHERE consumer=$1 AND generation=$2 AND account_ref=$3 AND state='ready'
+                `SELECT c.native_identity FROM candidates c
+          JOIN ag_management.physical_mappings m ON m.consumer=c.consumer AND m.generation=c.generation
+          WHERE c.consumer=$1 AND c.generation=$2 AND c.account_ref=$3 AND c.state='ready'
+            AND m.publication IS NOT DISTINCT FROM $4::jsonb
             AND NOT EXISTS (SELECT 1 FROM cleanup WHERE consumer=$1 AND generation=$2)`,
-                [tx.consumer, a.active_generation, a.ref],
+                [tx.consumer, a.active_generation, a.ref, retainedCustody?.publication ?? null],
               )
             : undefined;
         const exactCustody =
@@ -610,7 +670,7 @@ export class PostgresKernel implements DurableKernel {
           );
           await tx.db.query(
             "UPDATE operations SET lifecycle_result=$3 WHERE consumer=$1 AND id=$2",
-            [tx.consumer, input.operationId, JSON.stringify(accountStatus(a))],
+            [tx.consumer, input.operationId, JSON.stringify(await this.lifecycleSnapshot(tx, a))],
           );
           return this.op(tx, input.operationId);
         }
@@ -694,7 +754,7 @@ export class PostgresKernel implements DurableKernel {
         await tx.db.query("UPDATE operations SET lifecycle_result=$3 WHERE consumer=$1 AND id=$2", [
           tx.consumer,
           input.operationId,
-          JSON.stringify(accountStatus(a)),
+          JSON.stringify(await this.lifecycleSnapshot(tx, a)),
         ]);
       }
       return this.op(tx, input.operationId);

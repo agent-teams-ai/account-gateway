@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import * as c from "@agent-teams/account-gateway/contracts";
-import type { SavedExecution, RequestStatus } from "./domain.ts";
+import { KernelError, type SavedExecution, type RequestStatus } from "./domain.ts";
 import type { AccountManagement, AccountLifecycleReadback } from "./management.ts";
 
 // Bounded wire projections: no socket, SQL, native transport or credential access.
@@ -59,6 +59,9 @@ export function accountDTO(a: Awaited<ReturnType<AccountManagement["account"]>>)
   });
 }
 export function lifecycleAccountDTO(r: AccountLifecycleReadback): c.LifecycleAccount {
+  if (r.authKind !== "api_key" && r.authKind !== "oauth") {
+    throw new KernelError("unavailable");
+  }
   const a = r.account;
   return c.lifecycleAccount.parse({
     accountRef: a.accountRef,
@@ -70,6 +73,21 @@ export function lifecycleAccountDTO(r: AccountLifecycleReadback): c.LifecycleAcc
     authorizationEpoch: a.epoch,
     authKind: r.authKind,
     resumeCustody: r.resumeCustody,
+  });
+}
+export function lifecycleAccountV3DTO(r: AccountLifecycleReadback): c.LifecycleAccountV3 {
+  const a = r.account;
+  return c.lifecycleAccountV3.parse({
+    accountRef: a.accountRef,
+    ownerRef: a.ownerRef,
+    profileId: a.profile,
+    displayName: a.displayName,
+    state: a.state,
+    metadataRevision: a.revision,
+    authorizationEpoch: a.epoch,
+    authKind: r.authKind,
+    resumeCustody: r.resumeCustody,
+    ...(r.credential === undefined ? {} : { credential: r.credential }),
   });
 }
 export function retirementDTO(

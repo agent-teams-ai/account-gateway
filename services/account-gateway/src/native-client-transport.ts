@@ -13,6 +13,7 @@ export interface NativeManagementOptions {
   readonly bodyBytes?: number;
   readonly headerBytes?: number;
   readonly admission?: NativeControlAdmission;
+  readonly distinguishNotListening?: boolean;
 }
 // One concrete bounded transport shared by the two private control adapters.
 // It carries no enrollment policy and never performs a second HTTP attempt.
@@ -28,7 +29,8 @@ export class NativeControlHTTP {
   readonly #bodyBytes: number;
   readonly #headerBytes: number;
   readonly #admission?: NativeControlAdmission;
-  constructor(options: NativeManagementOptions) {
+  readonly #distinguishNotListening: boolean;
+  constructor(options: NativeManagementOptions, maximumDeadlineMs: 30_000 | 100_000 = 30_000) {
     let origin: URL;
     try {
       origin = new URL(options.origin);
@@ -63,7 +65,7 @@ export class NativeControlHTTP {
     if (
       !Number.isInteger(deadlineMs) ||
       deadlineMs < 1 ||
-      deadlineMs > 30_000 ||
+      deadlineMs > maximumDeadlineMs ||
       !Number.isInteger(bodyBytes) ||
       bodyBytes < 1 ||
       bodyBytes > 2 * 1024 * 1024 ||
@@ -80,6 +82,7 @@ export class NativeControlHTTP {
     this.#bodyBytes = bodyBytes;
     this.#headerBytes = headerBytes;
     this.#admission = options.admission;
+    this.#distinguishNotListening = options.distinguishNotListening === true;
   }
   protected scope(
     scope: Pick<CandidateJournal, "consumerId" | "generation" | "accountRef" | "ownerRef">,
@@ -106,11 +109,14 @@ export class NativeControlHTTP {
     try {
       body = value === undefined ? undefined : Buffer.from(JSON.stringify(value));
       const requestBytes =
-        path === "/private/native/v1/oauth/connect/import"
-          ? 400 * 1024
-          : path.endsWith("/oauth/connect/complete")
-            ? 32_768
-            : 16_384;
+        path === "/private/native/v2/connections/begin" ||
+        path === "/private/native/v2/connections/submit"
+          ? 80 * 1024
+          : path === "/private/native/v1/oauth/connect/import"
+            ? 400 * 1024
+            : path.endsWith("/oauth/connect/complete")
+              ? 32_768
+              : 16_384;
       if (body && body.length > requestBytes) {
         throw new NativeFailure("bounded");
       }
@@ -191,8 +197,14 @@ export class NativeControlHTTP {
         },
         Math.max(1, deadline - Date.now()),
       );
-      req.on("error", () => {
-        finish(new NativeFailure("unavailable"));
+      req.on("error", (error: NodeJS.ErrnoException) => {
+        finish(
+          new NativeFailure(
+            this.#distinguishNotListening && error.code === "ECONNREFUSED"
+              ? "not_listening"
+              : "unavailable",
+          ),
+        );
       });
       req.on("response", (res) => {
         // Retain one overflow sentinel beyond 64 pairs; Node truncates the rest.

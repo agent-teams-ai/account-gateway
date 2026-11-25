@@ -16,6 +16,40 @@ summary: Значимые проверки контрактов, миграци�
 
 Не писать тест на каждый getter, число классов или исходную строку. Не заменять behavioral evidence grep-проверкой файлов. Foundation/source boundary gates нужны именно для зависимостей; runtime invariants требуют runtime/integration tests.
 
+### Решение владельца от 25 ноября 2026: исключение TypeSafe из generative review
+
+Владелец явно поручил: «TypeSafe исключаем — зафиксируй это». Для текущей
+provider-parity поставки это заменяет прежнее требование обязательного
+generative review для всех 53 строк: обязательны **52 строки исходного Native
+G0 inventory**, кроме единственной
+`typesafe-systemone-apikey-v1/api_key/provider_api_key`.
+
+Исходный `native_connection_g0_rows.json`, его 53 идентификатора и исторические
+неуспешные receipts сохраняются. Новая приёмка не переименовывает старые
+52/53 FAILURE в SUCCESS и не засчитывает extension provider вместо baseline
+строки. Она требует нового source-bound прогона с явной политикой
+`native-generative-review-acceptance/v1`, решением
+`2026-11-25-typesafe-exclusion`, `originalInventoryRows: 53`,
+`requiredReviewRows: 52` и единственным `excludedReviewRowIds` выше.
+
+В исполняемом inventory по-прежнему наблюдаются все 53 строки. Каждая из
+52 обязательных строк должна завершить реальное enrollment и review с
+streaming, tool continuation, reconnect и terminal cleanup по существующим
+assertions. Потеря, подмена, дубликат или любой неуспешный результат другой
+строки остаётся отказом. Исключённая строка сохраняет только отрицательное
+свидетельство: `blocked`, `enrolled: false`, `review: not_requested`,
+`rr-enrollment → native_systemone_protocol`; оно не считается review PASS.
+Поддержка генерации, SSE или tool continuation для TypeSafe не объявляется,
+его Native protocol/capability и существующая typed implementation не меняются.
+
+Batch и итоговый gate используют эту одну именованную политику. Итоговый
+receipt сохраняет `originalBaselineQualified: false` для исходного all-53
+критерия и отдельно вычисляет `baselineQualified` для принятого набора 52.
+Native source postconditions, неизменный consumer build, старые readers,
+Node 24/26, browser, extension, sandbox и cleanup gates остаются обязательны.
+Успех focused acceptance tests сам по себе не доказывает joined E2E или
+production deployment.
+
 ## 2. Матрица рисков и минимальных проверок
 
 | Риск | Владелец | Значимое свидетельство |

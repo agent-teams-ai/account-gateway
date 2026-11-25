@@ -11,33 +11,41 @@ export type AccountLimitsWireSource =
   | {
       readonly contract: "account-limits/v2";
       read(input: AccountLimitsSelector): Promise<c.AccountLimitsV2>;
+    }
+  | {
+      readonly contract: "account-limits/v3";
+      read(input: AccountLimitsSelector): Promise<c.AccountLimitsV3>;
     };
 export interface AccountLimitsAuthority {
   authorize(input: AccountLimitsSelector): Promise<boolean>;
   currentIdentity(input: AccountLimitsSelector): Promise<unknown>;
 }
 export type AccountLimitsPortResult = {
-  readonly wire: c.AccountLimits | c.AccountLimitsV2;
+  readonly wire: c.AccountLimits | c.AccountLimitsV2 | c.AccountLimitsV3;
 };
 const empty = (): AccountLimitsPortResult => ({ wire: { status: "unsupported" } });
-type LimitsProvider = c.ProviderConnectionCapability["provider"]["identity"];
+type LimitsProvider = string;
 /** Versioned wire validation plus provider identity; anything else is unavailable. */
 export function acceptedLimitsWire(
   contract: AccountLimitsWireSource["contract"],
   observed: unknown,
   provider?: LimitsProvider,
-): c.AccountLimits | c.AccountLimitsV2 {
-  const parsed = (contract === "account-limits/v2" ? c.accountLimitsV2 : c.accountLimits).safeParse(
-    observed,
-  );
+): c.AccountLimits | c.AccountLimitsV2 | c.AccountLimitsV3 {
+  const parsed = (
+    contract === "account-limits/v3"
+      ? c.accountLimitsV3
+      : contract === "account-limits/v2"
+        ? c.accountLimitsV2
+        : c.accountLimits
+  ).safeParse(observed);
   if (!parsed.success) {
     return { status: "unavailable" };
   }
   const result = parsed.data;
-  if (result.status === "snapshot" && provider) {
+  if (result.status === "snapshot" && provider !== undefined) {
     const matches =
-      contract === "account-limits/v2"
-        ? (result as Extract<c.AccountLimitsV2, { status: "snapshot" }>).windows.every(
+      contract === "account-limits/v2" || contract === "account-limits/v3"
+        ? (result as Extract<c.AccountLimitsV3, { status: "snapshot" }>).windows.every(
             (window) => window.provider === provider,
           )
         : (result as Extract<c.AccountLimits, { status: "snapshot" }>).windows.every(
@@ -60,7 +68,7 @@ export async function readCachedAccountLimits(
   source: AccountLimitsWireSource | undefined,
   input: AccountLimitsSelector,
   expected: {
-    readonly contract: "account-limits/v1" | "account-limits/v2";
+    readonly contract: "account-limits/v1" | "account-limits/v2" | "account-limits/v3";
     readonly provider?: LimitsProvider;
   },
 ): Promise<AccountLimitsPortResult> {
@@ -71,7 +79,7 @@ export async function readCachedAccountLimits(
     return empty();
   }
   const before = await authority.currentIdentity(input);
-  let result: c.AccountLimits | c.AccountLimitsV2 = { status: "unavailable" };
+  let result: c.AccountLimits | c.AccountLimitsV2 | c.AccountLimitsV3 = { status: "unavailable" };
   try {
     result = acceptedLimitsWire(source.contract, await source.read(input), expected.provider);
   } catch {

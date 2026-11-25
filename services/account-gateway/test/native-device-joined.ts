@@ -308,6 +308,7 @@ async function run(): Promise<void> {
     },
   });
   const cfg = {
+    accountInfoContract: "account-info/v2",
     native: {
       executable: "/unused",
       sha256: "unused",
@@ -355,7 +356,7 @@ async function run(): Promise<void> {
     ],
   } satisfies Pick<
     ServiceConfig,
-    "native" | "consumer" | "profile" | "oauthEnrollment" | "bearers"
+    "native" | "consumer" | "profile" | "oauthEnrollment" | "bearers" | "accountInfoContract"
   >;
   const control = composeServiceControl(cfg, kernel, store, secrets, worker);
   const journalUsage = new PostgresUsageJournal(pool, randomBytes(32));
@@ -511,7 +512,25 @@ async function run(): Promise<void> {
     );
     assert.ok(Date.parse(fields.email.observedAt) <= Date.now());
     assert.ok(Date.parse(fields.credentialExpiresAt.value) > Date.now());
+    const current = await client.readAccountInfoV2({ ownerRef, accountRefs: [accountRef] });
+    assert.equal(current.contract, "account-info/v2");
+    const currentRow = current.accounts[0];
+    assert.equal(currentRow.accountRef, accountRef);
+    assert.equal(currentRow.metadataRevision, row.metadataRevision);
+    assert.equal(currentRow.authorizationEpoch, row.authorizationEpoch);
+    assert.equal(currentRow.info.status, "available");
+    const training = currentRow.info.fields.trainingUsage;
+    assert.equal(training.status, "known");
+    assert.equal(training.value, "disabled");
+    assert.equal(training.source, "provider_api");
+    assert.equal(training.freshness, "current");
+    assert.ok(Date.parse(training.observedAt) <= Date.now());
+    assert.equal(fields.privacyMode.status, "unsupported");
     await assert.rejects(foreign.readAccountInfo({ ownerRef, accountRefs: [accountRef] }), denied);
+    await assert.rejects(
+      foreign.readAccountInfoV2({ ownerRef, accountRefs: [accountRef] }),
+      denied,
+    );
     assert.deepEqual(await stats(), before, "metadata read never asks the provider");
     return row;
   };

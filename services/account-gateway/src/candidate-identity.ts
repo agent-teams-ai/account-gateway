@@ -1,4 +1,6 @@
 import { KernelError, identifier, uuid } from "./domain.ts";
+import { capturePublication, sameConnection, samePublication } from "./connection-domain.ts";
+import type { ConnectionSnapshot, ConnectionPublication } from "./connection-domain.ts";
 
 // Account-candidate shapes and validation are stable domain policy, independent
 // of lifecycle orchestration, SQL and native HTTP.
@@ -8,6 +10,7 @@ export interface ManagedProfile {
   readonly model: string;
   // Receipt comes from trusted fixture/non-inference qualification, never ingress.
   readonly qualificationRef: string;
+  readonly nativeConnection?: true;
 }
 export interface CandidateScope {
   readonly consumerId: string;
@@ -24,6 +27,7 @@ export interface PhysicalCandidate {
   readonly profile: string;
   readonly baseURL: string;
   readonly model: string;
+  readonly publication?: ConnectionPublication;
 }
 export interface NativeReadback extends PhysicalCandidate {
   readonly state: "inactive" | "active";
@@ -32,6 +36,7 @@ export interface CandidateJournal extends CandidateScope {
   readonly generation: string;
   readonly worker: string;
   readonly profile: ManagedProfile;
+  readonly connectionSnapshot?: ConnectionSnapshot;
 }
 export interface CandidateMapping extends CandidateJournal {
   readonly descriptor: PhysicalCandidate;
@@ -42,7 +47,13 @@ export function exactCandidate(j: CandidateJournal, d: PhysicalCandidate): boole
     d.nativePhysicalIdentity === j.generation &&
     d.profile === j.profile.profile &&
     d.baseURL === j.profile.baseURL &&
-    d.model === j.profile.model
+    d.model === j.profile.model &&
+    sameConnection(j.connectionSnapshot?.connection, d.publication?.connection) &&
+    (j.connectionSnapshot === undefined ||
+      (d.publication !== undefined &&
+        j.connectionSnapshot.method.allowedCredentialPolicies.includes(
+          d.publication.credential.credentialPolicy,
+        )))
   );
 }
 export function sameCandidate(a: PhysicalCandidate, b: PhysicalCandidate): boolean {
@@ -53,7 +64,8 @@ export function sameCandidate(a: PhysicalCandidate, b: PhysicalCandidate): boole
     a.createdAt === b.createdAt &&
     a.profile === b.profile &&
     a.baseURL === b.baseURL &&
-    a.model === b.model
+    a.model === b.model &&
+    samePublication(a.publication, b.publication)
   );
 }
 // Keep RFC3339 text verbatim. No Date conversion, ID-only or latest-row recovery.
@@ -66,6 +78,9 @@ export function physicalCandidate(input: PhysicalCandidate): PhysicalCandidate {
     profile: input.profile,
     baseURL: input.baseURL,
     model: input.model,
+    ...(input.publication === undefined
+      ? {}
+      : { publication: capturePublication(input.publication) }),
   };
   uuid(d.generation);
   uuid(d.nativePhysicalIdentity);

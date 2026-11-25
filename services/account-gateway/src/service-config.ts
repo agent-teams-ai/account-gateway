@@ -47,7 +47,7 @@ export interface ServiceConfig {
     cleanupCredential: string;
     callbackCredential: string;
   }>;
-  readonly profile: ServiceProfile;
+  readonly profile?: ServiceProfile;
   readonly secondProfile?: ServiceProfile;
   readonly providerProfiles?: readonly ServiceProfile[];
   readonly bearers: readonly (ManagementBearer | RunControlBearer | ConsumerControlBearer)[];
@@ -56,6 +56,8 @@ export interface ServiceConfig {
   readonly oauthEnrollment?: OAuthEnrollmentConfig;
   readonly claudeOAuthEnrollment?: ClaudeOAuthEnrollmentConfig;
   readonly grokOAuthEnrollment?: GrokOAuthEnrollmentConfig;
+  readonly nativeConnections?: NativeConnectionsConfig;
+  readonly accountInfoContract?: "account-info/v1" | "account-info/v2";
   readonly accountLifecycle?: Readonly<{
     contract: typeof lifecycleContract;
     writeGate: "enabled" | "disabled";
@@ -97,6 +99,60 @@ export interface ServiceProfile {
   readonly qualificationRef: string;
   readonly limits: Readonly<ApprovedLimits>;
   readonly providerTokenUpperBound: number;
+  readonly nativeConnection?: true;
+}
+export interface NativeConnectionsConfig {
+  readonly contract: "native-account-capabilities/v2";
+  readonly profiles: readonly {
+    readonly profileId: string;
+    readonly limits: Readonly<ApprovedLimits>;
+    readonly providerTokenUpperBound: number;
+  }[];
+}
+export function captureNativeConnections(value: unknown): NativeConnectionsConfig {
+  try {
+    const r = object(value, ["contract", "profiles"]);
+    if (
+      r.contract !== "native-account-capabilities/v2" ||
+      !Array.isArray(r.profiles) ||
+      !r.profiles.length ||
+      r.profiles.length > 128
+    ) {
+      return deny();
+    }
+    const profiles = r.profiles.map((entry) => {
+      const p = object(entry, ["profileId", "limits", "providerTokenUpperBound"]);
+      identifier(p.profileId, 64);
+      const limits = approvedLimits(
+        object(p.limits, [
+          "requests",
+          "concurrency",
+          "requestBytes",
+          "outputBytes",
+          "tokens",
+        ]) as unknown as ApprovedLimits,
+        { ...defaults, maxConcurrent: 64 },
+      );
+      integer(p.providerTokenUpperBound, 10_000_000);
+      if (limits.tokens > p.providerTokenUpperBound) {
+        return deny();
+      }
+      return Object.freeze({
+        profileId: p.profileId,
+        limits,
+        providerTokenUpperBound: p.providerTokenUpperBound,
+      });
+    });
+    if (new Set(profiles.map((p) => p.profileId)).size !== profiles.length) {
+      return deny();
+    }
+    return Object.freeze({
+      contract: "native-account-capabilities/v2",
+      profiles: Object.freeze(profiles),
+    });
+  } catch {
+    return deny();
+  }
 }
 export const openRouterProfile = Object.freeze({
   profile: "openrouter-openai-responses-apikey-v1",
@@ -411,9 +467,24 @@ export function captureServiceProfiles(
     | "oauthEnrollment"
     | "claudeOAuthEnrollment"
     | "grokOAuthEnrollment"
+    | "nativeConnections"
   >,
 ): readonly ServiceProfile[] {
   try {
+    if (input.nativeConnections !== undefined) {
+      captureNativeConnections(input.nativeConnections);
+      if (
+        input.profile !== undefined ||
+        input.secondProfile !== undefined ||
+        input.providerProfiles !== undefined ||
+        input.oauthEnrollment !== undefined ||
+        input.claudeOAuthEnrollment !== undefined ||
+        input.grokOAuthEnrollment !== undefined
+      ) {
+        return deny();
+      }
+      return [];
+    }
     const first = captureProfile(input.profile);
     if (
       first.profile !== "openai-responses-apikey-v1" &&
@@ -501,7 +572,7 @@ export function captureServiceProfiles(
 export function captureServiceBearers(
   value: unknown,
   consumerId: string,
-  profiles: readonly ServiceProfile[],
+  profiles: readonly Pick<ServiceProfile, "profile" | "limits">[],
 ): ServiceConfig["bearers"] {
   try {
     if (!Array.isArray(value) || !value.length || value.length > 128) {
@@ -657,7 +728,6 @@ export function loadServiceConfig(file: string): ServiceConfig {
         "callbackOrigin",
         "native",
         "consumer",
-        "profile",
         "bearers",
         "keys",
       ],
@@ -669,11 +739,22 @@ export function loadServiceConfig(file: string): ServiceConfig {
         "providerProfiles",
         "accountLifecycle",
         "requestReadbackRetentionMs",
+        "profile",
+        "nativeConnections",
+        "accountInfoContract",
       ],
     );
     const requestReadbackRetentionMs = Object.hasOwn(r, "requestReadbackRetentionMs")
       ? captureRequestReadbackRetention(r.requestReadbackRetentionMs)
       : undefined;
+    const nativeConnections =
+      r.nativeConnections === undefined ? undefined : captureNativeConnections(r.nativeConnections);
+    const accountInfoContract =
+      r.accountInfoContract ??
+      (r.nativeConnections === undefined ? "account-info/v1" : "account-info/v2");
+    if (accountInfoContract !== "account-info/v1" && accountInfoContract !== "account-info/v2") {
+      return deny();
+    }
     const accountLifecycle =
       r.accountLifecycle === undefined ? undefined : captureAccountLifecycle(r.accountLifecycle);
     const oauthEnrollment = Object.hasOwn(r, "oauthEnrollment")
@@ -741,7 +822,7 @@ export function loadServiceConfig(file: string): ServiceConfig {
       callbackCredential: text(c.callbackCredential),
     };
     identifier(consumer.consumerId);
-    const profile = captureProfile(r.profile),
+    const profile = r.profile === undefined ? undefined : captureProfile(r.profile),
       secondProfile = r.secondProfile === undefined ? undefined : captureProfile(r.secondProfile);
     if (r.providerProfiles !== undefined && !Array.isArray(r.providerProfiles)) {
       return deny();
@@ -755,6 +836,7 @@ export function loadServiceConfig(file: string): ServiceConfig {
       oauthEnrollment,
       claudeOAuthEnrollment,
       grokOAuthEnrollment,
+      nativeConnections,
     });
     const keys = {
       intentAEAD: text(k.intentAEAD),
@@ -765,7 +847,10 @@ export function loadServiceConfig(file: string): ServiceConfig {
     if (new Set(Object.values(keys)).size !== 3) {
       deny();
     }
-    const bearers = captureServiceBearers(r.bearers, consumer.consumerId, profiles);
+    const policyProfiles =
+      nativeConnections?.profiles.map((p) => ({ profile: p.profileId, limits: p.limits })) ??
+      profiles;
+    const bearers = captureServiceBearers(r.bearers, consumer.consumerId, policyProfiles);
     const credentials = [
       consumer.managementCredential,
       consumer.executionCredential,
@@ -796,7 +881,7 @@ export function loadServiceConfig(file: string): ServiceConfig {
       callbackOrigin,
       native,
       consumer,
-      profile,
+      ...(profile === undefined ? {} : { profile }),
       bearers,
       keys,
       ...(requestReadbackRetentionMs === undefined ? {} : { requestReadbackRetentionMs }),
@@ -806,6 +891,8 @@ export function loadServiceConfig(file: string): ServiceConfig {
       ...(oauthEnrollment === undefined ? {} : { oauthEnrollment }),
       ...(claudeOAuthEnrollment === undefined ? {} : { claudeOAuthEnrollment }),
       ...(grokOAuthEnrollment === undefined ? {} : { grokOAuthEnrollment }),
+      ...(nativeConnections === undefined ? {} : { nativeConnections }),
+      accountInfoContract,
     });
   } catch {
     return deny();

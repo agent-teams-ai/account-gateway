@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { writeSync } from "node:fs";
 import { createServer } from "node:http";
+import { setTimeout as pause } from "node:timers/promises";
 import type { Server } from "node:http";
 import { Pool } from "pg";
 import {
@@ -21,6 +22,7 @@ import { createFacade, cancelFacadeTransport } from "./facade.ts";
 import type { FacadeOptions } from "./facade.ts";
 import { strictJSON } from "./facade-ingress.ts";
 import { object } from "./native-wire.ts";
+import { NativeFailure } from "./native-client.ts";
 import { forwardNativeResponseDiagnostics } from "./native-response-diagnostics.ts";
 import {
   captureServiceProfiles,
@@ -34,6 +36,7 @@ import {
   composeServiceCleanupTurn,
   protectedReadSockets,
   composeServiceControl,
+  loadNativeConnectionProfiles,
   composeServiceCachedLimits,
   composeServiceNative,
 } from "./service-assembly.ts";
@@ -413,7 +416,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   pool.on("error", (error) => {
     fail(error, "pool_error");
   });
-  const qualifiedProfiles = captureServiceProfiles(cfg);
+  const qualifiedProfiles = cfg.nativeConnections?.profiles ?? captureServiceProfiles(cfg);
   const kernel = new PostgresKernel(
       pool,
       composeKernelBounds(cfg.bearers, qualifiedProfiles),
@@ -426,9 +429,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     ctx = Object.freeze({ consumerId: cfg.consumer.consumerId });
   const custody = new IntentSecrets(keyBytes(cfg.keys.intentAEAD), keyBytes(cfg.keys.intentHMAC));
   const store = new PostgresManagementStore(pool, custody);
-  const control = composeServiceControl(cfg, kernel, store, custody, worker, nativeControls);
-  const { profiles, bearers, management, catalog } = control;
-  bearers.configureExecutionKey(keyBytes(cfg.keys.facadeHMAC));
+  let control: ReturnType<typeof composeServiceControl> | undefined;
   const usage = new PostgresUsageJournal(pool, keyBytes(cfg.keys.facadeHMAC));
   const readRetirement = composeServiceRetirementReadback(cfg.native),
     readbackAbort = new AbortController();
@@ -440,7 +441,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
   const isStopping = (): boolean => stopping;
   let terminal: "retired" | "pending" | undefined, retirement: Retirement | undefined;
   let child: ReturnType<typeof spawn> | undefined, options: FacadeOptions | undefined;
-  type StartupStage = "starting" | "ready" | "heartbeat" | "facade-listen";
+  type StartupStage = "starting" | "capabilities" | "ready" | "heartbeat" | "facade-listen";
   let startupStage: StartupStage | undefined = "starting";
   let startupFailure: { cause: unknown; stage: StartupStage } | undefined;
   function retainStartupFailure(cause: unknown) {
@@ -491,7 +492,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     enrollmentWaiters = 0;
   let wakeSleep: (() => void) | undefined;
   function denyAdmission() {
-    bearers.replace([]);
+    control?.bearers.replace([]);
     facade?.closeAllConnections();
   }
   function fail(error?: unknown, cause: RuntimeFailureCause = "runtime_invalidated") {
@@ -542,7 +543,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
       }
       if (
         req.method !== "POST" ||
-        !/^\/private\/native\/v1\/(enrollment|admit|execution-authority|public-admit|execution-settle|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-custody-authority|oauth-refresh-authority|oauth-cleanup-authority|account-limits-authority)$/.test(
+        !/^\/private\/native\/v1\/(enrollment|admit|execution-authority|public-admit|execution-settle|dispatch-proof|cleanup-authority|owner-closure-authority|closure-ack|oauth-owner-authority|oauth-custody-authority|oauth-refresh-authority|oauth-cleanup-authority|account-limits-authority|account-info-authority)$/.test(
           req.url ?? "",
         )
       ) {
@@ -806,6 +807,56 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     });
     await waitFor(() => original !== undefined, 10_000);
     startupActive();
+    const readyDeadline = Date.now() + 10_000;
+    startupStage = "capabilities";
+    let nativeProfiles: Awaited<ReturnType<typeof loadNativeConnectionProfiles>> | undefined;
+    if (cfg.nativeConnections) {
+      let delayMs = 50;
+      while (nativeProfiles === undefined) {
+        startupActive();
+        const remaining = readyDeadline - Date.now();
+        if (remaining <= 0) {
+          throw new ServiceError("startup_denied");
+        }
+        try {
+          nativeProfiles = await loadNativeConnectionProfiles(
+            cfg,
+            nativeControls,
+            readbackAbort.signal,
+            Math.min(2000, remaining),
+          );
+        } catch (error) {
+          // Only a listener that has not opened yet may be awaited. A native
+          // HTTP response, malformed catalog or failed authority is terminal.
+          if (!(error instanceof NativeFailure) || error.code !== "not_listening") {
+            throw error;
+          }
+          await pause(Math.min(delayMs, Math.max(1, readyDeadline - Date.now())), undefined, {
+            signal: readbackAbort.signal,
+          });
+          delayMs = Math.min(delayMs * 2, 800);
+        }
+      }
+    }
+    startupActive();
+    if (
+      nativeProfiles &&
+      (nativeProfiles.enrollment.originRef !== original!.originRef ||
+        nativeProfiles.enrollment.engineIncarnation !== original!.incarnation)
+    ) {
+      throw new ServiceError("startup_denied");
+    }
+    control = composeServiceControl(
+      cfg,
+      kernel,
+      store,
+      custody,
+      worker,
+      nativeControls,
+      nativeProfiles,
+    );
+    const { profiles, bearers, management, catalog } = control;
+    bearers.configureExecutionKey(keyBytes(cfg.keys.facadeHMAC));
     const binding = original!;
     const enrollment = Object.freeze({
       originRef: binding.originRef,
@@ -835,7 +886,7 @@ export async function startService(configFile: string, signal?: AbortSignal): Pr
     });
     install();
     startupStage = "ready";
-    await waitFor(() => ready, 10_000);
+    await waitFor(() => ready, Math.max(1, readyDeadline - Date.now()));
     startupActive();
     startupStage = "heartbeat";
     await inServiceLane("control", () => kernel.heartbeat(ctx, worker));

@@ -5,8 +5,11 @@ import type { AccountInfoIdentity } from "./domain.ts";
 
 /** Safe backend result. Private native principal proofs terminate in its adapter. */
 export type AccountInfoObservation =
-  | { readonly info: Extract<c.AccountInfo, { status: "available" }>; readonly generation: string }
-  | { readonly info: Exclude<c.AccountInfo, { status: "available" }> };
+  | {
+      readonly info: Extract<c.AccountInfoV2, { status: "available" }>;
+      readonly generation: string;
+    }
+  | { readonly info: Exclude<c.AccountInfoV2, { status: "available" }> };
 export interface AccountInfoSource {
   readAccountInfo(
     input: c.AccountLimitsRequest,
@@ -59,6 +62,18 @@ export class AccountInfoReader {
     input: c.AccountInfoReadRequest,
     options: { readonly consumerId: string; readonly signal: AbortSignal },
   ): Promise<c.AccountInfoReadResponse> {
+    const result = await this.readV2(authority, input, options);
+    return c.accountInfoReadResponse.parse({
+      contract: c.ACCOUNT_INFO_CONTRACT,
+      accounts: result.accounts.map((row) => ({ ...row, info: c.accountInfoToV1(row.info) })),
+    });
+  }
+
+  async readV2(
+    authority: AccountInfoAuthority,
+    input: c.AccountInfoReadRequest,
+    options: { readonly consumerId: string; readonly signal: AbortSignal },
+  ): Promise<c.AccountInfoReadResponseV2> {
     const captured = c.accountInfoReadRequest.parse(input);
     const callerAborted = () => options.signal.aborted;
     const started = Date.now(),
@@ -92,7 +107,7 @@ export class AccountInfoReader {
       ) {
         throw new KernelError("denied");
       }
-      const infos: c.AccountInfo[] = before.map(() => ({
+      const infos: c.AccountInfoV2[] = before.map(() => ({
         status: this.#source ? "unavailable" : "unsupported",
       }));
       let next = 0;
@@ -133,7 +148,7 @@ export class AccountInfoReader {
             });
           try {
             const observed = await bounded(work, sourceDeadline - Date.now(), controller.signal);
-            const parsed = c.accountInfo.safeParse(observed.info);
+            const parsed = c.accountInfoV2.safeParse(observed.info);
             if (
               parsed.success &&
               (parsed.data.status !== "available" ||
@@ -159,8 +174,8 @@ export class AccountInfoReader {
       if (!isDeepStrictEqual(before, after) || callerAborted() || Date.now() >= deadline) {
         throw new KernelError("denied");
       }
-      return c.accountInfoReadResponse.parse({
-        contract: c.ACCOUNT_INFO_CONTRACT,
+      return c.accountInfoReadResponseV2.parse({
+        contract: c.ACCOUNT_INFO_V2_CONTRACT,
         accounts: after.map((row, index) => ({
           accountRef: row.accountRef,
           metadataRevision: row.revision,

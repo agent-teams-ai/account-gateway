@@ -3,6 +3,7 @@ import { physicalCandidate } from "./candidate-identity.ts";
 import type { OAuthProfileDefinition } from "./oauth-profiles.ts";
 
 export type NativeFailureCode =
+  | "not_listening"
   | "unavailable"
   | "deadline"
   | "bounded"

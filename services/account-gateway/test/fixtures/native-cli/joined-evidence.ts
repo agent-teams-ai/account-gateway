@@ -197,6 +197,34 @@ export function joinedSandboxQualification(value: unknown) {
   return expected;
 }
 
+function joinedToolOutputDiagnostic(value: Record<string, unknown>): boolean {
+  const flags = [
+    "workspaceObserved",
+    "exitZeroObserved",
+    "unknownToolObserved",
+    "invalidArgumentsObserved",
+    "sandboxFailureObserved",
+    "runningSessionObserved",
+    "execCommandFailureObserved",
+    "createProcessFailureObserved",
+    "resourceExhaustionObserved",
+    "approvalFailureObserved",
+    "nonzeroExitObserved",
+  ] as const;
+  const keys = ["phase", "profileId", "functionOutputs", ...flags];
+  return (
+    Object.keys(value).length === keys.length &&
+    keys.every((key) => Object.hasOwn(value, key)) &&
+    value.phase === "actual-cli-tool-output-shape" &&
+    joinedProviderProfiles.some(([, profileId]) => value.profileId === profileId) &&
+    typeof value.functionOutputs === "number" &&
+    Number.isSafeInteger(value.functionOutputs) &&
+    value.functionOutputs >= 1 &&
+    value.functionOutputs <= 128 &&
+    flags.every((key) => typeof value[key] === "boolean")
+  );
+}
+
 /** This third case uses the real RR Action pin, independently of the two CLI lanes. */
 export function joinedProviderReceipt(
   raw: string,
@@ -229,6 +257,11 @@ export function joinedProviderReceipt(
     check(value !== undefined);
     if (value.phase === "completed") {
       result = value;
+    } else if (value.phase === "actual-cli-tool-output-shape") {
+      // The pinned RR relay emits this closed diagnostic on successful tool
+      // continuation. It carries no proof authority and is never exported;
+      // the completed receipt below still has to satisfy every real gate.
+      check(joinedToolOutputDiagnostic(value));
     } else {
       // Existing safe diagnostic events are deliberately not exported.
       check(
