@@ -28,7 +28,11 @@ import type { ServiceConfig } from "../src/service-config.ts";
 import { startWorkerHeartbeat } from "./fixtures/native-cli/worker-heartbeat.ts";
 import { loadQualifiedConnectionConsumers } from "./fixtures/native-connections-joined/consumers.ts";
 import { prepareGatewayRollbackReader } from "./fixtures/native-connections-joined/rollback.ts";
-import { acceptedBatchRows } from "./fixtures/native-connections-joined/acceptance.ts";
+import {
+  acceptedBatchRows,
+  acceptedReviewBatchRows,
+  reviewAcceptance,
+} from "./fixtures/native-connections-joined/acceptance.ts";
 
 const report = (value: object) => process.stdout.write(JSON.stringify(value) + "\n");
 const required = (name: string) => {
@@ -1195,7 +1199,7 @@ async function main() {
       receipts.every((row) => row.pendingRecovery === true));
   const qualified =
     failed === 0 &&
-    acceptedBatchRows(receipts) &&
+    (isExtensibility ? acceptedBatchRows(receipts) : acceptedReviewBatchRows(receipts)) &&
     negativeFailures.length === 0 &&
     extensionComplete &&
     accountInfoCompatibility?.qualified === true &&
@@ -1211,6 +1215,7 @@ async function main() {
     ...provenance,
     batch: fixture.batch,
     expectedInventoryRows: 53,
+    ...(!isExtensibility ? { reviewAcceptance } : {}),
     ...(isExtensibility ? { expectedExtensionRows: 1 } : {}),
     batchRows: rows.length,
     passed,

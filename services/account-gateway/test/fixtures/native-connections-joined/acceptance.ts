@@ -3,6 +3,15 @@ import assert from "node:assert/strict";
 /** An observed capability restriction never substitutes for a completed review. */
 export const unavailableReviewRow = "typesafe-systemone-apikey-v1/api_key/provider_api_key";
 
+/** Explicit owner decision; the original Native inventory remains unchanged. */
+export const reviewAcceptance = {
+  contract: "native-generative-review-acceptance/v1",
+  ownerDecision: "2026-11-25-typesafe-exclusion",
+  originalInventoryRows: 53,
+  requiredReviewRows: 52,
+  excludedReviewRowIds: [unavailableReviewRow],
+} as const;
+
 export type AcceptanceRow = {
   rowId: string;
   outcome: string;
@@ -37,7 +46,7 @@ export function acceptedBatchRows(rows: readonly AcceptanceRow[]): boolean {
   );
 }
 
-export function acceptedBaselineRows(
+function hasBaselineInventoryRows(
   rows: readonly AcceptanceRow[],
   expectedRowIds: readonly string[],
 ): boolean {
@@ -46,8 +55,35 @@ export function acceptedBaselineRows(
     expectedRowIds.length === 53 &&
     expected.size === 53 &&
     rows.length === 53 &&
-    rows.every((row) => expected.has(row.rowId)) &&
-    acceptedBatchRows(rows)
+    rows.every((row) => expected.has(row.rowId))
+  );
+}
+
+/** Preserve the original all-53 result separately from the owner's new scope. */
+export function acceptedBaselineRows(
+  rows: readonly AcceptanceRow[],
+  expectedRowIds: readonly string[],
+): boolean {
+  return hasBaselineInventoryRows(rows, expectedRowIds) && acceptedBatchRows(rows);
+}
+
+/** TypeSafe remains an observed unsupported path, never a successful review. */
+export function acceptedReviewBatchRows(rows: readonly AcceptanceRow[]): boolean {
+  return (
+    new Set(rows.map((row) => row.rowId)).size === rows.length &&
+    rows.filter((row) => row.rowId === unavailableReviewRow).every(isExpectedUnavailableReview) &&
+    acceptedBatchRows(rows.filter((row) => row.rowId !== unavailableReviewRow))
+  );
+}
+
+export function acceptedRequiredReviewRows(
+  rows: readonly AcceptanceRow[],
+  expectedRowIds: readonly string[],
+): boolean {
+  return (
+    hasBaselineInventoryRows(rows, expectedRowIds) &&
+    expectedRowIds.includes(unavailableReviewRow) &&
+    acceptedReviewBatchRows(rows)
   );
 }
 

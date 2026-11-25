@@ -3,9 +3,12 @@ import { test } from "node:test";
 import {
   acceptedBaselineRows,
   acceptedBatchRows,
+  acceptedRequiredReviewRows,
+  acceptedReviewBatchRows,
   baselineRowIds,
   hasNativeSourcePostconditions,
   isExpectedUnavailableReview,
+  reviewAcceptance,
   unavailableReviewRow,
 } from "./acceptance.ts";
 
@@ -253,4 +256,86 @@ await test("each independent batch admits its own completed Native source checks
       true,
     );
   }
+});
+
+const scopedRows = [...passed.slice(0, 52), unavailable];
+
+await test("the owner's named exclusion qualifies 52 reviews without relabeling original53", () => {
+  const retained = structuredClone(scopedRows);
+  assert.equal(acceptedRequiredReviewRows(scopedRows, expectedRowIds), true);
+  assert.equal(acceptedRequiredReviewRows(scopedRows.toReversed(), expectedRowIds), true);
+  assert.equal(acceptedBaselineRows(scopedRows, expectedRowIds), false);
+  assert.equal(acceptedBatchRows(scopedRows), false);
+  assert.deepEqual(scopedRows, retained);
+  assert.deepEqual(reviewAcceptance, {
+    contract: "native-generative-review-acceptance/v1",
+    ownerDecision: "2026-11-25-typesafe-exclusion",
+    originalInventoryRows: 53,
+    requiredReviewRows: 52,
+    excludedReviewRowIds: ["typesafe-systemone-apikey-v1/api_key/provider_api_key"],
+  });
+});
+
+await test("every other original row must be present and complete its own review", () => {
+  for (let index = 0; index < 52; index++) {
+    const withoutRow = scopedRows.filter((_, rowIndex) => rowIndex !== index);
+    assert.equal(acceptedRequiredReviewRows(withoutRow, expectedRowIds), false);
+    for (const replacement of [
+      scopedRows[(index + 1) % 52],
+      { ...passed[index], rowId: "extension/api_key/provider_api_key" },
+      { ...passed[index], outcome: "blocked" },
+      { ...passed[index], outcome: "failed" },
+      { ...passed[index], enrolled: false },
+      { ...passed[index], review: "not_requested" },
+      { ...passed[index], review: "not_run" },
+      { ...passed[index], review: "failed" },
+    ]) {
+      const rows = scopedRows.with(index, replacement);
+      assert.equal(acceptedRequiredReviewRows(rows, expectedRowIds), false);
+    }
+  }
+});
+
+await test("the original 53-identity oracle and the named excluded observation remain required", () => {
+  assert.equal(acceptedRequiredReviewRows(passed.slice(0, 52), expectedRowIds), false);
+  assert.equal(acceptedRequiredReviewRows([...scopedRows, unavailable], expectedRowIds), false);
+  for (const invalidIds of [
+    expectedRowIds.slice(0, 52),
+    expectedRowIds.slice(1),
+    [...expectedRowIds.slice(1), expectedRowIds[1]],
+    expectedRowIds.with(52, "typesafe-systemone-apikey-v1/api_key/other_variant"),
+    expectedRowIds.with(0, "extension/api_key/provider_api_key"),
+  ]) {
+    assert.equal(acceptedRequiredReviewRows(scopedRows, invalidIds), false);
+  }
+  const substituteIds = expectedRowIds.with(52, "unlisted/api_key/provider_api_key");
+  const substitutes = substituteIds.map((rowId) => ({ ...passed[0], rowId }));
+  assert.equal(acceptedRequiredReviewRows(substitutes, substituteIds), false);
+});
+
+await test("the exclusion does not turn arbitrary TypeSafe failures or a fabricated review into success", () => {
+  for (const replacement of [
+    { ...unavailable, rowId: "typesafe-systemone-apikey-v1/api_key/other_variant" },
+    { ...unavailable, enrolled: true },
+    { ...unavailable, review: "passed" },
+    { ...unavailable, outcome: "failed" },
+    { ...unavailable, failure: undefined },
+    { ...unavailable, failure: { at: "other", error: "native_systemone_protocol" } },
+    { ...unavailable, failure: { at: "rr-enrollment", error: "other" } },
+    passed[52],
+  ]) {
+    const rows = [...passed.slice(0, 52), replacement];
+    assert.equal(acceptedReviewBatchRows(rows), false);
+    assert.equal(acceptedRequiredReviewRows(rows, expectedRowIds), false);
+  }
+});
+
+await test("batch qualification keeps the exact unsupported observation separate from required reviews", () => {
+  assert.equal(acceptedReviewBatchRows(scopedRows.slice(1)), true);
+  assert.equal(acceptedReviewBatchRows([passed[0]]), true);
+  assert.equal(acceptedReviewBatchRows([]), false);
+  assert.equal(acceptedReviewBatchRows([unavailable]), false);
+  assert.equal(acceptedReviewBatchRows([passed[0], unavailable, unavailable]), false);
+  assert.equal(acceptedReviewBatchRows([passed[0], { ...unavailable, rowId: "other" }]), false);
+  assert.equal(acceptedBatchRows([passed[0], unavailable]), false);
 });

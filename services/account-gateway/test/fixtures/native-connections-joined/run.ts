@@ -21,8 +21,10 @@ import { createServer } from "node:net";
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath } from "node:path";
 import {
   acceptedBaselineRows,
+  acceptedRequiredReviewRows,
   baselineRowIds,
   hasNativeSourcePostconditions,
+  reviewAcceptance,
 } from "./acceptance.ts";
 
 type Options = {
@@ -231,6 +233,7 @@ async function main() {
     rrCommit: options.rrCommit,
     sdkSHA256: options.sdkSHA256,
     expectedInventoryRows: 53,
+    reviewAcceptance,
     expectedExtensionRows: 1,
     timeBudget,
     batches: [],
@@ -457,6 +460,7 @@ async function main() {
       contract: string;
       qualified: boolean;
       expectedInventoryRows: number;
+      reviewAcceptance?: typeof reviewAcceptance;
       expectedExtensionRows?: number;
       batchRows: number;
       rows: {
@@ -585,6 +589,7 @@ async function main() {
         ]);
       } else {
         assert.equal(receipt.contract, "native-connections-gateway-sdk-rr-joined/v1");
+        assert.deepEqual(receipt.reviewAcceptance, reviewAcceptance);
       }
       item.receipt = receipt;
       // Keep observed review rows even when the separate Native proof is absent.
@@ -617,7 +622,8 @@ async function main() {
   const rows = baseline.flatMap((batch) => batch.receipt?.rows ?? []);
   const baselineQualified =
     baseline.every((batch) => batch.exitCode === 0 && batch.receipt?.qualified === true) &&
-    acceptedBaselineRows(rows, expectedBaselineRowIds);
+    acceptedRequiredReviewRows(rows, expectedBaselineRowIds);
+  const originalBaselineQualified = acceptedBaselineRows(rows, expectedBaselineRowIds);
   const identity = baseline[0].receipt?.consumerBuildDigestBefore;
   const unchangedConsumerBuild =
     identity !== undefined &&
@@ -708,9 +714,11 @@ async function main() {
     sdkSHA256: options.sdkSHA256,
     ...sources,
     expectedInventoryRows: 53,
+    reviewAcceptance,
     expectedExtensionRows: 1,
     timeBudget,
     baselineQualified,
+    originalBaselineQualified,
     nativeSourcePostconditionsVerified,
     consumerBuildDigest: identity,
     unchangedConsumerBuild,
