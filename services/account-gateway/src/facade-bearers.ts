@@ -436,7 +436,8 @@ export class FacadeBearers {
     // intent check, can authorize terminal readback. POST still checks dispatch.
     const terminalOriginal =
       (saved.state === "fenced" || saved.state === "closed") &&
-      original !== undefined && sameSaved(original, saved);
+      original !== undefined &&
+      sameSaved(original, saved);
     if (
       ((!saved.dispatchAllowed || saved.state !== "open") && !terminalOriginal) ||
       Date.parse(saved.admission.expiresAt) <= Date.now()
