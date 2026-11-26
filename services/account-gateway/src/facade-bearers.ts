@@ -433,11 +433,13 @@ export class FacadeBearers {
     }
     const saved = savedCopy(input);
     // Only the route's persisted original lookup, followed by prepare's exact
-    // intent check, can authorize fenced readback. POST still checks dispatch.
-    const fencedOriginal =
-      saved.state === "fenced" && original !== undefined && sameSaved(original, saved);
+    // intent check, can authorize terminal readback. POST still checks dispatch.
+    const terminalOriginal =
+      (saved.state === "fenced" || saved.state === "closed") &&
+      original !== undefined &&
+      sameSaved(original, saved);
     if (
-      ((!saved.dispatchAllowed || saved.state !== "open") && !fencedOriginal) ||
+      ((!saved.dispatchAllowed || saved.state !== "open") && !terminalOriginal) ||
       Date.parse(saved.admission.expiresAt) <= Date.now()
     ) {
       throw new KernelError("denied");

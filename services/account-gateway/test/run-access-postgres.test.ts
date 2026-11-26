@@ -608,6 +608,8 @@ void test("original prepare recovery survives settings drift and preserves scope
         );
         const active = f.execution(recovered);
         assert.equal((await active.client.status(active.ref, requestId)).effect, "completed");
+        const completedCloseId = randomUUID();
+        const reinstalledBearer = recovered.bearer;
         if (terminal === "close") {
           await f.restart();
           const restarted = f.execution(recovered);
@@ -620,7 +622,7 @@ void test("original prepare recovery survives settings drift and preserves scope
           assert.deepEqual(reinstalled.admission, recovered.admission);
           recovered = reinstalled;
           const e = f.execution(recovered);
-          await e.client.close(e.ref, { operationId: randomUUID(), reason: "completed" });
+          await e.client.close(e.ref, { operationId: completedCloseId, reason: "completed" });
         } else if (terminal === "fence") {
           await f.kernel.fence(f.context, randomUUID(), value.subjectRef, value.policyRevision + 1);
         } else if (terminal === "reconnect") {
@@ -644,7 +646,21 @@ void test("original prepare recovery survives settings drift and preserves scope
         } else {
           await delay(Math.max(1, Date.parse(value.deadline) - Date.now() + 30));
         }
-        if (terminal === "fence" || terminal === "reconnect") {
+        if (terminal === "close") {
+          await f.restart();
+          recovered = await f.mint(value);
+          assert.equal((await f.kernel.savedExecution(f.context, op.executionRef)).state, "closed");
+          assert.equal(recovered.bearer, reinstalledBearer);
+          const e = f.execution(recovered);
+          const retry = await e.client.close(e.ref, {
+            operationId: completedCloseId,
+            reason: "completed",
+          });
+          assert.equal(retry.state, "applied");
+          assert.equal(retry.operationRef, completedCloseId);
+          const changedTerminal = await f.raw({ ...value, bindingRevision: 4 });
+          assert.equal(changedTerminal.status, 409);
+        } else if (terminal === "fence" || terminal === "reconnect") {
           // Lose volatile grants, then recover only the immutable original scope.
           const previous = recovered;
           await f.restart();

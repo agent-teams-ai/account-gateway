@@ -3143,7 +3143,7 @@ void test("source HTTP: same fenced original remints only scoped readback and cl
     );
     await denyDispatch(final.bearer, final.admission);
 
-    // A distinct row actually closed from open still denies identical remint.
+    // A closed original allows scoped readback without allowing dispatch.
     const closedInput = {
       ...input,
       operationId: randomUUID(),
@@ -3163,9 +3163,12 @@ void test("source HTTP: same fenced original remints only scoped readback and cl
     );
     assert.equal(closedReply.status, 200);
     assert.equal((await f.kernel.savedExecution(f.context, closedRef)).state, "closed");
-    const closedDenied = await closedMint();
-    assert.equal(closedDenied.status, 403);
-    assert.equal(((await closedDenied.json()) as { effect: string }).effect, "effect_unknown");
+    const closedReplay = await closedMint();
+    assert.equal(closedReplay.status, 200);
+    const closedRecovered = (await closedReplay.json()) as Access;
+    assert.equal(closedRecovered.operation.result.state, "terminal");
+    assert.equal(closedRecovered.bearer, open.bearer);
+    await denyDispatch(closedRecovered.bearer, closedRecovered.admission);
 
     // Restore between the final saved read and issuance must be observed by a
     // fresh server issuer proof, even though exact prepare accepts the old HMAC.
