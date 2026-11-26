@@ -649,7 +649,7 @@ void test("original prepare recovery survives settings drift and preserves scope
         if (terminal === "close") {
           await f.restart();
           recovered = await f.mint(value);
-          assert.equal(recovered.operation.result?.state, "terminal");
+          assert.equal(c.preparationOperation.parse(recovered.operation).result?.state, "terminal");
           assert.equal(recovered.bearer, reinstalledBearer);
           const e = f.execution(recovered);
           const retry = await e.client.close(e.ref, {
@@ -658,8 +658,8 @@ void test("original prepare recovery survives settings drift and preserves scope
           });
           assert.equal(retry.state, "applied");
           assert.equal(retry.operationRef, completedCloseId);
-          const changed = await f.raw({ ...value, bindingRevision: 4 });
-          assert.equal(changed.status, 409);
+          const changedTerminal = await f.raw({ ...value, bindingRevision: 4 });
+          assert.equal(changedTerminal.status, 409);
         } else if (terminal === "fence" || terminal === "reconnect") {
           // Lose volatile grants, then recover only the immutable original scope.
           const previous = recovered;
