@@ -1324,9 +1324,9 @@ export function createFacade(options: FacadeOptions): Server {
             }
             const saved = savedCopy(await kernel.savedExecution(context, op.executionRef));
             // Exact original intent keeps its persisted issuer for HMAC/readback;
-            // restore rotation must still deny the fenced issuance exception.
+            // restore rotation must still deny the terminal issuance exception.
             if (
-              saved.state === "fenced" &&
+              (saved.state === "fenced" || saved.state === "closed") &&
               (await kernel.issuer(context)) !== saved.admission.issuerEpoch
             ) {
               throw new KernelError("denied");
