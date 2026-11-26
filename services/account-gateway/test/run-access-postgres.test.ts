@@ -649,7 +649,7 @@ void test("original prepare recovery survives settings drift and preserves scope
         if (terminal === "close") {
           await f.restart();
           recovered = await f.mint(value);
-          assert.equal(c.preparationOperation.parse(recovered.operation).result?.state, "terminal");
+          assert.equal((await f.kernel.savedExecution(f.context, op.executionRef)).state, "closed");
           assert.equal(recovered.bearer, reinstalledBearer);
           const e = f.execution(recovered);
           const retry = await e.client.close(e.ref, {
