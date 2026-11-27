@@ -306,6 +306,17 @@ export interface ExecutionRead {
     requestId: string,
   ): Promise<NativeDispatchProof | undefined>;
 }
+export const NATIVE_NON_ENTRY_CAPABILITY = "account-gateway/native-non-entry/v1" as const;
+export type NativeNonEntryCapability = typeof NATIVE_NON_ENTRY_CAPABILITY;
+export type NativeNonEntryReason = "admission_storage_conflict";
+export interface RequestRetryProof {
+  readonly kind: "request-retry-proof/v1";
+  readonly consumerId: string;
+  readonly executionRef: string;
+  readonly requestRef: string;
+  readonly nonEntryReason: NativeNonEntryReason;
+  readonly transportClosed: true;
+}
 export interface RequestStatus {
   requestRef: string;
   effect: Effect;
@@ -568,8 +579,20 @@ export interface DurableKernel {
     worker: string,
     admission: PrivateAdmission,
     reservation: NativeReservation,
+    nonEntryCapability?: NativeNonEntryCapability,
   ): Promise<ClaimResult>;
   request(context: TrustedContext, executionRef: string, requestId: string): Promise<RequestStatus>;
+  // Durable original receipt negotiation, including closure after owner expiry.
+  nativeNonEntryNegotiated?(
+    context: TrustedContext,
+    proof: NativeDispatchProof,
+  ): Promise<boolean>;
+  // Separate active-authority read. Absence in an older adapter never qualifies.
+  requestRetryProof?(
+    context: TrustedContext,
+    executionRef: string,
+    requestId: string,
+  ): Promise<RequestRetryProof>;
   effect(
     context: TrustedContext,
     executionRef: string,
@@ -585,6 +608,7 @@ export interface DurableKernel {
     worker: string,
     proof: NativeDispatchProof,
     entered: false,
+    nonEntryReason?: NativeNonEntryReason,
   ): Promise<RequestStatus>;
   // Trusted transport/supervisor closure evidence, never timeout or key erasure.
   // Original owner can ack after expiry; delegation requires exact cleanup CAS.

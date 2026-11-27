@@ -6,7 +6,7 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import type { IncomingMessage } from "node:http";
 import { KernelError, identifier, uuid, approvedLimits, defaults, instant } from "./domain.ts";
-import type { NativeDispatchProof, PrivateAdmission, SavedExecution } from "./domain.ts";
+import type { NativeDispatchProof, NativeNonEntryReason, PrivateAdmission, SavedExecution } from "./domain.ts";
 import type { PhysicalCandidate } from "./management.ts";
 import { strictJSON } from "./facade-ingress.ts";
 import type { NativeControlAdmission } from "./service-admission.ts";
@@ -172,7 +172,9 @@ export function cleanup(value: unknown): Readonly<CleanupLease> {
   instant(r.leaseExpiresAt);
   return Object.freeze({ ...r }) as unknown as CleanupLease;
 }
+export const NATIVE_NON_ENTRY_HEADER = "x-gateway-non-entry-capability" as const;
 export interface Receipt {
+  nonEntryReason?: NativeNonEntryReason;
   nativeUsage?: NativeUsage;
   consumerId: string;
   executionRef: string;
@@ -197,7 +199,12 @@ export interface Receipt {
 function truthy(value: unknown): boolean {
   return Boolean(value);
 }
-export function receipt(value: unknown, consumer: string, p: NativeDispatchProof): Receipt {
+export function receipt(
+  value: unknown,
+  consumer: string,
+  p: NativeDispatchProof,
+  nonEntryNegotiated = false,
+): Receipt {
   const r = object(
     value,
     [
@@ -211,7 +218,7 @@ export function receipt(value: unknown, consumer: string, p: NativeDispatchProof
       "acknowledged",
       "lifetime",
     ],
-    ["proof", "status", "nativeUsage"],
+    ["proof", "status", "nativeUsage", ...(nonEntryNegotiated ? ["nonEntryReason"] : [])],
   );
   if (
     r.consumerId !== consumer ||
@@ -264,6 +271,19 @@ export function receipt(value: unknown, consumer: string, p: NativeDispatchProof
   if (
     (truthy(lifetime.completed) && !truthy(lifetime.entered)) ||
     (r.effect === "completed") !== lifetime.completed
+  ) {
+    return denied();
+  }
+  if (
+    r.nonEntryReason !== undefined &&
+    (r.nonEntryReason !== "admission_storage_conflict" ||
+      lifetime.entered ||
+      r.phase !== "closed" ||
+      !lifetime.contextDone ||
+      !lifetime.forwardingReturned ||
+      !lifetime.bodyKnown ||
+      !lifetime.bodyClosed ||
+      lifetime.closeFailed)
   ) {
     return denied();
   }

@@ -113,6 +113,52 @@ jobs:
         run: |
           docker exec "${{ job.services.postgres.id }}" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ag_kernel_test_run_access_ci'
           node --test services/account-gateway/test/run-access-postgres.test.ts
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Joined native non-entry proof through private and public ingress
+        timeout-minutes: 20
+        env:
+          GATEWAY_NON_ENTRY_NATIVE_REVISION: 'c038d92aa2b51a55382f67b10f511e2bc2bcfbca'
+          GATEWAY_NATIVE_NON_ENTRY_JOINED_RUNNER_SHA256: '6aecbe2cdfc5270bacf0aafaa02848d46f7c1f297d5c98bcef090078dc6531e2'
+          AG_NATIVE_NON_ENTRY_JOINED_ALLOW: disposable_pg17_10
+          GOTOOLCHAIN: local
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = "v${{ matrix.node }}"
+          test "$(go env GOVERSION)" = go1.27.4
+          joined_root="$(mktemp -d "$RUNNER_TEMP/gateway-native-non-entry.XXXXXX")"
+          mkdir -p "$joined_root/go-cache" "$joined_root/go-modules" "$joined_root/go" "$joined_root/tmp"
+          export GOCACHE="$joined_root/go-cache"
+          export GOMODCACHE="$joined_root/go-modules"
+          export GOPATH="$joined_root/go"
+          export TMPDIR="$joined_root/tmp"
+          export GATEWAY_NATIVE_NON_ENTRY_JOINED_NODE="$(command -v node)"
+          export GATEWAY_NATIVE_NON_ENTRY_JOINED_RUNNER="$GITHUB_WORKSPACE/services/account-gateway/test/native-non-entry-joined.ts"
+          test -x "$GATEWAY_NATIVE_NON_ENTRY_JOINED_NODE"
+          printf '%s  %s\n' "$GATEWAY_NATIVE_NON_ENTRY_JOINED_RUNNER_SHA256" "$GATEWAY_NATIVE_NON_ENTRY_JOINED_RUNNER" | sha256sum --check --strict
+          git clone --no-checkout --filter=blob:none --depth=1 --no-tags https://github.com/agent-teams-ai/sub2api-standalone.git "$joined_root/native"
+          git -C "$joined_root/native" fetch --no-tags --depth=1 origin "$GATEWAY_NON_ENTRY_NATIVE_REVISION"
+          git -C "$joined_root/native" checkout --detach "$GATEWAY_NON_ENTRY_NATIVE_REVISION"
+          test "$(git -C "$joined_root/native" rev-parse HEAD)" = "$GATEWAY_NON_ENTRY_NATIVE_REVISION"
+          test -z "$(git -C "$joined_root/native" status --porcelain --untracked-files=all)"
+          for mode in private public; do
+            native_db="native_non_entry_joined_${mode}_ci"
+            gateway_db="ag_kernel_test_non_entry_${mode}_ci"
+            docker exec "${{ job.services.postgres.id }}" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE $native_db"
+            docker exec "${{ job.services.postgres.id }}" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE $gateway_db"
+            export GATEWAY_NATIVE_NON_ENTRY_JOINED_MODE="$mode"
+            export GATEWAY_NATIVE_NON_ENTRY_JOINED_NATIVE_DSN="postgres://postgres@127.0.0.1:5432/$native_db?sslmode=disable"
+            export AG_NATIVE_NON_ENTRY_JOINED_DSN="postgresql://postgres@127.0.0.1:5432/$gateway_db"
+            (
+              cd "$joined_root/native/backend"
+              go test -mod=readonly -p 2 -tags gatewaycustody ./internal/repository -run '^TestGatewayNativeNonEntryJoinedPostgresProof$' -count=1 -v -timeout 180s
+            ) 2>&1 | tee "$joined_root/$mode.log"
+            test "$(grep -c '^--- PASS: TestGatewayNativeNonEntryJoinedPostgresProof ' "$joined_root/$mode.log")" -eq 1
+            if grep -Fq -- '--- SKIP:' "$joined_root/$mode.log"; then exit 1; fi
+          done
+          test -z "$(git -C "$joined_root/native" status --porcelain --untracked-files=all)"
   kernel:
     needs: kernel_runtime
     if: ${{ always() }}

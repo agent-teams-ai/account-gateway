@@ -9,7 +9,7 @@ import { PostgresKernel } from "../src/postgres.ts";
 import { requestBoundNonce } from "../src/native-reservation.ts";
 import { PostgresUsageJournal } from "../src/usage.ts";
 import * as serviceComposition from "../src/service.ts";
-import { KernelError, defaults, factDefaults } from "../src/domain.ts";
+import { KernelError, NATIVE_NON_ENTRY_CAPABILITY, defaults, factDefaults } from "../src/domain.ts";
 import type {
   TrustedContext,
   AccountIntent,
@@ -5945,4 +5945,148 @@ void test("D-final tombstones and spent proofs survive restart/restore and all a
   );
   assert.equal(await count("SELECT used AS n FROM ag_kernel.fact_budget", []), serviceUsed + 6);
   assert.deepEqual(await y.operation(winCtx, inputs[accepted].operationId), winner.value);
+});
+
+async function nonEntryProofFixture(negotiated = true) {
+  const ctx = context(), account = await connected(ctx), w = await worker(ctx);
+  const e = await prepared(ctx, account.accountRef!);
+  const ref = e.result.executionRef!;
+  const claim = await a.claim(
+    ctx, ref, "original-non-entry", w, e.admission, reservation(),
+    negotiated ? NATIVE_NON_ENTRY_CAPABILITY : undefined,
+  );
+  assert.ok(claim.dispatch);
+  return { ctx, account, w, e, ref, proof: claim.dispatch.closure };
+}
+
+void test("request retry proof: original reason and separate closure retain the spent request across restart", async () => {
+  const f = await nonEntryProofFixture();
+  assert.equal(await a.nativeNonEntryNegotiated(f.ctx, f.proof), true);
+  await assert.rejects(a.requestRetryProof(f.ctx, f.ref, f.proof.requestRef), isCode("unknown"));
+  await a.rejectBeforeDispatch(f.ctx, f.w, f.proof, false, "admission_storage_conflict");
+  await assert.rejects(b.requestRetryProof(f.ctx, f.ref, f.proof.requestRef), isCode("unknown"));
+  assert.equal(await occupancy(f.ctx, f.account.accountRef!), 1);
+  await b.acknowledgeTransportClosed(f.ctx, f.w, f.proof);
+  const restarted = new PostgresKernel(poolB);
+  const expected = {
+    kind: "request-retry-proof/v1", consumerId: f.ctx.consumerId,
+    executionRef: f.ref, requestRef: f.proof.requestRef,
+    nonEntryReason: "admission_storage_conflict", transportClosed: true,
+  };
+  assert.deepEqual(await restarted.requestRetryProof(f.ctx, f.ref, f.proof.requestRef), expected);
+  assert.deepEqual(await a.requestRetryProof(f.ctx, f.ref, f.proof.requestRef), expected);
+  const status = await a.request(f.ctx, f.ref, f.proof.requestRef);
+  assert.deepEqual(status, {
+    requestRef: f.proof.requestRef, effect: "rejected_before_dispatch", code: "native_rejected",
+  });
+  assert.deepEqual(
+    await a.claim(f.ctx, f.ref, f.proof.requestRef, f.w, f.e.admission, reservation(), NATIVE_NON_ENTRY_CAPABILITY),
+    { status },
+  );
+  assert.equal(await count(
+    "SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
+    [f.ctx.consumerId, f.ref],
+  ), 1);
+  assert.equal(await occupancy(f.ctx, f.account.accountRef!), 0);
+  const successor = await a.claim(f.ctx, f.ref, "fresh-request", f.w, f.e.admission, reservation());
+  assert.ok(successor.dispatch);
+  assert.deepEqual(successor.dispatch.limits, f.e.admission.limits);
+  assert.equal(successor.dispatch.deadline, f.e.admission.expiresAt);
+  assert.equal(await count(
+    "SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
+    [f.ctx.consumerId, f.ref],
+  ), 2);
+});
+
+void test("request retry proof: legacy and generic rejections can never gain eligibility", async () => {
+  for (const negotiated of [false, true]) {
+    const f = await nonEntryProofFixture(negotiated);
+    if (!negotiated) {
+      await assert.rejects(
+        a.rejectBeforeDispatch(f.ctx, f.w, f.proof, false, "admission_storage_conflict"),
+        isCode("denied"),
+      );
+      await b.claim(f.ctx, f.ref, f.proof.requestRef, f.w, f.e.admission, reservation(), NATIVE_NON_ENTRY_CAPABILITY);
+      assert.equal(await a.nativeNonEntryNegotiated(f.ctx, f.proof), false);
+    }
+    await a.rejectBeforeDispatch(f.ctx, f.w, f.proof, false);
+    if (negotiated) {
+      // A later authenticated observation is readback, never historical promotion.
+      await b.rejectBeforeDispatch(f.ctx, f.w, f.proof, false, "admission_storage_conflict");
+    }
+    await a.acknowledgeTransportClosed(f.ctx, f.w, f.proof);
+    await assert.rejects(a.requestRetryProof(f.ctx, f.ref, f.proof.requestRef), isCode("unknown"));
+    const row = (await admin.query<{ non_entry_reason: string | null }>(
+      "SELECT non_entry_reason FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
+      [f.ctx.consumerId, f.ref, f.proof.requestRef],
+    )).rows[0];
+    assert.equal(row.non_entry_reason, null);
+    for (const assignment of [
+      "non_entry_reason='admission_storage_conflict'",
+      "non_entry_negotiated=NOT non_entry_negotiated",
+    ]) {
+      await assert.rejects(
+        admin.query(
+          "UPDATE ag_kernel.requests SET " + assignment + " WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
+          [f.ctx.consumerId, f.ref, f.proof.requestRef],
+        ),
+        (error: unknown) => typeof error === "object" && error !== null && "code" in error && error.code === "23514",
+      );
+    }
+  }
+});
+
+void test("request retry proof: receipt negotiation is exact and survives original authority expiry only for closure", async () => {
+  const f = await nonEntryProofFixture();
+  for (const wrong of [
+    { ...f.proof, executionRef: randomUUID() },
+    { ...f.proof, requestRef: "foreign-request" },
+    { ...f.proof, worker: randomUUID() },
+    { ...f.proof, token: randomUUID() },
+    { ...f.proof, native: { ...f.proof.native, originRef: "foreign-origin" } },
+    { ...f.proof, native: { ...f.proof.native, engineIncarnation: randomUUID() } },
+    { ...f.proof, native: { ...f.proof.native, requestNonce: randomUUID() } },
+    { ...f.proof, native: { ...f.proof.native, generation: randomUUID() } },
+  ]) {
+    assert.equal(await a.nativeNonEntryNegotiated(f.ctx, wrong), false);
+  }
+  assert.equal(await a.nativeNonEntryNegotiated(context(), f.proof), false);
+  await a.rejectBeforeDispatch(f.ctx, f.w, f.proof, false, "admission_storage_conflict");
+  await expire(f.ctx, f.w);
+  await worker(f.ctx); // Another live worker cannot stand in for the original.
+  await admin.query(
+    "UPDATE ag_kernel.executions SET deadline=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND ref=$2",
+    [f.ctx.consumerId, f.ref],
+  );
+  assert.equal(await b.nativeNonEntryNegotiated(f.ctx, f.proof), true);
+  await a.acknowledgeTransportClosed(f.ctx, f.w, f.proof);
+  assert.equal(await occupancy(f.ctx, f.account.accountRef!), 0);
+  await assert.rejects(b.requestRetryProof(f.ctx, f.ref, f.proof.requestRef), isCode("unknown"));
+  assert.equal((await a.request(f.ctx, f.ref, f.proof.requestRef)).effect, "rejected_before_dispatch");
+});
+
+void test("request retry proof: active worker, deadline, issuer, fence and open execution are independent gates", async () => {
+  for (const gate of ["worker", "deadline", "issuer", "fence", "close"] as const) {
+    const f = await nonEntryProofFixture();
+    await a.rejectBeforeDispatch(f.ctx, f.w, f.proof, false, "admission_storage_conflict");
+    await a.acknowledgeTransportClosed(f.ctx, f.w, f.proof);
+    await a.requestRetryProof(f.ctx, f.ref, f.proof.requestRef);
+    if (gate === "worker") {
+      await expire(f.ctx, f.w);
+      await worker(f.ctx);
+    } else if (gate === "deadline") {
+      await admin.query(
+        "UPDATE ag_kernel.executions SET deadline=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND ref=$2",
+        [f.ctx.consumerId, f.ref],
+      );
+    } else if (gate === "issuer") {
+      await a.restore(f.ctx, f.e.admission.issuerEpoch, randomUUID());
+    } else if (gate === "fence") {
+      await b.fence(f.ctx, randomUUID(), f.e.input.policySubject, f.e.input.policyRevision + 1);
+    } else {
+      await b.close(f.ctx, randomUUID(), f.ref);
+    }
+    await assert.rejects(a.requestRetryProof(f.ctx, f.ref, f.proof.requestRef), isCode("unknown"));
+    assert.equal(await a.nativeNonEntryNegotiated(f.ctx, f.proof), true);
+  }
 });

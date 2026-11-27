@@ -92,6 +92,8 @@ export type RequestRow = {
   engine_incarnation: string | null;
   request_nonce: string | null;
   descriptor_generation: string | null;
+  non_entry_negotiated: boolean;
+  non_entry_reason: "admission_storage_conflict" | null;
 };
 export type FenceRow = { revision: string; fence: string };
 export type CleanupRow = {

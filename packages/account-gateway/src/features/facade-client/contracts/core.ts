@@ -528,6 +528,18 @@ export const requestStatus = z
           v.error.effect === v.effect &&
           (v.status !== "unknown" || v.error.retry.kind !== "after"))),
   );
+/** Active original authority only; this never reauthorizes the spent request. */
+export const REQUEST_RETRY_PROOF_CONTRACT = "request-retry-proof/v1" as const;
+export const REQUEST_RETRY_PROOF_CAPABILITY_HEADER = "x-account-gateway-capability" as const;
+export const requestRetryProof = z.strictObject({
+  kind: z.literal(REQUEST_RETRY_PROOF_CONTRACT),
+  consumerId: z.string().regex(/^[a-zA-Z0-9_.:-]{1,128}$/),
+  executionRef: reference,
+  requestRef: reference,
+  nonEntryReason: z.literal("admission_storage_conflict"),
+  transportClosed: z.literal(true),
+});
+export type RequestRetryProof = z.infer<typeof requestRetryProof>;
 export const limits = z.strictObject({
   requests: z.number().int().min(1).max(10000),
   requestBytes: z.number().int().min(1).max(16777216),

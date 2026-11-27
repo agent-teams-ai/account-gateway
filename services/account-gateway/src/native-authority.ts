@@ -5,12 +5,13 @@ import { oauthProfileDefinition } from "./oauth-profiles.ts";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { KernelError, approvedLimits, defaults, identifier, uuid } from "./domain.ts";
+import { KernelError, NATIVE_NON_ENTRY_CAPABILITY, approvedLimits, defaults, identifier, uuid } from "./domain.ts";
 import type {
   ApprovedLimits,
   DurableKernel,
   ExecutionRead,
   NativeDispatchProof,
+  NativeNonEntryCapability,
   RequestStatus,
   SavedExecution,
   TrustedContext,
@@ -31,6 +32,7 @@ import type { NativeConnectionProfile } from "./provider-connections.ts";
 import type { ManagedProfile } from "./candidate-identity.ts";
 import {
   admission,
+  NATIVE_NON_ENTRY_HEADER,
   binding,
   cleanup,
   config,
@@ -964,7 +966,40 @@ export class NativeAuthority {
     }
     return value;
   }
-  async #publicAdmit(ctx: TrustedContext, value: unknown): Promise<unknown> {
+  // The optional field is never accepted solely because its JSON shape is valid.
+  // This exact durable reservation read remains usable for original late closure.
+  async verifiedReceipt(ctx: TrustedContext, value: unknown, p: NativeDispatchProof) {
+    let negotiated = false;
+    if (value !== null && typeof value === "object" && Object.hasOwn(value, "nonEntryReason")) {
+      negotiated = (await this.kernel.nativeNonEntryNegotiated?.(ctx, p)) === true;
+      if (!negotiated) {
+        return denied();
+      }
+    }
+    return receipt(value, ctx.consumerId, p, negotiated);
+  }
+  async #acknowledgeNonEntry(
+    ctx: TrustedContext,
+    value: unknown,
+    capability: NativeNonEntryCapability | undefined,
+    res: ServerResponse,
+  ): Promise<void> {
+    if (!capability || value === null || typeof value !== "object" || !("dispatch" in value)) {
+      return;
+    }
+    const dispatch = value.dispatch;
+    if (dispatch === null || typeof dispatch !== "object" || !("closure" in dispatch)) {
+      return denied();
+    }
+    if ((await this.kernel.nativeNonEntryNegotiated?.(ctx, proof(dispatch.closure))) === true) {
+      res.setHeader(NATIVE_NON_ENTRY_HEADER, NATIVE_NON_ENTRY_CAPABILITY);
+    }
+  }
+  async #publicAdmit(
+    ctx: TrustedContext,
+    value: unknown,
+    nonEntryCapability?: NativeNonEntryCapability,
+  ): Promise<unknown> {
     const r = object(value, [
       "consumerId",
       "requestRef",
@@ -1011,6 +1046,7 @@ export class NativeAuthority {
         engineIncarnation: e.engineIncarnation,
         requestNonce: native.requestNonce,
       },
+      nonEntryCapability,
     );
     const reply = { consumerId: ctx.consumerId, admission: admitted, status: claim.status };
     if (!claim.dispatch) {
@@ -1099,7 +1135,7 @@ export class NativeAuthority {
     }
     const p = proof(r.proof);
     await this.persisted(ctx, p);
-    const closed = receipt(r.receipt, ctx.consumerId, p);
+    const closed = await this.verifiedReceipt(ctx, r.receipt, p);
     if (!physicallyClosed(closed)) {
       return denied();
     }
@@ -1111,7 +1147,7 @@ export class NativeAuthority {
     let status = await this.kernel.request(ctx, p.executionRef, p.requestRef);
     if (!closed.lifetime.entered) {
       if (status.effect === "dispatch_started") {
-        status = await this.kernel.rejectBeforeDispatch(ctx, p.worker, p, false);
+        status = await this.kernel.rejectBeforeDispatch(ctx, p.worker, p, false, closed.nonEntryReason);
       }
     } else if (closed.lifetime.completed && closed.effect === "completed") {
       if (status.effect === "dispatch_started") {
@@ -1149,6 +1185,7 @@ export class NativeAuthority {
     ctx: TrustedContext,
     value: unknown,
     diagnostic: NativeFailureContext,
+    nonEntryCapability?: NativeNonEntryCapability,
   ): Promise<unknown> {
     const r = object(value, [
       "consumerId",
@@ -1204,7 +1241,7 @@ export class NativeAuthority {
     }
     a.native = native;
     a.admitStarted = true; // Before the sole captured claim await.
-    const permit = await a.callback.admit(native.requestNonce);
+    const permit = await a.callback.admit(native.requestNonce, nonEntryCapability);
     if (!permit.claim.dispatch) {
       return {
         consumerId: ctx.consumerId,
@@ -1273,6 +1310,7 @@ export class NativeAuthority {
         // Authenticate before scheduling. Only a fixed private caller can receive
         // the purpose-specific, nonce-bound proof that claim work never began.
         let consumerId: string, reservationNonce: string | undefined;
+        let nonEntryCapability: NativeNonEntryCapability | undefined;
         try {
           if (
             req.method !== "POST" ||
@@ -1304,6 +1342,20 @@ export class NativeAuthority {
             return denied();
           }
           consumerId = caller.consumerId;
+          const requestedNonEntry = singleton(req, NATIVE_NON_ENTRY_HEADER);
+          const hasNonEntry = req.rawHeaders.some(
+            (h, i) => i % 2 === 0 && h.toLowerCase() === NATIVE_NON_ENTRY_HEADER,
+          );
+          if (
+            hasNonEntry &&
+            (requestedNonEntry !== NATIVE_NON_ENTRY_CAPABILITY ||
+              !["/private/native/v1/admit", "/private/native/v1/public-admit"].includes(req.url))
+          ) {
+            return denied();
+          }
+          if (requestedNonEntry === NATIVE_NON_ENTRY_CAPABILITY && this.kernel.nativeNonEntryNegotiated) {
+            nonEntryCapability = NATIVE_NON_ENTRY_CAPABILITY;
+          }
           reservationNonce = singleton(req, "x-gateway-reservation-nonce");
           if (
             reservationNonce === undefined &&
@@ -1369,7 +1421,9 @@ export class NativeAuthority {
               ) {
                 return denied();
               }
-              send(200, await this.#publicAdmit(ctx, body));
+              const reply = await this.#publicAdmit(ctx, body, nonEntryCapability);
+              await this.#acknowledgeNonEntry(ctx, reply, nonEntryCapability, res);
+              send(200, reply);
               return;
             }
             if (path.endsWith("/execution-settle")) {
@@ -1423,7 +1477,9 @@ export class NativeAuthority {
               if (r.consumerId !== ctx.consumerId) {
                 return denied();
               }
-              send(200, await this.#admit(ctx, r, diagnostic));
+              const reply = await this.#admit(ctx, r, diagnostic, nonEntryCapability);
+              await this.#acknowledgeNonEntry(ctx, reply, nonEntryCapability, res);
+              send(200, reply);
               return;
             } else {
               diagnostic.phase = "callback_proof";
@@ -1457,7 +1513,7 @@ export class NativeAuthority {
                 await this.persisted(ctx, p);
                 if (route === "closure-ack") {
                   diagnostic.phase = "callback_closure";
-                  const closed = receipt(r.receipt, ctx.consumerId, p);
+                  const closed = await this.verifiedReceipt(ctx, r.receipt, p);
                   if (!physicallyClosed(closed)) {
                     return denied();
                   }

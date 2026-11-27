@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
-import { config, post, providerQuota } from "../src/native-wire.ts";
+import { config, post, providerQuota, receipt } from "../src/native-wire.ts";
 import { KernelError } from "../src/domain.ts";
 import { decode, NativeFailure } from "../src/native-client-wire.ts";
 
@@ -283,5 +283,49 @@ void test("native control JSON accepts primitive array tails and still rejects a
       () => decode(Buffer.from(invalid)),
       (error: unknown) => error instanceof NativeFailure && error.code === "invalid_readback",
     );
+  }
+});
+
+void test("native non-entry receipt requires exact negotiated capability and physically closed non-entry", () => {
+  const p = {
+    executionRef: "00000000-0000-4000-8000-000000000001",
+    requestRef: "request-non-entry",
+    worker: "00000000-0000-4000-8000-000000000002",
+    token: "00000000-0000-4000-8000-000000000003",
+    native: {
+      originRef: "native-origin",
+      engineIncarnation: "00000000-0000-4000-8000-000000000004",
+      requestNonce: "00000000-0000-4000-8000-000000000005",
+      generation: "00000000-0000-4000-8000-000000000006",
+    },
+  };
+  const original = {
+    consumerId: "wire-consumer", executionRef: p.executionRef, requestRef: p.requestRef,
+    native: p.native, proof: p, phase: "closed", effect: "effect_unknown",
+    sealed: true, acknowledged: false,
+    lifetime: {
+      entered: false, contextDone: true, forwardingReturned: true, bodyKnown: true,
+      bodyClosed: true, closeFailed: false, completed: false, sealed: true,
+    },
+  };
+  assert.deepEqual(receipt(original, original.consumerId, p), original);
+  const eligible = { ...original, nonEntryReason: "admission_storage_conflict" };
+  const denied = (value: unknown, negotiated = true) =>
+    assert.throws(() => receipt(value, original.consumerId, p, negotiated),
+      (error: unknown) => error instanceof KernelError && error.code === "denied");
+  denied(eligible, false);
+  assert.deepEqual(receipt(eligible, original.consumerId, p, true), eligible);
+  for (const value of [
+    { ...eligible, nonEntryReason: "upstream_503" },
+    { ...eligible, nativeError: "secret-sql-details" },
+    { ...eligible, phase: "admitted" },
+    { ...eligible, proof: { ...p, token: "00000000-0000-4000-8000-000000000007" } },
+    ...["contextDone", "forwardingReturned", "bodyKnown", "bodyClosed"].map(
+      (field) => ({ ...eligible, lifetime: { ...eligible.lifetime, [field]: false } }),
+    ),
+    { ...eligible, lifetime: { ...eligible.lifetime, entered: true } },
+    { ...eligible, lifetime: { ...eligible.lifetime, closeFailed: true } },
+  ]) {
+    denied(value);
   }
 });
