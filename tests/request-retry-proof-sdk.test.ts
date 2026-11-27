@@ -72,7 +72,7 @@ void test("request retry proof SDK: one bounded exact read, finite proof and no 
   ];
   for (const value of invalid) {
     response = value;
-    const before = calls;
+    const before: number = calls;
     await assert.rejects(
       client.retryProof(expected.executionRef, expected.requestRef),
       (error: unknown) => error instanceof sdk.GatewayError && error.code === "invalid_response",
