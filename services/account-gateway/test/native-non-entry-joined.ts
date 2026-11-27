@@ -472,9 +472,11 @@ async function run(): Promise<void> {
       void pending.then(
         () => {
           currentFinished = true;
+          return null;
         },
         () => {
           currentFinished = true;
+          return null;
         },
       );
       await bounded(reached.promise);
