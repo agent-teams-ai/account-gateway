@@ -40,4 +40,4 @@ These source-bound records are useful for tracing earlier patches and reviews, n
 
 ## Document organization
 
-The [reference collection](reference/) owns the maintained native-account documents and qualification references. New artifacts follow the [local authoring skill](.agents/skills/docs-authoring/SKILL.md) and the declared profile; do not invent artifact types or move historical records solely for cosmetic consistency. Keep this navigation separate from accepted contracts, proposed plans and source-bound evidence.
+The `docs/reference/` collection owns the maintained native-account documents and qualification references. New artifacts follow the [local authoring skill](.agents/skills/docs-authoring/SKILL.md) and the declared profile; do not invent artifact types or move historical records solely for cosmetic consistency. Keep this navigation separate from accepted contracts, proposed plans and source-bound evidence.
