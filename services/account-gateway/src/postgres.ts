@@ -10,6 +10,7 @@ import {
   AccountsLimitedError,
   FactCapacityError,
   KernelError,
+  NATIVE_NON_ENTRY_CAPABILITY,
   boundedConfig,
   boundedFacts,
   approvedLimits,
@@ -51,6 +52,9 @@ import type {
   CleanupAuthority,
   NativeReservation,
   NativeDispatchProof,
+  NativeNonEntryCapability,
+  NativeNonEntryReason,
+  RequestRetryProof,
 } from "./domain.ts";
 import { compactSafePayloads } from "./retention.ts";
 import { requestBoundNonce } from "./native-reservation.ts";
@@ -1281,6 +1285,70 @@ export class PostgresKernel implements DurableKernel {
         : undefined;
     });
   }
+  async nativeNonEntryNegotiated(
+    context: TrustedContext,
+    input: NativeDispatchProof,
+  ): Promise<boolean> {
+    const proof = captureClosure(input);
+    validateNativeClosure(proof);
+    return this.read(context, async (tx) => {
+      const result = await tx.db.query(
+        `SELECT 1 FROM requests r
+        JOIN executions e ON e.consumer=r.consumer AND e.ref=r.execution_ref
+        WHERE r.consumer=$1 AND r.execution_ref=$2 AND r.id=$3
+        AND r.worker=$4 AND r.closure_token=$5 AND r.native_origin_ref=$6
+        AND r.engine_incarnation=$7 AND r.request_nonce=$8 AND r.descriptor_generation=$9
+        AND r.non_entry_negotiated AND e.request_details_retired_at IS NULL`,
+        [
+          tx.consumer,
+          proof.executionRef,
+          proof.requestRef,
+          proof.worker,
+          proof.token,
+          proof.native.originRef,
+          proof.native.engineIncarnation,
+          proof.native.requestNonce,
+          proof.native.generation,
+        ],
+      );
+      return result.rowCount === 1;
+    });
+  }
+  async requestRetryProof(
+    context: TrustedContext,
+    ref: string,
+    id: string,
+  ): Promise<RequestRetryProof> {
+    uuid(ref);
+    identifier(id);
+    return this.read(context, async (tx) => {
+      // One snapshot binds the original worker, current execution authority,
+      // immutable rejection and the independently acknowledged physical closure.
+      await this.one<{ id: string }>(
+        tx,
+        `SELECT r.id FROM (${this.executionSnapshotSql}
+          WHERE e.consumer=$1 AND e.ref=$2) snapshot
+        JOIN requests r ON r.consumer=$1 AND r.execution_ref=$2 AND r.id=$3
+        JOIN workers w ON w.consumer=r.consumer AND w.worker=r.worker
+        WHERE snapshot.allowed AND snapshot.request_details_retired_at IS NULL
+        AND w.lease_until>clock_timestamp()
+        AND r.non_entry_negotiated AND r.non_entry_reason='admission_storage_conflict'
+        AND r.effect='rejected_before_dispatch' AND NOT r.transport_occupied
+        AND r.closure_token IS NOT NULL AND r.native_origin_ref IS NOT NULL
+        AND r.engine_incarnation IS NOT NULL AND r.request_nonce IS NOT NULL
+        AND r.descriptor_generation=snapshot.generation`,
+        [tx.consumer, ref, id],
+      );
+      return {
+        kind: "request-retry-proof/v1",
+        consumerId: tx.consumer,
+        executionRef: ref,
+        requestRef: id,
+        nonEntryReason: "admission_storage_conflict",
+        transportClosed: true,
+      };
+    });
+  }
   async claim(
     context: TrustedContext,
     ref: string,
@@ -1288,9 +1356,13 @@ export class PostgresKernel implements DurableKernel {
     worker: string,
     admission: PrivateAdmission,
     reservation: NativeReservation,
+    nonEntryCapability?: NativeNonEntryCapability,
   ): Promise<ClaimResult> {
     // Capture whitelisted primitives before validation or any await.
     reservation = captureReservation(reservation);
+    if (![undefined, NATIVE_NON_ENTRY_CAPABILITY].includes(nonEntryCapability)) {
+      throw new KernelError("invalid");
+    }
     admission = {
       executionRef: admission.executionRef,
       issuerEpoch: admission.issuerEpoch,
@@ -1464,8 +1536,8 @@ export class PostgresKernel implements DurableKernel {
       const r = (
         await tx.db.query<RequestRow>(
           `INSERT INTO requests(consumer,execution_ref,id,effect,code,worker,transport_occupied,closure_token,
-        native_origin_ref,engine_incarnation,request_nonce,descriptor_generation)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+        native_origin_ref,engine_incarnation,request_nonce,descriptor_generation,non_entry_negotiated)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
           [
             tx.consumer,
             ref,
@@ -1479,6 +1551,7 @@ export class PostgresKernel implements DurableKernel {
             denied ? null : reservation.engineIncarnation,
             denied ? null : reservation.requestNonce,
             denied ? null : e.generation,
+            !denied && nonEntryCapability === NATIVE_NON_ENTRY_CAPABILITY,
           ],
         )
       ).rows.at(0);
@@ -1579,11 +1652,15 @@ export class PostgresKernel implements DurableKernel {
     worker: string,
     input: NativeDispatchProof,
     entered: false,
+    nonEntryReason?: NativeNonEntryReason,
   ): Promise<RequestStatus> {
     const proof = captureClosure(input);
     uuid(worker);
     validateNativeClosure(proof);
     requireNonEntry(entered);
+    if (![undefined, "admission_storage_conflict"].includes(nonEntryReason)) {
+      throw new KernelError("invalid");
+    }
     if (worker !== proof.worker) {
       throw new KernelError("denied");
     }
@@ -1603,6 +1680,9 @@ export class PostgresKernel implements DurableKernel {
       ) {
         throw new KernelError("denied");
       }
+      if (nonEntryReason !== undefined && !r.non_entry_negotiated) {
+        throw new KernelError("denied");
+      }
       // Exact terminal readback is harmless after lease loss; it neither grants
       // permission nor rewrites the persisted non-entry fact.
       if (r.effect === "rejected_before_dispatch") {
@@ -1613,11 +1693,11 @@ export class PostgresKernel implements DurableKernel {
       }
       const rejected = (
         await tx.db.query<RequestRow>(
-          `UPDATE requests r SET effect='rejected_before_dispatch',code='native_rejected'
+          `UPDATE requests r SET effect='rejected_before_dispatch',code='native_rejected',non_entry_reason=$4
         WHERE r.consumer=$1 AND r.execution_ref=$2 AND r.id=$3 AND r.effect='dispatch_started'
         AND EXISTS (SELECT 1 FROM workers w WHERE w.consumer=r.consumer AND w.worker=r.worker
           AND w.lease_until>clock_timestamp()) RETURNING r.*`,
-          [tx.consumer, proof.executionRef, proof.requestRef],
+          [tx.consumer, proof.executionRef, proof.requestRef, nonEntryReason ?? null],
         )
       ).rows.at(0);
       if (rejected) {

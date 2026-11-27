@@ -63,23 +63,32 @@ const violates = (result) => {
 test("joined harness shares declared evidence without exposing private fixture commands or domain dependencies", () =>
   fixture((root) => {
     passes(check(root));
-    const harness = join(root, "services/account-gateway/test/native-provider-joined.ts");
-    const original = readFileSync(harness, "utf8");
-    writeFileSync(
-      harness,
-      original +
-        "\nimport { command } from './fixtures/native-cli/joined-command.ts';\nexport const forbidden = command;\n",
-    );
-    violates(check(root));
-    writeFileSync(harness, original);
-    passes(check(root));
+    for (const path of [
+      "services/account-gateway/test/native-provider-joined.ts",
+      "services/account-gateway/test/native-non-entry-joined.ts",
+    ]) {
+      const harness = join(root, path);
+      const original = readFileSync(harness, "utf8");
+      writeFileSync(
+        harness,
+        original +
+          "\nimport { command } from './fixtures/native-cli/joined-command.ts';\nexport const forbidden = command;\n",
+      );
+      violates(check(root));
+      writeFileSync(harness, original);
+      passes(check(root));
+    }
     const domain = join(root, "services/account-gateway/src/domain.ts");
-    writeFileSync(
-      domain,
-      readFileSync(domain, "utf8") +
-        "\nimport { joinedSandboxQualification } from '../test/fixtures/native-cli/joined-evidence.ts';\nexport const forbidden = joinedSandboxQualification;\n",
-    );
-    violates(check(root));
+    const original = readFileSync(domain, "utf8");
+    for (const forbidden of [
+      "\nimport { joinedSandboxQualification } from '../test/fixtures/native-cli/joined-evidence.ts';\nexport const forbidden = joinedSandboxQualification;\n",
+      "\nimport '../test/native-non-entry-joined.ts';\n",
+    ]) {
+      writeFileSync(domain, original + forbidden);
+      violates(check(root));
+    }
+    writeFileSync(domain, original);
+    passes(check(root));
   }));
 
 // Regression: type-only SDK/framework imports bypass the actual installed source policy.

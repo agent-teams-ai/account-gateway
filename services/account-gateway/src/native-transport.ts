@@ -15,7 +15,6 @@ import {
   physicallyClosed,
   post,
   proof,
-  receipt,
   singleton,
   providerQuota,
 } from "./native-wire.ts";
@@ -67,7 +66,11 @@ export class NativeHTTPTransport implements NativeTransport {
       ) {
         return denied();
       }
-      return receipt(await jsonBody(hop.response, cfg.controlBytes), ctx.consumerId, p);
+      return await authority.verifiedReceipt(
+        ctx,
+        await jsonBody(hop.response, cfg.controlBytes),
+        p,
+      );
     } finally {
       hop.abort();
     }
@@ -161,7 +164,7 @@ export class NativeHTTPTransport implements NativeTransport {
       // An authenticated positive no-entry receipt spends the original claim;
       // neither HTTP failure nor missing readback is a non-entry fact.
       if (status.effect === "dispatch_started") {
-        await a.callback.rejectBeforeDispatch(p, false);
+        await a.callback.rejectBeforeDispatch(p, false, r.nonEntryReason);
       }
     } else if (r.lifetime.completed && r.effect === "completed") {
       if (status.effect === "dispatch_started") {

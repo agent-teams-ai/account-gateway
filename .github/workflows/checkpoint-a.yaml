@@ -38,7 +38,54 @@ jobs:
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run toolchain:doctor
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run build
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run lint
-      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run format:check
+      - name: Check formatting
+        id: format-check
+        run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run format:check
+      - name: Preserve exact formatter correction for review
+        if: ${{ failure() && steps.format-check.outcome == 'failure' && matrix.node == '26.11.1' }}
+        timeout-minutes: 2
+        env:
+          FORMAT_REQUESTED_SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import { execFileSync } from "node:child_process";
+          import { createHash } from "node:crypto";
+          import { readFileSync } from "node:fs";
+          import { createRequire } from "node:module";
+          import { dirname, join } from "node:path";
+          const require = createRequire(import.meta.url);
+          const stackManifest = require.resolve("stack-toolchain/package.json");
+          assert.equal(JSON.parse(readFileSync(stackManifest, "utf8")).version, "0.1.1");
+          const ownedRequire = createRequire(stackManifest);
+          const formatterManifest = ownedRequire.resolve("oxfmt/package.json");
+          assert.equal(JSON.parse(readFileSync(formatterManifest, "utf8")).version, "0.74.0");
+          const config = JSON.parse(readFileSync("toolchain.config.json", "utf8"));
+          const paths = config.format.paths;
+          assert.ok(Array.isArray(paths) && paths.length > 0 && paths.every((path) => typeof path === "string"));
+          execFileSync("git", ["diff", "--exit-code"], { stdio: "pipe" });
+          const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
+          const provenance = {
+            requestedSource: process.env.FORMAT_REQUESTED_SOURCE,
+            checkoutCommit: git("rev-parse", "HEAD"),
+            checkoutTree: git("rev-parse", "HEAD^{tree}"),
+          };
+          execFileSync(process.execPath, [
+            join(dirname(formatterManifest), "bin", "oxfmt"),
+            "--config", join(dirname(stackManifest), "presets", "format.json"),
+            "--disable-nested-config", "--", ...paths,
+          ], { stdio: "inherit", timeout: 60_000 });
+          const patch = execFileSync("git", ["diff", "--no-ext-diff", "--no-color", "--", ...paths], {
+            maxBuffer: 262_144,
+          });
+          assert.ok(patch.length > 0 && patch.length <= 262_144);
+          const sha256 = createHash("sha256").update(patch).digest("hex");
+          process.stdout.write("FORMATTER_REVIEW_PATCH_BEGIN " + JSON.stringify({
+            ...provenance, bytes: patch.length, sha256,
+          }) + "\n");
+          process.stdout.write(patch);
+          process.stdout.write("FORMATTER_REVIEW_PATCH_END\n");
+          NODE
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run typecheck
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" test
       - run: node scripts/check-topology.mjs
@@ -47,6 +94,84 @@ jobs:
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run docs:check
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" --dir packages/account-gateway pack --pack-destination "$RUNNER_TEMP/gateway-archive"
       - run: scripts/qualify-consumers.sh "$RUNNER_TEMP/gateway-archive/agent-teams-account-gateway-0.1.0.tgz" "$RUNNER_TEMP/gateway-consumers"
+      - name: Record qualified SDK archive provenance
+        timeout-minutes: 2
+        env:
+          SDK_REQUESTED_SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
+          SDK_MATRIX_NODE: ${{ matrix.node }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import { execFileSync } from "node:child_process";
+          import { createHash } from "node:crypto";
+          import { readFileSync, writeFileSync } from "node:fs";
+          import { join } from "node:path";
+          const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
+          const requestedSource = process.env.SDK_REQUESTED_SOURCE;
+          assert.match(requestedSource, /^[a-f0-9]{40}$/);
+          try {
+            git("cat-file", "-e", requestedSource + "^{commit}");
+          } catch {
+            execFileSync("git", ["fetch", "--no-tags", "--depth=1", "origin", requestedSource], { stdio: "inherit" });
+          }
+          assert.equal(git("rev-parse", requestedSource + "^{commit}"), requestedSource);
+          assert.equal(process.versions.node, process.env.SDK_MATRIX_NODE);
+          const sourcePaths = [
+            "packages/account-gateway", "package.json", "pnpm-lock.yaml",
+            "pnpm-workspace.yaml", "tsconfig.build.json", "scripts/build.mjs",
+          ];
+          assert.equal(git("status", "--porcelain", "--untracked-files=all", "--", ...sourcePaths), "", "SDK build inputs are not clean");
+          const sourceInputs = Object.fromEntries(sourcePaths.map((path) => {
+            const checkoutObject = git("rev-parse", "HEAD:" + path);
+            const requestedObject = git("rev-parse", requestedSource + ":" + path);
+            assert.equal(checkoutObject, requestedObject, "SDK source differs from requested head: " + path);
+            return [path, { checkoutObject, requestedObject }];
+          }));
+          const rootPackage = JSON.parse(readFileSync("package.json", "utf8"));
+          const sdkPackage = JSON.parse(readFileSync("packages/account-gateway/package.json", "utf8"));
+          assert.equal(sdkPackage.name, "@agent-teams/account-gateway");
+          assert.equal(sdkPackage.version, "0.1.0");
+          const pnpmVersion = execFileSync(process.execPath, [
+            join(process.env.RUNNER_TEMP, "gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs"), "--version",
+          ], { encoding: "utf8" }).trim();
+          assert.equal("pnpm@" + pnpmVersion, rootPackage.packageManager);
+          const archiveName = "agent-teams-account-gateway-0.1.0.tgz";
+          const archive = readFileSync(join(process.env.RUNNER_TEMP, "gateway-archive", archiveName));
+          assert.ok(archive.length > 0);
+          const provenance = {
+            kind: "account-gateway-sdk-build-artifact/v1",
+            repository: process.env.GITHUB_REPOSITORY,
+            runId: process.env.GITHUB_RUN_ID,
+            runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+            event: process.env.GITHUB_EVENT_NAME,
+            requestedSource,
+            requestedTree: git("rev-parse", requestedSource + "^{tree}"),
+            checkoutCommit: git("rev-parse", "HEAD"),
+            checkoutTree: git("rev-parse", "HEAD^{tree}"),
+            checkoutParents: git("show", "--no-patch", "--format=%P", "HEAD").split(" ").filter(Boolean),
+            sourceInputs,
+            packageName: sdkPackage.name,
+            packageVersion: sdkPackage.version,
+            nodeVersion: process.versions.node,
+            pnpmVersion,
+            typescriptVersion: JSON.parse(readFileSync("node_modules/typescript/package.json", "utf8")).version,
+            archive: archiveName,
+            bytes: archive.length,
+            sha256: createHash("sha256").update(archive).digest("hex"),
+            sha512: createHash("sha512").update(archive).digest("hex"),
+            integrity: "sha512-" + createHash("sha512").update(archive).digest("base64"),
+          };
+          writeFileSync(join(process.env.RUNNER_TEMP, "gateway-archive", "provenance.json"), JSON.stringify(provenance, null, 2) + "\n");
+          NODE
+      - name: Preserve qualified SDK archive for review
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: account-gateway-sdk-node-${{ matrix.node }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/gateway-archive/agent-teams-account-gateway-0.1.0.tgz
+            ${{ runner.temp }}/gateway-archive/provenance.json
+          if-no-files-found: error
+          retention-days: 14
   qualify:
     needs: qualify_runtime
     if: ${{ always() }}

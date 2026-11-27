@@ -427,6 +427,25 @@ export function createExecutionClient(settings: ExecutionConfig) {
       json(requestPath(executionRef, requestId), c.requestStatus, "GET", undefined, options, {
         requestRef: requestId,
       }),
+    retryProof: async (
+      executionRef: string,
+      requestId: string,
+      options?: CallOptions,
+    ): Promise<c.RequestRetryProof> => {
+      const result = await json(
+        requestPath(executionRef, requestId) + "/retry-proof",
+        c.requestRetryProof,
+        "GET",
+        undefined,
+        options,
+        { requestRef: requestId },
+        { [c.REQUEST_RETRY_PROOF_CAPABILITY_HEADER]: c.REQUEST_RETRY_PROOF_CONTRACT },
+      );
+      if (result.executionRef !== executionRef || result.requestRef !== requestId) {
+        throw new GatewayError("invalid_response", "effect_unknown", undefined, requestId);
+      }
+      return result;
+    },
     close: (executionRef: string, input: c.Close, options?: CallOptions) => {
       const parsed = valid(c.close, input);
       return json(

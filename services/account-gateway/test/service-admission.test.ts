@@ -149,3 +149,22 @@ void test("protected usage reads admit only bounded list queries and exact obser
   }
   assert.equal(facadeControlRoute("POST", "/v1/usage"), false);
 });
+
+void test("retry proof uses exact read-only control admission and never admits inference writes", () => {
+  assert.equal(
+    facadeControlRoute("GET", "/v1/executions/execution-a/requests/request-a/retry-proof"),
+    true,
+  );
+  for (const path of [
+    "/v1/executions/execution-a/retry-proof",
+    "/v1/executions/execution-a/close/retry-proof",
+    "/v1/executions/execution-a/requests/request-a/retry-proof/extra",
+    "/v1/executions/execution-a/requests/request-a/retry-proof?capability=x",
+  ]) {
+    assert.equal(facadeControlRoute("GET", path), false);
+  }
+  assert.equal(
+    facadeControlRoute("POST", "/v1/executions/execution-a/requests/request-a/retry-proof"),
+    false,
+  );
+});
