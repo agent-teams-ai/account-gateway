@@ -66,7 +66,9 @@ async function bounded<T>(work: Promise<T>): Promise<T> {
     clearTimeout(timer);
   }
 }
-async function continueAfterReady(expected: "continue" | "continue-conflict" = "continue"): Promise<void> {
+async function continueAfterReady(
+  expected: "continue" | "continue-conflict" = "continue",
+): Promise<void> {
   const input = createInterface({ input: process.stdin });
   try {
     await bounded(
@@ -255,17 +257,21 @@ async function run(): Promise<void> {
   }
   const bearer = "joined-test-non-entry-public-execution";
   const controlBearer = "joined-test-non-entry-run-control";
-  const bearers = new FacadeBearers(saved
-    ? [{ role: "execution", consumerId: context.consumerId, token: bearer, saved }]
-    : [{
-        role: "run-control",
-        consumerId: context.consumerId,
-        token: controlBearer,
-        ownerRefs: [fixture.ownerRef],
-        profileIds: [descriptor.profile],
-        limits: { ...limits, requests: 3 },
-        maxRunMs: 120_000,
-      }]);
+  const bearers = new FacadeBearers(
+    saved
+      ? [{ role: "execution", consumerId: context.consumerId, token: bearer, saved }]
+      : [
+          {
+            role: "run-control",
+            consumerId: context.consumerId,
+            token: controlBearer,
+            ownerRefs: [fixture.ownerRef],
+            profileIds: [descriptor.profile],
+            limits: { ...limits, requests: 3 },
+            maxRunMs: 120_000,
+          },
+        ],
+  );
   const issued: Array<{ executionRef: string; token: string }> = [];
   if (consumer) {
     // Observe actual deterministic issuance; never substitute a test execution grant.
@@ -322,35 +328,37 @@ async function run(): Promise<void> {
     },
   });
   const facade = createFacade({
-      kernel,
-      store,
-      management,
-      bearers,
-      transport: new NativeHTTPTransport(authority),
-      enrollment: authority.configuration.enrollment,
-      intentHmacKey: randomBytes(32),
-      timeoutMs: 15_000,
-      profiles: [
-        {
-          dto: {
-            profileId: descriptor.profile,
-            protocol: "openai-responses",
-            modelIds: [descriptor.model],
-            authKinds: ["api_key"],
-          },
-          maxOutputTokens: 200,
+    kernel,
+    store,
+    management,
+    bearers,
+    transport: new NativeHTTPTransport(authority),
+    enrollment: authority.configuration.enrollment,
+    intentHmacKey: randomBytes(32),
+    timeoutMs: 15_000,
+    profiles: [
+      {
+        dto: {
+          profileId: descriptor.profile,
+          protocol: "openai-responses",
+          modelIds: [descriptor.model],
+          authKinds: ["api_key"],
         },
-      ],
-    });
-  const retryProofRequests: Array<{ path: string; authorization: string | undefined }> = [];
-  if (consumer) facade.on("request", (request) => {
-    if (request.method === "GET" && /\/retry-proof$/.test(request.url ?? "")) {
-      retryProofRequests.push({
-        path: request.url ?? "",
-        authorization: request.headers.authorization,
-      });
-    }
+        maxOutputTokens: 200,
+      },
+    ],
   });
+  const retryProofRequests: Array<{ path: string; authorization: string | undefined }> = [];
+  if (consumer) {
+    facade.on("request", (request) => {
+      if (request.method === "GET" && (request.url ?? "").endsWith("/retry-proof")) {
+        retryProofRequests.push({
+          path: request.url ?? "",
+          authorization: request.headers.authorization,
+        });
+      }
+    });
+  }
   const origin = await listen(facade);
   report({ phase: "ready", callbackOrigin, engineIncarnation });
   await continueAfterReady();
@@ -380,50 +388,71 @@ async function run(): Promise<void> {
       let size = 0;
       for (;;) {
         const chunk = await reader.read();
-        if (chunk.done) break;
-        size += chunk.value.byteLength;
+        if (chunk.done) {
+          break;
+        }
+        const bytes: unknown = chunk.value;
+        assert.ok(bytes instanceof Uint8Array);
+        size += bytes.byteLength;
         assert.ok(size <= 16_384);
-        chunks.push(chunk.value);
+        chunks.push(bytes);
       }
       return strictJSON(Buffer.concat(chunks), true) as Record<string, unknown>;
     };
     phase = "consumer-prepare";
-    assert.deepEqual(await call("prepare", {
-      gatewayOrigin: origin,
-      nativePublicOrigin,
-      mode: fixture.mode,
-      runControlBearer: controlBearer,
-      accountRef: fixture.accountRef,
-      profileId: descriptor.profile,
-      model: descriptor.model,
-      deadline: fixture.deadline,
-    }), { phase: "prepared" });
+    assert.deepEqual(
+      await call("prepare", {
+        gatewayOrigin: origin,
+        nativePublicOrigin,
+        mode: fixture.mode,
+        runControlBearer: controlBearer,
+        accountRef: fixture.accountRef,
+        profileId: descriptor.profile,
+        model: descriptor.model,
+        deadline: fixture.deadline,
+      }),
+      { phase: "prepared" },
+    );
     assert.deepEqual(await call("prior"), { phase: "prior-paid-completed" });
     assert.equal(issued.length, 1, "one original run access is issued");
-    const original = issued[0];
+    const original = issued.at(0);
     assert.ok(original !== undefined);
     const client = createExecutionClient({
-      role: "execution", origin, token: original.token, timeoutMs: 15_000,
+      role: "execution",
+      origin,
+      token: original.token,
+      timeoutMs: 15_000,
     });
-    const priorRows = (await pool.query<{ id: string; transport_occupied: boolean }>(
-      "SELECT id,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2",
-      [context.consumerId, original.executionRef],
-    )).rows;
+    const priorRows = (
+      await pool.query<{ id: string; transport_occupied: boolean }>(
+        "SELECT id,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2",
+        [context.consumerId, original.executionRef],
+      )
+    ).rows;
     assert.equal(priorRows.length, 1);
-    const prior = priorRows[0];
+    const prior = priorRows.at(0);
     assert.ok(prior !== undefined && !prior.transport_occupied);
-    assert.equal((await kernel.request(context, original.executionRef, prior.id)).effect, "completed");
+    assert.equal(
+      (await kernel.request(context, original.executionRef, prior.id)).effect,
+      "completed",
+    );
     const acknowledgement = kernel.acknowledgeTransportClosed.bind(kernel);
     const reached = Promise.withResolvers<void>(),
       release = Promise.withResolvers<void>();
     let heldRequestRef: string | undefined;
     kernel.acknowledgeTransportClosed = async (...args: Parameters<typeof acknowledgement>) => {
       const proof = args[2];
-      if (args[0].consumerId !== context.consumerId ||
-          proof.executionRef !== original.executionRef || proof.requestRef === prior.id) {
+      if (
+        args[0].consumerId !== context.consumerId ||
+        proof.executionRef !== original.executionRef ||
+        proof.requestRef === prior.id
+      ) {
         return acknowledgement(...args);
       }
-      assert.equal((await kernel.request(context, original.executionRef, proof.requestRef)).effect, "rejected_before_dispatch");
+      assert.equal(
+        (await kernel.request(context, original.executionRef, proof.requestRef)).effect,
+        "rejected_before_dispatch",
+      );
       heldRequestRef ??= proof.requestRef;
       assert.equal(proof.requestRef, heldRequestRef);
       reached.resolve();
@@ -438,22 +467,37 @@ async function run(): Promise<void> {
       phase = "consumer-held-ack";
       pending = call("current");
       void pending.then(
-        () => { currentFinished = true; },
-        () => { currentFinished = true; },
+        () => {
+          currentFinished = true;
+          return undefined;
+        },
+        () => {
+          currentFinished = true;
+          return undefined;
+        },
       );
       await bounded(reached.promise);
-      assert.equal(currentFinished, false, "current Action request is still pending at the actual ACK");
-      const held = (await pool.query<{ id: string; transport_occupied: boolean }>(
-        "SELECT id,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2",
-        [context.consumerId, original.executionRef],
-      )).rows;
+      assert.equal(
+        currentFinished,
+        false,
+        "current Action request is still pending at the actual ACK",
+      );
+      const held = (
+        await pool.query<{ id: string; transport_occupied: boolean }>(
+          "SELECT id,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2",
+          [context.consumerId, original.executionRef],
+        )
+      ).rows;
       assert.equal(held.length, 2);
       const roots = held.filter((row) => row.transport_occupied);
       assert.equal(roots.length, 1);
-      const root = roots[0];
+      const root = roots.at(0);
       assert.ok(root !== undefined);
       assert.equal(root.id, heldRequestRef);
-      assert.equal((await kernel.request(context, original.executionRef, root.id)).effect, "rejected_before_dispatch");
+      assert.equal(
+        (await kernel.request(context, original.executionRef, root.id)).effect,
+        "rejected_before_dispatch",
+      );
       assert.equal(retryProofRequests.length, 0);
       await assert.rejects(
         client.retryProof(original.executionRef, root.id),
@@ -478,24 +522,42 @@ async function run(): Promise<void> {
         transportClosed: true,
       });
       assert.equal(retryProofRequests.length, 3);
-      assert.ok(retryProofRequests.every((request) =>
-        request.path === "/v1/executions/" + encodeURIComponent(original.executionRef) +
-          "/requests/" + encodeURIComponent(root.id) + "/retry-proof" &&
-        request.authorization === "Bearer " + original.token));
-      const final = (await pool.query<{ id: string; transport_occupied: boolean }>(
-        "SELECT id,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2",
-        [context.consumerId, original.executionRef],
-      )).rows;
+      assert.ok(
+        retryProofRequests.every(
+          (request) =>
+            request.path ===
+              "/v1/executions/" +
+                encodeURIComponent(original.executionRef) +
+                "/requests/" +
+                encodeURIComponent(root.id) +
+                "/retry-proof" &&
+            request.authorization === "Bearer " + original.token,
+        ),
+      );
+      const final = (
+        await pool.query<{ id: string; transport_occupied: boolean }>(
+          "SELECT id,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2",
+          [context.consumerId, original.executionRef],
+        )
+      ).rows;
       assert.equal(final.length, 3);
       assert.equal(new Set(final.map((row) => row.id)).size, 3);
       assert.equal(final.filter((row) => row.transport_occupied).length, 0);
-      const effects = await Promise.all(final.map(async (row) =>
-        (await kernel.request(context, original.executionRef, row.id)).effect));
+      const effects = await Promise.all(
+        final.map(
+          async (row) => (await kernel.request(context, original.executionRef, row.id)).effect,
+        ),
+      );
       assert.deepEqual(effects.toSorted(), ["completed", "completed", "rejected_before_dispatch"]);
-      assert.equal((await pool.query<{ request_count: number }>(
-        "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
-        [context.consumerId, original.executionRef],
-      )).rows[0]?.request_count, 3);
+      assert.equal(
+        (
+          await pool.query<{ request_count: number }>(
+            "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
+            [context.consumerId, original.executionRef],
+          )
+        ).rows[0]?.request_count,
+        3,
+      );
       assert.equal(issued.length, 1, "retry must not acquire or renew run access");
       assert.deepEqual(await call("verify"), { phase: "verified" });
       phase = "completed";
