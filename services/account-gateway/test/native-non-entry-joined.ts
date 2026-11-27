@@ -57,9 +57,12 @@ async function bounded<T>(work: Promise<T>): Promise<T> {
     return await Promise.race([
       work,
       new Promise<never>((resolve, reject) => {
-        timer = setTimeout(() => {
-          reject(new KernelError("unavailable"));
-        }, Math.min(15_000, remaining));
+        timer = setTimeout(
+          () => {
+            reject(new KernelError("unavailable"));
+          },
+          Math.min(15_000, remaining),
+        );
       }),
     ]);
   } finally {
@@ -391,11 +394,11 @@ async function run(): Promise<void> {
         if (chunk.done) {
           break;
         }
-        const bytes: unknown = chunk.value;
-        assert.ok(bytes instanceof Uint8Array);
-        size += bytes.byteLength;
+        const chunkBytes: unknown = chunk.value;
+        assert.ok(chunkBytes instanceof Uint8Array);
+        size += chunkBytes.byteLength;
         assert.ok(size <= 16_384);
-        chunks.push(bytes);
+        chunks.push(chunkBytes);
       }
       return strictJSON(Buffer.concat(chunks), true) as Record<string, unknown>;
     };
@@ -469,11 +472,9 @@ async function run(): Promise<void> {
       void pending.then(
         () => {
           currentFinished = true;
-          return undefined;
         },
         () => {
           currentFinished = true;
-          return undefined;
         },
       );
       await bounded(reached.promise);
@@ -530,8 +531,7 @@ async function run(): Promise<void> {
                 encodeURIComponent(original.executionRef) +
                 "/requests/" +
                 encodeURIComponent(root.id) +
-                "/retry-proof" &&
-            request.authorization === "Bearer " + original.token,
+                "/retry-proof" && request.authorization === "Bearer " + original.token,
         ),
       );
       const final = (

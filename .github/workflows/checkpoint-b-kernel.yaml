@@ -120,8 +120,8 @@ jobs:
       - name: Joined native non-entry proof through private and public ingress
         timeout-minutes: 20
         env:
-          GATEWAY_NON_ENTRY_NATIVE_REVISION: 'e494e5a354503ec07eaf4f82075148b0432d50c1'
-          GATEWAY_NATIVE_NON_ENTRY_JOINED_RUNNER_SHA256: 'ad2c264af0c81d55856acbc215f3e485f767bbbc071f82161cbf33745d147dc9'
+          GATEWAY_NON_ENTRY_NATIVE_REVISION: 'f6e05bf458fc447fb641b786d3ec911c592a18ec'
+          GATEWAY_NATIVE_NON_ENTRY_JOINED_RUNNER_SHA256: '65521004a46fed38c1c440f07949bc20a99af33046c5d284ff2c3db63dfac82a'
           AG_NATIVE_NON_ENTRY_JOINED_ALLOW: disposable_pg17_10
           GOTOOLCHAIN: local
         run: |
