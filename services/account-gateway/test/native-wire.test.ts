@@ -310,9 +310,10 @@ void test("native non-entry receipt requires exact negotiated capability and phy
   };
   assert.deepEqual(receipt(original, original.consumerId, p), original);
   const eligible = { ...original, nonEntryReason: "admission_storage_conflict" };
-  const denied = (value: unknown, negotiated = true) =>
+  const denied = (value: unknown, negotiated = true) => {
     assert.throws(() => receipt(value, original.consumerId, p, negotiated),
       (error: unknown) => error instanceof KernelError && error.code === "denied");
+  };
   denied(eligible, false);
   assert.deepEqual(receipt(eligible, original.consumerId, p, true), eligible);
   for (const value of [

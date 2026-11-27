@@ -1352,7 +1352,7 @@ export class PostgresKernel implements DurableKernel {
   ): Promise<ClaimResult> {
     // Capture whitelisted primitives before validation or any await.
     reservation = captureReservation(reservation);
-    if (nonEntryCapability !== undefined && nonEntryCapability !== NATIVE_NON_ENTRY_CAPABILITY) {
+    if (![undefined, NATIVE_NON_ENTRY_CAPABILITY].includes(nonEntryCapability)) {
       throw new KernelError("invalid");
     }
     admission = {
@@ -1650,7 +1650,7 @@ export class PostgresKernel implements DurableKernel {
     uuid(worker);
     validateNativeClosure(proof);
     requireNonEntry(entered);
-    if (nonEntryReason !== undefined && nonEntryReason !== "admission_storage_conflict") {
+    if (![undefined, "admission_storage_conflict"].includes(nonEntryReason)) {
       throw new KernelError("invalid");
     }
     if (worker !== proof.worker) {

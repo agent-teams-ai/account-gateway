@@ -35,7 +35,7 @@ async function listen(server: Server): Promise<string> {
     server.listen(0, "127.0.0.1", resolve);
   });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   return "http://127.0.0.1:" + address.port;
 }
 function loopback(value: unknown): string {
@@ -51,7 +51,9 @@ async function bounded<T>(work: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([work, new Promise<never>((resolve, reject) => {
-      timer = setTimeout(() => reject(new KernelError("unavailable")), 15_000);
+      timer = setTimeout(() => {
+        reject(new KernelError("unavailable"));
+      }, 15_000);
     })]);
   } finally {
     clearTimeout(timer);
@@ -70,7 +72,9 @@ async function continueAfterReady(): Promise<void> {
           reject(new KernelError("invalid"));
         }
       });
-      input.once("close", () => reject(new KernelError("unavailable")));
+      input.once("close", () => {
+        reject(new KernelError("unavailable"));
+      });
     }));
   } finally {
     input.close();
@@ -81,7 +85,8 @@ async function run(): Promise<void> {
   assert.equal(process.env.AG_NATIVE_NON_ENTRY_JOINED_ALLOW, "disposable_pg17_10");
   const file = process.env.AG_NATIVE_NON_ENTRY_JOINED_FIXTURE;
   const dsn = process.env.AG_NATIVE_NON_ENTRY_JOINED_DSN;
-  assert.ok(file && isAbsolute(file) && dsn);
+  assert.ok(typeof file === "string" && isAbsolute(file));
+  assert.ok(typeof dsn === "string" && dsn.length > 0);
   const url = new URL(dsn);
   assert.ok(["postgres:", "postgresql:"].includes(url.protocol));
   assert.equal(url.hostname, "127.0.0.1");
@@ -92,7 +97,7 @@ async function run(): Promise<void> {
   const fixture = strictJSON(bytes, true) as {
     consumerId: string; accountRef: string; ownerRef: string; operationId: string;
     qualificationRef: string; descriptor: Parameters<typeof physicalCandidate>[0];
-    nativeOrigin: string; nativePublicOrigin: string; mode: "private" | "public";
+    nativeOrigin: string; nativePublicOrigin: string; mode: unknown;
   };
   for (const value of [fixture.consumerId, fixture.ownerRef, fixture.operationId, fixture.qualificationRef]) {
     identifier(value);
@@ -162,7 +167,7 @@ async function run(): Promise<void> {
     bindingRevision: 1, issuerEpoch: await kernel.issuer(context), deadline: new Date(Date.now() + 60_000),
     limits,
   });
-  assert.ok(prepared.executionRef);
+  assert.ok(typeof prepared.executionRef === "string" && prepared.executionRef.length > 0);
   const saved = await kernel.savedExecution(context, prepared.executionRef);
   const bearer = "joined-test-non-entry-public-execution";
   const bearers = new FacadeBearers([{ role: "execution", consumerId: context.consumerId, token: bearer, saved }]);
@@ -271,9 +276,13 @@ try {
   report({ phase: "failed", boundary: phase, category: error instanceof assert.AssertionError ? "assertion" : "unavailable" });
   process.exitCode = 1;
 } finally {
-  for (const server of servers.reverse()) {
+  for (const server of servers.toReversed()) {
     server.closeAllConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        resolve();
+      });
+    });
   }
   await pool?.end();
 }

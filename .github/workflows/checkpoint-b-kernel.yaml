@@ -121,7 +121,7 @@ jobs:
         timeout-minutes: 20
         env:
           GATEWAY_NON_ENTRY_NATIVE_REVISION: 'c038d92aa2b51a55382f67b10f511e2bc2bcfbca'
-          GATEWAY_NATIVE_NON_ENTRY_JOINED_RUNNER_SHA256: '6aecbe2cdfc5270bacf0aafaa02848d46f7c1f297d5c98bcef090078dc6531e2'
+          GATEWAY_NATIVE_NON_ENTRY_JOINED_RUNNER_SHA256: '11b0ef96ade8df95c551a534927ecd4e710d9db4effb19a5d68e0d9ed9150bbb'
           AG_NATIVE_NON_ENTRY_JOINED_ALLOW: disposable_pg17_10
           GOTOOLCHAIN: local
         run: |

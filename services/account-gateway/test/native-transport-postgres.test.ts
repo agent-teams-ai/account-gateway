@@ -2673,7 +2673,9 @@ void test("request retry proof TCP/SQL: duplicate capability fields are rejected
         timeout: 4000,
       }, (response) => {
         response.resume();
-        response.once("end", () => resolve(response.statusCode));
+        response.once("end", () => {
+          resolve(response.statusCode);
+        });
         response.once("error", reject);
       });
       req.once("error", reject);

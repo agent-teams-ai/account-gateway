@@ -277,13 +277,13 @@ export function receipt(
   if (
     r.nonEntryReason !== undefined &&
     (r.nonEntryReason !== "admission_storage_conflict" ||
-      lifetime.entered ||
+      lifetime.entered !== false ||
       r.phase !== "closed" ||
-      !lifetime.contextDone ||
-      !lifetime.forwardingReturned ||
-      !lifetime.bodyKnown ||
-      !lifetime.bodyClosed ||
-      lifetime.closeFailed)
+      lifetime.contextDone !== true ||
+      lifetime.forwardingReturned !== true ||
+      lifetime.bodyKnown !== true ||
+      lifetime.bodyClosed !== true ||
+      lifetime.closeFailed !== false)
   ) {
     return denied();
   }

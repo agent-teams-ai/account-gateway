@@ -39,11 +39,15 @@ void test("request retry proof SDK: one bounded exact read, finite proof and no 
   await once(server, "listening");
   t.after(async () => {
     server.closeAllConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        resolve();
+      });
+    });
     assert.deepEqual(failures, []);
   });
   const address = server.address();
-  assert.ok(address && typeof address === "object");
+  assert.ok(address !== null && typeof address === "object");
   const client = sdk.createExecutionClient({
     role: "execution", origin: "http://127.0.0.1:" + address.port,
     token: "synthetic-sdk-execution", timeoutMs: 1000,
