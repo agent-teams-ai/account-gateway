@@ -38,7 +38,54 @@ jobs:
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run toolchain:doctor
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run build
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run lint
-      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run format:check
+      - name: Check formatting
+        id: format-check
+        run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run format:check
+      - name: Preserve exact formatter correction for review
+        if: ${{ failure() && steps.format-check.outcome == 'failure' && matrix.node == '26.11.1' }}
+        timeout-minutes: 2
+        env:
+          FORMAT_REQUESTED_SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import { execFileSync } from "node:child_process";
+          import { createHash } from "node:crypto";
+          import { readFileSync } from "node:fs";
+          import { createRequire } from "node:module";
+          import { dirname, join } from "node:path";
+          const require = createRequire(import.meta.url);
+          const stackManifest = require.resolve("stack-toolchain/package.json");
+          assert.equal(JSON.parse(readFileSync(stackManifest, "utf8")).version, "0.1.1");
+          const ownedRequire = createRequire(stackManifest);
+          const formatterManifest = ownedRequire.resolve("oxfmt/package.json");
+          assert.equal(JSON.parse(readFileSync(formatterManifest, "utf8")).version, "0.74.0");
+          const config = JSON.parse(readFileSync("toolchain.config.json", "utf8"));
+          const paths = config.format.paths;
+          assert.ok(Array.isArray(paths) && paths.length > 0 && paths.every((path) => typeof path === "string"));
+          execFileSync("git", ["diff", "--exit-code"], { stdio: "pipe" });
+          const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
+          const provenance = {
+            requestedSource: process.env.FORMAT_REQUESTED_SOURCE,
+            checkoutCommit: git("rev-parse", "HEAD"),
+            checkoutTree: git("rev-parse", "HEAD^{tree}"),
+          };
+          execFileSync(process.execPath, [
+            join(dirname(formatterManifest), "bin", "oxfmt"),
+            "--config", join(dirname(stackManifest), "presets", "format.json"),
+            "--disable-nested-config", "--", ...paths,
+          ], { stdio: "inherit", timeout: 60_000 });
+          const patch = execFileSync("git", ["diff", "--no-ext-diff", "--no-color", "--", ...paths], {
+            maxBuffer: 262_144,
+          });
+          assert.ok(patch.length > 0 && patch.length <= 262_144);
+          const sha256 = createHash("sha256").update(patch).digest("hex");
+          process.stdout.write("FORMATTER_REVIEW_PATCH_BEGIN " + JSON.stringify({
+            ...provenance, bytes: patch.length, sha256,
+          }) + "\n");
+          process.stdout.write(patch);
+          process.stdout.write("FORMATTER_REVIEW_PATCH_END\n");
+          NODE
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run typecheck
       - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" test
       - run: node scripts/check-topology.mjs

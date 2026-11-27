@@ -32,6 +32,7 @@ import {
 } from "../src/service-admission.ts";
 import { KernelError, NATIVE_NON_ENTRY_CAPABILITY } from "../src/domain.ts";
 import { createExecutionClient, GatewayError } from "@agent-teams/account-gateway/http";
+import { safeError } from "@agent-teams/account-gateway/contracts";
 import type { NativeDispatchProof, PrivateAdmission } from "../src/domain.ts";
 import type { Descriptor, Receipt } from "../src/native-wire.ts";
 import {
@@ -2541,7 +2542,11 @@ void test("request retry proof TCP/SQL: negotiated private receipt waits for dur
     assert.equal(status.effect, "rejected_before_dispatch");
     assert.deepEqual(status.error?.retry, { kind: "never" });
     assert.equal(Object.hasOwn(status, "nonEntryReason"), false);
-    for (const capability of [undefined, "request-retry-proof/v2", "request-retry-proof/v1, request-retry-proof/v1"]) {
+    for (const [capability, expectedStatus, expectedCode] of [
+      [undefined, 400, "invalid_request"],
+      ["request-retry-proof/v2", 403, "forbidden"],
+      ["request-retry-proof/v1, request-retry-proof/v1", 403, "forbidden"],
+    ] as const) {
       const denied = await fetch(f.origin + "/v1/executions/" + ref + "/requests/" + requestId + "/retry-proof", {
         headers: {
           authorization: "Bearer " + f.bearer,
@@ -2549,8 +2554,11 @@ void test("request retry proof TCP/SQL: negotiated private receipt waits for dur
           ...(capability === undefined ? {} : { "x-account-gateway-capability": capability }),
         },
       });
-      assert.equal(denied.status, 403);
-      await denied.arrayBuffer();
+      assert.equal(denied.status, expectedStatus);
+      const error = safeError.parse(await denied.json());
+      assert.equal(error.code, expectedCode);
+      assert.equal(error.effect, "not_dispatched");
+      assert.deepEqual(error.retry, { kind: "never" });
     }
     await f.request(requestId);
     assert.deepEqual(f.stats(), { posts: 1, entries: 0, permits: 1, ackCalls: 1 });
@@ -2660,10 +2668,11 @@ void test("request retry proof TCP/SQL: duplicate capability fields are rejected
   const f = await publicExecutionFixture();
   try {
     const body = Buffer.from(JSON.stringify({ ...f.tuple, requestedModel: f.physical.model }));
-    const status = await new Promise<number | undefined>((resolve, reject) => {
+    const denied = await new Promise<{ status: number | undefined; body: string }>((resolve, reject) => {
       const req = httpRequest(f.origin + "/private/native/v1/public-admit", {
         method: "POST",
         headers: [
+          "Host", new URL(f.origin).host,
           "Authorization", "Bearer " + credentials.callbackCredential,
           "Content-Type", "application/json",
           "Content-Length", String(body.byteLength),
@@ -2672,9 +2681,17 @@ void test("request retry proof TCP/SQL: duplicate capability fields are rejected
         ],
         timeout: 4000,
       }, (response) => {
-        response.resume();
+        let responseBody = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => {
+          if (Buffer.byteLength(responseBody) + Buffer.byteLength(chunk) > 1024) {
+            response.destroy(new Error("duplicate capability response too large"));
+            return;
+          }
+          responseBody += chunk;
+        });
         response.once("end", () => {
-          resolve(response.statusCode);
+          resolve({ status: response.statusCode, body: responseBody });
         });
         response.once("error", reject);
       });
@@ -2682,7 +2699,8 @@ void test("request retry proof TCP/SQL: duplicate capability fields are rejected
       req.once("timeout", () => req.destroy(new Error("duplicate capability fixture timeout")));
       req.end(body);
     });
-    assert.equal(status, 403);
+    assert.equal(denied.status, 403);
+    assert.deepEqual(JSON.parse(denied.body), { code: "denied" });
     await assert.rejects(f.kernel.request(f.context, f.saved.admission.executionRef, f.tuple.requestRef),
       (error: unknown) => error instanceof KernelError && error.code === "unknown");
   } finally {
