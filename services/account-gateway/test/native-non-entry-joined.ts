@@ -28,6 +28,7 @@ const limits = { requests: 2, concurrency: 1, requestBytes: 4096, outputBytes: 4
 const servers: Server[] = [];
 let pool: Pool | undefined,
   phase = "guard";
+let consumerDeadline: number | undefined;
 const report = (value: object) => process.stdout.write(JSON.stringify(value) + "\n");
 async function listen(server: Server): Promise<string> {
   servers.push(server);
@@ -49,6 +50,8 @@ function loopback(value: unknown): string {
   return url.origin;
 }
 async function bounded<T>(work: Promise<T>): Promise<T> {
+  const remaining = consumerDeadline === undefined ? 15_000 : consumerDeadline - Date.now();
+  assert.ok(remaining > 0, "original joined deadline elapsed");
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
@@ -56,14 +59,14 @@ async function bounded<T>(work: Promise<T>): Promise<T> {
       new Promise<never>((resolve, reject) => {
         timer = setTimeout(() => {
           reject(new KernelError("unavailable"));
-        }, 15_000);
+        }, Math.min(15_000, remaining));
       }),
     ]);
   } finally {
     clearTimeout(timer);
   }
 }
-async function continueAfterReady(): Promise<void> {
+async function continueAfterReady(expected: "continue" | "continue-conflict" = "continue"): Promise<void> {
   const input = createInterface({ input: process.stdin });
   try {
     await bounded(
@@ -71,7 +74,7 @@ async function continueAfterReady(): Promise<void> {
         input.once("line", (line) => {
           try {
             assert.ok(line.length <= 128);
-            assert.deepEqual(strictJSON(Buffer.from(line)), { phase: "continue" });
+            assert.deepEqual(strictJSON(Buffer.from(line)), { phase: expected });
             resolve();
           } catch {
             reject(new KernelError("invalid"));
@@ -110,6 +113,8 @@ async function run(): Promise<void> {
     nativeOrigin: string;
     nativePublicOrigin: string;
     mode: unknown;
+    scenario?: unknown;
+    deadline?: unknown;
   };
   for (const value of [
     fixture.consumerId,
@@ -124,6 +129,17 @@ async function run(): Promise<void> {
   assert.equal(descriptor.nativePhysicalIdentity, descriptor.generation);
   assert.equal(descriptor.profile, "openai-responses-apikey-v1");
   assert.ok(fixture.mode === "private" || fixture.mode === "public");
+  assert.ok(fixture.scenario === undefined || fixture.scenario === "request-retry-consumer");
+  const consumer = fixture.scenario === "request-retry-consumer";
+  if (consumer) {
+    assert.equal(typeof fixture.deadline, "string");
+    const deadline = new Date(fixture.deadline as string);
+    assert.equal(deadline.toISOString(), fixture.deadline);
+    consumerDeadline = deadline.getTime();
+    assert.ok(consumerDeadline > Date.now() && consumerDeadline - Date.now() <= 120_000);
+  } else {
+    assert.equal(fixture.deadline, undefined);
+  }
   const nativeOrigin = loopback(fixture.nativeOrigin);
   const nativePublicOrigin = loopback(fixture.nativePublicOrigin);
   const provider = new URL(descriptor.baseURL);
@@ -218,26 +234,48 @@ async function run(): Promise<void> {
     (await kernel.acknowledgeCandidate(context, fixture.operationId, worker, descriptor)).state,
     "applied",
   );
-  const prepared = await kernel.prepare(context, {
-    operationId: randomUUID(),
-    intentDigest: "joined-non-entry-approval",
-    invocationRef: randomUUID(),
-    attemptRef: randomUUID(),
-    permittedAccounts: [fixture.accountRef],
-    profile: descriptor.profile,
-    policySubject: "joined-non-entry-policy",
-    policyRevision: 1,
-    bindingRevision: 1,
-    issuerEpoch: await kernel.issuer(context),
-    deadline: new Date(Date.now() + 60_000),
-    limits,
-  });
-  assert.ok(typeof prepared.executionRef === "string" && prepared.executionRef.length > 0);
-  const saved = await kernel.savedExecution(context, prepared.executionRef);
+  let saved: Awaited<ReturnType<typeof kernel.savedExecution>> | undefined;
+  if (!consumer) {
+    const prepared = await kernel.prepare(context, {
+      operationId: randomUUID(),
+      intentDigest: "joined-non-entry-approval",
+      invocationRef: randomUUID(),
+      attemptRef: randomUUID(),
+      permittedAccounts: [fixture.accountRef],
+      profile: descriptor.profile,
+      policySubject: "joined-non-entry-policy",
+      policyRevision: 1,
+      bindingRevision: 1,
+      issuerEpoch: await kernel.issuer(context),
+      deadline: new Date(Date.now() + 60_000),
+      limits,
+    });
+    assert.ok(typeof prepared.executionRef === "string" && prepared.executionRef.length > 0);
+    saved = await kernel.savedExecution(context, prepared.executionRef);
+  }
   const bearer = "joined-test-non-entry-public-execution";
-  const bearers = new FacadeBearers([
-    { role: "execution", consumerId: context.consumerId, token: bearer, saved },
-  ]);
+  const controlBearer = "joined-test-non-entry-run-control";
+  const bearers = new FacadeBearers(saved
+    ? [{ role: "execution", consumerId: context.consumerId, token: bearer, saved }]
+    : [{
+        role: "run-control",
+        consumerId: context.consumerId,
+        token: controlBearer,
+        ownerRefs: [fixture.ownerRef],
+        profileIds: [descriptor.profile],
+        limits: { ...limits, requests: 3 },
+        maxRunMs: 120_000,
+      }]);
+  const issued: Array<{ executionRef: string; token: string }> = [];
+  if (consumer) {
+    // Observe actual deterministic issuance; never substitute a test execution grant.
+    const issue = bearers.upsertExecution.bind(bearers);
+    bearers.upsertExecution = (...args: Parameters<typeof issue>) => {
+      const token = issue(...args);
+      issued.push({ executionRef: args[1].admission.executionRef, token });
+      return token;
+    };
+  }
   const engineIncarnation = randomUUID();
   const authority = new NativeAuthority({
     kernel,
@@ -283,8 +321,7 @@ async function run(): Promise<void> {
       },
     },
   });
-  const origin = await listen(
-    createFacade({
+  const facade = createFacade({
       kernel,
       store,
       management,
@@ -304,10 +341,181 @@ async function run(): Promise<void> {
           maxOutputTokens: 200,
         },
       ],
-    }),
-  );
+    });
+  const retryProofRequests: Array<{ path: string; authorization: string | undefined }> = [];
+  if (consumer) facade.on("request", (request) => {
+    if (request.method === "GET" && /\/retry-proof$/.test(request.url ?? "")) {
+      retryProofRequests.push({
+        path: request.url ?? "",
+        authorization: request.headers.authorization,
+      });
+    }
+  });
+  const origin = await listen(facade);
   report({ phase: "ready", callbackOrigin, engineIncarnation });
   await continueAfterReady();
+  if (consumer) {
+    const broker = loopback(process.env.RR_NATIVE_NON_ENTRY_CONSUMER_ORIGIN);
+    const brokerToken = process.env.RR_NATIVE_NON_ENTRY_CONSUMER_TOKEN;
+    assert.ok(typeof brokerToken === "string" && /^[a-f0-9]{64}$/.test(brokerToken));
+    const call = async (
+      step: "prepare" | "prior" | "current" | "held" | "verify",
+      value: object = {},
+    ): Promise<Record<string, unknown>> => {
+      assert.ok(consumerDeadline !== undefined && consumerDeadline > Date.now());
+      const response = await fetch(broker + "/" + step, {
+        method: "POST",
+        redirect: "error",
+        signal: AbortSignal.timeout(Math.min(15_000, consumerDeadline - Date.now())),
+        headers: {
+          authorization: "Bearer " + brokerToken,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(value),
+      });
+      assert.equal(response.status, 200);
+      assert.ok(response.body !== null);
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        size += chunk.value.byteLength;
+        assert.ok(size <= 16_384);
+        chunks.push(chunk.value);
+      }
+      return strictJSON(Buffer.concat(chunks), true) as Record<string, unknown>;
+    };
+    phase = "consumer-prepare";
+    assert.deepEqual(await call("prepare", {
+      gatewayOrigin: origin,
+      nativePublicOrigin,
+      mode: fixture.mode,
+      runControlBearer: controlBearer,
+      accountRef: fixture.accountRef,
+      profileId: descriptor.profile,
+      model: descriptor.model,
+      deadline: fixture.deadline,
+    }), { phase: "prepared" });
+    assert.deepEqual(await call("prior"), { phase: "prior-paid-completed" });
+    assert.equal(issued.length, 1, "one original run access is issued");
+    const original = issued[0];
+    assert.ok(original !== undefined);
+    const client = createExecutionClient({
+      role: "execution", origin, token: original.token, timeoutMs: 15_000,
+    });
+    const priorRows = (await pool.query<{ id: string; transport_occupied: boolean }>(
+      "SELECT id,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2",
+      [context.consumerId, original.executionRef],
+    )).rows;
+    assert.equal(priorRows.length, 1);
+    const prior = priorRows[0];
+    assert.ok(prior !== undefined && !prior.transport_occupied);
+    assert.equal((await kernel.request(context, original.executionRef, prior.id)).effect, "completed");
+    const acknowledgement = kernel.acknowledgeTransportClosed.bind(kernel);
+    const reached = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    let heldRequestRef: string | undefined;
+    kernel.acknowledgeTransportClosed = async (...args: Parameters<typeof acknowledgement>) => {
+      const proof = args[2];
+      if (args[0].consumerId !== context.consumerId ||
+          proof.executionRef !== original.executionRef || proof.requestRef === prior.id) {
+        return acknowledgement(...args);
+      }
+      assert.equal((await kernel.request(context, original.executionRef, proof.requestRef)).effect, "rejected_before_dispatch");
+      heldRequestRef ??= proof.requestRef;
+      assert.equal(proof.requestRef, heldRequestRef);
+      reached.resolve();
+      await bounded(release.promise);
+      return acknowledgement(...args);
+    };
+    let pending: Promise<Record<string, unknown>> | undefined;
+    let currentFinished = false;
+    try {
+      report({ phase: "prior-paid-completed" });
+      await continueAfterReady("continue-conflict");
+      phase = "consumer-held-ack";
+      pending = call("current");
+      void pending.then(
+        () => { currentFinished = true; },
+        () => { currentFinished = true; },
+      );
+      await bounded(reached.promise);
+      assert.equal(currentFinished, false, "current Action request is still pending at the actual ACK");
+      const held = (await pool.query<{ id: string; transport_occupied: boolean }>(
+        "SELECT id,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2",
+        [context.consumerId, original.executionRef],
+      )).rows;
+      assert.equal(held.length, 2);
+      const roots = held.filter((row) => row.transport_occupied);
+      assert.equal(roots.length, 1);
+      const root = roots[0];
+      assert.ok(root !== undefined);
+      assert.equal(root.id, heldRequestRef);
+      assert.equal((await kernel.request(context, original.executionRef, root.id)).effect, "rejected_before_dispatch");
+      assert.equal(retryProofRequests.length, 0);
+      await assert.rejects(
+        client.retryProof(original.executionRef, root.id),
+        (error: unknown) => error instanceof GatewayError && error.code === "safe_error",
+      );
+      assert.equal(retryProofRequests.length, 1);
+      assert.deepEqual(await call("held"), { phase: "held-without-retry" });
+      assert.equal(currentFinished, false);
+      // Only the failed root uses this hold. The successor's successful close
+      // takes the unchanged real acknowledgement path.
+      kernel.acknowledgeTransportClosed = acknowledgement;
+      release.resolve();
+      assert.deepEqual(await bounded(pending), { phase: "current-paid-completed" });
+      phase = "consumer-proof-after-ack";
+      assert.equal(retryProofRequests.length, 2, "the real RR relay reads proof exactly once");
+      assert.deepEqual(await client.retryProof(original.executionRef, root.id), {
+        kind: "request-retry-proof/v1",
+        consumerId: context.consumerId,
+        executionRef: original.executionRef,
+        requestRef: root.id,
+        nonEntryReason: "admission_storage_conflict",
+        transportClosed: true,
+      });
+      assert.equal(retryProofRequests.length, 3);
+      assert.ok(retryProofRequests.every((request) =>
+        request.path === "/v1/executions/" + encodeURIComponent(original.executionRef) +
+          "/requests/" + encodeURIComponent(root.id) + "/retry-proof" &&
+        request.authorization === "Bearer " + original.token));
+      const final = (await pool.query<{ id: string; transport_occupied: boolean }>(
+        "SELECT id,transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2",
+        [context.consumerId, original.executionRef],
+      )).rows;
+      assert.equal(final.length, 3);
+      assert.equal(new Set(final.map((row) => row.id)).size, 3);
+      assert.equal(final.filter((row) => row.transport_occupied).length, 0);
+      const effects = await Promise.all(final.map(async (row) =>
+        (await kernel.request(context, original.executionRef, row.id)).effect));
+      assert.deepEqual(effects.toSorted(), ["completed", "completed", "rejected_before_dispatch"]);
+      assert.equal((await pool.query<{ request_count: number }>(
+        "SELECT request_count FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
+        [context.consumerId, original.executionRef],
+      )).rows[0]?.request_count, 3);
+      assert.equal(issued.length, 1, "retry must not acquire or renew run access");
+      assert.deepEqual(await call("verify"), { phase: "verified" });
+      phase = "completed";
+      report({
+        phase,
+        contract: "native-non-entry-consumer/v1",
+        mode: fixture.mode,
+        proofAfterAck: true,
+        priorPaidPreserved: true,
+        originalSpent: true,
+        oneSuccessor: true,
+      });
+    } finally {
+      kernel.acknowledgeTransportClosed = acknowledgement;
+      release.resolve();
+      await pending?.catch(() => {});
+    }
+    return;
+  }
+  assert.ok(saved !== undefined);
   phase = "request-before-ack";
   const client = createExecutionClient({
     role: "execution",
