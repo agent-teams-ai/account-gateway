@@ -1,5 +1,7 @@
 # Agent Instructions
 
+Use the [documentation map](docs/README.md) to select the owning contract, integration reference or historical evidence.
+
 - Keep consumer policy independent of framework/vendor DTOs. Compose concrete
   adapters at the outer boundary. Reuse one versioned wire schema authority.
 - Credentials are write-only. Never log/export keys, OAuth material, native

@@ -25,3 +25,5 @@ rollout steps.
 
 No old-pool credential/history migration, personal account sharing or generic
 agent scheduler belongs to the initial slice.
+
+See the [documentation map](docs/README.md) for task-oriented navigation.
