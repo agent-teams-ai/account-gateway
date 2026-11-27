@@ -19,13 +19,18 @@ void test("request retry proof SDK: one bounded exact read, finite proof and no 
   assert.equal(contracts.REQUEST_RETRY_PROOF_CONTRACT, expected.kind);
   assert.equal(contracts.REQUEST_RETRY_PROOF_CAPABILITY_HEADER, "x-account-gateway-capability");
   assert.deepEqual(contracts.requestRetryProof.parse(expected), expected);
-  let response: unknown = expected, status = 200, calls = 0;
+  let response: unknown = expected,
+    status = 200,
+    calls = 0;
   const failures: unknown[] = [];
   const server = createServer((req, res) => {
     try {
       calls++;
       assert.equal(req.method, "GET");
-      assert.equal(req.url, "/v1/executions/execution-original/requests/request-original/retry-proof");
+      assert.equal(
+        req.url,
+        "/v1/executions/execution-original/requests/request-original/retry-proof",
+      );
       assert.equal(req.headers.authorization, "Bearer synthetic-sdk-execution");
       assert.equal(req.headers["x-account-gateway-capability"], "request-retry-proof/v1");
       res.writeHead(status, { "content-type": "application/json" });
@@ -49,8 +54,10 @@ void test("request retry proof SDK: one bounded exact read, finite proof and no 
   const address = server.address();
   assert.ok(address !== null && typeof address === "object");
   const client = sdk.createExecutionClient({
-    role: "execution", origin: "http://127.0.0.1:" + address.port,
-    token: "synthetic-sdk-execution", timeoutMs: 1000,
+    role: "execution",
+    origin: "http://127.0.0.1:" + address.port,
+    token: "synthetic-sdk-execution",
+    timeoutMs: 1000,
   });
   assert.deepEqual(await client.retryProof(expected.executionRef, expected.requestRef), expected);
   assert.equal(calls, 1);
@@ -74,14 +81,19 @@ void test("request retry proof SDK: one bounded exact read, finite proof and no 
   }
   status = 404;
   response = {
-    code: "not_found", traceRef: "synthetic-trace", requestRef: expected.requestRef,
-    effect: "not_dispatched", retry: { kind: "never" },
+    code: "not_found",
+    traceRef: "synthetic-trace",
+    requestRef: expected.requestRef,
+    effect: "not_dispatched",
+    retry: { kind: "never" },
   };
   const before = calls;
   await assert.rejects(
     client.retryProof(expected.executionRef, expected.requestRef),
-    (error: unknown) => error instanceof sdk.GatewayError &&
-      error.code === "safe_error" && error.effect === "effect_unknown",
+    (error: unknown) =>
+      error instanceof sdk.GatewayError &&
+      error.code === "safe_error" &&
+      error.effect === "effect_unknown",
   );
   assert.equal(calls, before + 1);
   const aborted = new AbortController();
@@ -95,17 +107,30 @@ void test("request retry proof SDK: one bounded exact read, finite proof and no 
 
 void test("request retry proof does not extend legacy status or allow retrying the original request", () => {
   const status = {
-    requestRef: "request-original", effect: "rejected_before_dispatch", status: "failed",
+    requestRef: "request-original",
+    effect: "rejected_before_dispatch",
+    status: "failed",
     error: {
-      code: "upstream_failure", traceRef: "synthetic-trace", requestRef: "request-original",
-      effect: "rejected_before_dispatch", retry: { kind: "never" },
+      code: "upstream_failure",
+      traceRef: "synthetic-trace",
+      requestRef: "request-original",
+      effect: "rejected_before_dispatch",
+      retry: { kind: "never" },
     },
   };
   assert.equal(contracts.requestStatus.safeParse(status).success, true);
-  assert.equal(contracts.requestStatus.safeParse({
-    ...status, nonEntryReason: "admission_storage_conflict",
-  }).success, false);
-  assert.equal(contracts.requestStatus.safeParse({
-    ...status, error: { ...status.error, retry: { kind: "after", milliseconds: 0 } },
-  }).success, false);
+  assert.equal(
+    contracts.requestStatus.safeParse({
+      ...status,
+      nonEntryReason: "admission_storage_conflict",
+    }).success,
+    false,
+  );
+  assert.equal(
+    contracts.requestStatus.safeParse({
+      ...status,
+      error: { ...status.error, retry: { kind: "after", milliseconds: 0 } },
+    }).success,
+    false,
+  );
 });

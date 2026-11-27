@@ -66,7 +66,11 @@ export class NativeHTTPTransport implements NativeTransport {
       ) {
         return denied();
       }
-      return await authority.verifiedReceipt(ctx, await jsonBody(hop.response, cfg.controlBytes), p);
+      return await authority.verifiedReceipt(
+        ctx,
+        await jsonBody(hop.response, cfg.controlBytes),
+        p,
+      );
     } finally {
       hop.abort();
     }

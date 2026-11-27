@@ -5,7 +5,14 @@ import { oauthProfileDefinition } from "./oauth-profiles.ts";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { KernelError, NATIVE_NON_ENTRY_CAPABILITY, approvedLimits, defaults, identifier, uuid } from "./domain.ts";
+import {
+  KernelError,
+  NATIVE_NON_ENTRY_CAPABILITY,
+  approvedLimits,
+  defaults,
+  identifier,
+  uuid,
+} from "./domain.ts";
 import type {
   ApprovedLimits,
   DurableKernel,
@@ -1147,7 +1154,13 @@ export class NativeAuthority {
     let status = await this.kernel.request(ctx, p.executionRef, p.requestRef);
     if (!closed.lifetime.entered) {
       if (status.effect === "dispatch_started") {
-        status = await this.kernel.rejectBeforeDispatch(ctx, p.worker, p, false, closed.nonEntryReason);
+        status = await this.kernel.rejectBeforeDispatch(
+          ctx,
+          p.worker,
+          p,
+          false,
+          closed.nonEntryReason,
+        );
       }
     } else if (closed.lifetime.completed && closed.effect === "completed") {
       if (status.effect === "dispatch_started") {
@@ -1353,7 +1366,10 @@ export class NativeAuthority {
           ) {
             return denied();
           }
-          if (requestedNonEntry === NATIVE_NON_ENTRY_CAPABILITY && this.kernel.nativeNonEntryNegotiated) {
+          if (
+            requestedNonEntry === NATIVE_NON_ENTRY_CAPABILITY &&
+            this.kernel.nativeNonEntryNegotiated
+          ) {
             nonEntryCapability = NATIVE_NON_ENTRY_CAPABILITY;
           }
           reservationNonce = singleton(req, "x-gateway-reservation-nonce");

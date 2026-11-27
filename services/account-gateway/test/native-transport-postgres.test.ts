@@ -352,7 +352,11 @@ const ignoreEntry = (): void => {};
 
 async function fixture(
   mode: Mode = "complete",
-  options: { maxPending?: number; timeoutMs?: number; nonEntry?: "negotiated" | "unnegotiated" } = {},
+  options: {
+    maxPending?: number;
+    timeoutMs?: number;
+    nonEntry?: "negotiated" | "unnegotiated";
+  } = {},
 ) {
   const executionLimits = mode === "large" ? { ...limits, outputBytes: 1_048_576 } : limits;
   const streamFrames =
@@ -461,12 +465,18 @@ async function fixture(
   const raws: Buffer[] = [],
     records = new Map<string, Receipt>();
   const call = async (
-    route: string, body: unknown, token = credentials.callbackCredential,
+    route: string,
+    body: unknown,
+    token = credentials.callbackCredential,
     extraHeaders: Record<string, string> = {},
   ) =>
     fetch(callbackOrigin + "/private/native/v1/" + route, {
       method: "POST",
-      headers: { authorization: "Bearer " + token, "content-type": "application/json", ...extraHeaders },
+      headers: {
+        authorization: "Bearer " + token,
+        "content-type": "application/json",
+        ...extraHeaders,
+      },
       body: JSON.stringify(body),
       redirect: "manual",
     });
@@ -500,9 +510,10 @@ async function fixture(
           native: NativeDispatchProof["native"];
         };
         delete admit.payload;
-        const nonEntryHeaders: Record<string, string> = options.nonEntry === "negotiated"
-          ? { "x-gateway-non-entry-capability": NATIVE_NON_ENTRY_CAPABILITY }
-          : {};
+        const nonEntryHeaders: Record<string, string> =
+          options.nonEntry === "negotiated"
+            ? { "x-gateway-non-entry-capability": NATIVE_NON_ENTRY_CAPABILITY }
+            : {};
         const admitting = call("admit", admit, credentials.callbackCredential, nonEntryHeaders);
         void admitting.catch(() => {});
         let early: Receipt | undefined;
@@ -558,11 +569,19 @@ async function fixture(
           status: { effect: string };
         };
         if (options.nonEntry === "negotiated" && reply.dispatch) {
-          assert.equal(response.headers.get("x-gateway-non-entry-capability"), NATIVE_NON_ENTRY_CAPABILITY);
+          assert.equal(
+            response.headers.get("x-gateway-non-entry-capability"),
+            NATIVE_NON_ENTRY_CAPABILITY,
+          );
         } else {
           assert.equal(response.headers.get("x-gateway-non-entry-capability"), null);
         }
-        const duplicate = await call("admit", admit, credentials.callbackCredential, nonEntryHeaders);
+        const duplicate = await call(
+          "admit",
+          admit,
+          credentials.callbackCredential,
+          nonEntryHeaders,
+        );
         assert.equal(duplicate.headers.get("x-gateway-non-entry-capability"), null);
         assert.equal(duplicate.status, 200);
         const readback = (await duplicate.json()) as Record<string, unknown>;
@@ -2509,78 +2528,106 @@ void test("public native model attribution rejects malformed labels and alternat
   }
 });
 
-void test("request retry proof TCP/SQL: negotiated private receipt waits for durable ACK and exact active bearer", { timeout: 15_000 }, async () => {
-  const f = await fixture("noentry", { nonEntry: "negotiated", timeoutMs: 5000 });
-  const reached = latch(), release = latch();
-  const acknowledge = f.kernel.acknowledgeTransportClosed.bind(f.kernel);
-  f.kernel.acknowledgeTransportClosed = async (...args: Parameters<typeof acknowledge>) => {
-    reached.resolve();
-    await release.promise;
-    return acknowledge(...args);
-  };
-  const client = createExecutionClient({ role: "execution", origin: f.origin, token: f.bearer });
-  const requestId = randomUUID(), ref = f.saved.admission.executionRef;
-  const pending = f.request(requestId);
-  try {
-    await waitFor(reached.promise);
-    assert.equal((await f.kernel.request(f.context, ref, requestId)).effect, "rejected_before_dispatch");
-    assert.equal(await f.occupied(requestId), true);
-    await assert.rejects(client.retryProof(ref, requestId),
-      (error: unknown) => error instanceof GatewayError && error.code === "safe_error");
-    release.resolve();
-    const response = await pending;
-    assert.equal(response.failed, false);
-    assert.equal(response.response.status, 202);
-    const expected = {
-      kind: "request-retry-proof/v1", consumerId: f.context.consumerId,
-      executionRef: ref, requestRef: requestId,
-      nonEntryReason: "admission_storage_conflict", transportClosed: true,
+void test(
+  "request retry proof TCP/SQL: negotiated private receipt waits for durable ACK and exact active bearer",
+  { timeout: 15_000 },
+  async () => {
+    const f = await fixture("noentry", { nonEntry: "negotiated", timeoutMs: 5000 });
+    const reached = latch(),
+      release = latch();
+    const acknowledge = f.kernel.acknowledgeTransportClosed.bind(f.kernel);
+    f.kernel.acknowledgeTransportClosed = async (...args: Parameters<typeof acknowledge>) => {
+      reached.resolve();
+      await release.promise;
+      return acknowledge(...args);
     };
-    assert.deepEqual(await client.retryProof(ref, requestId), expected);
-    assert.deepEqual(await new PostgresKernel(pool).requestRetryProof(f.context, ref, requestId), expected);
-    const status = await client.status(ref, requestId);
-    assert.equal(status.effect, "rejected_before_dispatch");
-    assert.deepEqual(status.error?.retry, { kind: "never" });
-    assert.equal(Object.hasOwn(status, "nonEntryReason"), false);
-    for (const [capability, expectedStatus, expectedCode] of [
-      [undefined, 400, "invalid_request"],
-      ["request-retry-proof/v2", 403, "forbidden"],
-      ["request-retry-proof/v1, request-retry-proof/v1", 403, "forbidden"],
-    ] as const) {
-      const denied = await fetch(f.origin + "/v1/executions/" + ref + "/requests/" + requestId + "/retry-proof", {
-        headers: {
-          authorization: "Bearer " + f.bearer,
-          "content-type": "application/json", accept: "application/json",
-          ...(capability === undefined ? {} : { "x-account-gateway-capability": capability }),
-        },
-      });
-      assert.equal(denied.status, expectedStatus);
-      const error = safeError.parse(await denied.json());
-      assert.equal(error.code, expectedCode);
-      assert.equal(error.effect, "not_dispatched");
-      assert.deepEqual(error.retry, { kind: "never" });
+    const client = createExecutionClient({ role: "execution", origin: f.origin, token: f.bearer });
+    const requestId = randomUUID(),
+      ref = f.saved.admission.executionRef;
+    const pending = f.request(requestId);
+    try {
+      await waitFor(reached.promise);
+      assert.equal(
+        (await f.kernel.request(f.context, ref, requestId)).effect,
+        "rejected_before_dispatch",
+      );
+      assert.equal(await f.occupied(requestId), true);
+      await assert.rejects(
+        client.retryProof(ref, requestId),
+        (error: unknown) => error instanceof GatewayError && error.code === "safe_error",
+      );
+      release.resolve();
+      const response = await pending;
+      assert.equal(response.failed, false);
+      assert.equal(response.response.status, 202);
+      const expected = {
+        kind: "request-retry-proof/v1",
+        consumerId: f.context.consumerId,
+        executionRef: ref,
+        requestRef: requestId,
+        nonEntryReason: "admission_storage_conflict",
+        transportClosed: true,
+      };
+      assert.deepEqual(await client.retryProof(ref, requestId), expected);
+      assert.deepEqual(
+        await new PostgresKernel(pool).requestRetryProof(f.context, ref, requestId),
+        expected,
+      );
+      const status = await client.status(ref, requestId);
+      assert.equal(status.effect, "rejected_before_dispatch");
+      assert.deepEqual(status.error?.retry, { kind: "never" });
+      assert.equal(Object.hasOwn(status, "nonEntryReason"), false);
+      for (const [capability, expectedStatus, expectedCode] of [
+        [undefined, 400, "invalid_request"],
+        ["request-retry-proof/v2", 403, "forbidden"],
+        ["request-retry-proof/v1, request-retry-proof/v1", 403, "forbidden"],
+      ] as const) {
+        const denied = await fetch(
+          f.origin + "/v1/executions/" + ref + "/requests/" + requestId + "/retry-proof",
+          {
+            headers: {
+              authorization: "Bearer " + f.bearer,
+              "content-type": "application/json",
+              accept: "application/json",
+              ...(capability === undefined ? {} : { "x-account-gateway-capability": capability }),
+            },
+          },
+        );
+        assert.equal(denied.status, expectedStatus);
+        const error = safeError.parse(await denied.json());
+        assert.equal(error.code, expectedCode);
+        assert.equal(error.effect, "not_dispatched");
+        assert.deepEqual(error.retry, { kind: "never" });
+      }
+      await f.request(requestId);
+      assert.deepEqual(f.stats(), { posts: 1, entries: 0, permits: 1, ackCalls: 1 });
+      f.bearers.replace([]);
+      await assert.rejects(
+        client.retryProof(ref, requestId),
+        (error: unknown) => error instanceof GatewayError && error.httpStatus === 401,
+      );
+    } finally {
+      release.resolve();
+      await pending.catch(() => {});
+      await f.stop();
     }
-    await f.request(requestId);
-    assert.deepEqual(f.stats(), { posts: 1, entries: 0, permits: 1, ackCalls: 1 });
-    f.bearers.replace([]);
-    await assert.rejects(client.retryProof(ref, requestId),
-      (error: unknown) => error instanceof GatewayError && error.httpStatus === 401);
-  } finally {
-    release.resolve();
-    await pending.catch(() => {});
-    await f.stop();
-  }
-});
+  },
+);
 
 void test("request retry proof TCP/SQL: unnegotiated finite field cannot settle or acknowledge", async () => {
   const f = await fixture("noentry", { nonEntry: "unnegotiated" });
   try {
     const result = await f.request();
-    assert.equal((await f.kernel.request(f.context, f.saved.admission.executionRef, result.requestId)).effect, "effect_unknown");
+    assert.equal(
+      (await f.kernel.request(f.context, f.saved.admission.executionRef, result.requestId)).effect,
+      "effect_unknown",
+    );
     assert.equal(await f.occupied(result.requestId), true);
     assert.deepEqual(f.stats(), { posts: 1, entries: 0, permits: 1, ackCalls: 0 });
-    await assert.rejects(f.kernel.requestRetryProof(f.context, f.saved.admission.executionRef, result.requestId),
-      (error: unknown) => error instanceof KernelError && error.code === "unknown");
+    await assert.rejects(
+      f.kernel.requestRetryProof(f.context, f.saved.admission.executionRef, result.requestId),
+      (error: unknown) => error instanceof KernelError && error.code === "unknown",
+    );
   } finally {
     await f.stop();
   }
@@ -2591,55 +2638,111 @@ void test("request retry proof TCP/SQL: public settlement and late original clos
     const f = await publicExecutionFixture();
     const requestedModel = f.physical.model;
     try {
-      const headers: Record<string, string> = negotiated ? { "x-gateway-non-entry-capability": NATIVE_NON_ENTRY_CAPABILITY } : {};
+      const headers: Record<string, string> = negotiated
+        ? { "x-gateway-non-entry-capability": NATIVE_NON_ENTRY_CAPABILITY }
+        : {};
       const admitted = await f.call("public-admit", { ...f.tuple, requestedModel }, headers);
       assert.equal(admitted.status, 200);
-      assert.equal(admitted.headers.get("x-gateway-non-entry-capability"), negotiated ? NATIVE_NON_ENTRY_CAPABILITY : null);
+      assert.equal(
+        admitted.headers.get("x-gateway-non-entry-capability"),
+        negotiated ? NATIVE_NON_ENTRY_CAPABILITY : null,
+      );
       const reply = nativeObject(await admitted.json(), [
-        "consumerId", "admission", "status", "dispatch", "nativeDescriptor", "leaseExpiresAt",
+        "consumerId",
+        "admission",
+        "status",
+        "dispatch",
+        "nativeDescriptor",
+        "leaseExpiresAt",
       ]);
-      const dispatch = nativeObject(reply.dispatch, ["descriptor", "executionRef", "requestRef", "limits", "deadline", "closure"]);
+      const dispatch = nativeObject(reply.dispatch, [
+        "descriptor",
+        "executionRef",
+        "requestRef",
+        "limits",
+        "deadline",
+        "closure",
+      ]);
       const p = nativeProof(dispatch.closure);
       const receipt: Receipt = {
-        consumerId: f.context.consumerId, executionRef: p.executionRef, requestRef: p.requestRef,
-        native: p.native, proof: p, phase: "closed", effect: "effect_unknown",
-        sealed: true, acknowledged: false, nonEntryReason: "admission_storage_conflict",
+        consumerId: f.context.consumerId,
+        executionRef: p.executionRef,
+        requestRef: p.requestRef,
+        native: p.native,
+        proof: p,
+        phase: "closed",
+        effect: "effect_unknown",
+        sealed: true,
+        acknowledged: false,
+        nonEntryReason: "admission_storage_conflict",
         lifetime: {
-          entered: false, contextDone: true, forwardingReturned: true, bodyKnown: true,
-          bodyClosed: true, closeFailed: false, completed: false, sealed: true,
+          entered: false,
+          contextDone: true,
+          forwardingReturned: true,
+          bodyKnown: true,
+          bodyClosed: true,
+          closeFailed: false,
+          completed: false,
+          sealed: true,
         },
       };
       const body = { consumerId: f.context.consumerId, proof: p, receipt, requestedModel };
       const settled = await f.call("execution-settle", body);
       assert.equal(settled.status, negotiated ? 200 : 403);
       await settled.arrayBuffer();
-      const occupancy = async () => (await pool.query<{ transport_occupied: boolean }>(
-        "SELECT transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
-        [f.context.consumerId, p.executionRef, p.requestRef],
-      )).rows[0].transport_occupied;
+      const occupancy = async () =>
+        (
+          await pool.query<{ transport_occupied: boolean }>(
+            "SELECT transport_occupied FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
+            [f.context.consumerId, p.executionRef, p.requestRef],
+          )
+        ).rows[0].transport_occupied;
       assert.equal(await occupancy(), !negotiated);
       if (!negotiated) {
-        assert.equal((await f.kernel.request(f.context, p.executionRef, p.requestRef)).effect, "dispatch_started");
-        const denied = await f.call("closure-ack", { consumerId: f.context.consumerId, proof: p, receipt });
+        assert.equal(
+          (await f.kernel.request(f.context, p.executionRef, p.requestRef)).effect,
+          "dispatch_started",
+        );
+        const denied = await f.call("closure-ack", {
+          consumerId: f.context.consumerId,
+          proof: p,
+          receipt,
+        });
         assert.equal(denied.status, 403);
         await denied.arrayBuffer();
         assert.equal(await occupancy(), true);
         continue;
       }
-      assert.equal((await f.kernel.request(f.context, p.executionRef, p.requestRef)).effect, "rejected_before_dispatch");
-      assert.equal((await f.kernel.requestRetryProof(f.context, p.executionRef, p.requestRef)).transportClosed, true);
-      await pool.query("UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND worker=$2",
-        [f.context.consumerId, p.worker]);
-      await pool.query("UPDATE ag_kernel.executions SET deadline=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND ref=$2",
-        [f.context.consumerId, p.executionRef]);
+      assert.equal(
+        (await f.kernel.request(f.context, p.executionRef, p.requestRef)).effect,
+        "rejected_before_dispatch",
+      );
+      assert.equal(
+        (await f.kernel.requestRetryProof(f.context, p.executionRef, p.requestRef)).transportClosed,
+        true,
+      );
+      await pool.query(
+        "UPDATE ag_kernel.workers SET lease_until=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND worker=$2",
+        [f.context.consumerId, p.worker],
+      );
+      await pool.query(
+        "UPDATE ag_kernel.executions SET deadline=clock_timestamp()-interval '1 second' WHERE consumer=$1 AND ref=$2",
+        [f.context.consumerId, p.executionRef],
+      );
       const duplicate = await f.call("execution-settle", body);
       assert.equal(duplicate.status, 200);
       await duplicate.arrayBuffer();
-      const lateAck = await f.call("closure-ack", { consumerId: f.context.consumerId, proof: p, receipt });
+      const lateAck = await f.call("closure-ack", {
+        consumerId: f.context.consumerId,
+        proof: p,
+        receipt,
+      });
       assert.equal(lateAck.status, 200);
       await lateAck.arrayBuffer();
-      await assert.rejects(f.kernel.requestRetryProof(f.context, p.executionRef, p.requestRef),
-        (error: unknown) => error instanceof KernelError && error.code === "unknown");
+      await assert.rejects(
+        f.kernel.requestRetryProof(f.context, p.executionRef, p.requestRef),
+        (error: unknown) => error instanceof KernelError && error.code === "unknown",
+      );
       assert.equal(await occupancy(), false);
     } finally {
       await f.stop();
@@ -2648,16 +2751,25 @@ void test("request retry proof TCP/SQL: public settlement and late original clos
 });
 
 void test("request retry proof TCP/SQL: unknown or coalesced private capability cannot create a reservation", async () => {
-  for (const capability of ["unsupported", NATIVE_NON_ENTRY_CAPABILITY + ", " + NATIVE_NON_ENTRY_CAPABILITY]) {
+  for (const capability of [
+    "unsupported",
+    NATIVE_NON_ENTRY_CAPABILITY + ", " + NATIVE_NON_ENTRY_CAPABILITY,
+  ]) {
     const f = await publicExecutionFixture();
     try {
-      const response = await f.call("public-admit", { ...f.tuple, requestedModel: f.physical.model }, {
-        "x-gateway-non-entry-capability": capability,
-      });
+      const response = await f.call(
+        "public-admit",
+        { ...f.tuple, requestedModel: f.physical.model },
+        {
+          "x-gateway-non-entry-capability": capability,
+        },
+      );
       assert.equal(response.status, 403);
       await response.arrayBuffer();
-      await assert.rejects(f.kernel.request(f.context, f.saved.admission.executionRef, f.tuple.requestRef),
-        (error: unknown) => error instanceof KernelError && error.code === "unknown");
+      await assert.rejects(
+        f.kernel.request(f.context, f.saved.admission.executionRef, f.tuple.requestRef),
+        (error: unknown) => error instanceof KernelError && error.code === "unknown",
+      );
     } finally {
       await f.stop();
     }
@@ -2668,41 +2780,55 @@ void test("request retry proof TCP/SQL: duplicate capability fields are rejected
   const f = await publicExecutionFixture();
   try {
     const body = Buffer.from(JSON.stringify({ ...f.tuple, requestedModel: f.physical.model }));
-    const denied = await new Promise<{ status: number | undefined; body: string }>((resolve, reject) => {
-      const req = httpRequest(f.origin + "/private/native/v1/public-admit", {
-        method: "POST",
-        headers: [
-          "Host", new URL(f.origin).host,
-          "Authorization", "Bearer " + credentials.callbackCredential,
-          "Content-Type", "application/json",
-          "Content-Length", String(body.byteLength),
-          "X-Gateway-Non-Entry-Capability", NATIVE_NON_ENTRY_CAPABILITY,
-          "X-Gateway-Non-Entry-Capability", NATIVE_NON_ENTRY_CAPABILITY,
-        ],
-        timeout: 4000,
-      }, (response) => {
-        let responseBody = "";
-        response.setEncoding("utf8");
-        response.on("data", (chunk: string) => {
-          if (Buffer.byteLength(responseBody) + Buffer.byteLength(chunk) > 1024) {
-            response.destroy(new Error("duplicate capability response too large"));
-            return;
-          }
-          responseBody += chunk;
-        });
-        response.once("end", () => {
-          resolve({ status: response.statusCode, body: responseBody });
-        });
-        response.once("error", reject);
-      });
-      req.once("error", reject);
-      req.once("timeout", () => req.destroy(new Error("duplicate capability fixture timeout")));
-      req.end(body);
-    });
+    const denied = await new Promise<{ status: number | undefined; body: string }>(
+      (resolve, reject) => {
+        const req = httpRequest(
+          f.origin + "/private/native/v1/public-admit",
+          {
+            method: "POST",
+            headers: [
+              "Host",
+              new URL(f.origin).host,
+              "Authorization",
+              "Bearer " + credentials.callbackCredential,
+              "Content-Type",
+              "application/json",
+              "Content-Length",
+              String(body.byteLength),
+              "X-Gateway-Non-Entry-Capability",
+              NATIVE_NON_ENTRY_CAPABILITY,
+              "X-Gateway-Non-Entry-Capability",
+              NATIVE_NON_ENTRY_CAPABILITY,
+            ],
+            timeout: 4000,
+          },
+          (response) => {
+            let responseBody = "";
+            response.setEncoding("utf8");
+            response.on("data", (chunk: string) => {
+              if (Buffer.byteLength(responseBody) + Buffer.byteLength(chunk) > 1024) {
+                response.destroy(new Error("duplicate capability response too large"));
+                return;
+              }
+              responseBody += chunk;
+            });
+            response.once("end", () => {
+              resolve({ status: response.statusCode, body: responseBody });
+            });
+            response.once("error", reject);
+          },
+        );
+        req.once("error", reject);
+        req.once("timeout", () => req.destroy(new Error("duplicate capability fixture timeout")));
+        req.end(body);
+      },
+    );
     assert.equal(denied.status, 403);
     assert.deepEqual(JSON.parse(denied.body), { code: "denied" });
-    await assert.rejects(f.kernel.request(f.context, f.saved.admission.executionRef, f.tuple.requestRef),
-      (error: unknown) => error instanceof KernelError && error.code === "unknown");
+    await assert.rejects(
+      f.kernel.request(f.context, f.saved.admission.executionRef, f.tuple.requestRef),
+      (error: unknown) => error instanceof KernelError && error.code === "unknown",
+    );
   } finally {
     await f.stop();
   }

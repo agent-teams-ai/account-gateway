@@ -300,19 +300,33 @@ void test("native non-entry receipt requires exact negotiated capability and phy
     },
   };
   const original = {
-    consumerId: "wire-consumer", executionRef: p.executionRef, requestRef: p.requestRef,
-    native: p.native, proof: p, phase: "closed", effect: "effect_unknown",
-    sealed: true, acknowledged: false,
+    consumerId: "wire-consumer",
+    executionRef: p.executionRef,
+    requestRef: p.requestRef,
+    native: p.native,
+    proof: p,
+    phase: "closed",
+    effect: "effect_unknown",
+    sealed: true,
+    acknowledged: false,
     lifetime: {
-      entered: false, contextDone: true, forwardingReturned: true, bodyKnown: true,
-      bodyClosed: true, closeFailed: false, completed: false, sealed: true,
+      entered: false,
+      contextDone: true,
+      forwardingReturned: true,
+      bodyKnown: true,
+      bodyClosed: true,
+      closeFailed: false,
+      completed: false,
+      sealed: true,
     },
   };
   assert.deepEqual(receipt(original, original.consumerId, p), original);
   const eligible = { ...original, nonEntryReason: "admission_storage_conflict" };
   const denied = (value: unknown, negotiated = true) => {
-    assert.throws(() => receipt(value, original.consumerId, p, negotiated),
-      (error: unknown) => error instanceof KernelError && error.code === "denied");
+    assert.throws(
+      () => receipt(value, original.consumerId, p, negotiated),
+      (error: unknown) => error instanceof KernelError && error.code === "denied",
+    );
   };
   denied(eligible, false);
   assert.deepEqual(receipt(eligible, original.consumerId, p, true), eligible);
@@ -321,9 +335,10 @@ void test("native non-entry receipt requires exact negotiated capability and phy
     { ...eligible, nativeError: "secret-sql-details" },
     { ...eligible, phase: "admitted" },
     { ...eligible, proof: { ...p, token: "00000000-0000-4000-8000-000000000007" } },
-    ...["contextDone", "forwardingReturned", "bodyKnown", "bodyClosed"].map(
-      (field) => ({ ...eligible, lifetime: { ...eligible.lifetime, [field]: false } }),
-    ),
+    ...["contextDone", "forwardingReturned", "bodyKnown", "bodyClosed"].map((field) => ({
+      ...eligible,
+      lifetime: { ...eligible.lifetime, [field]: false },
+    })),
     { ...eligible, lifetime: { ...eligible.lifetime, entered: true } },
     { ...eligible, lifetime: { ...eligible.lifetime, closeFailed: true } },
   ]) {

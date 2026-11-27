@@ -5662,11 +5662,18 @@ void test("D-final only expired positively safe payloads compact; held evidence 
 });
 
 async function nonEntryProofFixture(negotiated = true) {
-  const ctx = context(), account = await connected(ctx), w = await worker(ctx);
+  const ctx = context(),
+    account = await connected(ctx),
+    w = await worker(ctx);
   const e = await prepared(ctx, account.accountRef!);
   const ref = e.result.executionRef!;
   const claim = await a.claim(
-    ctx, ref, "original-non-entry", w, e.admission, reservation(),
+    ctx,
+    ref,
+    "original-non-entry",
+    w,
+    e.admission,
+    reservation(),
     negotiated ? NATIVE_NON_ENTRY_CAPABILITY : undefined,
   );
   assert.ok(claim.dispatch);
@@ -5683,33 +5690,52 @@ void test("request retry proof: original reason and separate closure retain the 
   await b.acknowledgeTransportClosed(f.ctx, f.w, f.proof);
   const restarted = new PostgresKernel(poolB);
   const expected = {
-    kind: "request-retry-proof/v1", consumerId: f.ctx.consumerId,
-    executionRef: f.ref, requestRef: f.proof.requestRef,
-    nonEntryReason: "admission_storage_conflict", transportClosed: true,
+    kind: "request-retry-proof/v1",
+    consumerId: f.ctx.consumerId,
+    executionRef: f.ref,
+    requestRef: f.proof.requestRef,
+    nonEntryReason: "admission_storage_conflict",
+    transportClosed: true,
   };
   assert.deepEqual(await restarted.requestRetryProof(f.ctx, f.ref, f.proof.requestRef), expected);
   assert.deepEqual(await a.requestRetryProof(f.ctx, f.ref, f.proof.requestRef), expected);
   const status = await a.request(f.ctx, f.ref, f.proof.requestRef);
   assert.deepEqual(status, {
-    requestRef: f.proof.requestRef, effect: "rejected_before_dispatch", code: "native_rejected",
+    requestRef: f.proof.requestRef,
+    effect: "rejected_before_dispatch",
+    code: "native_rejected",
   });
   assert.deepEqual(
-    await a.claim(f.ctx, f.ref, f.proof.requestRef, f.w, f.e.admission, reservation(), NATIVE_NON_ENTRY_CAPABILITY),
+    await a.claim(
+      f.ctx,
+      f.ref,
+      f.proof.requestRef,
+      f.w,
+      f.e.admission,
+      reservation(),
+      NATIVE_NON_ENTRY_CAPABILITY,
+    ),
     { status },
   );
-  assert.equal(await count(
-    "SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
-    [f.ctx.consumerId, f.ref],
-  ), 1);
+  assert.equal(
+    await count(
+      "SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
+      [f.ctx.consumerId, f.ref],
+    ),
+    1,
+  );
   assert.equal(await occupancy(f.ctx, f.account.accountRef!), 0);
   const successor = await a.claim(f.ctx, f.ref, "fresh-request", f.w, f.e.admission, reservation());
   assert.ok(successor.dispatch);
   assert.deepEqual(successor.dispatch.limits, f.e.admission.limits);
   assert.equal(successor.dispatch.deadline, f.e.admission.expiresAt);
-  assert.equal(await count(
-    "SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
-    [f.ctx.consumerId, f.ref],
-  ), 2);
+  assert.equal(
+    await count(
+      "SELECT request_count AS n FROM ag_kernel.executions WHERE consumer=$1 AND ref=$2",
+      [f.ctx.consumerId, f.ref],
+    ),
+    2,
+  );
 });
 
 void test("request retry proof: legacy and generic rejections can never gain eligibility", async () => {
@@ -5720,7 +5746,15 @@ void test("request retry proof: legacy and generic rejections can never gain eli
         a.rejectBeforeDispatch(f.ctx, f.w, f.proof, false, "admission_storage_conflict"),
         isCode("denied"),
       );
-      await b.claim(f.ctx, f.ref, f.proof.requestRef, f.w, f.e.admission, reservation(), NATIVE_NON_ENTRY_CAPABILITY);
+      await b.claim(
+        f.ctx,
+        f.ref,
+        f.proof.requestRef,
+        f.w,
+        f.e.admission,
+        reservation(),
+        NATIVE_NON_ENTRY_CAPABILITY,
+      );
       assert.equal(await a.nativeNonEntryNegotiated(f.ctx, f.proof), false);
     }
     await a.rejectBeforeDispatch(f.ctx, f.w, f.proof, false);
@@ -5730,10 +5764,12 @@ void test("request retry proof: legacy and generic rejections can never gain eli
     }
     await a.acknowledgeTransportClosed(f.ctx, f.w, f.proof);
     await assert.rejects(a.requestRetryProof(f.ctx, f.ref, f.proof.requestRef), isCode("unknown"));
-    const row = (await admin.query<{ non_entry_reason: string | null }>(
-      "SELECT non_entry_reason FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
-      [f.ctx.consumerId, f.ref, f.proof.requestRef],
-    )).rows[0];
+    const row = (
+      await admin.query<{ non_entry_reason: string | null }>(
+        "SELECT non_entry_reason FROM ag_kernel.requests WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
+        [f.ctx.consumerId, f.ref, f.proof.requestRef],
+      )
+    ).rows[0];
     assert.equal(row.non_entry_reason, null);
     for (const assignment of [
       "non_entry_reason='admission_storage_conflict'",
@@ -5741,10 +5777,13 @@ void test("request retry proof: legacy and generic rejections can never gain eli
     ]) {
       await assert.rejects(
         admin.query(
-          "UPDATE ag_kernel.requests SET " + assignment + " WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
+          "UPDATE ag_kernel.requests SET " +
+            assignment +
+            " WHERE consumer=$1 AND execution_ref=$2 AND id=$3",
           [f.ctx.consumerId, f.ref, f.proof.requestRef],
         ),
-        (error: unknown) => typeof error === "object" && error !== null && "code" in error && error.code === "23514",
+        (error: unknown) =>
+          typeof error === "object" && error !== null && "code" in error && error.code === "23514",
       );
     }
   }
@@ -5776,7 +5815,10 @@ void test("request retry proof: receipt negotiation is exact and survives origin
   await a.acknowledgeTransportClosed(f.ctx, f.w, f.proof);
   assert.equal(await occupancy(f.ctx, f.account.accountRef!), 0);
   await assert.rejects(b.requestRetryProof(f.ctx, f.ref, f.proof.requestRef), isCode("unknown"));
-  assert.equal((await a.request(f.ctx, f.ref, f.proof.requestRef)).effect, "rejected_before_dispatch");
+  assert.equal(
+    (await a.request(f.ctx, f.ref, f.proof.requestRef)).effect,
+    "rejected_before_dispatch",
+  );
 });
 
 void test("request retry proof: active worker, deadline, issuer, fence and open execution are independent gates", async () => {

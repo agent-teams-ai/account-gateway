@@ -583,10 +583,7 @@ export interface DurableKernel {
   ): Promise<ClaimResult>;
   request(context: TrustedContext, executionRef: string, requestId: string): Promise<RequestStatus>;
   // Durable original receipt negotiation, including closure after owner expiry.
-  nativeNonEntryNegotiated?(
-    context: TrustedContext,
-    proof: NativeDispatchProof,
-  ): Promise<boolean>;
+  nativeNonEntryNegotiated?(context: TrustedContext, proof: NativeDispatchProof): Promise<boolean>;
   // Separate active-authority read. Absence in an older adapter never qualifies.
   requestRetryProof?(
     context: TrustedContext,

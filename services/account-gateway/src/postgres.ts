@@ -1299,9 +1299,17 @@ export class PostgresKernel implements DurableKernel {
         AND r.worker=$4 AND r.closure_token=$5 AND r.native_origin_ref=$6
         AND r.engine_incarnation=$7 AND r.request_nonce=$8 AND r.descriptor_generation=$9
         AND r.non_entry_negotiated AND e.request_details_retired_at IS NULL`,
-        [tx.consumer, proof.executionRef, proof.requestRef, proof.worker, proof.token,
-          proof.native.originRef, proof.native.engineIncarnation,
-          proof.native.requestNonce, proof.native.generation],
+        [
+          tx.consumer,
+          proof.executionRef,
+          proof.requestRef,
+          proof.worker,
+          proof.token,
+          proof.native.originRef,
+          proof.native.engineIncarnation,
+          proof.native.requestNonce,
+          proof.native.generation,
+        ],
       );
       return result.rowCount === 1;
     });

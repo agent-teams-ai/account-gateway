@@ -6,7 +6,12 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import type { IncomingMessage } from "node:http";
 import { KernelError, identifier, uuid, approvedLimits, defaults, instant } from "./domain.ts";
-import type { NativeDispatchProof, NativeNonEntryReason, PrivateAdmission, SavedExecution } from "./domain.ts";
+import type {
+  NativeDispatchProof,
+  NativeNonEntryReason,
+  PrivateAdmission,
+  SavedExecution,
+} from "./domain.ts";
 import type { PhysicalCandidate } from "./management.ts";
 import { strictJSON } from "./facade-ingress.ts";
 import type { NativeControlAdmission } from "./service-admission.ts";

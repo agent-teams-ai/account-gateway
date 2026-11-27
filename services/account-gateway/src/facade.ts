@@ -467,7 +467,10 @@ export function createFacade(options: FacadeOptions): Server {
       return proof;
     };
     const callbacks: NativeCallback = Object.freeze({
-      async admit(requestNonce: string, nonEntryCapability?: NativeNonEntryCapability): Promise<NativePermit> {
+      async admit(
+        requestNonce: string,
+        nonEntryCapability?: NativeNonEntryCapability,
+      ): Promise<NativePermit> {
         uuid(requestNonce);
         requireCurrent(grant);
         if (signal.aborted) {
@@ -587,8 +590,11 @@ export function createFacade(options: FacadeOptions): Server {
         }
         return kernel.effect(context, p.executionRef, p.requestRef, peer.worker, next);
       },
-      rejectBeforeDispatch: (proof: NativeDispatchProof, entered: false, reason?: NativeNonEntryReason) =>
-        kernel.rejectBeforeDispatch(context, peer.worker, validProof(proof), entered, reason),
+      rejectBeforeDispatch: (
+        proof: NativeDispatchProof,
+        entered: false,
+        reason?: NativeNonEntryReason,
+      ) => kernel.rejectBeforeDispatch(context, peer.worker, validProof(proof), entered, reason),
       closed: (proof: NativeDispatchProof, cleanup?: CleanupAuthority) =>
         kernel.acknowledgeTransportClosed(context, peer.worker, validProof(proof), cleanup),
     });
@@ -601,8 +607,11 @@ export function createFacade(options: FacadeOptions): Server {
         proof: NativeDispatchProof,
         next: "response_started" | "completed" | "effect_unknown",
       ) => inServiceLane("control", () => callbacks.effect(proof, next)),
-      rejectBeforeDispatch: (proof: NativeDispatchProof, entered: false, reason?: NativeNonEntryReason) =>
-        inServiceLane("control", () => callbacks.rejectBeforeDispatch(proof, entered, reason)),
+      rejectBeforeDispatch: (
+        proof: NativeDispatchProof,
+        entered: false,
+        reason?: NativeNonEntryReason,
+      ) => inServiceLane("control", () => callbacks.rejectBeforeDispatch(proof, entered, reason)),
       closed: (proof: NativeDispatchProof, cleanup?: CleanupAuthority) =>
         inServiceLane("control", () => callbacks.closed(proof, cleanup)),
     });
@@ -1437,8 +1446,12 @@ export function createFacade(options: FacadeOptions): Server {
             }
             if (match[5]) {
               if (
-                method !== "GET" || !match[2] || !match[3] || match[4] ||
-                singleton(req, c.REQUEST_RETRY_PROOF_CAPABILITY_HEADER) !== c.REQUEST_RETRY_PROOF_CONTRACT ||
+                method !== "GET" ||
+                !match[2] ||
+                !match[3] ||
+                match[4] ||
+                singleton(req, c.REQUEST_RETRY_PROOF_CAPABILITY_HEADER) !==
+                  c.REQUEST_RETRY_PROOF_CONTRACT ||
                 !kernel.requestRetryProof
               ) {
                 throw new KernelError("denied");
@@ -1448,11 +1461,17 @@ export function createFacade(options: FacadeOptions): Server {
               requireCurrent(grant);
               const proof = await kernel.requestRetryProof(context, ref, identity.requestRef!);
               requireCurrent(grant);
-              if (proof.consumerId !== context.consumerId ||
-                  proof.executionRef !== ref || proof.requestRef !== identity.requestRef) {
+              if (
+                proof.consumerId !== context.consumerId ||
+                proof.executionRef !== ref ||
+                proof.requestRef !== identity.requestRef
+              ) {
                 throw new KernelError("denied");
               }
-              res.setHeader(c.REQUEST_RETRY_PROOF_CAPABILITY_HEADER, c.REQUEST_RETRY_PROOF_CONTRACT);
+              res.setHeader(
+                c.REQUEST_RETRY_PROOF_CAPABILITY_HEADER,
+                c.REQUEST_RETRY_PROOF_CONTRACT,
+              );
               send(res, c.requestRetryProof, proof);
               return;
             }

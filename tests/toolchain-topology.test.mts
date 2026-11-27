@@ -178,7 +178,10 @@ void test("ordinary CI requires public lint and format after SDK build", async (
       assert.notEqual(altered, original, "fixture must alter an actual CI command");
       if (change === "typecheck-order") {
         assert.ok(original.includes(typecheck + testStep), "fixture must find adjacent real steps");
-        assert.ok(altered.includes(testStep + typecheck), "typecheck must remain after the test step");
+        assert.ok(
+          altered.includes(testStep + typecheck),
+          "typecheck must remain after the test step",
+        );
         assert.equal(altered.split(typecheck).length, 2, "typecheck must still occur exactly once");
       }
       await writeFile(path, altered);
