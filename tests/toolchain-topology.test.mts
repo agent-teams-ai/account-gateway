@@ -131,22 +131,56 @@ void test("whole checker rejects missing or redirected SDK workspace ownership",
   }
 });
 
-// Removing a quality command or placing it before SDK emission must refuse CI.
+// Mandatory quality steps cannot be removed, reordered or made optional.
 void test("ordinary CI requires public lint and format after SDK build", async () => {
-  for (const change of ["lint", "format:check", "order"]) {
+  for (const change of [
+    "lint",
+    "format:check",
+    "order",
+    "typecheck",
+    "typecheck-order",
+    "conditional-format",
+    "optional-lint",
+    "recovery-condition",
+  ] as const) {
     await fixture(async (root) => {
       const path = join(root, ".github/workflows/checkpoint-a.yaml");
       const original = await readFile(path, "utf8");
-      const prefix =
-        '      - run: node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run ';
+      const pnpm = 'node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs"';
+      const runner = `${pnpm} run `;
+      const prefix = `      - run: ${runner}`;
       const build = prefix + "build\n",
         lint = prefix + "lint\n",
-        format = prefix + "format:check\n";
-      const altered =
-        change === "order"
-          ? original.replace(build + lint + format, lint + format + build)
-          : original.replace(prefix + change + "\n", "");
+        typecheck = prefix + "typecheck\n",
+        testStep = `      - run: ${pnpm} test\n`;
+      const format = [
+        "      - name: Check formatting",
+        "        id: format-check",
+        `        run: ${runner}format:check`,
+        "",
+      ].join("\n");
+      const altered = {
+        lint: original.replace(lint, ""),
+        "format:check": original.replace(format, ""),
+        order: original.replace(build + lint + format, lint + format + build),
+        typecheck: original.replace(typecheck, ""),
+        "typecheck-order": original.replace(typecheck, "").replace(testStep, testStep + typecheck),
+        "conditional-format": original.replace(
+          format,
+          format.replace("        run:", "        if: false\n        run:"),
+        ),
+        "optional-lint": original.replace(lint, lint + "        continue-on-error: true\n"),
+        "recovery-condition": original.replace(
+          "failure() && steps.format-check.outcome == 'failure'",
+          "always()",
+        ),
+      }[change];
       assert.notEqual(altered, original, "fixture must alter an actual CI command");
+      if (change === "typecheck-order") {
+        assert.ok(original.includes(typecheck + testStep), "fixture must find adjacent real steps");
+        assert.ok(altered.includes(testStep + typecheck), "typecheck must remain after the test step");
+        assert.equal(altered.split(typecheck).length, 2, "typecheck must still occur exactly once");
+      }
       await writeFile(path, altered);
       rejected(root, "ci-quality");
     });

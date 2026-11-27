@@ -47,6 +47,52 @@ packages/account-gateway pack; run scripts/qualify-consumers.sh with the absolut
 archive and a new directory outside the source workspace. See docs/HANDOFF.md
 for current gate results and root documentation adoption prerequisites.
 
+## Attested request non-entry
+
+The execution client exposes `retryProof(executionRef, requestId, { signal })`
+for the exact original request. It performs one bounded GET to
+`/v1/executions/{executionRef}/requests/{requestId}/retry-proof` with
+`x-account-gateway-capability: request-retry-proof/v1`. The strict
+`requestRetryProof` schema, `RequestRetryProof` type and the two
+`REQUEST_RETRY_PROOF_*` constants are exported from `/contracts`.
+
+The response contains only `kind: "request-retry-proof/v1"`, `consumerId`,
+`executionRef`, `requestRef`,
+`nonEntryReason: "admission_storage_conflict"` and
+`transportClosed: true`. The SDK rejects a response for another execution or
+request. The caller must bind the consumer and the original request identity to
+its own authoritative dispatch, body, route and budget; those consumer-owned
+facts are not additional fields in this public proof.
+
+Gateway returns this proof only when the original request negotiated the native
+non-entry contract, Native recorded the exact protected admission storage
+conflict before any provider entry, and physical transport closure was
+independently acknowledged. The eligible Native cause is a typed PostgreSQL
+serialization failure or deadlock in that protected admission operation. A
+generic rejection, HTTP 502, timeout, error message or absent response does not
+establish non-entry. Native SQL codes, provider errors and private identity
+details do not enter this public response.
+
+The proof read rechecks the original execution's current authority, deadline,
+worker lease, generation and policy fences in one database observation. It
+cannot renew an execution, create a new grant or recover authority after expiry.
+Historical requests without the original negotiation remain ineligible. A
+later closure acknowledgement can release retained transport custody under the
+existing cleanup contract; it cannot make an expired request eligible for retry.
+
+This endpoint does not mutate or refund the original request. Existing status
+readback remains unchanged, including `status.error.retry: { kind: "never" }`
+for the rejection. The SDK still does not retry inference. Any consumer-authorized successor needs a fresh
+request identity and its own admission within the original remaining budget and
+deadline. The consumer must separately prevent duplicate successors, preserve
+the original body and route, and settle the original spent dispatch. Failure,
+404, unsupported negotiation or an ambiguous proof cannot authorize a successor.
+
+Upgrade and qualify the paired Native and Gateway producers before enabling a
+consumer of this capability. The new proof endpoint is explicitly negotiated;
+legacy status envelopes retain their existing shape. Qualify the source-built
+SDK archive and the consumer's accounting and rollback paths before activation.
+
 ## Provider identity and usage completeness
 
 `providerConnectionIdentity(profileId)` from `/contracts` (also on the package

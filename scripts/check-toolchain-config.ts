@@ -40,19 +40,33 @@ function samePaths(value: unknown, expected: readonly string[], code: string): v
 export async function checkToolchainConfiguration(root: string): Promise<void> {
   const toolchain = await json(root, "toolchain.config.json");
   samePaths(record(toolchain.typecheck).projects, ordinaryProjects, "ordinary-projects");
-  // The maintained CI profile uses adjacent single-line run steps; other forms
-  // require explicit policy review rather than a permissive workflow parser.
+  // The maintained CI profile is closed: mandatory quality steps surround only
+  // the reviewed failure-only formatter diagnostic; other forms need policy review.
   const checkpoint = await readFile(resolve(root, ".github/workflows/checkpoint-a.yaml"), "utf8");
   const laneStart = checkpoint.indexOf("\njobs:\n  qualify_runtime:\n");
   const laneEnd = checkpoint.indexOf("\n  qualify:\n", laneStart);
   const runner = 'node "$RUNNER_TEMP/gateway-pnpm/node_modules/pnpm/bin/pnpm.cjs" run ';
-  const qualitySteps = ["build", "lint", "format:check", "typecheck"]
-    .map((command) => `      - run: ${runner}${command}`)
-    .join("\n");
+  const qualitySteps = [
+    ...["build", "lint"].map((command) => `      - run: ${runner}${command}`),
+    "      - name: Check formatting",
+    "        id: format-check",
+    `        run: ${runner}format:check`,
+    "      - name: Preserve exact formatter correction for review",
+    "        if: ${{ failure() && steps.format-check.outcome == 'failure' && matrix.node == '26.11.1' }}",
+    "        timeout-minutes: 2",
+    "        env:",
+    "          FORMAT_REQUESTED_SOURCE: ${{ github.event.pull_request.head.sha || github.sha }}",
+    "        run: |",
+  ].join("\n");
+  const lane = checkpoint.slice(laneStart, laneEnd);
+  const qualityStart = lane.indexOf(qualitySteps);
+  const nextStep = lane.indexOf("\n      - ", qualityStart + qualitySteps.length);
   if (
     laneStart < 0 ||
     laneEnd < laneStart ||
-    !checkpoint.slice(laneStart, laneEnd).includes(qualitySteps)
+    qualityStart < 0 ||
+    nextStep < 0 ||
+    !lane.slice(nextStep).startsWith(`\n      - run: ${runner}typecheck\n      - `)
   ) {
     return fail("ci-quality");
   }
