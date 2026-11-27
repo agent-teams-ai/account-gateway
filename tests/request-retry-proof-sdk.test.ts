@@ -2,12 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
+import type { RequestRetryProof } from "../packages/account-gateway/dist/contracts/index.js";
 
 const sdk = await import("../packages/account-gateway/dist/http/index.js");
 const contracts = await import("../packages/account-gateway/dist/contracts/index.js");
 
 void test("request retry proof SDK: one bounded exact read, finite proof and no fallback or replay", async (t) => {
-  const expected = {
+  const expected: RequestRetryProof = {
     kind: "request-retry-proof/v1",
     consumerId: "sdk-consumer",
     executionRef: "execution-original",
@@ -15,6 +16,9 @@ void test("request retry proof SDK: one bounded exact read, finite proof and no 
     nonEntryReason: "admission_storage_conflict",
     transportClosed: true,
   };
+  assert.equal(contracts.REQUEST_RETRY_PROOF_CONTRACT, expected.kind);
+  assert.equal(contracts.REQUEST_RETRY_PROOF_CAPABILITY_HEADER, "x-account-gateway-capability");
+  assert.deepEqual(contracts.requestRetryProof.parse(expected), expected);
   let response: unknown = expected, status = 200, calls = 0;
   const failures: unknown[] = [];
   const server = createServer((req, res) => {

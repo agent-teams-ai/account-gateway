@@ -101,6 +101,7 @@ void test("SDK build authority rejects broadened inputs and weaker compiler sett
 void test("whole-consumer qualification rejects missing strict inputs or runtime inventory", async () => {
   for (const [path, target, code] of [
     ["tsconfig.tests.json", "tests/whole-consumer.test.ts", "test-scope"],
+    ["tsconfig.tests.json", "tests/request-retry-proof-sdk.test.ts", "test-scope"],
     ["tsconfig.consumer-pin.json", "scripts/qualify-whole-consumer.ts", "pin-script-scope"],
     ["tsconfig.consumer-pin.json", "scripts/consumer-limits-check.mts", "pin-script-scope"],
     ["package.json", "tests/whole-consumer.test.ts", "whole-test-inventory"],

@@ -63,6 +63,7 @@ export async function checkToolchainConfiguration(root: string): Promise<void> {
       "tests/whole-consumer.test.ts",
       "tests/account-info.test.ts",
       "tests/provider-connections-v3.test.ts",
+      "tests/request-retry-proof-sdk.test.ts",
     ],
     "test-scope",
   );
