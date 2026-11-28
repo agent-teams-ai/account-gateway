@@ -9,7 +9,7 @@ import { createInterface } from "node:readline";
 import type { Server } from "node:http";
 import { Pool } from "pg";
 import { createExecutionClient, GatewayError } from "@agent-teams/account-gateway/http";
-import { KernelError, identifier, uuid } from "../src/domain.ts";
+import { KernelError, defaults, identifier, uuid } from "../src/domain.ts";
 import { PostgresKernel } from "../src/postgres.ts";
 import { AccountManagement, physicalCandidate } from "../src/management.ts";
 import { IntentSecrets, PostgresManagementStore } from "../src/management-store.ts";
@@ -25,6 +25,8 @@ const credentials = {
   callbackCredential: "joined-test-non-entry-callback",
 };
 const limits = { requests: 2, concurrency: 1, requestBytes: 4096, outputBytes: 4096, tokens: 100 };
+const consumerLogicalAuthorityHorizonMs = 190 * 60_000;
+const consumerObservationWindowMs = 120_000;
 const servers: Server[] = [];
 let pool: Pool | undefined,
   phase = "guard";
@@ -120,6 +122,7 @@ async function run(): Promise<void> {
     mode: unknown;
     scenario?: unknown;
     deadline?: unknown;
+    observationDeadline?: unknown;
   };
   for (const value of [
     fixture.consumerId,
@@ -140,10 +143,16 @@ async function run(): Promise<void> {
     assert.equal(typeof fixture.deadline, "string");
     const deadline = new Date(fixture.deadline as string);
     assert.equal(deadline.toISOString(), fixture.deadline);
-    consumerDeadline = deadline.getTime();
-    assert.ok(consumerDeadline > Date.now() && consumerDeadline - Date.now() <= 120_000);
+    assert.equal(typeof fixture.observationDeadline, "string");
+    const observationDeadline = new Date(fixture.observationDeadline as string);
+    assert.equal(observationDeadline.toISOString(), fixture.observationDeadline);
+    consumerDeadline = observationDeadline.getTime();
+    assert.ok(consumerDeadline > Date.now() && consumerDeadline - Date.now() <= consumerObservationWindowMs);
+    assert.ok(deadline.getTime() > Date.now() && deadline.getTime() - Date.now() <= consumerLogicalAuthorityHorizonMs);
+    assert.equal(deadline.getTime() - consumerDeadline, consumerLogicalAuthorityHorizonMs - consumerObservationWindowMs);
   } else {
     assert.equal(fixture.deadline, undefined);
+    assert.equal(fixture.observationDeadline, undefined);
   }
   const nativeOrigin = loopback(fixture.nativeOrigin);
   const nativePublicOrigin = loopback(fixture.nativePublicOrigin);
@@ -174,7 +183,10 @@ async function run(): Promise<void> {
   }
   const context = { consumerId: fixture.consumerId },
     worker = randomUUID();
-  const kernel = new PostgresKernel(pool);
+  const kernel = new PostgresKernel(
+    pool,
+    consumer ? { ...defaults, maxRunMs: consumerLogicalAuthorityHorizonMs } : defaults,
+  );
   const store = new PostgresManagementStore(
     pool,
     new IntentSecrets(randomBytes(32), randomBytes(32)),
@@ -271,7 +283,7 @@ async function run(): Promise<void> {
             ownerRefs: [fixture.ownerRef],
             profileIds: [descriptor.profile],
             limits: { ...limits, requests: 3 },
-            maxRunMs: 120_000,
+            maxRunMs: consumerLogicalAuthorityHorizonMs,
           },
         ],
   );
@@ -413,6 +425,7 @@ async function run(): Promise<void> {
         profileId: descriptor.profile,
         model: descriptor.model,
         deadline: fixture.deadline,
+        observationDeadline: fixture.observationDeadline,
       }),
       { phase: "prepared" },
     );
