@@ -147,9 +147,17 @@ async function run(): Promise<void> {
     const observationDeadline = new Date(fixture.observationDeadline as string);
     assert.equal(observationDeadline.toISOString(), fixture.observationDeadline);
     consumerDeadline = observationDeadline.getTime();
-    assert.ok(consumerDeadline > Date.now() && consumerDeadline - Date.now() <= consumerObservationWindowMs);
-    assert.ok(deadline.getTime() > Date.now() && deadline.getTime() - Date.now() <= consumerLogicalAuthorityHorizonMs);
-    assert.equal(deadline.getTime() - consumerDeadline, consumerLogicalAuthorityHorizonMs - consumerObservationWindowMs);
+    assert.ok(
+      consumerDeadline > Date.now() && consumerDeadline - Date.now() <= consumerObservationWindowMs,
+    );
+    assert.ok(
+      deadline.getTime() > Date.now() &&
+        deadline.getTime() - Date.now() <= consumerLogicalAuthorityHorizonMs,
+    );
+    assert.equal(
+      deadline.getTime() - consumerDeadline,
+      consumerLogicalAuthorityHorizonMs - consumerObservationWindowMs,
+    );
   } else {
     assert.equal(fixture.deadline, undefined);
     assert.equal(fixture.observationDeadline, undefined);
